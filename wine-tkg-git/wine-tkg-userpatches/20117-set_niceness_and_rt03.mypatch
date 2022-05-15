@@ -1,0 +1,122 @@
+From 7c1a54025abdd406cc40b836d6ae161b1fd6a524 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Fri, 21 May 2021 21:54:39 +0200
+Subject: [PATCH 4/6] ntdll: Set RLIMIT_NICE to its hard limit and inform the
+ server.
+
+---
+ dlls/ntdll/unix/loader.c |  3 +++
+ dlls/ntdll/unix/server.c | 14 ++++++++++++++
+ server/process.h         |  1 +
+ server/protocol.def      |  1 +
+ server/thread.c          |  7 +++++++
+ 5 files changed, 26 insertions(+)
+
+diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
+index 96301b1654e..33f3d8e287a 100644
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -2423,6 +2423,9 @@ void __wine_main( int argc, char *argv[], char *envp[] )
+ #ifdef RLIMIT_AS
+     set_max_limit( RLIMIT_AS );
+ #endif
++#ifdef RLIMIT_NICE
++    set_max_limit( RLIMIT_NICE );
++#endif
+ 
+     virtual_init();
+     init_environment( argc, argv, envp );
+diff --git a/dlls/ntdll/unix/server.c b/dlls/ntdll/unix/server.c
+index 9d0594d3374..f2de7b0bd2e 100644
+--- a/dlls/ntdll/unix/server.c
++++ b/dlls/ntdll/unix/server.c
+@@ -52,6 +52,9 @@
+ #ifdef HAVE_SYS_PRCTL_H
+ # include <sys/prctl.h>
+ #endif
++#ifdef HAVE_SYS_RESOURCE_H
++# include <sys/resource.h>
++#endif
+ #include <sys/stat.h>
+ #ifdef HAVE_SYS_SYSCALL_H
+ # include <sys/syscall.h>
+@@ -1423,6 +1426,8 @@ size_t server_init_process(void)
+     struct sigaction sig_act;
+     size_t info_size;
+     DWORD pid, tid;
++    struct rlimit rlimit;
++    int nice_limit = 0;
+ 
+     server_pid = -1;
+     if (env_socket)
+@@ -1484,10 +1489,19 @@ size_t server_init_process(void)
+ 
+     reply_pipe = init_thread_pipe();
+ 
++#ifdef RLIMIT_NICE
++    if (!getrlimit( RLIMIT_NICE, &rlimit ))
++    {
++        if (rlimit.rlim_cur <= 40) nice_limit = 20 - rlimit.rlim_cur;
++        else if (rlimit.rlim_cur == -1 /* RLIMIT_INFINITY */) nice_limit = -20;
++    }
++#endif
++
+     SERVER_START_REQ( init_first_thread )
+     {
+         req->unix_pid    = getpid();
+         req->unix_tid    = get_unix_tid();
++        req->nice_limit  = nice_limit;
+         req->reply_fd    = reply_pipe;
+         req->wait_fd     = ntdll_get_thread_data()->wait_fd[1];
+         req->debug_level = (TRACE_ON(server) != 0);
+diff --git a/server/process.h b/server/process.h
+index 632faf9c4bf..8fa4df20819 100644
+--- a/server/process.h
++++ b/server/process.h
+@@ -56,6 +56,7 @@ struct process
+     timeout_t            sigkill_delay;   /* delay before final SIGKILL */
+     unsigned short       machine;         /* client machine type */
+     int                  unix_pid;        /* Unix pid for final SIGKILL */
++    int                  nice_limit;      /* RLIMIT_NICE of the process */
+     int                  exit_code;       /* process exit code */
+     int                  running_threads; /* number of threads running in this process */
+     timeout_t            start_time;      /* absolute time at process start */
+diff --git a/server/protocol.def b/server/protocol.def
+index e89cf635542..533e24876fd 100644
+--- a/server/protocol.def
++++ b/server/protocol.def
+@@ -907,6 +907,7 @@ typedef struct
+     int          debug_level;  /* new debug level */
+     int          reply_fd;     /* fd for reply pipe */
+     int          wait_fd;      /* fd for blocking calls pipe */
++    char         nice_limit;   /* RLIMIT_NICE of new thread */
+ @REPLY
+     process_id_t pid;          /* process id of the new thread's process */
+     thread_id_t  tid;          /* thread id of the new thread */
+diff --git a/server/thread.c b/server/thread.c
+index d74b006d3a5..fc37852533f 100644
+--- a/server/thread.c
++++ b/server/thread.c
+@@ -59,6 +59,13 @@
+ #include "esync.h"
+ #include "fsync.h"
+ 
++#ifdef HAVE_SYS_TIME_H
++#include <sys/time.h>
++#endif
++#ifdef HAVE_SYS_RESOURCE_H
++#include <sys/resource.h>
++#endif
++
+ static int thread_base_priority = -1;
+ 
+ /* gets the priority value from an environment variable */
+@@ -1614,6 +1621,7 @@ DECL_HANDLER(init_first_thread)
+ 
+     current->unix_pid = process->unix_pid = req->unix_pid;
+     current->unix_tid = req->unix_tid;
++    process->nice_limit = req->nice_limit;
+ 
+     if (!process->parent_id)
+         process->affinity = current->affinity = get_thread_affinity( current );
+

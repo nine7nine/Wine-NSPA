@@ -1,0 +1,120 @@
+diff --git a/patches/winebuild-Fake_Dlls/0010-tools-winebuild-Add-syscall-thunks-for-64-bit.patch b/patches/winebuild-Fake_Dlls/0010-tools-winebuild-Add-syscall-thunks-for-64-bit.patch
+--- a/patches/winebuild-Fake_Dlls/0010-tools-winebuild-Add-syscall-thunks-for-64-bit.patch
++++ b/patches/winebuild-Fake_Dlls/0010-tools-winebuild-Add-syscall-thunks-for-64-bit.patch
+@@ -119,8 +119,8 @@ index 0941dd87c05..002f3215af2 100644
+ --- a/server/mapping.c
+ +++ b/server/mapping.c
+ @@ -964,7 +964,11 @@ struct object *create_user_data_mapping( struct object *root, const struct unico
+-     if (!(mapping = create_mapping( root, name, OBJ_OPENIF, sizeof(KSHARED_USER_DATA),
+-                                     SEC_COMMIT, 0, FILE_READ_DATA | FILE_WRITE_DATA, NULL ))) return NULL;
++     grab_object( mapping );
++     make_object_static( &mapping->obj );
+      ptr = mmap( NULL, mapping->size, PROT_WRITE, MAP_SHARED, get_unix_fd( mapping->fd ), 0 );
+ -    if (ptr != MAP_FAILED) user_shared_data = ptr;
+ +    if (ptr != MAP_FAILED)
+@@ -128,9 +128,9 @@ +    {
+ +        user_shared_data = ptr;
+ +        user_shared_data->SystemCallPad[0] = 1;
+ +    }
+-     return &mapping->obj;
+  }
+  
++ /* create a file mapping */
+ diff --git a/tools/winebuild/parser.c b/tools/winebuild/parser.c
+ index 74216f8bb6e..820516329a4 100644
+ --- a/tools/winebuild/parser.c
+
+diff --git a/patches/ntdll-Fix_Alignment/0001-ntdll-Move-NtProtectVirtualMemory-and-NtCreateSectio.patch b/patches/ntdll-Fix_Alignment/0001-ntdll-Move-NtProtectVirtualMemory-and-NtCreateSectio.patch
+index aa940f9de..270c82fdd 100644
+--- a/patches/ntdll-Fix_Alignment/0001-ntdll-Move-NtProtectVirtualMemory-and-NtCreateSectio.patch
++++ b/patches/ntdll-Fix_Alignment/0001-ntdll-Move-NtProtectVirtualMemory-and-NtCreateSectio.patch
+@@ -7,16 +7,16 @@ Subject: ntdll: Move NtProtectVirtualMemory and NtCreateSection to separate
+ ---
+  dlls/ntdll/virtual.c | 8 ++++++++
+  1 file changed, 8 insertions(+)
+ 
+ diff --git a/dlls/ntdll/virtual.c b/dlls/ntdll/virtual.c
+-index ce2469829b0..eb2dbe8a2cd 100644
++index cfe30bbe710..6173846cfb4 100644
+ --- a/dlls/ntdll/virtual.c
+ +++ b/dlls/ntdll/virtual.c
+-@@ -168,6 +168,14 @@ static void *preload_reserve_end;
+- static BOOL use_locks;
+- static BOOL force_exec_prot;  /* whether to force PROT_EXEC on all PROT_READ mmaps */
++@@ -366,6 +366,14 @@ static void free_ranges_remove_view( struct file_view *view )
++ }
++ 
+  
+ +#if defined(__i386__)
+ +NTSTATUS WINAPI NtProtectVirtualMemory( HANDLE process, PVOID *addr_ptr, SIZE_T *size_ptr,
+ +                                        ULONG new_prot, ULONG *old_prot ) DECLSPEC_ALIGN(4096);
+ +NTSTATUS WINAPI NtCreateSection( HANDLE *handle, ACCESS_MASK access, const OBJECT_ATTRIBUTES *attr,
+ 
+diff --git a/patches/ntdll-ForceBottomUpAlloc/definition b/patches/ntdll-ForceBottomUpAlloc/definition
+index fe758c9e4..c58d53a50 100644
+--- a/patches/ntdll-ForceBottomUpAlloc/definition
++++ b/patches/ntdll-ForceBottomUpAlloc/definition
+@@ -1,3 +1,3 @@
+ Fixes: [48175] AION (64 bit) - crashes in crysystem.dll.CryFree() due to high memory pointers allocated
+ Fixes: [46568] 64-bit msxml6.dll from Microsoft Core XML Services 6.0 redist package fails to load (Wine doesn't respect 44-bit user-mode VA limitation from Windows < 8.1)
+-
++Disabled: true
+
+diff --git a/patches/patchinstall.sh b/patches/patchinstall.sh
+index 82c5545db..6e38522a2 100755
+--- a/patches/patchinstall.sh
++++ b/patches/patchinstall.sh
+@@ -175,7 +175,6 @@ patch_enable_all ()
+ 	enable_ntdll_FileDispositionInformation="$1"
+ 	enable_ntdll_FileFsFullSizeInformation="$1"
+ 	enable_ntdll_Fix_Alignment="$1"
+-	enable_ntdll_ForceBottomUpAlloc="$1"
+ 	enable_ntdll_HashLinks="$1"
+ 	enable_ntdll_Heap_Improvements="$1"
+ 	enable_ntdll_Hide_Wine_Exports="$1"
+@@ -626,9 +625,6 @@ patch_enable ()
+ 		ntdll-Fix_Alignment)
+ 			enable_ntdll_Fix_Alignment="$2"
+ 			;;
+-		ntdll-ForceBottomUpAlloc)
+-			enable_ntdll_ForceBottomUpAlloc="$2"
+-			;;
+ 		ntdll-HashLinks)
+ 			enable_ntdll_HashLinks="$2"
+ 			;;
+@@ -3867,35 +3863,6 @@ if test "$enable_ntdll_Fix_Alignment" -eq 1; then
+ 	) >> "$patchlist"
+ fi
+ 
+-# Patchset ntdll-ForceBottomUpAlloc
+-# |
+-# | This patchset fixes the following Wine bugs:
+-# |   *	[#48175] AION (64 bit) - crashes in crysystem.dll.CryFree() due to high memory pointers allocated
+-# |   *	[#46568] 64-bit msxml6.dll from Microsoft Core XML Services 6.0 redist package fails to load (Wine doesn't respect
+-# | 	44-bit user-mode VA limitation from Windows < 8.1)
+-# |
+-# | Modified files:
+-# |   *	dlls/ntdll/virtual.c, include/wine/library.h, libs/wine/mmap.c, libs/wine/wine.map
+-# |
+-if test "$enable_ntdll_ForceBottomUpAlloc" -eq 1; then
+-	patch_apply ntdll-ForceBottomUpAlloc/0001-ntdll-Stop-search-on-mmap-error-in-try_map_free_area.patch
+-	patch_apply ntdll-ForceBottomUpAlloc/0002-ntdll-Use-MAP_FIXED_NOREPLACE-flag-in-try_map_free_a.patch
+-	patch_apply ntdll-ForceBottomUpAlloc/0003-ntdll-Force-bottom-up-allocation-order-for-64-bit-ar.patch
+-	patch_apply ntdll-ForceBottomUpAlloc/0004-ntdll-Increase-step-after-failed-map-attempt-in-try_.patch
+-	patch_apply ntdll-ForceBottomUpAlloc/0005-libs-wine-Add-functions-for-managing-free-area-list.patch
+-	patch_apply ntdll-ForceBottomUpAlloc/0006-ntdll-Use-free-area-list-for-virtual-memory-allocati.patch
+-	patch_apply ntdll-ForceBottomUpAlloc/0007-ntdll-Permanently-exclude-natively-mapped-areas-from.patch
+-	(
+-		printf '%s\n' '+    { "Paul Gofman", "ntdll: Stop search on mmap() error in try_map_free_area().", 1 },';
+-		printf '%s\n' '+    { "Paul Gofman", "ntdll: Use MAP_FIXED_NOREPLACE flag in try_map_free_area() if available.", 1 },';
+-		printf '%s\n' '+    { "Paul Gofman", "ntdll: Force bottom up allocation order for 64 bit arch unless top down is requested.", 1 },';
+-		printf '%s\n' '+    { "Paul Gofman", "ntdll: Increase step after failed map attempt in try_map_free_area().", 1 },';
+-		printf '%s\n' '+    { "Paul Gofman", "libs/wine: Add functions for managing free area list.", 1 },';
+-		printf '%s\n' '+    { "Paul Gofman", "ntdll: Use free area list for virtual memory allocation.", 1 },';
+-		printf '%s\n' '+    { "Paul Gofman", "ntdll: Permanently exclude natively mapped areas from free areas list.", 1 },';
+-	) >> "$patchlist"
+-fi
+-
+ # Patchset ntdll-HashLinks
+ # |
+ # | Modified files:

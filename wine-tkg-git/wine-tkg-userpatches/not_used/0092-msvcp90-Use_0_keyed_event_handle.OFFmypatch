@@ -1,0 +1,84 @@
+From 7ef4bdd30453a2db44c1e10a47eb1f4ef9a80f46 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Thu, 24 Dec 2020 13:47:06 +0100
+Subject: [PATCH] msvcp90: Use 0 keyed event handle instead of opening one.
+
+---
+ dlls/msvcp90/misc.c | 22 +++++-----------------
+ 1 file changed, 5 insertions(+), 17 deletions(-)
+
+diff --git a/dlls/msvcp90/misc.c b/dlls/msvcp90/misc.c
+index 2d309911f10..31ab2cc9e16 100644
+--- a/dlls/msvcp90/misc.c
++++ b/dlls/msvcp90/misc.c
+@@ -853,19 +853,9 @@ typedef _Cnd_t *_Cnd_arg_t;
+ #define CND_T_TO_ARG(c)     (&(c))
+ #endif
+ 
+-static HANDLE keyed_event;
+-
+ void __cdecl _Cnd_init_in_situ(_Cnd_t cnd)
+ {
+     InitializeConditionVariable(&cnd->cv);
+-
+-    if(!keyed_event) {
+-        HANDLE event;
+-
+-        NtCreateKeyedEvent(&event, GENERIC_READ|GENERIC_WRITE, NULL, 0);
+-        if(InterlockedCompareExchangePointer(&keyed_event, event, NULL) != NULL)
+-            NtClose(event);
+-    }
+ }
+ 
+ int __cdecl _Cnd_init(_Cnd_t *cnd)
+@@ -882,7 +872,7 @@ int __cdecl _Cnd_wait(_Cnd_arg_t cnd, _Mtx_arg_t mtx)
+     InterlockedExchangeAdd( (LONG *)&cv->Ptr, 1 );
+     _Mtx_unlock(mtx);
+ 
+-    NtWaitForKeyedEvent(keyed_event, &cv->Ptr, FALSE, NULL);
++    NtWaitForKeyedEvent(0, &cv->Ptr, FALSE, NULL);
+ 
+     _Mtx_lock(mtx);
+     return 0;
+@@ -898,11 +888,11 @@ int __cdecl _Cnd_timedwait(_Cnd_arg_t cnd, _Mtx_arg_t mtx, const xtime *xt)
+     _Mtx_unlock(mtx);
+ 
+     timeout.QuadPart = (ULONGLONG)(ULONG)_Xtime_diff_to_millis(xt) * -10000;
+-    status = NtWaitForKeyedEvent(keyed_event, &cv->Ptr, FALSE, &timeout);
++    status = NtWaitForKeyedEvent(0, &cv->Ptr, FALSE, &timeout);
+     if (status)
+     {
+         if (!interlocked_dec_if_nonzero( (LONG *)&cv->Ptr ))
+-            status = NtWaitForKeyedEvent( keyed_event, &cv->Ptr, FALSE, NULL );
++            status = NtWaitForKeyedEvent( 0, &cv->Ptr, FALSE, NULL );
+     }
+ 
+     _Mtx_lock(mtx);
+@@ -914,7 +904,7 @@ int __cdecl _Cnd_broadcast(_Cnd_arg_t cnd)
+     CONDITION_VARIABLE *cv = &CND_T_FROM_ARG(cnd)->cv;
+     LONG val = InterlockedExchange( (LONG *)&cv->Ptr, 0 );
+     while (val-- > 0)
+-        NtReleaseKeyedEvent( keyed_event, &cv->Ptr, FALSE, NULL );
++        NtReleaseKeyedEvent( 0, &cv->Ptr, FALSE, NULL );
+     return 0;
+ }
+ 
+@@ -922,7 +912,7 @@ int __cdecl _Cnd_signal(_Cnd_arg_t cnd)
+ {
+     CONDITION_VARIABLE *cv = &CND_T_FROM_ARG(cnd)->cv;
+     if (interlocked_dec_if_nonzero( (LONG *)&cv->Ptr ))
+-        NtReleaseKeyedEvent( keyed_event, &cv->Ptr, FALSE, NULL );
++        NtReleaseKeyedEvent( 0, &cv->Ptr, FALSE, NULL );
+     return 0;
+ }
+ 
+@@ -1781,8 +1771,6 @@ void init_misc(void *base)
+ void free_misc(void)
+ {
+ #if _MSVCP_VER >= 110
+-    if(keyed_event)
+-        NtClose(keyed_event);
+     HeapFree(GetProcessHeap(), 0, broadcast_at_thread_exit.to_broadcast);
+ #endif
+ }
+

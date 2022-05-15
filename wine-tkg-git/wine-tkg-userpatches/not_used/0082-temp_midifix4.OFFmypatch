@@ -1,0 +1,131 @@
+From 5b78faf2d0806b0f3e2999a5a3e69be434f4527b Mon Sep 17 00:00:00 2001
+From: =?utf-8?q?J=C3=B6rg=20H=C3=B6hle?= <hoehle@users.sourceforge.net>
+Date: Tue, 26 Feb 2013 15:37:42 +0100
+Subject: [PATCH 7/7] winealsa: midiOutLongMsg handles divided SysEx and coalesced channel messages.
+
+---
+ dlls/winealsa.drv/midi.c |   88 ++++++++++++++++++++++++++++++++--------------
+ 1 files changed, 61 insertions(+), 27 deletions(-)
+
+diff --git a/dlls/winealsa.drv/midi.c b/dlls/winealsa.drv/midi.c
+index 825514a..26951cc 100644
+--- a/dlls/winealsa.drv/midi.c
++++ b/dlls/winealsa.drv/midi.c
+@@ -992,14 +992,30 @@ static DWORD modData(WORD wDevID, DWORD
+     return MMSYSERR_NOERROR;
+ }
+ 
++/* undefined/reserved system common is treated like a SysEx of unknown length */
++static const BYTE system_message_length[16] = {0,2,3,2,0,0,1,0, 1,1,1,1,1,1,1,1};
++
++static DWORD MIDI_length(BYTE status)
++{
++    switch (status >> 4) {
++    case 0x8: case 0x9: case 0xA: case 0xB: case 0xE:
++        return 3;
++    case 0xC: case 0xD:
++        return 2;
++    case 0xF:
++        return system_message_length[status & 0xF];
++    default: /* assume divided SysEx, not running status */
++        return 0;
++    }
++}
++
+ /**************************************************************************
+  *		modLongData					[internal]
+- *
+- * FIXME: Must handle SysEx as well as simple concatenated channel messages
+  */
+ static DWORD modLongData(WORD wDevID, LPMIDIHDR lpMidiHdr, DWORD dwSize)
+ {
+     BYTE *lpData;
++    DWORD index;
+     snd_seq_event_t event;
+ 
+     TRACE("(%04X, %p, %08X);\n", wDevID, lpMidiHdr, dwSize);
+@@ -1028,37 +1044,53 @@ static DWORD modLongData(WORD wDevID, LP
+     lpMidiHdr->dwFlags &= ~MHDR_DONE;
+     lpMidiHdr->dwFlags |= MHDR_INQUEUE;
+ 
+-    /* FIXME: Recognize and split channel messages */
+-    if (lpData[0] != 0xF0 || lpData[lpMidiHdr->dwBufferLength - 1] != 0xF7)
+-	FIXME("divided SysEx\n");
+     TRACE("%u bytes %02X %02X %02X ... %02X %02X %02X\n", lpMidiHdr->dwBufferLength,
+ 	  lpData[0], lpData[1], lpData[2], lpData[lpMidiHdr->dwBufferLength-3],
+ 	  lpData[lpMidiHdr->dwBufferLength-2], lpData[lpMidiHdr->dwBufferLength-1]);
+ 
+-    switch (MidiOutDev[wDevID].caps.wTechnology) {
+-    case MOD_FMSYNTH:
+-        /* FIXME: I don't think there is much to do here */
+-        break;
+-    case MOD_MIDIPORT:
+-	snd_seq_ev_clear(&event);
+-	snd_seq_ev_set_direct(&event);
+-	snd_seq_ev_set_source(&event, MidiOutDev[wDevID].port_out);
+-	snd_seq_ev_set_dest(&event, MidiOutDev[wDevID].addr.client, MidiOutDev[wDevID].addr.port);
+-	TRACE("destination %d:%d\n", MidiOutDev[wDevID].addr.client, MidiOutDev[wDevID].addr.port);
+-	/* The ALSA documentation erroneously states:
+-	 * "the sysex data must contain the start byte 0xf0 and the end byte 0xf7."
+-	 * Actually SysEx continuations are acceptable.  The first
+-	 * message must start with F0 and the last one end with F7.
+-	 */
+-	snd_seq_ev_set_sysex(&event, lpMidiHdr->dwBufferLength, lpData);
+-        EnterCriticalSection(&midiSeqLock);
+-	snd_seq_event_output_direct(midiSeq, &event);
+-        LeaveCriticalSection(&midiSeqLock);
+-        break;
+-    default:
+-	WARN("Technology not supported (yet) %d !\n",
+-	     MidiOutDev[wDevID].caps.wTechnology);
+-	return MMSYSERR_NOTENABLED;
++    for (index = 0; index < lpMidiHdr->dwBufferLength;) {
++        BYTE evt = lpData[index];
++        DWORD length = MIDI_length(evt);
++
++        if (length && index + length <= lpMidiHdr->dwBufferLength) {
++            BYTE d1 = length > 1 ? lpData[index+1] : 0;
++            BYTE d2 = length > 2 ? lpData[index+2] : 0;
++
++            /* concatenated channel messages (e.g. chords) */
++            modData(wDevID, evt | (d1 << 8) | (d2 << 16));
++            index += length;
++        } else {
++            /* include up to the next status message or trailing F7 */
++            length = (evt == 0xF7) ? index : index + 1;
++            while (length < lpMidiHdr->dwBufferLength && lpData[length] < 0x80) length++;
++            if (length < lpMidiHdr->dwBufferLength && lpData[length] == 0xF7) length++;
++            TRACE("%sSysEx %u bytes %02X...\n", (evt == 0xF0 && lpData[length-1] == 0xF7) ?
++                  "" : "divided ", length - index, evt);
++
++            switch (MidiOutDev[wDevID].caps.wTechnology) {
++            case MOD_FMSYNTH:
++                /* FIXME: I don't think there is much to do here */
++                break;
++            case MOD_MIDIPORT:
++                snd_seq_ev_clear(&event);
++                snd_seq_ev_set_direct(&event);
++                snd_seq_ev_set_source(&event, MidiOutDev[wDevID].port_out);
++                snd_seq_ev_set_dest(&event, MidiOutDev[wDevID].addr.client, MidiOutDev[wDevID].addr.port);
++                TRACE("destination %d:%d\n", MidiOutDev[wDevID].addr.client, MidiOutDev[wDevID].addr.port);
++                /* The ALSA documentation erroneously states:
++                 * "the sysex data must contain the start byte 0xf0 and the end byte 0xf7."
++                 * Actually SysEx continuations are acceptable.  The first
++                 * message must start with F0 and the last one end with F7.
++                 */
++                snd_seq_ev_set_sysex(&event, length - index, lpData + index);
++                snd_seq_event_output_direct(midiSeq, &event);
++                break;
++            default:
++                FIXME("Technology not supported (yet) %d !\n",
++                      MidiOutDev[wDevID].caps.wTechnology);
++            }
++            index = length;
++        }
+     }
+ 
+     lpMidiHdr->dwFlags &= ~MHDR_INQUEUE;
+
+-- 
+1.5.6.3
+

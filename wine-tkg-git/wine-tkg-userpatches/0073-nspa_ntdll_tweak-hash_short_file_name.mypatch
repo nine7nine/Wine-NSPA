@@ -1,0 +1,49 @@
+ - Tweak hash_short_file_name() hash algorithm.
+ 
+ This supposedly helped with avoiding hash collisions in the old wine-muse builds.
+ 
+ updated for wine-6.22+
+ 
+ johnstonljordan <AT> gmail <DOT> com
+
+--- a/dlls/ntdll/unix/file.c	2021-12-07 11:04:56.412552038 -0500
++++ b/dlls/ntdll/unix/file.c	2021-12-07 11:04:42.861379431 -0500
+@@ -1407,7 +1407,7 @@ static ULONG hash_short_file_name( const
+     WCHAR hash_name[MAX_DIR_ENTRY_LEN + 1];
+     LPCWSTR p, ext, end = name + length, hash_end = hash_name + length;
+     LPWSTR dst;
+-    unsigned short hash;
++    unsigned int hash;
+     int i;
+ 
+     /* Compute the hash code of the file name */
+@@ -1418,7 +1418,7 @@ static ULONG hash_short_file_name( const
+         for (p = name, dst = hash_name; p < end; p++, dst++)
+             *dst = towlower(*p);
+         for (p = hash_name, hash = 0xbeef; p < hash_end - 1; p++)
+-            hash = (hash << 3) ^ (hash >> 5) ^ *p ^ (p[1] << 8);
++            hash = (hash << 3) ^ (hash >> 5) ^ *p ^ (p[1] << 8) ^ (p[2] << 16);
+         hash = (hash << 3) ^ (hash >> 5) ^ *p;  /* Last character */
+     }
+     else
+@@ -1433,16 +1433,17 @@ static ULONG hash_short_file_name( const
+         if (*ext == '.') break;
+     if (ext == name) ext = NULL;
+ 
+-    /* Copy first 4 chars, replacing invalid chars with '_' */
+-    for (i = 4, p = name, dst = buffer; i > 0; i--, p++)
++    /* Copy first 3 chars, replacing invalid chars with '_' */
++    for (i = 3, p = name, dst = buffer; i > 0; i--, p++)
+     {
+         if (p == end || p == ext) break;
+         *dst++ = is_invalid_dos_char(*p) ? '_' : *p;
+     }
+-    /* Pad to 5 chars with '~' */
++    /* Pad to 4 chars with '~' */
+     while (i-- >= 0) *dst++ = '~';
+ 
+     /* Insert hash code converted to 3 ASCII chars */
++    *dst++ = hash_chars[(hash >> 15) & 0x1f];
+     *dst++ = hash_chars[(hash >> 10) & 0x1f];
+     *dst++ = hash_chars[(hash >> 5) & 0x1f];
+     *dst++ = hash_chars[hash & 0x1f];

@@ -1,0 +1,179 @@
+From 7559216fcf84aeef16c4879999eb0035275fc2df Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Mon, 23 Nov 2020 17:21:46 +0100
+Subject: [PATCH] user32: Refresh active hook list only when needed.
+
+Instead of doing it on every get_message request.
+---
+ dlls/user32/hook.c    | 32 ++++++++++++++++++++++++++------
+ dlls/user32/message.c |  4 +++-
+ server/hook.c         |  8 +++++++-
+ server/protocol.def   |  8 +++++++-
+ server/queue.c        |  2 --
+ server/user.h         |  1 -
+ 6 files changed, 43 insertions(+), 12 deletions(-)
+
+diff --git a/dlls/user32/hook.c b/dlls/user32/hook.c
+index e8a31100646..434619f7fcb 100644
+--- a/dlls/user32/hook.c
++++ b/dlls/user32/hook.c
+@@ -134,6 +134,27 @@ static UINT get_ll_hook_timeout(void)
+ }
+ 
+ 
++/***********************************************************************
++ *      get_active_hooks
++ *
++ */
++static UINT get_active_hooks(void)
++{
++    struct user_thread_info *thread_info = get_user_thread_info();
++
++    if (!thread_info->active_hooks)
++    {
++        SERVER_START_REQ( get_active_hooks )
++        {
++            if (!wine_server_call( req )) thread_info->active_hooks = reply->active_hooks;
++        }
++        SERVER_END_REQ;
++    }
++
++    return thread_info->active_hooks;
++}
++
++
+ /***********************************************************************
+  *		set_windows_hook
+  *
+@@ -470,10 +491,9 @@ static LRESULT call_hook( struct hook_info *info, INT code, WPARAM wparam, LPARA
+  */
+ static BOOL HOOK_IsHooked( INT id )
+ {
+-    struct user_thread_info *thread_info = get_user_thread_info();
+-
+-    if (!thread_info->active_hooks) return TRUE;
+-    return (thread_info->active_hooks & (1 << (id - WH_MINHOOK))) != 0;
++    UINT active_hooks = get_active_hooks();
++    if (!active_hooks) return TRUE;
++    return (active_hooks & (1 << (id - WH_MINHOOK))) != 0;
+ }
+ 
+ 
+@@ -490,7 +510,7 @@ LRESULT HOOK_CallHooks( INT id, INT code, WPARAM wparam, LPARAM lparam, BOOL uni
+ 
+     if (!HOOK_IsHooked( id ))
+     {
+-        TRACE( "skipping hook %s mask %x\n", hook_names[id-WH_MINHOOK], thread_info->active_hooks );
++        TRACE( "skipping hook %s mask %x\n", hook_names[id-WH_MINHOOK], get_active_hooks() );
+         return 0;
+     }
+ 
+@@ -806,7 +826,7 @@ static inline BOOL find_first_hook(DWORD id, DWORD event, HWND hwnd, LONG object
+ 
+     if (!HOOK_IsHooked( id ))
+     {
+-        TRACE( "skipping hook %s mask %x\n", hook_names[id-WH_MINHOOK], thread_info->active_hooks );
++        TRACE( "skipping hook %s mask %x\n", hook_names[id-WH_MINHOOK], get_active_hooks() );
+         return FALSE;
+     }
+ 
+diff --git a/dlls/user32/message.c b/dlls/user32/message.c
+index cb99d176ba1..1b02da56319 100644
+--- a/dlls/user32/message.c
++++ b/dlls/user32/message.c
+@@ -2703,12 +2703,14 @@ static int peek_message( MSG *msg, HWND hwnd, UINT first, UINT last, UINT flags,
+                 info.msg.pt.x    = reply->x;
+                 info.msg.pt.y    = reply->y;
+                 hw_id            = 0;
+-                thread_info->active_hooks = reply->active_hooks;
+             }
+             else buffer_size = reply->total;
+         }
+         SERVER_END_REQ;
+ 
++        /* force refreshing hooks */
++        thread_info->active_hooks = 0;
++
+         if (res)
+         {
+             HeapFree( GetProcessHeap(), 0, buffer );
+diff --git a/server/hook.c b/server/hook.c
+index fa25244c049..9244ae5c7e1 100644
+--- a/server/hook.c
++++ b/server/hook.c
+@@ -361,7 +361,7 @@ static int is_hook_active( struct hook_table *table, int index )
+ }
+ 
+ /* get a bitmap of all active hooks for the current thread */
+-unsigned int get_active_hooks(void)
++static unsigned int get_active_hooks(void)
+ {
+     struct hook_table *table = get_queue_hooks( current );
+     struct hook_table *global_hooks = get_global_hooks( current );
+@@ -388,6 +388,12 @@ struct hook *get_first_global_hook( int id )
+     return hook;
+ }
+ 
++/* get thread active hooks */
++DECL_HANDLER(get_active_hooks)
++{
++    reply->active_hooks = get_active_hooks();
++}
++
+ /* set a window hook */
+ DECL_HANDLER(set_hook)
+ {
+diff --git a/server/protocol.def b/server/protocol.def
+index 533e24876fd..c5ddb7dc67c 100644
+--- a/server/protocol.def
++++ b/server/protocol.def
+@@ -2045,7 +2045,6 @@ enum message_type
+     int             x;         /* message x position */
+     int             y;         /* message y position */
+     unsigned int    time;      /* message time */
+-    unsigned int    active_hooks; /* active hooks bitmap */
+     data_size_t     total;     /* total size of extra data */
+     VARARG(data,message_data); /* message data for sent messages */
+ @END
+@@ -2826,6 +2825,13 @@ enum caret_state
+ };
+ 
+ 
++/* get thread active hooks */
++@REQ(get_active_hooks)
++@REPLY
++    unsigned int   active_hooks;   /* active hooks bitmap */
++@END
++
++
+ /* Set a window hook */
+ @REQ(set_hook)
+     int            id;             /* id of the hook */
+diff --git a/server/queue.c b/server/queue.c
+index 0725aeca766..cb80d04c82b 100644
+--- a/server/queue.c
++++ b/server/queue.c
+@@ -2746,8 +2746,6 @@ DECL_HANDLER(get_message)
+     user_handle_t get_win = get_user_full_handle( req->get_win );
+     unsigned int filter = req->flags >> 16;
+ 
+-    reply->active_hooks = get_active_hooks();
+-
+     if (get_win && get_win != 1 && get_win != -1 && !get_user_object( get_win, USER_WINDOW ))
+     {
+         set_win32_error( ERROR_INVALID_WINDOW_HANDLE );
+
+diff --git a/server/user.h b/server/user.h
+index 3c4601e2b8e..1199359600b 100644
+--- a/server/user.h
++++ b/server/user.h
+@@ -97,7 +97,6 @@ extern void cleanup_clipboard_thread( st
+ /* hook functions */
+ 
+ extern void remove_thread_hooks( struct thread *thread );
+-extern unsigned int get_active_hooks(void);
+ extern struct thread *get_first_global_hook( int id );
+ 
+ /* queue functions */
+
+

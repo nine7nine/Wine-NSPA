@@ -1,0 +1,235 @@
+#!/bin/bash
+
+if [[ "$_custom_wine_source" = *"ValveSoftware"* ]] || [[ "$_custom_wine_source" = *"GloriousEggroll"* ]]; then
+  _unfrog="true"
+fi
+
+if [ -d "${srcdir}"/"${_stgsrcdir}" ]; then
+
+    if [ "$_use_staging" = "true" ] && grep -Fxq 'Disabled: True' "${srcdir}/${_stgsrcdir}/patches/mfplat-streaming-support/definition"; then
+      warning "! Staging has disabled mfplat support on this revision, so video playback will not work in games using mfplat unless a hotfix is available !"
+    fi
+
+    # Valve Proton specifics
+    if [ "$_unfrog" = "true" ]; then
+      # Fixes for 32-bit ldap, futex_waitv outside of Valve's container
+      cp "$_where"/wine-tkg-patches/hotfixes/valve/fixes/*.mypatch "$_where"/
+
+      if [ "$_steamclient_noswap" = "true" ]; then
+        cp "$_where"/wine-tkg-patches/hotfixes/valve/0001-proton-steamclient-swap-revert.mypatch "$_where"/
+      fi
+
+      if [[ ${_community_patches[*]} =~ "amd_fsr_fshack.mypatch" ]]; then
+        cp "$_where"/wine-tkg-patches/hotfixes/valve/proton-fsr.mypatch "$_where"/
+      fi
+
+      warning "Disabling any known to be broken community patch on valve proton tree"
+      _community_patches=$(echo $_community_patches | sed "s/0001-ntdll-Use-kernel-soft-dirty-flags-for-write-watches-.mypatch//g" | tr -s " ")
+      _community_patches=$(echo $_community_patches | sed "s/0002-proton_QPC.mypatch//g" | tr -s " ")
+      _community_patches=$(echo $_community_patches | sed "s/EA_desktop_fix.mypatch//g" | tr -s " ")
+      _community_patches=$(echo $_community_patches | sed "s/amdags-proton.mypatch//g" | tr -s " ")
+      _community_patches=$(echo $_community_patches | sed "s/atiadlxx-proton.mypatch//g" | tr -s " ")
+      _community_patches=$(echo $_community_patches | sed "s/ntdll_Map_top-down_if_dll_characteristics_include_DYNAMIC_BASE.mypatch//g" | tr -s " ")
+      _community_patches=$(echo $_community_patches | sed "s/amd_fsr_fshack.mypatch//g" | tr -s " ")
+      _community_patches=$(echo $_community_patches | sed "s/unhide-prefix-update-window.mypatch//g" | tr -s " ")
+      _community_patches=$(echo $_community_patches | sed "s/Add-SORT_DIGITSAS-UMBERS-flag-to-CompareStringsEx.mypatch//g" | tr -s " ")
+    fi
+    # /Valve Proton specifics
+
+    # Community Patches
+
+    # Disable the 0002-proton_QPC patch when using 488a00c or newer
+    if ( [ "$_protonify" = "true" ] || [ "$_EXTERNAL_INSTALL" = "proton" ] ) && [[ ${_community_patches[*]} =~ "0002-proton_QPC.mypatch" ]] && ( git merge-base --is-ancestor 488a00c3be2e4ef0dd0c945ac96e0f1a49c449f8 HEAD ); then
+      warning "Disabling the 0002-proton_QPC community patch since it's superseded by your current protonify patchset"
+      _community_patches=$(echo $_community_patches | sed "s/0002-proton_QPC.mypatch//g" | tr -s " ")
+    fi
+
+    # Disable the amd_fsr_fshack patch if _proton_fs_hack is disabled.
+    if [[ ${_community_patches[*]} =~ "amd_fsr_fshack.mypatch" ]] && [ "$_unfrog" != "true" ]; then
+      if [ "$_use_staging" = "true" ] && [ "$_proton_fs_hack" = "true" ]; then
+        _steamvr_support="true"
+      elif [ "$_proton_fs_hack" != "true" ] || [ "$_use_staging" != "true" ]; then
+        warning "Disabling the amd_fsr_fshack community patch because its _proton_fs_hack dependency is disabled"
+        _community_patches=$(echo $_community_patches | sed "s/amd_fsr_fshack.mypatch//g" | tr -s " ")
+      fi
+    fi
+
+    # LFH
+    if ( [[ ${_community_patches[*]} =~ "0002-proton_LFH.mypatch" ]] && [ "$_use_staging" != "true" ] ) || ( [[ ${_community_patches[*]} =~ "0002-proton_LFH.mypatch" ]] && [ "$_use_staging" = "true" ] && [ "$_protonify" = "false" ] ); then
+      warning "Disabling 0002-proton_LFH.mypatch on mainline or non-protonified"
+      _community_patches=$(echo $_community_patches | sed "s/0002-proton_LFH.mypatch//g" | tr -s " ")
+    fi
+
+    # Shell32-CreateDirectoryInDestinationInFileOp-Move-multiop
+    if [[ ${_community_patches[*]} =~ "Shell32-CreateDirectoryInDestinationInFileOp-Move-multiop.mypatch" ]] && [ "$_use_staging" != "true" ]; then
+      warning "Disabling Shell32-CreateDirectoryInDestinationInFileOp-Move-multiop.mypatch on mainline"
+      _community_patches=$(echo $_community_patches | sed "s/Shell32-CreateDirectoryInDestinationInFileOp-Move-multiop.mypatch//g" | tr -s " ")
+    fi
+
+    # Star Citizen fixes
+    if [[ ${_community_patches[*]} =~ "star-citizen-StorageDeviceSeekPenaltyProperty.mypatch" ]] && [ "$_use_staging" = "true" ]; then
+      warning "Disabling staging patchsets breaking Star Citizen: ntdll-ForceBottomUpAlloc, ntdll-WRITECOPY and ntdll-Builtin_Prot"
+      _staging_args+=(-W ntdll-ForceBottomUpAlloc -W ntdll-WRITECOPY -W ntdll-Builtin_Prot)
+    fi
+
+    # Disable Add-SORT_DIGITSAS-UMBERS-flag-to-CompareStringsEx patch if the Wine version selected already contains the commit which implements it.
+    # NOTE: The patch and the commit are not the same, but this is only because the commit adds some other stuff on top of the patch.
+    if [[ ${_community_patches[*]} =~ "Add-SORT_DIGITSAS-UMBERS-flag-to-CompareStringsEx.mypatch" ]] && ( git merge-base --is-ancestor 0a366f7e4a68c9375b54ace5289989bd81b65d22 $(../"$_stgsrcdir"/patches/patchinstall.sh --upstream-commit) > /dev/null ); then
+      warning "Disabling the Add-SORT_DIGITSAS-UMBERS-flag-to-CompareStringsEx community patch because the patch is already in the Wine version selected."
+      _community_patches=$(echo $_community_patches | sed "s/Add-SORT_DIGITSAS-UMBERS-flag-to-CompareStringsEx.mypatch//g" | tr -s " ")
+    fi    
+
+    # Disable the EA desktop patch if the Wine version selected already contains the patch.
+    if [[ ${_community_patches[*]} =~ "EA_desktop_fix.mypatch" ]] && ( git merge-base --is-ancestor 725655de79be751ee478b584a6c9aef482b33b4a HEAD ); then
+      warning "Disabling the EA_desktop_fix community patch because the patch is already in the Wine version selected."
+      _community_patches=$(echo $_community_patches | sed "s/EA_desktop_fix.mypatch//g" | tr -s " ")
+    fi
+
+    # Disable the roblox_fix patch if the Wine version selected already contains the patch.
+    if [[ ${_community_patches[*]} =~ "roblox_fix.mypatch" ]] && ( git merge-base --is-ancestor 29e1494c72041f3d2ee89e89eff17877df7cabd2 HEAD ); then
+      warning "Disabling the roblox_fix community patch because the patch is already in the Wine version selected."
+      _community_patches=$(echo $_community_patches | sed "s/roblox_fix.mypatch//g" | tr -s " ")
+    fi
+    
+    # Prompt user to disable fshack if the wine_wayland_driver patch is enabled.
+    if [[ ${_community_patches[*]} =~ "wine_wayland_driver.mypatch" ]]; then
+      _wayland_driver="true"
+    fi
+    
+    # Prompt user to enable fshack if the winex11-fs-no_above_state patch is enabled.
+    if [[ ${_community_patches[*]} =~ "winex11-fs-no_above_state.mypatch" ]]; then
+      if [ "$_proton_fs_hack" != "true" ] && [ "$_hotfixes_no_confirm" != "true" ]; then
+        warning "HALP! You have enabled winex11-fs-no_above_state community patch, but its _proton_fs_hack dependency is disabled."
+        read -rp "Enable _proton_fs_hack?"$'\n> Y/n : ' _hotfixansw;
+      fi
+      if ( [ "$_hotfixansw" != "n" ] && [ "$_hotfixansw" != "N" ] ) || [ "$_hotfixes_no_confirm" = "true" ]; then
+        _proton_fs_hack="true"
+      fi
+    fi
+    
+    # Prompt user to disable mfhacks if the guy1524_mfplat_WIP patch is enabled
+    if [[ ${_community_patches[*]} =~ "guy1524_mfplat_WIP.mypatch" ]] && ( cd "${srcdir}"/"${_stgsrcdir}" && git merge-base --is-ancestor af56d3821a32c84305fcc55b03b7ece4e1f7b3d9 HEAD && ! git merge-base --is-ancestor 480bf20becda07ac96b1de48ef59b07bc16fca56 HEAD ); then
+      if [ "$_proton_mf_hacks" = "true" ] && [ "$_hotfixes_no_confirm" != "true" ]; then
+        warning "HALP! You have enabled guy1524_mfplat_WIP community patch, but the potentially conflicting _proton_mf_hacks option is also enabled."
+        read -rp "Disable _proton_mf_hacks?"$'\n> Y/n : ' _hotfixansw;
+      fi
+      if ( [ "$_hotfixansw" != "n" ] && [ "$_hotfixansw" != "N" ] ) || [ "$_hotfixes_no_confirm" = "true" ]; then
+        _proton_mf_hacks="false"
+      fi
+      _staging_args+=(-W mfplat-streaming-support)
+    fi
+    # /community patches
+
+    # Fix broken staging commit fbe1ba5.
+    if ( cd "${srcdir}"/"${_stgsrcdir}" && [ "$(git rev-parse HEAD)" = "fbe1ba5578fb7380e2b09a5aebf5aa488744a823" ] ); then
+      warning "Fixing wrong staging upstream commit... Should be 4358ddc75fbfabdc4a4f31b4e3cc9aa1e0811d4c"
+      sed -i 's|echo "3bb824f98891e8eb907c9c652fe528373a17b10d"|echo "4358ddc75fbfabdc4a4f31b4e3cc9aa1e0811d4c"|g' "${srcdir}"/"${_stgsrcdir}"/patches/patchinstall.sh
+    fi
+
+    # Fix broken staging commit f329843.
+    if ( cd "${srcdir}"/"${_stgsrcdir}" && [ "$(git rev-parse HEAD)" = "f3298432f0c4614a7554e06c6c9a66ef3623ead8" ] ); then
+      warning "Fixing wrong staging upstream commit... Should be 8257fe88fb99ca0bdeec27b47b7cf835bda5c061"
+      sed -i 's|echo "ba920246e502afe7bc664c1881d528a27e980101"|echo "8257fe88fb99ca0bdeec27b47b7cf835bda5c061"|g' "${srcdir}"/"${_stgsrcdir}"/patches/patchinstall.sh
+    fi
+
+    # Fix broken staging commits 215d78f8 - 3f3a05f9.
+    if ( cd "${srcdir}"/"${_stgsrcdir}" && git merge-base --is-ancestor 215d78f8e18bced54b97b39fcf71ebbb2a3ab13c HEAD && ! git merge-base --is-ancestor 3f3a05f91c85cb5ccdc4c8185bcc862c6e96cd52 HEAD ); then
+      warning "Disable broken xactengine-initial patchset on staging 215d78f8+"
+      _staging_args+=(-W xactengine-initial)
+    fi
+
+    # Fix broken staging commit 4ef21bcf.
+    if ( cd "${srcdir}"/"${_stgsrcdir}" && [ "$(git rev-parse HEAD)" = "4ef21bcf82f625cce4c487c34ab695e61388afb6" ] ); then
+      warning "Disable broken dsound-EAX patchset on staging 4ef21bcf"
+      _staging_args+=(-W dsound-EAX)
+    fi
+
+    # Fix broken staging commit eae4093b.
+    if ( cd "${srcdir}"/"${_stgsrcdir}" && [ "$(git rev-parse HEAD)" = "eae4093bf85769871ce6675b54364d190094ebd3" ] ); then
+      warning "Fix typo in mfplat-streaming-support patchset on staging eae4093b"
+      patch "${srcdir}"/"${_stgsrcdir}"/patches/mfplat-streaming-support/0035-Miscellaneous.patch << 'EOM'
+@@ -1269,7 +1269,7 @@ index 0000000000..d6d6b01a11
+ +
+ +    drain = gst_query_new_drain();
+ +    gst_pad_peer_query(decoder->input_src, drain);
+-+    gst_query_unref (query);
+++    gst_query_unref(drain);
+ +
+ +    if (decoder->output_counter || decoder->draining)
+ +    {
+EOM
+    fi
+
+    # Fix broken staging commits d9eb78e5 - 03290f8a.
+    if ( cd "${srcdir}"/"${_stgsrcdir}" && git merge-base --is-ancestor d9eb78e597833fcafeb3d957a3b7dd6fc3afaa0e HEAD && ! git merge-base --is-ancestor 03290f8a41a61188758b5e0ec1236046367d1497 HEAD ); then
+      warning "Disable broken ole32-HGLOBALStream patchset on staging d9eb78e5+"
+      _staging_args+=(-W ole32-HGLOBALStream)
+    fi
+
+    # Fix broken staging commit 495ae4e.
+    if ( cd "${srcdir}"/"${_stgsrcdir}" && [ "$(git rev-parse HEAD)" = "495ae4e9af49936591d486e262ff96f528e28766" ] ); then
+      warning "Fixing wrong staging upstream commit... Should be 2148167f2557cc6c7d1e2f5ffef28bd936503a9a"
+      sed -i 's|echo "93107c08f5aa7f37ad7ece9cd7ca248dba3030ce"|echo "2148167f2557cc6c7d1e2f5ffef28bd936503a9a"|g' "${srcdir}"/"${_stgsrcdir}"/patches/patchinstall.sh
+    fi
+
+    if [ "$_use_staging" = "true" ]; then
+      # Esync was disabled in staging commit 3b6b470, so let's disable fsync as well.
+      if ( cd "${srcdir}"/"${_stgsrcdir}" && [ "$(git rev-parse HEAD)" = "3b6b470bcaf1e77bc9ba851b80a35fd4778e40fe" ] ); then
+        warning "Esync was disabled in staging 3b6b470b, so fsync was disabled as well to prevent patch application failure. You can use _staging_version=\"cd3ee9b2\" in your .cfg to get esync/fsync back until rebase."
+        _use_fsync="false"
+      fi
+    fi
+
+    # Esync is broken on staging commit dc77e28, breaking fsync as a result. Some hunks are getting unordered due to similar contexts. So let's add a bit more context as a fix.
+    if ( cd "${srcdir}"/"${_stgsrcdir}" && [ "$(git rev-parse HEAD)" = "dc77e28b0f7d6fdb11dafacb73b9889545359572" ] ); then
+      warning "Fix eventfd_synchronization on staging dc77e28"
+      patch "${srcdir}"/"${_stgsrcdir}"/patches/eventfd_synchronization/0008-ntdll-Implement-NtSetEvent.patch << 'EOM'
+@@ -49,18 +49,20 @@ index d9c7df967f8..b585af047ee 100644
+                                      BOOLEAN alertable, const LARGE_INTEGER *timeout ) DECLSPEC_HIDDEN;
+ diff --git a/dlls/ntdll/unix/sync.c b/dlls/ntdll/unix/sync.c
+ index 51f77b1015f..60be9a0885a 100644
+ --- a/dlls/ntdll/unix/sync.c
+ +++ b/dlls/ntdll/unix/sync.c
+-@@ -486,6 +486,9 @@ NTSTATUS WINAPI NtSetEvent( HANDLE handle, LONG *prev_state )
++@@ -458,8 +458,11 @@ NTSTATUS WINAPI NtSetEvent( HANDLE handle, LONG *prev_state )
++ NTSTATUS WINAPI NtSetEvent( HANDLE handle, LONG *prev_state )
+  {
+      NTSTATUS ret;
+  
+ +    if (do_esync())
+ +        return esync_set_event( handle );
+ +
+      SERVER_START_REQ( event_op )
+      {
+          req->handle = wine_server_obj_handle( handle );
++         req->op     = SET_EVENT;
+ -- 
+ 2.28.0
+ 
+EOM
+      patch "${srcdir}"/"${_stgsrcdir}"/patches/eventfd_synchronization/0009-ntdll-Implement-NtResetEvent.patch << 'EOM'
+@@ -49,18 +49,20 @@ index b585af047ee..8480a213b2a 100644
+  extern NTSTATUS esync_wait_objects( DWORD count, const HANDLE *handles, BOOLEAN wait_any,
+ diff --git a/dlls/ntdll/unix/sync.c b/dlls/ntdll/unix/sync.c
+ index 60be9a0885a..1d2e831964f 100644
+ --- a/dlls/ntdll/unix/sync.c
+ +++ b/dlls/ntdll/unix/sync.c
+-@@ -508,6 +508,9 @@ NTSTATUS WINAPI NtResetEvent( HANDLE handle, LONG *prev_state )
++@@ -508,8 +508,11 @@ NTSTATUS WINAPI NtResetEvent( HANDLE handle, LONG *prev_state )
++ NTSTATUS WINAPI NtResetEvent( HANDLE handle, LONG *prev_state )
+  {
+      NTSTATUS ret;
+  
+ +    if (do_esync())
+ +        return esync_reset_event( handle );
+ +
+      SERVER_START_REQ( event_op )
+      {
+          req->handle = wine_server_obj_handle( handle );
++         req->op     = RESET_EVENT;
+ -- 
+ 2.28.0
+ 
+EOM
+    fi
+fi

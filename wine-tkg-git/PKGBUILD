@@ -1,0 +1,522 @@
+# Created by: Tk-Glitch <ti3nou at gmail dot com>
+
+pkgname=wine-tkg-git
+pkgver=0
+
+# workaround for pkgrel overwritten on regen
+pkgrel=1
+eval pkgrel=327
+
+_stgsrcdir='wine-staging-git'
+_esyncsrcdir='esync'
+export _where="$PWD" # track basedir as different Arch based distros are moving srcdir around
+_configure_args=() # additional args to ./configure will be added during prepare()
+_makepkg_options=()
+
+# load functions
+source "$_where"/wine-tkg-scripts/prepare.sh
+source "$_where"/wine-tkg-scripts/build.sh
+
+exit_cleanup() {
+  _exit_cleanup
+  remove_deps || true
+}
+
+# init steps
+if msg2; then # Arch chroot workaround for even more looping fun
+  _init
+fi
+
+if [ -z "$_localbuild" ]; then
+ _pkgnaming
+fi
+
+# custom plain wine commit to pass to git
+if [ -n "$_plain_version" ]; then
+  if [ "$_use_staging" = "false" ] || ( [ "$_use_staging" = "true" ] && [ "$_staging_upstreamignore" = "true" ] ); then
+    _plain_commit="#commit=$_plain_version"
+  fi
+fi
+
+# custom staging commit to pass to git
+if [ "$_use_staging" = "true" ] && [ -n "$_staging_version" ]; then
+  _staging_commit="#commit=$_staging_version"
+fi
+
+pkgdesc='This "Wine to rule them all" package is the result of some random pkgbuild found online. Looks safe to me, amirite? Some variants of it can be found in lutris runners.'
+url='https://github.com/Tk-Glitch/PKGBUILDS/tree/master/wine-tkg-git'
+arch=('x86_64')
+
+# Don't strip if _pkg_strip is disabled
+if [ "$_pkg_strip" != "true" ]; then
+ _makepkg_options+=('!strip')
+fi
+
+# Only pass the staticlibs option to system-wide installs
+if [ "$_EXTERNAL_INSTALL" != "true" ]; then
+  _makepkg_options+=(staticlibs)
+fi
+
+if msg2; then # Arch chroot workaround for even more looping fun
+  # Use ccache if available
+  if pacman -Qq ccache &> /dev/null; then
+    msg2 'ccache was found and will be used'
+    _makepkg_options+=('ccache')
+  else
+    msg2 'ccache was not found and will not be used'
+  fi
+fi
+
+options=(${_makepkg_options[@]} !lto)
+
+license=('LGPL')
+depends=(
+    'attr'                  'lib32-attr'
+    'fontconfig'            'lib32-fontconfig'
+    'lcms2'                 'lib32-lcms2'
+    'libxml2'               'lib32-libxml2'
+    'libxcursor'            'lib32-libxcursor'
+    'libxrandr'             'lib32-libxrandr'
+    'libxdamage'            'lib32-libxdamage'
+    'libxi'                 'lib32-libxi'
+    'gettext'               'lib32-gettext'
+    'freetype2'             'lib32-freetype2'
+    'glu'                   'lib32-glu'
+    'libsm'                 'lib32-libsm'
+    'gcc-libs'              'lib32-gcc-libs'
+    'libpcap'               'lib32-libpcap'
+    'faudio'                'lib32-faudio'
+    'desktop-file-utils'    'jxrlib'
+    $_user_deps
+)
+
+makedepends=('git' 'autoconf' 'ncurses' 'bison' 'perl' 'fontforge' 'flex'
+    'gcc>=4.5.0-2'          'pkgconf'
+    'giflib'                'lib32-giflib'
+    'libpng'                'lib32-libpng'
+    'gnutls'                'lib32-gnutls'
+    'libxinerama'           'lib32-libxinerama'
+    'libxcomposite'         'lib32-libxcomposite'
+    'libxmu'                'lib32-libxmu'
+    'libxxf86vm'            'lib32-libxxf86vm'
+    'libldap'               'lib32-libldap'
+    'mpg123'                'lib32-mpg123'
+    'openal'                'lib32-openal'
+    'v4l-utils'             'lib32-v4l-utils'
+    'alsa-lib'              'lib32-alsa-lib'
+    'libxcomposite'         'lib32-libxcomposite'
+    'mesa'                  'lib32-mesa'
+    'libgl'                 'lib32-libgl'
+    'libxslt'               'lib32-libxslt'
+    'libpulse'              'lib32-libpulse'
+    'libva'                 'lib32-libva'
+    'gtk3'                  'lib32-gtk3'
+    'gst-plugins-base-libs' 'lib32-gst-plugins-base-libs'
+    'gst-plugins-good'      'lib32-gst-plugins-good'
+    'vulkan-icd-loader'     'lib32-vulkan-icd-loader'
+    'sdl2'                  'lib32-sdl2'
+    'libcups'               'lib32-libcups'
+    'samba'                 'opencl-headers'
+    'meson'                 'ninja'
+    'glslang'               'wget'
+    'ocl-icd'               'lib32-ocl-icd'
+    'jack'                 'lib32-jack'
+    $_user_makedeps
+)
+
+# mingw
+if [ -z "${CUSTOM_MINGW_PATH}" ]; then
+  makedepends+=('mingw-w64-gcc')
+fi
+
+# proton-tkg deps
+if [ -e "$_where"/proton_tkg_token ]; then
+  makedepends+=('fontforge' 'python-fonttools')
+  depends+=('tk')
+fi
+if [ "$_build_mediaconv" = "true" ]; then
+  depends+=('gst-plugins-ugly')
+fi
+
+# wine-mono deps
+if [ "$_use_mono" = "true" ]; then
+  depends+=('wine-mono')
+fi
+
+optdepends=(
+    'giflib'                'lib32-giflib'
+    'libpng'                'lib32-libpng'
+    'libldap'               'lib32-libldap'
+    'gnutls'                'lib32-gnutls'
+    'mpg123'                'lib32-mpg123'
+    'openal'                'lib32-openal'
+    'v4l-utils'             'lib32-v4l-utils'
+    'libpulse'              'lib32-libpulse'
+    'alsa-plugins'          'lib32-alsa-plugins'
+    'alsa-lib'              'lib32-alsa-lib'
+    'libjpeg-turbo'         'lib32-libjpeg-turbo'
+    'libxcomposite'         'lib32-libxcomposite'
+    'libxinerama'           'lib32-libxinerama'
+    'ncurses'               'lib32-ncurses'
+    'libxslt'               'lib32-libxslt'
+    'libva'                 'lib32-libva'
+    'gtk3'                  'lib32-gtk3'
+    'gst-plugins-base-libs' 'lib32-gst-plugins-base-libs'
+    'vulkan-icd-loader'     'lib32-vulkan-icd-loader'
+    'sdl2'                  'lib32-sdl2'
+    'cups'                  'zapcc'
+    'samba'                 'clang'
+    'dosbox'                'ccache'
+    'faudio'                'lib32-faudio'
+    'schedtool'
+)
+
+# Wine source
+if [ -n "$_custom_wine_source" ]; then
+  _winesrcdir=$( sed 's|/|-|g' <<< $(sed 's|.*://.[^/]*/||g' <<< $_custom_wine_source))
+  _winesrctarget="$_custom_wine_source"
+else
+  if [ "$_plain_mirrorsrc" = "true" ]; then
+    _winesrcdir="wine-mirror-git"
+    _winesrctarget="git+https://github.com/wine-mirror/wine.git"
+  else
+    _winesrcdir="wine-git"
+    _winesrctarget="git://source.winehq.org/git/wine.git"
+  fi
+fi
+
+if [ ! -e "$_where"/BIG_UGLY_FROGMINER ]; then
+  find "$_where"/wine-tkg-patches -type f -not -path "*hotfixes*" -exec cp -n {} "$_where" \; && # copy patches inside the PKGBUILD's dir to preserve makepkg sourcing and md5sum checking
+  cp "$_where"/wine-tkg-userpatches/*.my* "$_where" 2>/dev/null # copy userpatches inside the PKGBUILD's dir
+fi
+
+source=("$_winesrcdir"::"${_winesrctarget}${_plain_commit}"
+		"$_stgsrcdir"::"git+https://github.com/wine-staging/wine-staging.git${_staging_commit}"
+		# misc
+		'30-win32-aliases.conf' # 32-bit font antialiasing
+		'wine-binfmt.conf' # Enables launching windows executables directly
+)
+
+# 		# game specific
+# 		'poe-fix.patch' # Enable Path of Exile DX11 to work
+# 		'f4skyrimse-fix-1.patch' # Fo4 & Skyrim SE Script Extender fix 1/2 (merged with 12be24a)
+# 		'f4skyrimse-fix-2.patch' # Fo4 & Skyrim SE Script Extender fix 2/2 (Fixed in 6672fc9+)
+# 		'mtga-staging.patch' # Magic The Gathering: Arena crashfix
+# 		'mtga-mainline.patch' # Magic The Gathering: Arena crashfix
+# 		'mtga-legacy.patch' # Magic The Gathering: Arena crashfix (<aa0c4bb5e72caf290b6588bc1f9931cc89a9feb6)
+# 		'mtga-legacy-addition.patch' # Hack to allow for msi installers of Magic The Gathering: Arena to succeed (on older than 5.0rc1)
+# 		'sims_2-fix-legacy.patch' # Sims 2 fix for <4.1
+# 		'sims_2-fix-4.2-.patch' # Sims 2 fix for 4.2 and lower
+# 		'sims_2-fix.patch' # Sims 2 fix for 4.3+
+# 		'sims_3-oldnvidia.patch' # No.
+# 		'mwo.patch' # Mechwarrior Online fix
+# 		'pythonfix.patch' # Backported Python/Sims4 squash patch for <=3.18
+# 		'resident_evil_4_hack.patch' # Fixes broken rendering
+# 		'childwindow.patch' # Child window rendering support for vk - Fixes World of Final Fantasy and others
+# 		'warframe-launcher.patch' # Fix for Warframe Launcher failing to update itself
+# 		'ffxiv-launcher-workaround.patch' # Workaround for Final Fantasy XIV Launcher 404 error
+# 		'leagueoflolfix.patch' # LoL 9.20+ fix - Requires vdso32 disabled (echo 0 > /proc/sys/abi/vsyscall32)
+# 		'overwatch-mfstub.patch' # Overwatch mf crash workaround
+# 		'assettocorsa_hud_perf.patch' # Fix for Assetto Corsa performance drop when HUD elements are displayed
+# 		'mk11.patch' # Fix for Mortal Kombat 11
+# 		'proton-windows.gaming.input.patch' # Proton's windows.gaming.input patchset, for Death Stranding (staged as of c4b73e17)
+# 		# esync
+# 		'esync-staging-fixes-r1.patch' # For 3.10-3.16 - Untested on lower than 3.10
+# 		'esync-staging-fixes-r2.patch' # For 3.17+
+# 		'esync-staging-fixes-r3.patch' # For 3.20+
+# 		'esync-no_alloc_handle.patch' # esync staging extended support patch (<4.5)
+# 		'esync-compat-fixes-r1.patch'  # For 3.10-3.16 - Untested on lower than 3.10
+# 		'esync-compat-fixes-r1.1.patch' # Addon for 3.14-3.16
+# 		'esync-compat-fixes-r2.patch' # For 3.17+
+# 		'esync-compat-fixes-r2.1.patch' # Addon for 3.19+ - non-staging only
+# 		'esync-compat-fixes-r3.patch' # For 3.20+
+# 		'esync-compat-fixes-r3.1.patch' # Addon for 4.4+
+# 		'esync-compat-fixes-r3.2.patch' # Addon for 4.5+
+# 		'esync-compat-fixes-r3.3.patch' # Addon for 4.6+ (b3c8d5d)
+# 		'esync-compat-fixes-r3.4.patch' # Addon for 4.6+ (4c0e817)
+# 		'esync-compat-fixes-r3.5.patch' # Addon for 4.6+ (f534fbd)
+# 		'esync-compat-fixes-r3.6.patch' # Addon for 4.8+ (29914d5)
+# 		'esync-compat-fixes-r3.7.patch' # Addon for 4.20+ (608d086)
+# 		'esync-compat-fixes-r3.8.patch' # Addon for 4.20+ (4538a13)
+# 		'esync-compat-fixes-r3.9.patch' # Addon for 4.21+ (b934f66)
+# 		'esync-compat-fixes-r3.10.patch' # Addon for 4.21+ (fc17535)
+# 		'esync-compat-fixes-r3.11.patch' # Addon for 5.5+ (b664ae8)
+# 		'esync-compat-fixes-r3.12.patch' # Addon for 5.6+ (8701260)
+# 		'esync-compat-fixes-r3.13.patch' # Addon for 5.7+ (40e849f)
+# 		'esync-compat-fixes-r3.14.patch' # Addon for 5.8+ (e5030a4)
+# 		'esync-compat-fixes-r3.15.patch' # Addon for 5.8+ (2633a5c)
+# 		'esync-compat-fixes-r3.16.patch' # Addon for 5.9+ (a1c46c3)
+# 		'esync-no_kernel_obj_list.patch' # esync extended support patch (4.5+)
+# 		# fsync
+# 		'fsync-mainline.patch' # Fsync patchset, introduced with Proton 4.11-1
+# 		'fsync-staging.patch' # Fsync patchset, introduced with Proton 4.11-1 - Staging edition
+# 		'fsync-staging-no_alloc_handle.patch' # Add no_alloc_handle object method to fsync for staging
+# 		'fsync-spincounts.patch' # Add a configurable spin count to fsync
+# 		# pba
+# 		'PBA313-.patch' # For 3.10-3.13 - Untested on lower than 3.10
+# 		'PBA314+.patch' # For 3.14-3.16
+# 		'PBA317+.patch' # For 3.17-3.18
+# 		# misc
+# 		'wine-tkg.patch' # Do NOT report bugs at winehq when using custom build
+# 		'wine-tkg-staging.patch' # Do NOT report bugs at winehq when using custom build - staging
+# 		'steam.patch' # auto-append --no-sandbox
+# 		'use_clock_monotonic.patch' # Perf
+# 		'use_clock_monotonic-2.patch' # Addon for the patch above, needed on 13e11d3+
+# 		'lowlatency_audio.patch' # wine osu! lowlat patch
+# 		'CSMT-toggle.patch' # Corrected CSMT switch logic
+# 		'GLSL-toggle.patch' # Toggles OpenGL shading language
+# 		'launch-with-dedicated-gpu-desktop-entry.patch'
+# 		'plasma_systray_fix.patch' # Systray fix for winex11
+# 		'faudio-exp.patch' # Faudio experimental support
+# 		'enable_stg_shared_mem_def.patch' # Enable STAGING_SHARED_MEMORY by default
+# 		'legacy-LAA.patch' # IMAGE_FILE_LARGE_ADDRESS_AWARE override (<4.2)
+# 		'legacy-LAA-staging.patch' # Same as above, for staging
+# 		'LAA.patch' # IMAGE_FILE_LARGE_ADDRESS_AWARE override
+# 		'LAA-staging.patch' # Same as above, for staging
+# 		'winevulkan-1.1.103.patch' # Update winevulkan
+# 		'winevulkan-1.1.113.patch' # Update winevulkan
+# 		'high-core-count-fix.patch' # High core count setup fix for <=4.0
+# 		'nvidia-hate.patch' # novideo hate patch to disable nvapi, nvcuda etc.
+# 		'virtual_desktop_refreshrate.patch' # Add custom fake refreshrate to virtual desktop
+# 		'0001-kernelbase-Remove-DECLSPEC_HOTPATCH-from-SetThreadSt.patch' # Native dotnet workaround for 4.13+
+# 		'usvfs.patch' # USVFS (Mod Organizer 2's virtual filesystem) patch
+# 		'revert-c6b6935.patch' # Reverts c6b6935 due to https://bugs.winehq.org/show_bug.cgi?id=47752
+# 		'proton-tkg-kernelbase-reverts.patch' # Reverts 05d0027, 0f5538b, c5dc41e, a5d45e9, 619bd16 and 8d25965 (moving various funcs to kernelbase). This is required for proton-tkg and fixes some dll loading issues (with Cemu notably)
+# 		'proton-tkg-staging-kernelbase-reverts.patch' # Staging version of the above patch
+# 		'staging-44d1a45-localreverts.patch' # local reverts for staging 44d1a45+fshack
+# 		'd3d12-fixes.patch' # Fixes for d3d12 support through vkd3d From HansKristan - https://www.winehq.org/pipermail/wine-devel/2019-October/152356.html - https://www.winehq.org/pipermail/wine-devel/2019-October/152357.html
+# 		'josh-flat-theme.patch' # Joshua Ashton's take on making wine dialogs and menus less win95-ish - https://github.com/Joshua-Ashton/wine/tree/wine-better-theme
+# 		# proton
+# 		'FS_bypass_compositor.patch' # Perf
+# 		'FS_bypass_compositor-disabler.patch' # Disabler for the actual bypass
+# 		'valve_proton_fullscreen_hack.patch' # Proton FS hack
+# 		'valve_proton_fullscreen_hack-staging.patch' # Proton FS hack (staging)
+# 		'valve_proton_fullscreen_hack_realmodes.patch' # Real modes listing in FS hack
+# 		'proton_fs_hack_integer_scaling.patch' # Integer scaling for FS hack
+# 		'proton-rawinput.patch' # Proton compatible rawinput patchset
+# 		'winevulkan-1.1.113-proton.patch' # Update winevulkan - Proton edition
+# 		'proton-tkg-8d25965.patch' # Proton-tkg (<8d25965)
+# 		'proton-tkg.patch' # Proton-tkg
+# 		'proton-tkg-rpc.patch' # necessary pre-patch for Proton-tkg
+# 		'proton-tkg-staging.patch' # Proton-tkg-staging
+# 		'proton-tkg-staging-rpc.patch' # necessary pre-patch for Proton-tkg-staging
+# 		'proton-tkg-steamclient-swap.patch' # Key steamclient substitution hack
+# 		'msvcrt_nativebuiltin_mainline.patch' # Enforce mscvrt Dlls to native then builtin - from Proton - mainline
+# 		'msvcrt_nativebuiltin.patch' # Enforce mscvrt Dlls to native then builtin - from Proton
+# 		'proton-sdl-joy.patch' # Proton SDL joystick support
+# 		'proton-sdl-joy-2.patch' # Proton SDL joystick support additions for newer trees
+# 		'proton-gamepad-additions.patch' # Proton 4.11-7 xinput hacks and other gamepad additions
+# 		'proton-vk-bits-4.5.patch' # Proton vk bits for 4.5+
+# 		'proton-restore-unicode.patch' # Restore installing wine/unicode.h to please Proton
+# 		'proton_mf_hacks.patch' # Workarounds to prevent crashes on some mf functions
+# 		'proton-wined3d-additions.patch' # Proton non-vr-related wined3d additions
+# 		'staging-winex11-key_translation.patch' # Older version of that staging patchset specifically for proton-tkg with fs hack disabled
+# 		'proton-staging_winex11-MWM_Decorations.patch' # Proton friendly version of that staging patchset
+# 		'proton-vr.patch' # wined3d interop and friends for steamvr support
+# 		'proton-win10-default-staging.patch' # Set default wine version to win10 - staging
+# 		'proton-win10-default.patch' # Set default wine version to win10
+# 		'proton-steam-bits.patch' # Proton's steam-centric patches
+# 		'dxvk_config_dxgi_support.patch' # Add support for dxvk_config library to Wine's dxgi
+# 		'proton-winevulkan.patch' # Winevulkan-specific patches
+# 		'proton-winevulkan-nofshack.patch' # Winevulkan-specific patches - for FS hack disabled
+# 		'proton-seccomp-envvar.patch' # Guard seccomp with the WINESECCOMP envvar - Depends on staging
+# 		'proton-pa-staging.patch' # Unstaged proton PA additions
+# 		'server_Abort_waiting_on_a_completion_port_when_closing_it-no_alloc_handle.patch' # Proton patch introduced with 5.0-8 (for no_alloc_handle)
+# 		'server_Abort_waiting_on_a_completion_port_when_closing_it.patch' # Proton patch introduced with 5.0-8
+
+md5sums=('SKIP'
+         'SKIP'
+         '1ff4e467f59409272088d92173a0f801'
+         'cff441678d798466a13a0d03b01e23d7'
+)
+
+if [ "$_EXTERNAL_INSTALL" = "true" ]; then
+  provides=(
+    "$pkgname=$pkgver"
+  )
+  conflicts=("$pkgname")
+else
+  provides=(
+    "wine=$pkgver"
+    "wine-wow64=$pkgver"
+    "wine-staging=$pkgver"
+    "wine-esync=$pkgver"
+  )
+  conflicts=('wine' 'wine-wow64' 'wine-staging' 'wine-esync')
+  if [[ "$pkgname" == *-git ]]; then
+    replaces=("${pkgname/%-git/-faudio-git}")
+  fi
+fi
+
+if [ -n "$_localbuild" ]; then
+  _winesrcdir="$_localbuild"
+  _use_staging="false"
+  pkgname="$_localbuild"
+  if [ -n "$_PKGNAME_OVERRIDE" ]; then
+    if [ "$_PKGNAME_OVERRIDE" = "none" ]; then
+      pkgname="${pkgname}"
+    else
+      pkgname="${pkgname}-${_PKGNAME_OVERRIDE}"
+    fi
+    if msg2; then # Arch chroot workaround for even more looping fun
+      msg2 "Overriding default pkgname. New pkgname: ${pkgname}"
+    fi
+  fi
+fi
+
+makedepends=("${makedepends[@]}" "${depends[@]}")
+
+nonuser_patcher() {
+  if [ "$_NUKR" != "debug" ] || [[ "$_DEBUGANSW1" =~ [yY] ]]; then
+    if [ "$_nopatchmsg" != "true" ]; then
+      _fullpatchmsg=" -- ( $_patchmsg )"
+    fi
+    msg2 "Applying ${_patchname}"
+    echo -e "\n${_patchname}${_fullpatchmsg}" >> "$_where"/prepare.log
+    patch -Np1 < ../"$_patchname" >> "$_where"/prepare.log || (error "Patch application has failed. The error was logged to $_where/prepare.log for your convenience." && exit 1)
+    echo -e "${_patchname}${_fullpatchmsg}" >> "$_where"/last_build_config.log
+  fi
+}
+
+pkgver() {
+	if [ "$_use_staging" = "true" ]; then
+	  cd "${srcdir}/${_stgsrcdir}"
+	else
+	  cd "${srcdir}/${_winesrcdir}"
+	fi
+
+	# retrieve current wine version - if staging is enabled, staging version will be used instead
+	_describe_wine
+}
+
+prepare() {
+	if msg2; then # Arch chroot workaround for even more looping fun
+	  # Remove gst-editing-services
+	  if pacman -Qq gst-editing-services &> /dev/null; then
+	    warning '! found gst-editing-services package, known to break wine prefix creation !'
+	    read -rp "  Uninstall it?"$'\n> N/y : ' _gst_editing_services;
+	    if [[ "$_gst_editing_services" =~ [yY] ]]; then
+	      sudo pacman -R gst-editing-services
+	    fi
+	  fi
+	fi
+
+	# Symlink legacy patches to srcdir
+	if [ "$_NUKR" != "debug" ] || [[ "$_DEBUGANSW1" =~ [yY] ]]; then
+	  for _sympatch in "$_where"/*.patch; do
+	    if [[ ! "${source[@]##*/}" =~ "${_sympatch##*/}" ]]; then
+	      ln -s "$_sympatch" "$srcdir/"
+	    fi
+	  done
+	fi
+
+	# state tracker start - FEAR THE MIGHTY FROG MINER
+	touch "${_where}"/BIG_UGLY_FROGMINER
+
+	# prepare steps
+	if [ -z "$_localbuild" ]; then
+	  _source_cleanup > "$_where"/prepare.log
+	  _prepare
+	else
+	  echo -e "Building local source $_localbuild" > "$_where"/prepare.log
+	fi
+	_polish
+	_makedirs
+
+    if [ "$_allow_server_rt_prio" = "true" ] || [ "$_allow_wine_net_raw" = "true" ]; then
+      if [ "$_EXTERNAL_INSTALL" = "true" ]; then
+        if [ "$_EXTERNAL_NOVER" = "true" ]; then
+          _serverpath="$_DEFAULT_EXTERNAL_PATH/$pkgname/bin/wineserver"
+          _preloaderpath="$_DEFAULT_EXTERNAL_PATH/$pkgname/bin/wine-preloader"
+          _preloader64path="$_DEFAULT_EXTERNAL_PATH/$pkgname/bin/wine64-preloader"
+        else
+          if [ "$_use_staging" = "true" ]; then
+            cd "$srcdir/$_stgsrcdir"
+          else
+            cd "$srcdir/$_winesrcdir"
+          fi
+          _realwineversion=$(_describe_wine)
+          _serverpath="$_DEFAULT_EXTERNAL_PATH/$pkgname-$_realwineversion/bin/wineserver"
+          _preloaderpath="$_DEFAULT_EXTERNAL_PATH/$pkgname-$_realwineversion/bin/wine-preloader"
+          _preloader64path="$_DEFAULT_EXTERNAL_PATH/$pkgname-$_realwineversion/bin/wine64-preloader"
+        fi
+      else
+        _serverpath="/usr/bin/wineserver"
+        _preloaderpath="/usr/bin/wine-preloader"
+        _preloader64path="/usr/bin/wine64-preloader"
+      fi
+      cp "$_where"/wine.install "$_where"/wine-tkg.install
+      sed -i "s|#echo \"Setting wineserver and/or wine-preloader capabilities\"|echo \"Setting wineserver and/or wine-preloader capabilities\"|g" "$_where"/wine-tkg.install
+      if [ "$_allow_server_rt_prio" = "true" ] && [ "$_allow_wine_net_raw" != "true" ]; then
+        sed -i "s|#setcap cap_net_raw+eip /usr/bin/wineserver 2>/dev/null|setcap cap_sys_nice+ep $_serverpath 2>/dev/null|g" "$_where"/wine-tkg.install
+      fi
+      if [ "$_allow_wine_net_raw" = "true" ] && [ "$_allow_server_rt_prio" != "true" ]; then
+        sed -i "s|#setcap cap_net_raw+eip /usr/bin/wineserver 2>/dev/null|setcap cap_net_raw+eip $_serverpath 2>/dev/null|g" "$_where"/wine-tkg.install
+      fi
+      if [ "$_allow_wine_net_raw" = "true" ] && [ "$_allow_server_rt_prio" = "true" ]; then
+        sed -i "s|#setcap cap_net_raw+eip /usr/bin/wineserver 2>/dev/null|setcap cap_sys_nice,cap_net_raw+eip $_serverpath 2>/dev/null|g" "$_where"/wine-tkg.install
+      fi
+      if [ "$_allow_wine_net_raw" = "true" ]; then
+        sed -i "s|#setcap cap_net_raw+eip /usr/bin/wine-preloader 2>/dev/null|setcap cap_net_raw+eip $_preloaderpath 2>/dev/null|g" "$_where"/wine-tkg.install
+        sed -i "s|#setcap cap_net_raw+eip /usr/bin/wine64-preloader 2>/dev/null|setcap cap_net_raw+eip $_preloader64path 2>/dev/null|g" "$_where"/wine-tkg.install
+      fi
+    fi
+}
+
+build() {
+  _prebuild_common
+
+  local _prefix=/usr
+  local _lib32name="lib32"
+  local _lib64name="lib"
+
+  # configure args
+  if [ -n "$_configure_userargs64" ]; then
+    _configure_args64+=($_configure_userargs64)
+  fi
+  if [ -n "$_configure_userargs32" ]; then
+    _configure_args32+=($_configure_userargs32)
+  fi
+
+  # External install
+  if [ "$_EXTERNAL_INSTALL" = "true" ]; then
+    _lib32name="lib" && _lib64name="lib64"
+    if [ "$_EXTERNAL_NOVER" = "true" ]; then
+      _prefix="$_DEFAULT_EXTERNAL_PATH/$pkgname"
+    else
+      if [ "$_use_staging" = "true" ]; then
+        cd "$srcdir/$_stgsrcdir"
+      else
+        cd "$srcdir/$_winesrcdir"
+      fi
+      _realwineversion=$(_describe_wine)
+      _prefix="$_DEFAULT_EXTERNAL_PATH/$pkgname-$_realwineversion"
+    fi
+    _configure_args64+=(--libdir="$_prefix/$_lib64name")
+    _configure_args32+=(--libdir="$_prefix/$_lib32name")
+  elif [ "$_EXTERNAL_INSTALL" = "proton" ]; then
+    _prefix="$_where"
+    _configure_args+=(--without-curses)
+  else
+    _configure_args64+=(--libdir="$_prefix/$_lib64name")
+    _configure_args32+=(--libdir="$_prefix/$_lib32name")
+  fi
+
+  if [ "$_SKIPBUILDING" != "true" ] && [ "$_NOCOMPILE" != "true" ]; then
+    _build
+  fi
+}
+
+package() {
+  if [ "$_allow_server_rt_prio" = "true" ]; then
+    install=wine-tkg.install
+  else
+    install=wine.install
+  fi
+
+  if [ "$_NOCOMPILE" != "true" ]; then
+    _package_makepkg
+  fi
+}
+
+trap exit_cleanup EXIT

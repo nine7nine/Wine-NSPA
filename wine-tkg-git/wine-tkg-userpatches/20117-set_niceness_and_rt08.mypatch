@@ -1,0 +1,68 @@
+--- a/server/thread.c	2022-01-11 10:24:08.896335345 -0500
++++ b/server/thread.c	2022-01-11 10:23:52.877379223 -0500
+@@ -753,24 +753,24 @@ static int get_unix_niceness( int base_p
+ 
+ static int get_rt_priority( int priority_class, int priority )
+ {
+-    int min, max, base_priority;
++    int min, max, rt_base_priority;
+ 
+     min = sched_get_priority_min( SCHED_FIFO );
+     max = sched_get_priority_max( SCHED_FIFO );
+ 
+     // RT priority for threads must be below kernel-mode APC, TIME_CRITICAL threads and Wineserver.
+-    if ((base_priority = get_priority( "WINE_RT_PRIO", min, max )) != -1)
++    if ((rt_base_priority = get_priority( "WINE_RT_PRIO", min, max )) != -1)
+     {
+-        thread_base_priority = base_priority - 1;
++        thread_base_priority = rt_base_priority - 1;
+     }
+     switch (priority_class) {
+     case PROCESS_PRIOCLASS_REALTIME:
+         switch (priority) {
+-        case THREAD_PRIORITY_IDLE: return 0;
+-        case -7: return 0;
+-        case -5: return 0;
+-        case -4: return 0;
+-        case -3: return 0;
++        case THREAD_PRIORITY_IDLE: return -12;
++        case -7: return -11;
++        case -5: return -11;
++        case -4: return -11;
++        case -3: return -11;
+         case THREAD_PRIORITY_LOWEST: return -10 + thread_base_priority;
+         case THREAD_PRIORITY_BELOW_NORMAL: return -8 + thread_base_priority;
+         case THREAD_PRIORITY_NORMAL: return -6 + thread_base_priority;
+@@ -804,7 +804,7 @@ static int wine_rt_policy = -1;
+ static void apply_thread_priority( struct thread *thread, int priority_class, int priority, int delayed )
+ {
+     int niceness, limit = min( nice_limit, thread->process->nice_limit );
+-    int min, max, base_priority;
++    int min, max, rt_base_priority;
+     // Get RT policy
+     const char *policyStr = getenv("WINE_RT_POLICY");
+ 
+@@ -812,9 +812,9 @@ static void apply_thread_priority( struc
+     max = sched_get_priority_max( SCHED_FIFO );
+ 
+     // RT priority for threads must be below kernel-mode APC, TIME_CRITICAL threads and Wineserver.
+-    if ((base_priority = get_priority( "WINE_RT_PRIO", min, max )) != -1)
++    if ((rt_base_priority = get_priority( "WINE_RT_PRIO", min, max )) != -1)
+     {
+-        thread_base_priority = base_priority - 1;
++        thread_base_priority = rt_base_priority - 1;
+     }
+     
+     // Set the RT policy      
+@@ -906,9 +906,8 @@ static void set_thread_info( struct thre
+             thread->priority = req->priority;
+             // set RT threads. see: scheduler.c
+             set_scheduler_priority( thread );
++            //set_thread_priority( thread, thread->process->priority, req->priority );
+         }         
+-        if (set_thread_priority( thread, thread->process->priority, req->priority ))
+-            file_set_error();
+     }
+     if (req->mask & SET_THREAD_INFO_AFFINITY)
+     {
+

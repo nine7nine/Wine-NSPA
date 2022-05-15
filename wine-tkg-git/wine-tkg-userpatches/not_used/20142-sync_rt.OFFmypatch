@@ -1,0 +1,289 @@
+--- a/dlls/ntdll/unix/esync.c	2022-01-18 20:51:17.943635359 -0500
++++ b/dlls/ntdll/unix/esync.c	2022-01-18 20:50:57.225817384 -0500
+@@ -54,6 +54,20 @@
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(esync);
+ 
++/* gets the priority value from an environment variable */
++static int get_sync_priority( const char *variable, int min, int max )
++{
++    const char *env;
++    int val;
++
++    env = getenv( variable );
++    if (!env) return -1;
++
++    val = atoi( env );
++    if (val >= min && val <= max) return val;
++    return -1;
++}
++
+ int do_esync(void)
+ {
+ #ifdef HAVE_SYS_EVENTFD_H
+@@ -1294,6 +1308,24 @@ NTSTATUS esync_signal_and_wait( HANDLE s
+ void esync_init(void)
+ {
+     struct stat st;
++    pthread_mutexattr_t attr;
++    int sync_ceiling_priority;
++
++    int min, max, srt_ceiling_priority;
++    min = sched_get_priority_min( SCHED_FIFO );
++    max = sched_get_priority_max( SCHED_FIFO );
++
++    if ((srt_ceiling_priority = get_sync_priority( "SYNC_CEILING_PRIO", min, max -1)) != -1)
++    {
++        sync_ceiling_priority = srt_ceiling_priority -1;
++    }
++    
++    pthread_mutexattr_init( &attr );
++    pthread_mutexattr_settype( &attr, PTHREAD_MUTEX_RECURSIVE );
++    pthread_mutexattr_setprotocol( &attr, PTHREAD_PRIO_INHERIT );
++    pthread_mutexattr_setprioceiling( &attr, sync_ceiling_priority );
++    pthread_mutex_init( &shm_addrs_mutex, &attr );
++    pthread_mutexattr_destroy( &attr );
+ 
+     if (!do_esync())
+     {
+
+
+--- a/dlls/ntdll/unix/fsync.c	2022-01-14 14:51:10.621567145 -0500
++++ b/dlls/ntdll/unix/fsync.c	2022-01-14 14:50:55.754370195 -0500
+@@ -54,6 +54,20 @@
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(fsync);
+ 
++/* gets the priority value from an environment variable */
++static int get_sync_priority( const char *variable, int min, int max )
++{
++    const char *env;
++    int val;
++
++    env = getenv( variable );
++    if (!env) return -1;
++
++    val = atoi( env );
++    if (val >= min && val <= max) return val;
++    return -1;
++}
++
+ #include "pshpack4.h"
+ #include "poppack.h"
+ 
+@@ -441,6 +473,24 @@ static NTSTATUS open_fsync( enum fsync_t
+ void fsync_init(void)
+ {
+     struct stat st;
++    pthread_mutexattr_t attr;
++    int sync_ceiling_priority;
++
++    int min, max, srt_ceiling_priority;
++    min = sched_get_priority_min( SCHED_FIFO );
++    max = sched_get_priority_max( SCHED_FIFO );
++
++    if ((srt_ceiling_priority = get_sync_priority( "SYNC_CEILING_PRIO", min, max -1)) != -1)
++    {
++        sync_ceiling_priority = srt_ceiling_priority -1;
++    }
++    
++    pthread_mutexattr_init( &attr );
++    pthread_mutexattr_settype( &attr, PTHREAD_MUTEX_RECURSIVE );
++    pthread_mutexattr_setprotocol( &attr, PTHREAD_PRIO_INHERIT );
++    pthread_mutexattr_setprioceiling( &attr, sync_ceiling_priority );
++    pthread_mutex_init( &shm_addrs_mutex, &attr );
++    pthread_mutexattr_destroy( &attr );
+ 
+     if (!do_fsync())
+     {
+
+--- a/dlls/ntdll/unix/server.c	2022-01-16 14:03:01.464924946 -0500
++++ b/dlls/ntdll/unix/server.c	2022-01-16 14:02:49.981868347 -0500
+@@ -94,6 +94,20 @@
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(server);
+ 
++/* gets the priority value from an environment variable */
++static int get_fd_priority( const char *variable, int min, int max )
++{
++    const char *env;
++    int val;
++
++    env = getenv( variable );
++    if (!env) return -1;
++
++    val = atoi( env );
++    if (val >= min && val <= max) return val;
++    return -1;
++}
++
+ /* just in case... */
+ #undef EXT2_IOC_GETFLAGS
+ #undef EXT2_IOC_SETFLAGS
+@@ -1498,6 +1512,24 @@ size_t server_init_process(void)
+     DWORD pid, tid;
+     struct rlimit rlimit;
+     int nice_limit = 0;
++    pthread_mutexattr_t attr;
++    int fd_ceiling_priority;
++
++    int min, max, fdrt_ceiling_priority;
++    min = sched_get_priority_min( SCHED_FIFO );
++    max = sched_get_priority_max( SCHED_FIFO );
++
++    if ((fdrt_ceiling_priority = get_fd_priority( "FD_CEILING_PRIO", min, max -1)) != -1)
++    {
++        fd_ceiling_priority = fdrt_ceiling_priority -1;
++    }
++    
++    pthread_mutexattr_init( &attr );
++    pthread_mutexattr_settype( &attr, PTHREAD_MUTEX_RECURSIVE );
++    pthread_mutexattr_setprotocol( &attr, PTHREAD_PRIO_INHERIT );
++    pthread_mutexattr_setprioceiling( &attr, fd_ceiling_priority );
++    pthread_mutex_init( &fd_cache_mutex, &attr );
++    pthread_mutexattr_destroy( &attr );
+ 
+     server_pid = -1;
+     if (env_socket)
+
+--- a/dlls/winepulse.drv/pulse.c	2022-01-19 10:52:42.117624495 -0500
++++ b/dlls/winepulse.drv/pulse.c	2022-01-19 10:52:26.162010592 -0500
+@@ -43,6 +43,20 @@
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(pulse);
+ 
++/* gets the priority value from an environment variable */
++static int get_pulse_priority( const char *variable, int min, int max )
++{
++    const char *env;
++    int val;
++
++    env = getenv( variable );
++    if (!env) return -1;
++
++    val = atoi( env );
++    if (val >= min && val <= max) return val;
++    return -1;
++}
++
+ struct pulse_stream
+ {
+     EDataFlow dataflow;
+@@ -179,9 +193,20 @@ static int pulse_poll_func(struct pollfd
+ static NTSTATUS pulse_process_attach(void *args)
+ {
+     pthread_mutexattr_t attr;
++    int pulse_ceiling_priority;
++
++    int min, max, prt_ceiling_priority;
++    min = sched_get_priority_min( SCHED_FIFO );
++    max = sched_get_priority_max( SCHED_FIFO );
++
++    if ((prt_ceiling_priority = get_pulse_priority( "PULSE_CEILING_PRIO", min, max -1)) != -1)
++    {
++        pulse_ceiling_priority = prt_ceiling_priority -1;
++    }
+ 
+     pthread_mutexattr_init(&attr);
+-    pthread_mutexattr_setprotocol(&attr, PTHREAD_PRIO_INHERIT);
++    pthread_mutexattr_setprotocol(&attr, PTHREAD_PRIO_INHERIT);
++    pthread_mutexattr_setprioceiling( &attr, pulse_ceiling_priority );
+ 
+     if (pthread_mutex_init(&pulse_mutex, &attr) != 0)
+         pthread_mutex_init(&pulse_mutex, NULL);
+
+--- a/dlls/ntdll/unix/sync.c    2022-01-18 21:11:58.656330808 -0500
++++ b/dlls/ntdll/unix/sync.c	2022-01-18 21:11:37.859403372 -0500
+@@ -69,6 +69,20 @@
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(sync);
+ 
++/* gets the priority value from an environment variable */
++static int get_keyed_priority( const char *variable, int min, int max )
++{
++    const char *env;
++    int val;
++
++    env = getenv( variable );
++    if (!env) return -1;
++
++    val = atoi( env );
++    if (val >= min && val <= max) return val;
++    return -1;
++}
++
+ HANDLE keyed_event = 0;
+ 
+ static pthread_mutex_t keyed_mutex = PTHREAD_MUTEX_INITIALIZER;
+@@ -233,6 +247,24 @@ static inline int futex_wake_bitset( con
+ static inline int use_futexes(void)
+ {
+     static int supported = -1;
++    pthread_mutexattr_t attr;
++    int keyed_ceiling_priority;
++
++    int min, max, krt_ceiling_priority;
++    min = sched_get_priority_min( SCHED_FIFO );
++    max = sched_get_priority_max( SCHED_FIFO );
++
++    if ((krt_ceiling_priority = get_keyed_priority( "KEYED_CEILING_PRIO", min, max -1)) != -1)
++    {
++        keyed_ceiling_priority = krt_ceiling_priority -1;
++    }
++    
++    pthread_mutexattr_init( &attr );
++    pthread_mutexattr_settype( &attr, PTHREAD_MUTEX_RECURSIVE );
++    pthread_mutexattr_setprotocol( &attr, PTHREAD_PRIO_INHERIT );
++    pthread_mutexattr_setprioceiling( &attr, keyed_ceiling_priority );
++    pthread_mutex_init( &keyed_mutex, &attr );
++    pthread_mutexattr_destroy( &attr );
+ 
+     if (supported == -1)
+     {
+
+--- a/dlls/win32u/gdiobj.c	2022-01-12 17:09:53.992296154 -0500
++++ b/dlls/win32u/gdiobj.c	2022-01-12 17:09:37.592182213 -0500
+@@ -42,6 +42,20 @@
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(gdi);
+ 
++/* gets the priority value from an environment variable */
++static int get_gdi_ceiling_priority( const char *variable, int min, int max )
++{
++    const char *env;
++    int val;
++
++    env = getenv( variable );
++    if (!env) return -1;
++
++    val = atoi( env );
++    if (val >= min && val <= max) return val;
++    return -1;
++}
++
+ #define FIRST_GDI_HANDLE 32
+ 
+ static GDI_SHARED_MEMORY *gdi_shared;
+@@ -1191,9 +1205,21 @@ NTSTATUS gdi_init(void)
+ {
+     pthread_mutexattr_t attr;
+     unsigned int dpi;
++    int gdi_ceiling_priority;
++    
++    int min, max, gdi_rt_ceiling_priority;
++    min = sched_get_priority_min( SCHED_FIFO );
++    max = sched_get_priority_max( SCHED_FIFO );
++    
++    if ((gdi_rt_ceiling_priority = get_gdi_ceiling_priority( "GDI_CEILING_PRIO", min, max -1)) != -1)
++    {
++        gdi_ceiling_priority = gdi_rt_ceiling_priority -1;
++    }
+ 
+     pthread_mutexattr_init( &attr );
+     pthread_mutexattr_settype( &attr, PTHREAD_MUTEX_RECURSIVE );
++    pthread_mutexattr_setprotocol( &attr, PTHREAD_PRIO_PROTECT );
++    pthread_mutexattr_setprioceiling( &attr, gdi_ceiling_priority );
+     pthread_mutex_init( &gdi_lock, &attr );
+     pthread_mutexattr_destroy( &attr );
+ 
+

@@ -1,0 +1,62 @@
+From: Masanori Kakura <kakurasan@gmail.com>
+Subject: [PATCH] Revert "winealsa.drv: Send MIDI events to port subscribers."
+Message-Id: <20211216142111.237842-1-kakurasan@gmail.com>
+Date: Thu, 16 Dec 2021 23:21:11 +0900
+
+This reverts commit 3d57cc2863f2f9a5ace40d29317b3ff4357fd119.
+
+Wine-Bug: https://bugs.winehq.org/show_bug.cgi?id=52220
+Signed-off-by: Masanori Kakura <kakurasan@gmail.com>
+---
+ dlls/winealsa.drv/midi.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/winealsa.drv/midi.c b/dlls/winealsa.drv/midi.c
+index 073c0a6e3f3..74512ad09d2 100644
+--- a/dlls/winealsa.drv/midi.c
++++ b/dlls/winealsa.drv/midi.c
+@@ -889,7 +889,7 @@ static DWORD modData(WORD wDevID, DWORD
+             snd_seq_ev_clear(&event);
+             snd_seq_ev_set_direct(&event);
+             snd_seq_ev_set_source(&event, MidiOutDev[wDevID].port_out);
+-            snd_seq_ev_set_subs(&event);
++           snd_seq_ev_set_dest(&event, MidiOutDev[wDevID].addr.client, MidiOutDev[wDevID].addr.port);
+ 	    
+ 	    switch (evt & 0xF0) {
+ 	    case MIDI_CMD_NOTE_OFF:
+@@ -953,7 +953,11 @@ static DWORD modData(WORD wDevID, DWORD
+ 			BYTE buf[2];
+ 			buf[0] = evt;
+ 			buf[1] = d1;
+-			snd_seq_ev_set_sysex(&event, sizeof(buf), buf);
++			snd_midi_event_t *midi_event;
++			snd_midi_event_new(sizeof(buf), &midi_event);
++			snd_midi_event_init(midi_event);
++			snd_midi_event_encode(midi_event, buf, sizeof(buf), &event);
++			snd_midi_event_free(midi_event);
+ 	            }
+ 	            break;
+ 		case 0x02:	/* Song Position Pointer. */
+@@ -962,7 +966,11 @@ static DWORD modData(WORD wDevID, DWORD
+ 			buf[0] = evt;
+ 			buf[1] = d1;
+ 			buf[2] = d2;
+-			snd_seq_ev_set_sysex(&event, sizeof(buf), buf);
++			snd_midi_event_t *midi_event;
++			snd_midi_event_new(sizeof(buf), &midi_event);
++			snd_midi_event_init(midi_event);
++			snd_midi_event_encode(midi_event, buf, sizeof(buf), &event);
++			snd_midi_event_free(midi_event);
+ 	            }
+ 		    break;
+ 		}
+@@ -1058,7 +1066,8 @@ static DWORD modLongData(WORD wDevID, LP
+ 	snd_seq_ev_clear(&event);
+ 	snd_seq_ev_set_direct(&event);
+ 	snd_seq_ev_set_source(&event, MidiOutDev[wDevID].port_out);
+-	snd_seq_ev_set_subs(&event);
++	snd_seq_ev_set_dest(&event, MidiOutDev[wDevID].addr.client, MidiOutDev[wDevID].addr.port);
++	TRACE("destination %d:%d\n", MidiOutDev[wDevID].addr.client, MidiOutDev[wDevID].addr.port);
+ 	snd_seq_ev_set_sysex(&event, lpMidiHdr->dwBufferLength + len_add, lpNewData ? lpNewData : lpData);
+         EnterCriticalSection(&midiSeqLock);
+ 	snd_seq_event_output_direct(midiSeq, &event);
