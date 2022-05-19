@@ -1,0 +1,120 @@
+From 84a4027aec7d6ac12303a792fc76b6d55d4afb4e Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Thu, 24 Dec 2020 16:11:56 +0100
+Subject: [PATCH] ntdll: Track active keyed events on the client side.
+
+---
+ dlls/ntdll/unix/sync.c | 70 +++++++++++++++++++++++++++++++++++++++---
+ 1 file changed, 66 insertions(+), 4 deletions(-)
+
+diff --git a/dlls/ntdll/unix/sync.c b/dlls/ntdll/unix/sync.c
+index 442243d8bcf..d830c9295d3 100644
+--- a/dlls/ntdll/unix/sync.c
++++ b/dlls/ntdll/unix/sync.c
+@@ -69,6 +69,58 @@ WINE_DEFAULT_DEBUG_CHANNEL(sync);
+ 
+ HANDLE keyed_event = 0;
+ 
++static pthread_mutex_t keyed_mutex = PTHREAD_MUTEX_INITIALIZER;
++
++struct keyed_entry
++{
++    client_ptr_t key;
++    LONG         ref;
++    HANDLE       handle;
++    BOOLEAN      alertable;
++};
++
++static struct keyed_entry keyed_entries[256];
++static size_t nb_keyed_entries;
++
++static inline struct keyed_entry *keyed_entry_acquire( HANDLE handle, client_ptr_t key, BOOLEAN alertable )
++{
++    struct keyed_entry *entry;
++    DWORD i;
++
++    mutex_lock( &keyed_mutex );
++    for (i = 0; i < nb_keyed_entries; ++i)
++    {
++        if (!keyed_entries[i].ref) continue;
++        if (keyed_entries[i].key == key) break;
++    }
++    if (i == nb_keyed_entries) for (i = 0; i <= nb_keyed_entries; ++i)
++    {
++        if (!keyed_entries[i].ref) break;
++    }
++    assert(i < ARRAY_SIZE(keyed_entries));
++    if (i == nb_keyed_entries) nb_keyed_entries++;
++
++    entry = keyed_entries + i;
++    if (!entry->ref++)
++    {
++        entry->key = key;
++        entry->handle = handle;
++        entry->alertable = alertable;
++    }
++
++    if (entry->handle != handle) WARN("inconsistent keyed event handle %p, previously %p\n", handle, entry->handle);
++    if (entry->alertable != alertable) WARN("inconsistent keyed event alertable %d, previously %d\n", alertable, entry->alertable);
++    mutex_unlock( &keyed_mutex );
++    return entry;
++}
++
++static inline void keyed_entry_release( struct keyed_entry *entry )
++{
++    mutex_lock( &keyed_mutex );
++    if (!--entry->ref) while (nb_keyed_entries && !keyed_entries[nb_keyed_entries - 1].ref) nb_keyed_entries--;
++    mutex_unlock( &keyed_mutex );
++}
++
+ static const char *debugstr_timeout( const LARGE_INTEGER *timeout )
+ {
+     if (!timeout) return "(infinite)";
+@@ -1862,16 +1914,21 @@ NTSTATUS WINAPI NtOpenKeyedEvent( HANDLE
+ NTSTATUS WINAPI NtWaitForKeyedEvent( HANDLE handle, const void *key,
+                                      BOOLEAN alertable, const LARGE_INTEGER *timeout )
+ {
++    struct keyed_entry *entry;
+     select_op_t select_op;
+     UINT flags = SELECT_INTERRUPTIBLE;
++    NTSTATUS status;
+ 
+-    if (!handle) handle = keyed_event;
+     if ((ULONG_PTR)key & 1) return STATUS_INVALID_PARAMETER_1;
++    entry = keyed_entry_acquire( handle, wine_server_client_ptr( key ), alertable );
++    if (!handle) handle = keyed_event;
+     if (alertable) flags |= SELECT_ALERTABLE;
+     select_op.keyed_event.op     = SELECT_KEYED_EVENT_WAIT;
+     select_op.keyed_event.handle = wine_server_obj_handle( handle );
+     select_op.keyed_event.key    = wine_server_client_ptr( key );
+-    return server_wait( &select_op, sizeof(select_op.keyed_event), flags, timeout );
++    status = server_wait( &select_op, sizeof(select_op.keyed_event), flags, timeout );
++    keyed_entry_release( entry );
++    return status;
+ }
+ 
+ 
+@@ -1881,16 +1938,21 @@ NTSTATUS WINAPI NtWaitForKeyedEvent( HAN
+ NTSTATUS WINAPI NtReleaseKeyedEvent( HANDLE handle, const void *key,
+                                      BOOLEAN alertable, const LARGE_INTEGER *timeout )
+ {
++    struct keyed_entry *entry;
+     select_op_t select_op;
+     UINT flags = SELECT_INTERRUPTIBLE;
++    NTSTATUS status;    
+ 
+-    if (!handle) handle = keyed_event;
+     if ((ULONG_PTR)key & 1) return STATUS_INVALID_PARAMETER_1;
++    entry = keyed_entry_acquire( handle, wine_server_client_ptr( key ), alertable );
++    if (!handle) handle = keyed_event;
+     if (alertable) flags |= SELECT_ALERTABLE;
+     select_op.keyed_event.op     = SELECT_KEYED_EVENT_RELEASE;
+     select_op.keyed_event.handle = wine_server_obj_handle( handle );
+     select_op.keyed_event.key    = wine_server_client_ptr( key );
+-    return server_wait( &select_op, sizeof(select_op.keyed_event), flags, timeout );
++    status = server_wait( &select_op, sizeof(select_op.keyed_event), flags, timeout );
++    keyed_entry_release( entry );
++    return status;
+ }
+ 
+ 
