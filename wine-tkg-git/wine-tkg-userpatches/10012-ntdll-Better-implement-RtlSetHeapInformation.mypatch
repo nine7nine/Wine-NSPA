@@ -1,0 +1,121 @@
+From 8e868d1fc86162af4d65ebef88035b019ef3c8ab Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Tue, 5 May 2020 14:24:35 +0200
+Subject: [PATCH 12/18] ntdll: Better implement RtlSetHeapInformation.
+
+And set extended_type heap field when HeapCompatibilityInformation is
+used.
+---
+ dlls/kernel32/tests/heap.c | 23 +++++++++++++++++++++--
+ dlls/ntdll/heap.c          | 36 ++++++++++++++++++++++++++++++++++--
+ include/winnt.h            |  3 ++-
+ 3 files changed, 57 insertions(+), 5 deletions(-)
+
+diff --git a/dlls/kernel32/tests/heap.c b/dlls/kernel32/tests/heap.c
+index db96fb010b4..9e613995e39 100644
+--- a/dlls/kernel32/tests/heap.c
++++ b/dlls/kernel32/tests/heap.c
+@@ -644,7 +644,28 @@ static void test_HeapCreate(void)
+            "HeapQueryInformation failed\n");
+         trace("HeapQueryInformation returned %d\n", hci);
+ 
++        hci = 0;
++        ok(pHeapSetInformation(NULL, HeapEnableTerminationOnCorruption, NULL, 0),
++           "HeapSetInformation(HeapEnableTerminationOnCorruption) failed\n");
++        ok(pHeapSetInformation((HANDLE)0xdeadbeef, HeapEnableTerminationOnCorruption, &hci, sizeof(hci)),
++           "HeapSetInformation(HeapEnableTerminationOnCorruption) succeeded\n");
++        ok(pHeapSetInformation(heap, HeapEnableTerminationOnCorruption, &hci, sizeof(hci)),
++           "HeapSetInformation(HeapEnableTerminationOnCorruption) succeeded\n");
++        ok(pHeapSetInformation(heap, HeapEnableTerminationOnCorruption, NULL, 0),
++           "HeapSetInformation(HeapEnableTerminationOnCorruption) failed\n");
++        ok(!pHeapQueryInformation(heap, HeapEnableTerminationOnCorruption, NULL, 0, &size),
++           "HeapQueryInformation(HeapEnableTerminationOnCorruption) succeeded\n");
++
+         hci = 2;
++        SetLastError(0xdeadbeef);
++        ok(!pHeapSetInformation(NULL, HeapCompatibilityInformation, NULL, 0),
++           "HeapSetInformation succeeded\n");
++        ok(GetLastError() == ERROR_INSUFFICIENT_BUFFER,
++           "expected ERROR_INSUFFICIENT_BUFFER, got %u\n", GetLastError());
++        ok(!pHeapSetInformation(NULL, HeapCompatibilityInformation, &hci, 2),
++           "HeapSetInformation succeeded\n");
++        ok(GetLastError() == ERROR_INSUFFICIENT_BUFFER,
++           "expected ERROR_INSUFFICIENT_BUFFER, got %u\n", GetLastError());
+         ok(pHeapSetInformation(heap, HeapCompatibilityInformation, &hci, sizeof(hci)),
+            "HeapSetInformation failed\n");
+         ok(pHeapQueryInformation(heap, HeapCompatibilityInformation, &hci, sizeof(hci), &size),
+@@ -653,10 +674,8 @@ static void test_HeapCreate(void)
+ 
+         hci = 1;
+         SetLastError(0xdeadbeef);
+-        todo_wine
+         ok(!pHeapSetInformation(heap, HeapCompatibilityInformation, &hci, sizeof(hci)),
+            "HeapSetInformation succeeded\n");
+-        todo_wine
+         ok(GetLastError() == ERROR_GEN_FAILURE,
+            "expected ERROR_GEN_FAILURE, got %u\n", GetLastError());
+ 
+diff --git a/dlls/ntdll/heap.c b/dlls/ntdll/heap.c
+index 669ab43581d..eda28f05e6e 100644
+--- a/dlls/ntdll/heap.c
++++ b/dlls/ntdll/heap.c
+@@ -2320,8 +2320,40 @@ NTSTATUS WINAPI RtlQueryHeapInformation( HANDLE heap, HEAP_INFORMATION_CLASS inf
+  */
+ NTSTATUS WINAPI RtlSetHeapInformation( HANDLE heap, HEAP_INFORMATION_CLASS info_class, PVOID info, SIZE_T size)
+ {
+-    FIXME("%p %d %p %ld stub\n", heap, info_class, info, size);
+-    return STATUS_SUCCESS;
++    TRACE("%p %d %p %ld stub\n", heap, info_class, info, size);
++
++    switch (info_class)
++    {
++    case HeapEnableTerminationOnCorruption:
++        FIXME("unimplemented HeapEnableTerminationOnCorruption\n");
++        return STATUS_SUCCESS;
++
++    case HeapCompatibilityInformation:
++    {
++        HEAP *heapPtr;
++        heapPtr = HEAP_GetPtr( heap );
++
++        if (size < sizeof(ULONG))
++            return STATUS_BUFFER_TOO_SMALL;
++
++        if (heapPtr->extended_type != HEAP_STD)
++            return STATUS_UNSUCCESSFUL;
++
++        if (*(ULONG *)info != HEAP_STD &&
++            *(ULONG *)info != HEAP_LFH)
++        {
++            FIXME("unimplemented HeapCompatibilityInformation %d\n", *(ULONG *)info);
++            return STATUS_SUCCESS;
++        }
++
++        heapPtr->extended_type = *(ULONG *)info;
++        return STATUS_SUCCESS;
++    }
++
++    default:
++        FIXME("Unknown heap information class %u\n", info_class);
++        return STATUS_INVALID_INFO_CLASS;
++    }
+ }
+ 
+ void HEAP_notify_thread_destroy( BOOLEAN last )
+diff --git a/include/winnt.h b/include/winnt.h
+index c80efee077d..b3bbb8a58b8 100644
+--- a/include/winnt.h
++++ b/include/winnt.h
+@@ -934,7 +934,8 @@ NTSYSAPI WORD         WINAPI RtlQueryDepthSList(PSLIST_HEADER);
+ #define HEAP_SHARED                     0x04000000
+ 
+ typedef enum _HEAP_INFORMATION_CLASS {
+-    HeapCompatibilityInformation,
++    HeapCompatibilityInformation = 0,
++    HeapEnableTerminationOnCorruption = 1,
+ } HEAP_INFORMATION_CLASS;
+ 
+ /* Processor feature flags.  */
+-- 
+2.34.1
+

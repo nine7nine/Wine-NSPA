@@ -1,0 +1,132 @@
+From 4fc5512398c77f018927b568113e843665bdff1f Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Wed, 28 Aug 2019 22:24:42 +0200
+Subject: [PATCH 05/18] ntdll: Lock heap critical section outside of
+ HEAP_IsRealArena.
+
+---
+ dlls/ntdll/heap.c | 58 +++++++++++++++++++++++++----------------------
+ 1 file changed, 31 insertions(+), 27 deletions(-)
+
+diff --git a/dlls/ntdll/heap.c b/dlls/ntdll/heap.c
+index aa48050afbe..07bcd3e78b5 100644
+--- a/dlls/ntdll/heap.c
++++ b/dlls/ntdll/heap.c
+@@ -478,21 +478,26 @@ static HEAP *HEAP_GetPtr(
+              HANDLE heap /* [in] Handle to the heap */
+ ) {
+     HEAP *heapPtr = heap;
++    BOOL ret;
++
+     if (!heapPtr || (heapPtr->magic != HEAP_MAGIC))
+     {
+         ERR("Invalid heap %p!\n", heap );
+         return NULL;
+     }
+-    if ((heapPtr->flags & HEAP_VALIDATE_ALL) && !HEAP_IsRealArena( heapPtr, 0, NULL, NOISY ))
++    if (!(heapPtr->flags & HEAP_VALIDATE_ALL)) return heapPtr;
++
++    if (!(heapPtr->flags & HEAP_NO_SERIALIZE)) RtlEnterCriticalSection( &heapPtr->critSection );
++    ret = HEAP_IsRealArena( heapPtr, heapPtr->flags, NULL, NOISY );
++    if (!(heapPtr->flags & HEAP_NO_SERIALIZE)) RtlLeaveCriticalSection( &heapPtr->critSection );
++
++    if (ret) return heapPtr;
++    if (TRACE_ON(heap))
+     {
+-        if (TRACE_ON(heap))
+-        {
+-            HEAP_Dump( heapPtr );
+-            assert( FALSE );
+-        }
+-        return NULL;
++        HEAP_Dump( heapPtr );
++        assert( FALSE );
+     }
+-    return heapPtr;
++    return NULL;
+ }
+ 
+ 
+@@ -1445,15 +1450,8 @@ static BOOL HEAP_IsRealArena( HEAP *heap
+                               *             does not complain    */
+ {
+     SUBHEAP *subheap;
+-    BOOL ret = FALSE;
+     const ARENA_LARGE *large_arena;
+ 
+-    flags &= HEAP_NO_SERIALIZE;
+-    flags |= heapPtr->flags;
+-    /* calling HeapLock may result in infinite recursion, so do the critsect directly */
+-    if (!(flags & HEAP_NO_SERIALIZE))
+-        enter_critical_section( &heapPtr->critSection );
+-
+     if (block)  /* only check this single memory block */
+     {
+         const ARENA_INUSE *arena = (const ARENA_INUSE *)block - 1;
+@@ -1467,11 +1465,11 @@ static BOOL HEAP_IsRealArena( HEAP *heap
+                     ERR("Heap %p: block %p is not inside heap\n", heapPtr, block );
+                 else if (WARN_ON(heap))
+                     WARN("Heap %p: block %p is not inside heap\n", heapPtr, block );
++                return FALSE;
+             }
+-            else ret = validate_large_arena( heapPtr, large_arena, quiet );
++            return validate_large_arena( heapPtr, large_arena, quiet );
+         }
+-        else ret = HEAP_ValidateInUseArena( subheap, arena, quiet );
+-        goto done;
++        return HEAP_ValidateInUseArena( subheap, arena, quiet );
+     }
+ 
+     LIST_FOR_EACH_ENTRY( subheap, &heapPtr->subheap_list, SUBHEAP, entry )
+@@ -1481,25 +1479,21 @@ static BOOL HEAP_IsRealArena( HEAP *heap
+         {
+             if (*(DWORD *)ptr & ARENA_FLAG_FREE)
+             {
+-                if (!HEAP_ValidateFreeArena( subheap, (ARENA_FREE *)ptr )) goto done;
++                if (!HEAP_ValidateFreeArena( subheap, (ARENA_FREE *)ptr )) return FALSE;
+                 ptr += sizeof(ARENA_FREE) + (*(DWORD *)ptr & ARENA_SIZE_MASK);
+             }
+             else
+             {
+-                if (!HEAP_ValidateInUseArena( subheap, (ARENA_INUSE *)ptr, NOISY )) goto done;
++                if (!HEAP_ValidateInUseArena( subheap, (ARENA_INUSE *)ptr, NOISY )) return FALSE;
+                 ptr += sizeof(ARENA_INUSE) + (*(DWORD *)ptr & ARENA_SIZE_MASK);
+             }
+         }
+     }
+ 
+     LIST_FOR_EACH_ENTRY( large_arena, &heapPtr->large_list, ARENA_LARGE, entry )
+-        if (!validate_large_arena( heapPtr, large_arena, quiet )) goto done;
+-
+-    ret = TRUE;
++        if (!validate_large_arena( heapPtr, large_arena, quiet )) return FALSE;
+ 
+-done:
+-    if (!(flags & HEAP_NO_SERIALIZE)) leave_critical_section( &heapPtr->critSection );
+-    return ret;
++    return TRUE;
+ }
+ 
+ 
+@@ -2176,9 +2170,19 @@ SIZE_T WINAPI RtlSizeHeap( HANDLE heap,
+  */
+ BOOLEAN WINAPI RtlValidateHeap( HANDLE heap, ULONG flags, LPCVOID ptr )
+ {
++    BOOLEAN ret;
+     HEAP *heapPtr = HEAP_GetPtr( heap );
+     if (!heapPtr) return FALSE;
+-    return HEAP_IsRealArena( heapPtr, flags, ptr, QUIET );
++
++    flags &= HEAP_NO_SERIALIZE;
++    flags |= heapPtr->flags;
++
++    if (!(flags & HEAP_NO_SERIALIZE)) RtlEnterCriticalSection( &heapPtr->critSection );
++    ret = HEAP_IsRealArena( heapPtr, flags, ptr, QUIET );
++    if (!(flags & HEAP_NO_SERIALIZE)) RtlLeaveCriticalSection( &heapPtr->critSection );
++
++    TRACE("(%p,%08x,%p): returning %d\n", heapPtr, flags, ptr, ret );
++    return ret;
+ }
+ 
+ 
+

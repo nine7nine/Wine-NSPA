@@ -1,0 +1,41 @@
+From 9efd804ab6858bb3ac42c8d2dd35f2c6b36eac5a Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Sat, 25 Apr 2020 12:26:57 +0200
+Subject: [PATCH 02/18] kernel32: Catch page faults in GlobalSize.
+
+In the same way GlobalFree does already.
+---
+ dlls/kernel32/heap.c | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/dlls/kernel32/heap.c b/dlls/kernel32/heap.c
+index 02f4587d43b..e68135e499d 100644
+--- a/dlls/kernel32/heap.c
++++ b/dlls/kernel32/heap.c
+@@ -326,6 +326,8 @@ SIZE_T WINAPI GlobalSize(HGLOBAL hmem)
+        return 0;
+    }
+ 
++    __TRY
++    {
+    if(ISPOINTER(hmem))
+    {
+       retval=HeapSize(GetProcessHeap(), 0, hmem);
+@@ -359,6 +361,14 @@ SIZE_T WINAPI GlobalSize(HGLOBAL hmem)
+       }
+       RtlUnlockHeap(GetProcessHeap());
+    }
++   }
++   __EXCEPT_PAGE_FAULT
++   {
++       SetLastError( ERROR_INVALID_HANDLE );
++       retval = 0;
++   }
++   __ENDTRY
++
+    if (retval == ~(SIZE_T)0) retval = 0;
+    return retval;
+ }
+-- 
+2.34.1
+

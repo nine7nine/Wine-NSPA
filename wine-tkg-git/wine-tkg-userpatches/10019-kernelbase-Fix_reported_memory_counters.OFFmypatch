@@ -1,0 +1,47 @@
+From cf726af3e0d8305d505066cba5b9b4739b229e05 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Mon, 10 Jan 2022 13:45:20 +0100
+Subject: [PATCH] kernelbase: Fix reported memory counters.
+
+---
+ dlls/kernelbase/memory.c | 8 ++++----
+ dlls/ntdll/unix/system.c | 4 ++++
+ 2 files changed, 8 insertions(+), 4 deletions(-)
+
+diff --git a/dlls/kernelbase/memory.c b/dlls/kernelbase/memory.c
+index 9a8af4d0b20..c5f9821328a 100644
+--- a/dlls/kernelbase/memory.c
++++ b/dlls/kernelbase/memory.c
+@@ -1068,12 +1068,12 @@ BOOL WINAPI DECLSPEC_HOTPATCH GlobalMemoryStatusEx( MEMORYSTATUSEX *status )
+         return FALSE;
+ 
+     status->dwMemoryLoad     = 0;
+-    status->ullTotalPhys     = perf_info.TotalCommitLimit;
++    status->ullTotalPhys     = basic_info.MmNumberOfPhysicalPages;
+     status->ullAvailPhys     = perf_info.AvailablePages;
+-    status->ullTotalPageFile = perf_info.TotalCommitLimit + 1; /* Titan Quest refuses to run if TotalPageFile <= TotalPhys */
++    status->ullTotalPageFile = perf_info.TotalCommitLimit;
+     status->ullAvailPageFile = status->ullTotalPageFile - perf_info.TotalCommittedPages;
+-    status->ullTotalVirtual  = (ULONG_PTR)basic_info.HighestUserAddress - (ULONG_PTR)basic_info.LowestUserAddress;
+-    status->ullAvailVirtual  = status->ullTotalVirtual - 64 * 1024;  /* FIXME */
++    status->ullTotalVirtual  = (ULONG_PTR)basic_info.HighestUserAddress - (ULONG_PTR)basic_info.LowestUserAddress + 1;
++    status->ullAvailVirtual  = status->ullTotalVirtual - (ULONGLONG)perf_info.TotalCommittedPages * basic_info.PageSize;
+     status->ullAvailExtendedVirtual = 0;
+ 
+     status->ullTotalPhys     *= basic_info.PageSize;
+diff --git a/dlls/ntdll/unix/system.c b/dlls/ntdll/unix/system.c
+index 23379392458..34e835f8471 100644
+--- a/dlls/ntdll/unix/system.c
++++ b/dlls/ntdll/unix/system.c
+@@ -2008,6 +2008,10 @@ static void get_performance_info( SYSTEM_PERFORMANCE_INFORMATION *info )
+ #endif
+     }
+ #endif
++
++    /* Titan Quest refuses to run if TotalPageFile <= TotalPhys */
++    if (!totalswap) totalswap = page_size;
++
+     info->AvailablePages      = freeram / page_size;
+     info->TotalCommittedPages = (totalram + totalswap - freeram - freeswap) / page_size;
+     info->TotalCommitLimit    = (totalram + totalswap) / page_size;
+

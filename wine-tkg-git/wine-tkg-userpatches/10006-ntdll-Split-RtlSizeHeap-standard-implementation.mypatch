@@ -1,0 +1,91 @@
+From de92cdb5a2385fe5816ea29f9ef4769f8a804e98 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Tue, 16 Mar 2021 15:05:42 +0100
+Subject: [PATCH 06/18] ntdll: Split RtlSizeHeap standard implementation.
+
+---
+ dlls/ntdll/heap.c       | 43 +++++++++++++++++++++--------------------
+ dlls/ntdll/ntdll_misc.h |  2 ++
+ 2 files changed, 24 insertions(+), 21 deletions(-)
+
+diff --git a/dlls/ntdll/heap.c b/dlls/ntdll/heap.c
+index 07bcd3e78b5..59b1f0263d2 100644
+--- a/dlls/ntdll/heap.c
++++ b/dlls/ntdll/heap.c
+@@ -2118,10 +2118,9 @@ BOOLEAN WINAPI RtlUnlockHeap( HANDLE hea
+  */
+ SIZE_T WINAPI RtlSizeHeap( HANDLE heap, ULONG flags, const void *ptr )
+ {
+-    SIZE_T ret;
+-    const ARENA_INUSE *pArena;
+-    SUBHEAP *subheap;
+     HEAP *heapPtr = HEAP_GetPtr( heap );
++    NTSTATUS status;
++    SIZE_T size = ~(SIZE_T)0;
+ 
+     if (!heapPtr)
+     {
+@@ -2130,27 +2129,27 @@ SIZE_T WINAPI RtlSizeHeap( HANDLE heap,
+     }
+     flags &= HEAP_NO_SERIALIZE;
+     flags |= heapPtr->flags;
+-    if (!(flags & HEAP_NO_SERIALIZE)) enter_critical_section( &heapPtr->critSection );
+-
+-    pArena = (const ARENA_INUSE *)ptr - 1;
+-    if (!validate_block_pointer( heapPtr, &subheap, pArena ))
+-    {
+-        RtlSetLastWin32ErrorAndNtStatusFromNtStatus( STATUS_INVALID_PARAMETER );
+-        ret = ~(SIZE_T)0;
+-    }
+-    else if (!subheap)
+-    {
+-        const ARENA_LARGE *large_arena = (const ARENA_LARGE *)ptr - 1;
+-        ret = large_arena->data_size;
+-    }
+-    else
+-    {
+-        ret = (pArena->size & ARENA_SIZE_MASK) - pArena->unused_bytes;
+-    }
++    if (!(flags & HEAP_NO_SERIALIZE)) RtlEnterCriticalSection( &heapPtr->critSection );
++    status = HEAP_std_get_allocated_size( heap, flags, ptr, &size );
+     if (!(flags & HEAP_NO_SERIALIZE)) leave_critical_section( &heapPtr->critSection );
+ 
+-    TRACE("(%p,%08x,%p): returning %08lx\n", heap, flags, ptr, ret );
+-    return ret;
++    TRACE("(%p,%08x,%p): status %#x, size %08lx\n", heapPtr, flags, ptr, status, size );
++    if (!status) return size;
++    RtlSetLastWin32ErrorAndNtStatusFromNtStatus( status );
++    return ~(SIZE_T)0;
++}
++
++NTSTATUS HEAP_std_get_allocated_size( HANDLE heap, ULONG flags, const void *ptr, SIZE_T *out )
++{
++    const ARENA_LARGE *large_arena = (const ARENA_LARGE *)ptr - 1;
++    const ARENA_INUSE *arena = (const ARENA_INUSE *)ptr - 1;
++    HEAP *heapPtr = heap;
++    SUBHEAP *subheap;
++
++    if (!validate_block_pointer( heapPtr, &subheap, arena )) return STATUS_INVALID_PARAMETER;
++    else if (!subheap) *out = large_arena->data_size;
++    else *out = (arena->size & ARENA_SIZE_MASK) - arena->unused_bytes;
++    return STATUS_SUCCESS;
+ }
+ 
+ 
+
+diff --git a/dlls/ntdll/ntdll_misc.h b/dlls/ntdll/ntdll_misc.h
+index 99be0e498d1..4d69f128759 100644
+--- a/dlls/ntdll/ntdll_misc.h
++++ b/dlls/ntdll/ntdll_misc.h
+@@ -118,6 +118,8 @@ static inline TEB64 *NtCurrentTeb64(void) { return NULL; }
+ static inline TEB64 *NtCurrentTeb64(void) { return (TEB64 *)NtCurrentTeb()->GdiBatchCount; }
+ #endif
+ 
++NTSTATUS HEAP_std_get_allocated_size( HANDLE heap, ULONG flags, const void *ptr, SIZE_T *out );
++
+ #define HASH_STRING_ALGORITHM_DEFAULT  0
+ #define HASH_STRING_ALGORITHM_X65599   1
+ #define HASH_STRING_ALGORITHM_INVALID  0xffffffff
+-- 
+2.34.1
+
