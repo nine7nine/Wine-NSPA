@@ -1,0 +1,138 @@
+commit ebf411c1e5f20c6db7962cea587d6169246078e0
+Author: Rémi Bernon <rbernon@codeweavers.com>
+Date:   Wed Jul 3 10:54:06 2019 +0200
+Subject: [PATCH 2/2] server: Fallback to RTKIT for thread priorities.
+
+sched_setscheduler and setpriority usually require elevated privileges
+to succeed and most Linux distributions ship rtkit daemon with a dbus
+interface to enable unprivileged control of some scheduling parameters.
+
+diff --git a/configure.ac b/configure.ac
+index 11111111111..11111111111 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -1417,7 +1417,7 @@ dnl **** Check for libdbus ****
+ if test "x$with_dbus" != "xno"
+ then
+     WINE_PACKAGE_FLAGS(DBUS,[dbus-1],,,,
+-        [AC_CHECK_HEADER([dbus/dbus.h],
++        [AC_CHECK_HEADERS([dbus/dbus.h],
+             [WINE_CHECK_SONAME(dbus-1, dbus_connection_close,,[DBUS_CFLAGS=""],[$DBUS_LIBS])],
+             [DBUS_CFLAGS=""])])
+ fi
+diff --git a/server/thread.c b/server/thread.c
+index 11111111111..11111111111 100644
+--- a/server/thread.c
++++ b/server/thread.c
+@@ -59,6 +59,77 @@
+ #include "esync.h"
+ #include "fsync.h"
+ 
++#ifdef HAVE_DBUS_DBUS_H
++#include <dbus/dbus.h>
++
++static int rtkit_set_realtime( dbus_uint64_t process, dbus_uint64_t thread, dbus_uint32_t priority )
++{
++    DBusConnection* dbus;
++    DBusMessage *msg;
++    int ret = -1;
++
++    if ((dbus = dbus_bus_get(DBUS_BUS_SYSTEM, NULL)))
++    {
++        dbus_connection_set_exit_on_disconnect(dbus, 0);
++
++        if ((msg = dbus_message_new_method_call("org.freedesktop.RealtimeKit1",
++                                                "/org/freedesktop/RealtimeKit1",
++                                                "org.freedesktop.RealtimeKit1",
++                                                "MakeThreadRealtimeWithPID")))
++        {
++            dbus_message_set_no_reply(msg, 1);
++
++            if (dbus_message_append_args(msg,
++                                         DBUS_TYPE_UINT64, &process,
++                                         DBUS_TYPE_UINT64, &thread,
++                                         DBUS_TYPE_UINT32, &priority,
++                                         DBUS_TYPE_INVALID) &&
++                dbus_connection_send(dbus, msg, NULL))
++                ret = 0;
++
++            dbus_message_unref(msg);
++        }
++
++        dbus_connection_unref(dbus);
++    }
++
++    return ret;
++}
++
++static int rtkit_set_niceness( dbus_uint64_t process, dbus_uint64_t thread, dbus_int32_t niceness )
++{
++    DBusConnection* dbus;
++    DBusMessage *msg;
++    int ret = -1;
++
++    if ((dbus = dbus_bus_get(DBUS_BUS_SYSTEM, NULL)))
++    {
++        dbus_connection_set_exit_on_disconnect(dbus, 0);
++
++        if ((msg = dbus_message_new_method_call("org.freedesktop.RealtimeKit1",
++                                                "/org/freedesktop/RealtimeKit1",
++                                                "org.freedesktop.RealtimeKit1",
++                                                "MakeThreadHighPriorityWithPID")))
++        {
++            dbus_message_set_no_reply(msg, 1);
++
++            if (dbus_message_append_args(msg,
++                                         DBUS_TYPE_UINT64, &process,
++                                         DBUS_TYPE_UINT64, &thread,
++                                         DBUS_TYPE_INT32, &niceness,
++                                         DBUS_TYPE_INVALID) &&
++                dbus_connection_send(dbus, msg, NULL))
++                ret = 0;
++
++            dbus_message_unref(msg);
++        }
++
++        dbus_connection_unref(dbus);
++    }
++
++    return ret;
++}
++#endif
+ 
+ /* thread queues */
+ 
+@@ -687,7 +758,8 @@ affinity_t get_thread_affinity( struct thread *thread )
+     return mask;
+ }
+ 
+-#if defined(HAVE_SCHED_SETSCHEDULER) || defined(HAVE_SETPRIORITY)
++#if defined(HAVE_SCHED_SETSCHEDULER) || defined(HAVE_SETPRIORITY) || \
++    defined(HAVE_DBUS_DBUS_H)
+ static int get_unix_priority( int priority_class, int priority )
+ {
+     switch (priority_class) {
+@@ -809,6 +881,11 @@ int set_thread_priority( struct thread* thread, int priority_class, int priority
+         param.sched_priority = get_unix_priority( priority_class, priority );
+         if (sched_setscheduler( thread->unix_tid, SCHED_RR|SCHED_RESET_ON_FORK, &param ) == 0)
+             return 0;
++#endif
++#ifdef HAVE_DBUS_DBUS_H
++        if (rtkit_set_realtime( thread->unix_pid, thread->unix_tid,
++                                get_unix_priority( priority_class, priority ) ) == 0)
++            return 0;
+ #endif
+     }
+     else
+@@ -817,6 +894,11 @@ int set_thread_priority( struct thread* thread, int priority_class, int priority
+         if (setpriority( PRIO_PROCESS, thread->unix_tid,
+                          get_unix_priority( priority_class, priority ) ) == 0)
+             return 0;
++#endif
++#ifdef HAVE_DBUS_DBUS_H
++        if (rtkit_set_niceness( thread->unix_pid, thread->unix_tid,
++                                get_unix_priority( priority_class, priority ) ) == 0)
++            return 0;
+ #endif
+     }
+ #endif
