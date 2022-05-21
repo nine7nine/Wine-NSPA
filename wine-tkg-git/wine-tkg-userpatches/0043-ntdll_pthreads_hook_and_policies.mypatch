@@ -1,0 +1,52 @@
+ - Hook regular pthreads created by wine, along with the kernel-mode apc
+ - allow changing to TS (time-sharing / SCHED_OTHER) policy too
+
+--- a/dlls/ntdll/unix/thread.c	2022-05-20 20:14:00.485649338 -0500
++++ b/dlls/ntdll/unix/thread.c	2022-05-20 20:18:33.332166446 -0500
+@@ -105,12 +105,13 @@ int ntdll_set_sync_realtime (pthread_t p
+     min = sched_get_priority_min( SCHED_FIFO );
+     max = sched_get_priority_max( SCHED_FIFO );
+ 
+-    // hardcoded to SCHED_FIFO
+     if (policyStr) {
+         if (strcmp(policyStr, "RR")==0)
+             ntdll_rt_policy = SCHED_RR;
+-        else if (strcmp(policyStr, "FF")==0)
++        if (strcmp(policyStr, "FF")==0)
+             ntdll_rt_policy = SCHED_FIFO;
++        else if (strcmp(policyStr, "TS")==0)
++            ntdll_rt_policy = SCHED_OTHER;    
+     }
+    
+     if ((apc_priority = get_priority( "NTDLL_RT_PRIO", min, max -1)) != -1)
+@@ -1427,12 +1427,12 @@ done:
+     // which sets gets the tid via pthread_functions.init_current_teb
+     // 
+     // Catch all Synchronization Threads;
+-    pthread_t validSyncThread = (thread_data->fsync_apc_idx);
++    pthread_t validSyncThread = (thread_data->fsync_apc_idx || thread_data->pthread_id);
+                                 
+     if (validSyncThread == 0) {
+         int i;
+         for (i = 0; i < 100; ++i) {
+-            validSyncThread = (thread_data->fsync_apc_idx);
++            validSyncThread = (thread_data->fsync_apc_idx || thread_data->pthread_id);
+                                
+             if (validSyncThread == 0)
+                 usleep(300);
+@@ -1441,13 +1441,12 @@ done:
+     if (validSyncThread != 0) {
+         // Fail on / filter out unsupported threads;
+         if (handle == GetCurrentThread() && (validSyncThread != thread_data->fsync_apc_idx)) { 
+-            //thread_data->pthread_id)) {
+             return status;
+         }
+ 
+         // set RT for sync threads
+         pthread_attr_setinheritsched(&pthread_attr, PTHREAD_EXPLICIT_SCHED);
+-        ntdll_set_sync_realtime(validSyncThread, ntdll_rt_policy, priority);
++        ntdll_set_sync_realtime(pthread_self(), ntdll_rt_policy, priority);
+     }
+ #endif
+     return STATUS_SUCCESS;
+
