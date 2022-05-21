@@ -1,0 +1,45 @@
+ - split the kernel-mode apc from the other pthreads
+
+--- a/dlls/ntdll/unix/thread.c	2022-05-20 20:14:00.485649338 -0500
++++ b/dlls/ntdll/unix/thread.c	2022-05-20 20:18:33.332166446 -0500
+@@ -1428,20 +1428,33 @@ done:
+     // which sets gets the tid via pthread_functions.init_current_teb
+     // 
+     // Catch all Synchronization Threads;
+-    pthread_t validSyncThread = (thread_data->fsync_apc_idx || thread_data->pthread_id);
++    pthread_t validIDXThread = (thread_data->fsync_apc_idx);
++    pthread_t validPIDThread = (thread_data->pthread_id);
+                                 
+-    if (validSyncThread == 0) {
++    if (validIDXThread || validPIDThread == 0) {
+         int i;
+         for (i = 0; i < 100; ++i) {
+-            validSyncThread = (thread_data->fsync_apc_idx || thread_data->pthread_id);
++            validIDXThread = (thread_data->fsync_apc_idx);
++            validPIDThread = (thread_data->pthread_id);
+                                
+-            if (validSyncThread == 0)
++            if (validIDXThread || validPIDThread == 0)
+                 usleep(300);
+         }
+     }
+-    if (validSyncThread != 0) {
++    if (validIDXThread != 0) {
+         // Fail on / filter out unsupported threads;
+-        if (handle == GetCurrentThread() && (validSyncThread != thread_data->fsync_apc_idx)) { 
++        if (handle == GetCurrentThread() && (validIDXThread != thread_data->fsync_apc_idx)) { 
++            return status;
++        }
++
++        // set RT for sync threads
++        pthread_attr_setinheritsched(&pthread_attr, PTHREAD_EXPLICIT_SCHED);
++        ntdll_rt_policy = SCHED_FIFO;
++        ntdll_set_sync_realtime(pthread_self(), ntdll_rt_policy, priority);
++    }
++    if (validPIDThread != 0) {
++        // Fail on / filter out unsupported threads;
++        if (handle == GetCurrentThread() && (validPIDThread != thread_data->pthread_id)) { 
+             return status;
+         }
+ 
+
