@@ -1,0 +1,68 @@
+From 02453537d5b801ea62870b745e90cebcfc75a50f Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Fri, 13 Mar 2020 16:00:56 +0100
+Subject: [PATCH 1/4] server: Don't reallocate a buffer for every request.
+
+---
+ server/request.c | 14 ++++++++------
+ server/thread.c  |  1 +
+ server/thread.h  |  1 +
+ 3 files changed, 10 insertions(+), 6 deletions(-)
+
+diff --git a/server/request.c b/server/request.c
+index 11111111111..11111111111 100644
+--- a/server/request.c
++++ b/server/request.c
+@@ -342,11 +342,15 @@ void read_request( struct thread *thread )
+             call_req_handler( thread );
+             return;
+         }
+-        if (!(thread->req_data = malloc( thread->req_toread )))
++        if (thread->req_data_size < thread->req_toread)
+         {
+-            fatal_protocol_error( thread, "no memory for %u bytes request %d\n",
+-                                  thread->req_toread, thread->req.request_header.req );
+-            return;
++            thread->req_data_size = thread->req_toread;
++            if (!(thread->req_data = realloc( thread->req_data, thread->req_data_size )))
++            {
++                fatal_protocol_error( thread, "no memory for %u bytes request %d\n",
++                                      thread->req_toread, thread->req.request_header.req );
++                return;
++            }
+         }
+     }
+ 
+@@ -361,8 +365,6 @@ void read_request( struct thread *thread )
+         if (!(thread->req_toread -= ret))
+         {
+             call_req_handler( thread );
+-            free( thread->req_data );
+-            thread->req_data = NULL;
+             return;
+         }
+     }
+diff --git a/server/thread.c b/server/thread.c
+index 11111111111..11111111111 100644
+--- a/server/thread.c
++++ b/server/thread.c
+@@ -329,6 +329,7 @@ static inline void init_thread_structure( struct thread *thread )
+     thread->wait            = NULL;
+     thread->error           = 0;
+     thread->req_data        = NULL;
++    thread->req_data_size   = 0;
+     thread->req_toread      = 0;
+     thread->reply_data      = NULL;
+     thread->reply_towrite   = 0;
+diff --git a/server/thread.h b/server/thread.h
+index 11111111111..11111111111 100644
+--- a/server/thread.h
++++ b/server/thread.h
+@@ -67,6 +67,7 @@ struct thread
+     unsigned int           error;         /* current error code */
+     union generic_request  req;           /* current request */
+     void                  *req_data;      /* variable-size data for request */
++    unsigned int           req_data_size;
+     unsigned int           req_toread;    /* amount of data still to read in request */
+     void                  *reply_data;    /* variable-size data for reply */
+     unsigned int           reply_size;    /* size of reply data */

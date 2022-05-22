@@ -1,0 +1,112 @@
+From: Jangwoong Kim <6812skiii@gmail.com>
+Subject: [PATCH] ntdll: Implement dynamic spinning
+Message-Id: <20210101134108.5112-1-6812skiii@gmail.com>
+Date: Fri,  1 Jan 2021 22:41:08 +0900
+
+Previously, InitialzeCriticalSectionEx with
+RTL_CRITICAL_SECTION_FLAG_DYNAMIC_SPIN worked as semi-stub.
+
+This patch implements dynamic spinning.
+Specifically, 32th bit from the right (starting with zero index)
+indicates whether it is dynamically spinning critical section.
+
+Signed-off-by: Jangwoong Kim <6812skiii@gmail.com>
+---
+ dlls/ntdll/sync.c | 52 ++++++++++++++++++++++++++++++++++++++++-------
+ 1 file changed, 45 insertions(+), 7 deletions(-)
+
+diff --git a/dlls/ntdll/sync.c b/dlls/ntdll/sync.c
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/sync.c
++++ b/dlls/ntdll/sync.c
+@@ -46,6 +46,9 @@ static const char *debugstr_timeout( const LARGE_INTEGER *timeout )
+     return wine_dbgstr_longlong( timeout->QuadPart );
+ }
+ 
++#define MAX_ADAPTIVE_SPIN_COUNT 4000
++#define MIN(a, b) (((a) < (b)) ? (a) : (b))
++
+ /******************************************************************
+  *              RtlRunOnceInitialize (NTDLL.@)
+  */
+@@ -217,7 +220,7 @@ NTSTATUS WINAPI RtlInitializeCriticalSectionAndSpinCount( RTL_CRITICAL_SECTION *
+  */
+ NTSTATUS WINAPI RtlInitializeCriticalSectionEx( RTL_CRITICAL_SECTION *crit, ULONG spincount, ULONG flags )
+ {
+-    if (flags & (RTL_CRITICAL_SECTION_FLAG_DYNAMIC_SPIN|RTL_CRITICAL_SECTION_FLAG_STATIC_INIT))
++    if (flags & RTL_CRITICAL_SECTION_FLAG_STATIC_INIT)
+         FIXME("(%p,%u,0x%08x) semi-stub\n", crit, spincount, flags);
+ 
+     /* FIXME: if RTL_CRITICAL_SECTION_FLAG_STATIC_INIT is given, we should use
+@@ -247,8 +250,15 @@ NTSTATUS WINAPI RtlInitializeCriticalSectionEx( RTL_CRITICAL_SECTION *crit, ULON
+     crit->RecursionCount = 0;
+     crit->OwningThread   = 0;
+     crit->LockSemaphore  = 0;
++    spincount = spincount & ~RTL_CRITICAL_SECTION_FLAG_DYNAMIC_SPIN;
++    if (flags & RTL_CRITICAL_SECTION_FLAG_DYNAMIC_SPIN)
++    {
++        spincount = MIN(spincount, MAX_ADAPTIVE_SPIN_COUNT);
++        /* RTL_CRITICAL_SECTION_FLAG_DYNAMIC_SPIN indicates whether it is a dynamically spinning CS */
++        spincount |= RTL_CRITICAL_SECTION_FLAG_DYNAMIC_SPIN;
++    }
+     if (NtCurrentTeb()->Peb->NumberOfProcessors <= 1) spincount = 0;
+-    crit->SpinCount = spincount & ~0x80000000;
++    crit->SpinCount = spincount;
+     return STATUS_SUCCESS;
+ }
+ 
+@@ -380,17 +390,45 @@ NTSTATUS WINAPI RtlEnterCriticalSection( RTL_CRITICAL_SECTION *crit )
+ {
+     if (crit->SpinCount)
+     {
++        ULONG spincount = *(volatile ULONG*)&crit->SpinCount;
+         ULONG count;
+ 
+         if (RtlTryEnterCriticalSection( crit )) return STATUS_SUCCESS;
+-        for (count = crit->SpinCount; count > 0; count--)
++        if (spincount & RTL_CRITICAL_SECTION_FLAG_DYNAMIC_SPIN)
++        {
++            ULONG max_count;
++            LONG adjustment;
++
++            spincount &= ~RTL_CRITICAL_SECTION_FLAG_DYNAMIC_SPIN;
++            max_count = MIN(spincount * 2, MAX_ADAPTIVE_SPIN_COUNT);
++            for (count = 0; count < max_count; count++)
++            {
++                if (crit->LockCount == -1 && InterlockedCompareExchange( &crit->LockCount, 0, -1 ) == -1)
++                {
++                    adjustment = (LONG)(count - spincount) / 10;
++                    spincount = *(volatile ULONG*)&crit->SpinCount & ~RTL_CRITICAL_SECTION_FLAG_DYNAMIC_SPIN;
++                    spincount += adjustment;
++                    crit->SpinCount = (LONG)spincount < 0 ? 0 : MIN(spincount, MAX_ADAPTIVE_SPIN_COUNT);
++                    goto done;
++                }
++                YieldProcessor();
++            }
++            adjustment = (LONG)(count - spincount) / 10;
++            spincount = *(volatile ULONG*)&crit->SpinCount & ~RTL_CRITICAL_SECTION_FLAG_DYNAMIC_SPIN;
++            spincount += adjustment;
++            crit->SpinCount = (LONG)spincount < 0 ? 0 : MIN(spincount, MAX_ADAPTIVE_SPIN_COUNT);
++        }
++        else
+         {
+-            if (crit->LockCount > 0) break;  /* more than one waiter, don't bother spinning */
+-            if (crit->LockCount == -1)       /* try again */
++            for (count = spincount; count > 0; count--)
+             {
+-                if (InterlockedCompareExchange( &crit->LockCount, 0, -1 ) == -1) goto done;
++                if (crit->LockCount > 0) break;  /* more than one waiter, don't bother spinning */
++                if (crit->LockCount == -1)       /* try again */
++                {
++                    if (InterlockedCompareExchange( &crit->LockCount, 0, -1 ) == -1) goto done;
++                }
++                YieldProcessor();
+             }
+-            YieldProcessor();
+         }
+     }
+ 
+
+-- 
+2.36.0
+
