@@ -1,0 +1,95 @@
+From: Jan Sikorski <jsikorski@codeweavers.com>
+Subject: [PATCH] msvcrt: Faster memcmp().
+Message-Id: <20220406171437.534079-1-jsikorski@codeweavers.com>
+Date: Wed,  6 Apr 2022 19:14:37 +0200
+
+Signed-off-by: Jan Sikorski <jsikorski@codeweavers.com>
+---
+ dlls/msvcrt/string.c | 63 +++++++++++++++++++++++++++++++++++++++++---
+ 1 file changed, 59 insertions(+), 4 deletions(-)
+
+diff --git a/dlls/msvcrt/string.c b/dlls/msvcrt/string.c
+index 11111111111..11111111111 100644
+--- a/dlls/msvcrt/string.c
++++ b/dlls/msvcrt/string.c
+@@ -2711,10 +2711,7 @@ static inline int memcmp_blocks(const void *ptr1, const void *ptr2, size_t size)
+     return memcmp_bytes(p1, p2, remainder);
+ }
+ 
+-/*********************************************************************
+- *                  memcmp (MSVCRT.@)
+- */
+-int __cdecl memcmp(const void *ptr1, const void *ptr2, size_t n)
++static inline int memcmp_unaligned(const void *ptr1, const void *ptr2, size_t n)
+ {
+     const unsigned char *p1 = ptr1, *p2 = ptr2;
+     size_t align;
+@@ -3115,6 +3112,64 @@ void * __cdecl _memccpy(void *dst, const void *src, int c, size_t n)
+ }
+ 
+ 
++static int memcmp_aligned(const void *p1, const void *p2, size_t size)
++{
++    const unsigned char *first = p1, *second = p2;
++    const size_t block_size = sizeof(size_t);
++
++    size_t remainder = size & (block_size - 1);
++    size_t block_count = size / block_size;
++
++    while (block_count-- > 0)
++    {
++        size_t value_1 = *(size_t *)first;
++        size_t value_2 = *(size_t *)second;
++
++        if (value_1 != value_2)
++            return memcmp_unaligned(first, second, block_size);
++
++        first += block_size;
++        second += block_size;
++    }
++
++    return memcmp_unaligned(first, second, remainder);
++}
++
++/*********************************************************************
++ *                  memcmp (MSVCRT.@)
++ */
++int __cdecl memcmp(const void *ptr1, const void *ptr2, size_t n)
++{
++    const size_t block_size = sizeof(size_t);
++    const unsigned char *p1 = ptr1, *p2 = ptr2;
++    size_t align;
++    int result;
++
++    if (n < block_size)
++        return memcmp_unaligned(p1, p2, n);
++
++    align = -(uintptr_t)p1 & (block_size - 1);
++
++    if ((result = memcmp_unaligned(p1, p2, align)))
++        return result;
++
++    p1 += align;
++    p2 += align;
++    n  -= align;
++
++#if defined(__i386__) || defined(__x86_64__)
++    return memcmp_aligned(p1, p2, n);
++#else
++    if (!((uintptr_t)p2 & (block_size - 1)))
++    {
++        result = memcmp_aligned(p1, p2, n);
++        return result;
++    }
++
++    return memcmp_unaligned(p1, p2, n);
++#endif
++}
++
+ #if defined(__i386__) || defined(__x86_64__)
+ 
+ #ifdef __i386__
+
+-- 
+2.36.0
+
