@@ -1,0 +1,87 @@
+From: Paul Gofman <pgofman@codeweavers.com>
+Subject: [PATCH v2 6/7] ntdll: Use shared loader locking in LdrQueryProcessModuleInformation().
+Message-Id: <20211001220041.349604-6-pgofman@codeweavers.com>
+Date: Sat,  2 Oct 2021 01:00:40 +0300
+In-Reply-To: <20211001220041.349604-1-pgofman@codeweavers.com>
+References: <20211001220041.349604-1-pgofman@codeweavers.com>
+
+Signed-off-by: Paul Gofman <pgofman@codeweavers.com>
+---
+ dlls/ntdll/loader.c | 37 ++++++++++++++++++++++++++++++++++---
+ 1 file changed, 34 insertions(+), 3 deletions(-)
+
+diff --git a/dlls/ntdll/loader.c b/dlls/ntdll/loader.c
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/loader.c
++++ b/dlls/ntdll/loader.c
+@@ -166,6 +166,7 @@ static RTL_CRITICAL_SECTION_DEBUG critsect_debug =
+ static RTL_CRITICAL_SECTION loader_section = { &critsect_debug, -1, 0, 0, 0, 0 };
+ 
+ static RTL_SRWLOCK loader_srw_lock = RTL_SRWLOCK_INIT;
++static volatile BOOL locked_exclusive;
+ 
+ static CRITICAL_SECTION dlldir_section;
+ static CRITICAL_SECTION_DEBUG dlldir_critsect_debug =
+@@ -256,8 +257,32 @@ static void lock_loader_exclusive(void)
+     ULONG recursion_count = inc_recursion_count();
+ 
+     TRACE( "recursion_count %u.\n", recursion_count );
++    if (!recursion_count)
++    {
++        if (!RtlDllShutdownInProgress())
++            RtlAcquireSRWLockExclusive( &loader_srw_lock );
++        locked_exclusive = TRUE;
++    }
++    else
++    {
++        assert( locked_exclusive );
++    }
++}
++
++/*************************************************************************
++ *		lock_loader_shared
++ *
++ * Take shared ownership of internal loader lock.
++ * If the thread already has exclusive lock it will stay exclusive.
++ */
++static void lock_loader_shared(void)
++{
++    ULONG recursion_count = inc_recursion_count();
++
++    TRACE("recursion_count %u, locked_exclusive %d.\n", recursion_count, locked_exclusive);
++
+     if (!recursion_count && !RtlDllShutdownInProgress())
+-        RtlAcquireSRWLockExclusive( &loader_srw_lock );
++        RtlAcquireSRWLockShared( &loader_srw_lock );
+ }
+ 
+ /*************************************************************************
+@@ -275,8 +300,14 @@ static void unlock_loader(void)
+ 
+     assert( recursion_count != ~0u );
+ 
+-    if (!recursion_count)
++    if (recursion_count) return;
++
++    if (locked_exclusive)
++    {
++        locked_exclusive = FALSE;
+         RtlReleaseSRWLockExclusive( &loader_srw_lock );
++    }
++    else RtlReleaseSRWLockShared( &loader_srw_lock );
+ }
+ 
+ #define RTL_UNLOAD_EVENT_TRACE_NUMBER 64
+@@ -3621,7 +3652,7 @@ NTSTATUS WINAPI LdrQueryProcessModuleInformation(RTL_PROCESS_MODULES *smi,
+ 
+     smi->ModulesCount = 0;
+ 
+-    lock_loader_exclusive();
++    lock_loader_shared();
+     mark = &NtCurrentTeb()->Peb->LdrData->InLoadOrderModuleList;
+     for (entry = mark->Flink; entry != mark; entry = entry->Flink)
+     {
+
+-- 
+2.36.0
+

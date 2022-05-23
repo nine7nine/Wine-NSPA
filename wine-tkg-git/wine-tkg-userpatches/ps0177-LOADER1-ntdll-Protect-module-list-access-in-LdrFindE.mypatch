@@ -1,0 +1,151 @@
+From: Paul Gofman <pgofman@codeweavers.com>
+Subject: [PATCH v2 1/7] ntdll: Protect module list access in LdrFindEntryForAddress() with SRW lock.
+Message-Id: <20211001220041.349604-1-pgofman@codeweavers.com>
+Date: Sat,  2 Oct 2021 01:00:35 +0300
+
+Fixes racy access to LDR lists in lookup_function_info().
+
+Signed-off-by: Paul Gofman <pgofman@codeweavers.com>
+---
+Supersedes 215952-215974.
+
+ dlls/ntdll/actctx.c |  6 ------
+ dlls/ntdll/loader.c | 21 ++++++++++++++++++---
+ 2 files changed, 18 insertions(+), 9 deletions(-)
+
+diff --git a/dlls/ntdll/actctx.c b/dlls/ntdll/actctx.c
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/actctx.c
++++ b/dlls/ntdll/actctx.c
+@@ -745,10 +745,8 @@ static inline const char* debugstr_version(const struct assembly_version *ver)
+ static NTSTATUS get_module_filename( HMODULE module, UNICODE_STRING *str, unsigned int extra_len )
+ {
+     NTSTATUS status;
+-    ULONG_PTR magic;
+     LDR_DATA_TABLE_ENTRY *pldr;
+ 
+-    LdrLockLoaderLock(0, NULL, &magic);
+     status = LdrFindEntryForAddress( module, &pldr );
+     if (status == STATUS_SUCCESS)
+     {
+@@ -761,7 +759,6 @@ static NTSTATUS get_module_filename( HMODULE module, UNICODE_STRING *str, unsign
+         }
+         else status = STATUS_NO_MEMORY;
+     }
+-    LdrUnlockLoaderLock(0, magic);
+     return status;
+ }
+ 
+@@ -3405,12 +3402,10 @@ static NTSTATUS find_query_actctx( HANDLE *handle, DWORD flags, ULONG class )
+     }
+     else if (flags & (QUERY_ACTCTX_FLAG_ACTCTX_IS_ADDRESS|QUERY_ACTCTX_FLAG_ACTCTX_IS_HMODULE))
+     {
+-        ULONG_PTR magic;
+         LDR_DATA_TABLE_ENTRY *pldr;
+ 
+         if (!*handle) return STATUS_INVALID_PARAMETER;
+ 
+-        LdrLockLoaderLock( 0, NULL, &magic );
+         if (!LdrFindEntryForAddress( *handle, &pldr ))
+         {
+             if ((flags & QUERY_ACTCTX_FLAG_ACTCTX_IS_HMODULE) && *handle != pldr->DllBase)
+@@ -3419,7 +3414,6 @@ static NTSTATUS find_query_actctx( HANDLE *handle, DWORD flags, ULONG class )
+                 *handle = pldr->ActivationContext;
+         }
+         else status = STATUS_DLL_NOT_FOUND;
+-        LdrUnlockLoaderLock( 0, magic );
+     }
+     else if (!*handle && (class != ActivationContextBasicInformation))
+         *handle = process_actctx;
+diff --git a/dlls/ntdll/loader.c b/dlls/ntdll/loader.c
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/loader.c
++++ b/dlls/ntdll/loader.c
+@@ -181,6 +181,10 @@ static PEB_LDR_DATA ldr =
+     { &ldr.InMemoryOrderModuleList, &ldr.InMemoryOrderModuleList },
+     { &ldr.InInitializationOrderModuleList, &ldr.InInitializationOrderModuleList }
+ };
++/* Ldr data is modified with loader locked and exclusive lock held.
++ * Taking shared lock to access the data is required outside of loader lock only.
++ */
++static RTL_SRWLOCK ldr_data_srw_lock = RTL_SRWLOCK_INIT;
+ 
+ static RTL_BITMAP tls_bitmap;
+ static RTL_BITMAP tls_expansion_bitmap;
+@@ -1476,12 +1480,14 @@ static WINE_MODREF *alloc_module( HMODULE hModule, const UNICODE_STRING *nt_name
+             wm->ldr.EntryPoint = (char *)hModule + nt->OptionalHeader.AddressOfEntryPoint;
+     }
+ 
++    RtlAcquireSRWLockExclusive( &ldr_data_srw_lock );
+     InsertTailList(&NtCurrentTeb()->Peb->LdrData->InLoadOrderModuleList,
+                    &wm->ldr.InLoadOrderLinks);
+     InsertTailList(&NtCurrentTeb()->Peb->LdrData->InMemoryOrderModuleList,
+                    &wm->ldr.InMemoryOrderLinks);
+     InsertTailList(&hash_table[hash_basename(wm->ldr.BaseDllName.Buffer)],
+                    &wm->ldr.HashLinks);
++    RtlReleaseSRWLockExclusive( &ldr_data_srw_lock );
+ 
+     /* wait until init is called for inserting into InInitializationOrderModuleList */
+     wm->ldr.InInitializationOrderLinks.Flink = NULL;
+@@ -1690,8 +1696,12 @@ static NTSTATUS process_attach( LDR_DDAG_NODE *node, LPVOID lpReserved )
+     status = walk_node_dependencies( node, lpReserved, process_attach );
+ 
+     if (!wm->ldr.InInitializationOrderLinks.Flink)
++    {
++        RtlAcquireSRWLockExclusive( &ldr_data_srw_lock );
+         InsertTailList(&NtCurrentTeb()->Peb->LdrData->InInitializationOrderModuleList,
+                 &wm->ldr.InInitializationOrderLinks);
++        RtlReleaseSRWLockExclusive( &ldr_data_srw_lock );
++    }
+ 
+     /* Call DLL entry point */
+     if (status == STATUS_SUCCESS)
+@@ -1814,13 +1824,14 @@ NTSTATUS WINAPI LdrDisableThreadCalloutsForDll(HMODULE hModule)
+ /******************************************************************
+  *              LdrFindEntryForAddress (NTDLL.@)
+  *
+- * The loader_section must be locked while calling this function
+  */
+ NTSTATUS WINAPI LdrFindEntryForAddress( const void *addr, PLDR_DATA_TABLE_ENTRY *pmod )
+ {
++    NTSTATUS ret = STATUS_NO_MORE_ENTRIES;
+     PLIST_ENTRY mark, entry;
+     PLDR_DATA_TABLE_ENTRY mod;
+ 
++    RtlAcquireSRWLockShared( &ldr_data_srw_lock );
+     mark = &NtCurrentTeb()->Peb->LdrData->InMemoryOrderModuleList;
+     for (entry = mark->Flink; entry != mark; entry = entry->Flink)
+     {
+@@ -1829,10 +1840,12 @@ NTSTATUS WINAPI LdrFindEntryForAddress( const void *addr, PLDR_DATA_TABLE_ENTRY
+             (const char *)addr < (char*)mod->DllBase + mod->SizeOfImage)
+         {
+             *pmod = mod;
+-            return STATUS_SUCCESS;
++            ret = STATUS_SUCCESS;
++            break;
+         }
+     }
+-    return STATUS_NO_MORE_ENTRIES;
++    RtlReleaseSRWLockShared( &ldr_data_srw_lock );
++    return ret;
+ }
+ 
+ /******************************************************************
+@@ -3853,11 +3866,13 @@ static void free_modref( WINE_MODREF *wm )
+     SINGLE_LIST_ENTRY *entry;
+     LDR_DEPENDENCY *dep;
+ 
++    RtlAcquireSRWLockExclusive( &ldr_data_srw_lock );
+     RemoveEntryList(&wm->ldr.InLoadOrderLinks);
+     RemoveEntryList(&wm->ldr.InMemoryOrderLinks);
+     RemoveEntryList(&wm->ldr.HashLinks);
+     if (wm->ldr.InInitializationOrderLinks.Flink)
+         RemoveEntryList(&wm->ldr.InInitializationOrderLinks);
++    RtlReleaseSRWLockExclusive( &ldr_data_srw_lock );
+ 
+     while ((entry = wm->ldr.DdagNode->Dependencies.Tail))
+     {
+
+-- 
+2.36.0
+

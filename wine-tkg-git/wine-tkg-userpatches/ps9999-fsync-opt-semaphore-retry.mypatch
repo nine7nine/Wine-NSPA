@@ -1,0 +1,27 @@
+diff --git a/dlls/ntdll/unix/fsync.c b/dlls/ntdll/unix/fsync.c
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/unix/fsync.c
++++ b/dlls/ntdll/unix/fsync.c
+@@ -844,13 +844,15 @@ static NTSTATUS __fsync_wait_objects( DWORD count, const HANDLE *handles,
+                         struct semaphore *semaphore = obj->shm;
+                         int current;
+ 
+-                        if ((current = __atomic_load_n( &semaphore->count, __ATOMIC_SEQ_CST ))
+-                                && __sync_val_compare_and_swap( &semaphore->count, current, current - 1 ) == current)
+-                        {
+-                            TRACE("Woken up by handle %p [%d].\n", handles[i], i);
+-                            if (waited) simulate_sched_quantum();
+-                            return i;
+-                        }
++                        do {
++                            if ((current = __atomic_load_n( &semaphore->count, __ATOMIC_SEQ_CST ))
++                                    && __sync_val_compare_and_swap( &semaphore->count, current, current - 1 ) == current)
++                            {
++                                TRACE("Woken up by handle %p [%d].\n", handles[i], i);
++                                if (waited) simulate_sched_quantum();
++                                return i;
++                            }
++                        } while (current);
+ 
+                         futex_vector_set( &futexes[i], &semaphore->count, 0 );
+                         break;

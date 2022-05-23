@@ -1,0 +1,179 @@
+From: Paul Gofman <pgofman@codeweavers.com>
+Subject: [PATCH v2 5/7] ntdll: Only lock loader_section when calling application callbacks().
+Message-Id: <20211001220041.349604-5-pgofman@codeweavers.com>
+Date: Sat,  2 Oct 2021 01:00:39 +0300
+In-Reply-To: <20211001220041.349604-1-pgofman@codeweavers.com>
+References: <20211001220041.349604-1-pgofman@codeweavers.com>
+
+Signed-off-by: Paul Gofman <pgofman@codeweavers.com>
+---
+v2:
+    - use static initializers for SRW lock.
+
+ dlls/ntdll/loader.c | 58 ++++++++++++++++++++++++++++++++++++++++-----
+ include/winternl.h  |  2 +-
+ 2 files changed, 53 insertions(+), 7 deletions(-)
+
+diff --git a/dlls/ntdll/loader.c b/dlls/ntdll/loader.c
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/loader.c
++++ b/dlls/ntdll/loader.c
+@@ -165,6 +165,8 @@ static RTL_CRITICAL_SECTION_DEBUG critsect_debug =
+ };
+ static RTL_CRITICAL_SECTION loader_section = { &critsect_debug, -1, 0, 0, 0, 0 };
+ 
++static RTL_SRWLOCK loader_srw_lock = RTL_SRWLOCK_INIT;
++
+ static CRITICAL_SECTION dlldir_section;
+ static CRITICAL_SECTION_DEBUG dlldir_critsect_debug =
+ {
+@@ -223,24 +225,58 @@ static inline BOOL contains_path( LPCWSTR name )
+     return ((*name && (name[1] == ':')) || wcschr(name, '/') || wcschr(name, '\\'));
+ }
+ 
++/*************************************************************************
++ *		inc_recursion_count
++ *
++ * Increment thread local internal loader lock recursion count and return the old value.
++ */
++static ULONG inc_recursion_count(void)
++{
++    return NtCurrentTeb()->Spare2++;
++}
++
++/*************************************************************************
++ *		dec_recursion_count
++ *
++ * Decrement thread local internal loader lock recursion count and return the new value.
++ */
++static ULONG dec_recursion_count(void)
++{
++    return --NtCurrentTeb()->Spare2;
++}
++
+ /*************************************************************************
+  *		lock_loader_exclusive
+  *
+- * Take exclusive loader lock.
++ * Take exclusive ownership of internal loader lock.
++ * Recursive locking is allowed.
+  */
+ static void lock_loader_exclusive(void)
+ {
+-    RtlEnterCriticalSection( &loader_section );
++    ULONG recursion_count = inc_recursion_count();
++
++    TRACE( "recursion_count %u.\n", recursion_count );
++    if (!recursion_count && !RtlDllShutdownInProgress())
++        RtlAcquireSRWLockExclusive( &loader_srw_lock );
+ }
+ 
+ /*************************************************************************
+  *		unlock_loader
+  *
+- * Release loader lock.
++ * Release internal loader lock.
+  */
+ static void unlock_loader(void)
+ {
+-    RtlLeaveCriticalSection( &loader_section );
++    ULONG recursion_count = dec_recursion_count();
++
++    TRACE( "recursion_count %u.\n", recursion_count );
++
++    if (RtlDllShutdownInProgress()) return;
++
++    assert( recursion_count != ~0u );
++
++    if (!recursion_count)
++        RtlReleaseSRWLockExclusive( &loader_srw_lock );
+ }
+ 
+ #define RTL_UNLOAD_EVENT_TRACE_NUMBER 64
+@@ -501,6 +537,7 @@ static void call_ldr_notifications( ULONG reason, LDR_DATA_TABLE_ENTRY *module )
+     data.Loaded.DllBase     = module->DllBase;
+     data.Loaded.SizeOfImage = module->SizeOfImage;
+ 
++    RtlEnterCriticalSection( &loader_section );
+     RtlEnterCriticalSection( &ldr_notifications_section );
+     LIST_FOR_EACH_ENTRY_SAFE( notify, notify_next, &ldr_notifications, struct ldr_notification, entry )
+     {
+@@ -513,6 +550,7 @@ static void call_ldr_notifications( ULONG reason, LDR_DATA_TABLE_ENTRY *module )
+                 notify->callback, reason, &data, notify->context );
+     }
+     RtlLeaveCriticalSection( &ldr_notifications_section );
++    RtlLeaveCriticalSection( &loader_section );
+ }
+ 
+ /*************************************************************************
+@@ -1591,6 +1629,8 @@ static void call_tls_callbacks( HMODULE module, UINT reason )
+     dir = RtlImageDirectoryEntryToData( module, TRUE, IMAGE_DIRECTORY_ENTRY_TLS, &dirsize );
+     if (!dir || !dir->AddressOfCallBacks) return;
+ 
++    RtlEnterCriticalSection( &loader_section );
++
+     for (callback = (const PIMAGE_TLS_CALLBACK *)dir->AddressOfCallBacks; *callback; callback++)
+     {
+         TRACE_(relay)("\1Call TLS callback (proc=%p,module=%p,reason=%s,reserved=0)\n",
+@@ -1609,6 +1649,8 @@ static void call_tls_callbacks( HMODULE module, UINT reason )
+         TRACE_(relay)("\1Ret  TLS callback (proc=%p,module=%p,reason=%s,reserved=0)\n",
+                       *callback, module, reason_names[reason] );
+     }
++
++    RtlLeaveCriticalSection( &loader_section );
+ }
+ 
+ /*************************************************************************
+@@ -1641,6 +1683,8 @@ static NTSTATUS MODULE_InitDLL( WINE_MODREF *wm, UINT reason, LPVOID lpReserved
+     else TRACE("(%p %s,%s,%p) - CALL\n", module, debugstr_w(wm->ldr.BaseDllName.Buffer),
+                reason_names[reason], lpReserved );
+ 
++    RtlEnterCriticalSection( &loader_section );
++
+     __TRY
+     {
+         retv = call_dll_entry_point( entry, module, reason, lpReserved );
+@@ -1655,6 +1699,8 @@ static NTSTATUS MODULE_InitDLL( WINE_MODREF *wm, UINT reason, LPVOID lpReserved
+     }
+     __ENDTRY
+ 
++    RtlLeaveCriticalSection( &loader_section );
++
+     /* The state of the module list may have changed due to the call
+        to the dll. We cannot assume that this module has not been
+        deleted.  */
+@@ -1894,7 +1940,7 @@ NTSTATUS WINAPI LdrEnumerateLoadedModules( void *unknown, LDRENUMPROC callback,
+         return STATUS_INVALID_PARAMETER;
+ 
+     lock_loader_exclusive();
+-
++    RtlEnterCriticalSection( &loader_section );
+     mark = &NtCurrentTeb()->Peb->LdrData->InMemoryOrderModuleList;
+     for (entry = mark->Flink; entry != mark; entry = entry->Flink)
+     {
+@@ -1902,7 +1948,7 @@ NTSTATUS WINAPI LdrEnumerateLoadedModules( void *unknown, LDRENUMPROC callback,
+         callback( mod, context, &stop );
+         if (stop) break;
+     }
+-
++    RtlLeaveCriticalSection( &loader_section );
+     unlock_loader();
+     return STATUS_SUCCESS;
+ }
+diff --git a/include/winternl.h b/include/winternl.h
+index 11111111111..11111111111 100644
+--- a/include/winternl.h
++++ b/include/winternl.h
+@@ -466,7 +466,7 @@ typedef struct _TEB
+     PVOID                        Instrumentation[16];               /* f2c/16b8 */
+     PVOID                        WinSockData;                       /* f6c/1738 */
+     ULONG                        GdiBatchCount;                     /* f70/1740 */
+-    ULONG                        Spare2;                            /* f74/1744 */
++    ULONG                        Spare2;                            /* f74/1744 used for ntdll loader data in Wine */
+     ULONG                        GuaranteedStackBytes;              /* f78/1748 */
+     PVOID                        ReservedForPerf;                   /* f7c/1750 */
+     PVOID                        ReservedForOle;                    /* f80/1758 */
+
+-- 
+2.36.0
+

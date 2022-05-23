@@ -1,0 +1,76 @@
+From: Paul Gofman <pgofman@codeweavers.com>
+Subject: [PATCH v2 4/7] ntdll: Use a critical section for guarding ldr_notifications list.
+Message-Id: <20211001220041.349604-4-pgofman@codeweavers.com>
+Date: Sat,  2 Oct 2021 01:00:38 +0300
+In-Reply-To: <20211001220041.349604-1-pgofman@codeweavers.com>
+References: <20211001220041.349604-1-pgofman@codeweavers.com>
+
+Signed-off-by: Paul Gofman <pgofman@codeweavers.com>
+---
+ dlls/ntdll/loader.c | 19 +++++++++++++++----
+ 1 file changed, 15 insertions(+), 4 deletions(-)
+
+diff --git a/dlls/ntdll/loader.c b/dlls/ntdll/loader.c
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/loader.c
++++ b/dlls/ntdll/loader.c
+@@ -118,6 +118,15 @@ struct ldr_notification
+ 
+ static struct list ldr_notifications = LIST_INIT( ldr_notifications );
+ 
++static CRITICAL_SECTION ldr_notifications_section;
++static CRITICAL_SECTION_DEBUG ldr_notifications_critsect_debug =
++{
++    0, 0, &ldr_notifications_section,
++    { &ldr_notifications_critsect_debug.ProcessLocksList, &ldr_notifications_critsect_debug.ProcessLocksList },
++      0, 0, { (DWORD_PTR)(__FILE__ ": dlldir_section") }
++};
++static CRITICAL_SECTION ldr_notifications_section = { &ldr_notifications_critsect_debug, -1, 0, 0, 0, 0 };
++
+ static const char * const reason_names[] =
+ {
+     "PROCESS_DETACH",
+@@ -492,6 +501,7 @@ static void call_ldr_notifications( ULONG reason, LDR_DATA_TABLE_ENTRY *module )
+     data.Loaded.DllBase     = module->DllBase;
+     data.Loaded.SizeOfImage = module->SizeOfImage;
+ 
++    RtlEnterCriticalSection( &ldr_notifications_section );
+     LIST_FOR_EACH_ENTRY_SAFE( notify, notify_next, &ldr_notifications, struct ldr_notification, entry )
+     {
+         TRACE_(relay)("\1Call LDR notification callback (proc=%p,reason=%u,data=%p,context=%p)\n",
+@@ -502,6 +512,7 @@ static void call_ldr_notifications( ULONG reason, LDR_DATA_TABLE_ENTRY *module )
+         TRACE_(relay)("\1Ret  LDR notification callback (proc=%p,reason=%u,data=%p,context=%p)\n",
+                 notify->callback, reason, &data, notify->context );
+     }
++    RtlLeaveCriticalSection( &ldr_notifications_section );
+ }
+ 
+ /*************************************************************************
+@@ -1917,9 +1928,9 @@ NTSTATUS WINAPI LdrRegisterDllNotification(ULONG flags, PLDR_DLL_NOTIFICATION_FU
+     notify->callback = callback;
+     notify->context = context;
+ 
+-    lock_loader_exclusive();
++    RtlEnterCriticalSection( &ldr_notifications_section );
+     list_add_tail( &ldr_notifications, &notify->entry );
+-    unlock_loader();
++    RtlLeaveCriticalSection( &ldr_notifications_section );
+ 
+     *cookie = notify;
+     return STATUS_SUCCESS;
+@@ -1936,9 +1947,9 @@ NTSTATUS WINAPI LdrUnregisterDllNotification( void *cookie )
+ 
+     if (!notify) return STATUS_INVALID_PARAMETER;
+ 
+-    lock_loader_exclusive();
++    RtlEnterCriticalSection( &ldr_notifications_section );
+     list_remove( &notify->entry );
+-    unlock_loader();
++    RtlLeaveCriticalSection( &ldr_notifications_section );
+ 
+     RtlFreeHeap( GetProcessHeap(), 0, notify );
+     return STATUS_SUCCESS;
+
+-- 
+2.36.0
+
