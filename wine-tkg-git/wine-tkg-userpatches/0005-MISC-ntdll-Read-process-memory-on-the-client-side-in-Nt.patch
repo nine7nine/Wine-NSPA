@@ -1,0 +1,178 @@
+From eef39a6e9c0a9b939521c7a5119225b4823b83cc Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Fri, 21 May 2021 15:10:07 +0300
+Subject: [PATCH] ntdll: Read process memory on the client side in
+ NtReadVirtualMemory().
+
+CW-Bug-Id: 18957
+---
+ dlls/ntdll/unix/server.c       |  2 +-
+ dlls/ntdll/unix/virtual.c      | 46 ++++++++++++++++++++++++++++++++++
+ include/wine/server_protocol.h |  4 ++-
+ server/process.c               |  2 ++
+ server/protocol.def            |  1 +
+ server/request.h               |  3 ++-
+ server/trace.c                 |  3 ++-
+ 7 files changed, 57 insertions(+), 4 deletions(-)
+
+diff --git a/dlls/ntdll/unix/server.c b/dlls/ntdll/unix/server.c
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/unix/server.c
++++ b/dlls/ntdll/unix/server.c
+@@ -1542,7 +1542,7 @@ size_t server_init_process(void)
+                                (version > SERVER_PROTOCOL_VERSION) ? "wine" : "wineserver" );
+ #if defined(__linux__) && defined(HAVE_PRCTL)
+     /* work around Ubuntu's ptrace breakage */
+-    if (server_pid != -1) prctl( 0x59616d61 /* PR_SET_PTRACER */, server_pid );
++    if (server_pid != -1) prctl( 0x59616d61 /* PR_SET_PTRACER */, PR_SET_PTRACER_ANY );
+ #endif
+ 
+     /* ignore SIGPIPE so that we get an EPIPE error instead  */
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -64,6 +64,8 @@
+ # include <mach/mach_vm.h>
+ #endif
+ 
++#include <sys/uio.h>
++
+ #include "ntstatus.h"
+ #define WIN32_NO_STATUS
+ #include "windef.h"
+@@ -5154,7 +5156,50 @@ NTSTATUS WINAPI NtReadVirtualMemory( HANDLE process, const void *addr, void *buf
+                                      SIZE_T size, SIZE_T *bytes_read )
+ {
+     NTSTATUS status;
++#ifdef linux
++    struct iovec local, remote;
++    int unix_pid;
++    ssize_t ret;
++
++    SERVER_START_REQ( read_process_memory )
++    {
++        req->handle = wine_server_obj_handle( process );
++        status = wine_server_call( req );
++        unix_pid = reply->unix_pid;
++    }
++    SERVER_END_REQ;
++
++    if (status)
++    {
++        WARN( "Could not get unix_pid for process %p, status %#x.\n", process, status );
++        size = 0;
++        goto done;
++    }
++
++    local.iov_base = buffer;
++    local.iov_len = size;
+ 
++    remote.iov_base = (void *)addr;
++    remote.iov_len = size;
++
++    if ((ret = process_vm_readv( unix_pid, &local, 1, &remote, 1, 0 )) != size)
++    {
++        WARN( "Error reading memory from process %p, addr %p, size %p, buffer %p, ret %p, errno %d.\n",
++              process, addr, (void *)size, buffer, (void *)ret, errno );
++
++        if (ret == -1)
++        {
++            status = errno == ESRCH ? STATUS_PARTIAL_COPY : errno_to_status( errno );
++            size = 0;
++        }
++        else
++        {
++            status = STATUS_PARTIAL_COPY;
++            size = ret;
++        }
++    }
++done:
++#else
+     if (virtual_check_buffer_for_write( buffer, size ))
+     {
+         if (process == GetCurrentProcess())
+@@ -5191,6 +5236,7 @@ NTSTATUS WINAPI NtReadVirtualMemory( HANDLE process, const void *addr, void *buf
+         status = STATUS_ACCESS_VIOLATION;
+         size = 0;
+     }
++#endif
+     if (bytes_read) *bytes_read = size;
+     return status;
+ }
+diff --git a/include/wine/server_protocol.h b/include/wine/server_protocol.h
+index 11111111111..11111111111 100644
+--- a/include/wine/server_protocol.h
++++ b/include/wine/server_protocol.h
+@@ -2169,7 +2169,9 @@ struct read_process_memory_request
+ struct read_process_memory_reply
+ {
+     struct reply_header __header;
++    int unix_pid;
+     /* VARARG(data,bytes); */
++    char __pad_12[4];
+ };
+ 
+ 
+@@ -6414,7 +6416,7 @@ union generic_reply
+ 
+ /* ### protocol_version begin ### */
+ 
+-#define SERVER_PROTOCOL_VERSION 752
++#define SERVER_PROTOCOL_VERSION 753
+ 
+ /* ### protocol_version end ### */
+ 
+diff --git a/server/process.c b/server/process.c
+index 11111111111..11111111111 100644
+--- a/server/process.c
++++ b/server/process.c
+@@ -1743,6 +1743,8 @@ DECL_HANDLER(read_process_memory)
+ 
+     if (!(process = get_process_from_handle( req->handle, PROCESS_VM_READ ))) return;
+ 
++    reply->unix_pid = process->unix_pid;
++
+     if (len)
+     {
+         char *buffer = mem_alloc( len );
+diff --git a/server/protocol.def b/server/protocol.def
+index 11111111111..11111111111 100644
+--- a/server/protocol.def
++++ b/server/protocol.def
+@@ -1759,6 +1759,7 @@ struct process_info
+     obj_handle_t handle;       /* process handle */
+     client_ptr_t addr;         /* addr to read from */
+ @REPLY
++    int unix_pid;              /* Unix pid of new process */
+     VARARG(data,bytes);        /* result data */
+ @END
+ 
+diff --git a/server/request.h b/server/request.h
+index 11111111111..11111111111 100644
+--- a/server/request.h
++++ b/server/request.h
+@@ -1177,7 +1177,8 @@ C_ASSERT( sizeof(struct set_debug_obj_info_request) == 24 );
+ C_ASSERT( FIELD_OFFSET(struct read_process_memory_request, handle) == 12 );
+ C_ASSERT( FIELD_OFFSET(struct read_process_memory_request, addr) == 16 );
+ C_ASSERT( sizeof(struct read_process_memory_request) == 24 );
+-C_ASSERT( sizeof(struct read_process_memory_reply) == 8 );
++C_ASSERT( FIELD_OFFSET(struct read_process_memory_reply, unix_pid) == 8 );
++C_ASSERT( sizeof(struct read_process_memory_reply) == 16 );
+ C_ASSERT( FIELD_OFFSET(struct write_process_memory_request, handle) == 12 );
+ C_ASSERT( FIELD_OFFSET(struct write_process_memory_request, addr) == 16 );
+ C_ASSERT( sizeof(struct write_process_memory_request) == 24 );
+diff --git a/server/trace.c b/server/trace.c
+index 11111111111..11111111111 100644
+--- a/server/trace.c
++++ b/server/trace.c
+@@ -2294,7 +2294,8 @@ static void dump_read_process_memory_request( const struct read_process_memory_r
+ 
+ static void dump_read_process_memory_reply( const struct read_process_memory_reply *req )
+ {
+-    dump_varargs_bytes( " data=", cur_size );
++    fprintf( stderr, " unix_pid=%d", req->unix_pid );
++    dump_varargs_bytes( ", data=", cur_size );
+ }
+ 
+ static void dump_write_process_memory_request( const struct write_process_memory_request *req )
