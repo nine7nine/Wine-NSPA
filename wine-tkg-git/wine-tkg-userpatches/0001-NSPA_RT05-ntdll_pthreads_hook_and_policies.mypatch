@@ -1,5 +1,8 @@
  - Hook regular pthreads created by wine, along with the kernel-mode apc
- - allow changing to TS (time-sharing / SCHED_OTHER) policy too
+ - split validSyncThread to allow treating kernel-mode apc differently
+ - allow changing to TS (time-sharing / SCHED_OTHER) policy on hooked pthreads
+ - hardcode SCHED_FIFO for fsync_apc_idx
+ - remove commented out junk code
 
 --- a/dlls/ntdll/unix/thread.c	2022-05-20 20:14:00.485649338 -0500
 +++ b/dlls/ntdll/unix/thread.c	2022-05-20 20:18:33.332166446 -0500
@@ -19,33 +22,51 @@
      }
     
      if ((apc_priority = get_priority( "NTDLL_RT_PRIO", min, max -1)) != -1)
-@@ -1427,12 +1427,12 @@ done:
+@@ -1427,27 +1428,39 @@ done:
      // which sets gets the tid via pthread_functions.init_current_teb
      // 
      // Catch all Synchronization Threads;
 -    pthread_t validSyncThread = (thread_data->fsync_apc_idx);
-+    pthread_t validSyncThread = (thread_data->fsync_apc_idx || thread_data->pthread_id);
++    pthread_t validIDXThread = (thread_data->fsync_apc_idx);
++    pthread_t validPIDThread = (thread_data->pthread_id);
                                  
-     if (validSyncThread == 0) {
+-    if (validSyncThread == 0) {
++    if (validIDXThread || validPIDThread == 0) {
          int i;
          for (i = 0; i < 100; ++i) {
 -            validSyncThread = (thread_data->fsync_apc_idx);
-+            validSyncThread = (thread_data->fsync_apc_idx || thread_data->pthread_id);
++            validIDXThread = (thread_data->fsync_apc_idx);
++            validPIDThread = (thread_data->pthread_id);
                                 
-             if (validSyncThread == 0)
+-            if (validSyncThread == 0)
++            if (validIDXThread || validPIDThread == 0)
                  usleep(300);
-@@ -1441,13 +1441,12 @@ done:
-     if (validSyncThread != 0) {
+         }
+     }
+-    if (validSyncThread != 0) {
++    if (validIDXThread != 0) {
          // Fail on / filter out unsupported threads;
-         if (handle == GetCurrentThread() && (validSyncThread != thread_data->fsync_apc_idx)) { 
+-        if (handle == GetCurrentThread() && (validSyncThread != thread_data->fsync_apc_idx)) { 
 -            //thread_data->pthread_id)) {
++        if (handle == GetCurrentThread() && (validIDXThread != thread_data->fsync_apc_idx)) { 
              return status;
          }
  
          // set RT for sync threads
          pthread_attr_setinheritsched(&pthread_attr, PTHREAD_EXPLICIT_SCHED);
 -        ntdll_set_sync_realtime(validSyncThread, ntdll_rt_policy, priority);
-+        ntdll_set_sync_realtime(pthread_self(), ntdll_rt_policy, priority);
++        ntdll_rt_policy = SCHED_FIFO;
++        ntdll_set_sync_realtime(validIDXThread, ntdll_rt_policy, priority);
++    }
++    else if (validPIDThread != 0) {
++        // Fail on / filter out unsupported threads;
++        if (handle == GetCurrentThread() && (validPIDThread != thread_data->pthread_id)) { 
++            return status;
++        }
++
++        // set RT for sync threads
++        pthread_attr_setinheritsched(&pthread_attr, PTHREAD_EXPLICIT_SCHED);
++        ntdll_set_sync_realtime(validPIDThread, ntdll_rt_policy, priority);
      }
  #endif
      return STATUS_SUCCESS;
