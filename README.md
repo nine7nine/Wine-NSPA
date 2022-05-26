@@ -34,8 +34,8 @@ enabled. Have a look here; https://github.com/nine7nine/Wine-NSPA/tree/main/exam
 ### List of useful Wine-NSPA env variables
 
 * WINE_RT_PRIO=78 - Set RT thread Prioties from Wineserver. *note: sets highest priority, then decrements by 2.
-* WINE_RT_POLICY="FF" - Set RT Policy from Wineserver. *note: TIME_CRITICAL threads are hardcoded to SCHED_FIFO.
-* NTDLL_RT_PRIO=5 - Set RT thread priorities from Ntdll. *note: these are basically NT threads; APCs or non-winAPI pthreads. 
+* WINE_RT_POLICY="FF" - Set RT Policy from Wineserver. *note: TIME_CRITICAL threads = SCHED_FIFO.
+* NTDLL_RT_PRIO=5 - Set RT thread priorities from Ntdll. *note: NT threads: fsync'd APCs or non-winAPI pthreads. 
 * NTDLL_RT_POLICY="RR" - Set NTDLL scheduling policy. *supports FF, RR and TS.
 * WINEESYNC=1 - Esync server-side synchronization. note: Fsync is better.
 * WINEFSYNC=1 - Fsync kernel-side / futex_waitv / futex-based synchronization.
@@ -50,8 +50,27 @@ This is a rough summary, for now. More details will be added later.
 As mentioned above, some features in Wine-NSPA require kernel support. I provide my own kernel sources + Archlinux 
 PKGBUILDs for my own custom kernel. Found here;
 
-* PKGBUILD - https://github.com/nine7nine/pkgbuilds-linux-nspa/tree/master/linux-cachy-nspa-rt
+* Archlinux PKGBUILD - https://github.com/nine7nine/pkgbuilds-linux-nspa/tree/master/linux-cachy-nspa-rt
 * My Linux Kernel Sources - https://github.com/nine7nine/linux-cachy-nspa
+
+Credits/Shoutouts:
+
+* WineHQ: https://www.winehq.org/
+* Wine-Staging: https://github.com/wine-staging/wine-staging
+* Wine-TKG: https://github.com/Frogging-Family/wine-tkg-git
+* RBernon's Wine Repo: https://github.com/rbernon/wine
+* Openglfreak Repo: https://github.com/openglfreak/wine-tkg-userpatches
+* Valve's Proton: https://github.com/ValveSoftware/Proton
+* Realtime Linux: https://wiki.linuxfoundation.org/realtime/start
+* Jack Audio Connection Kit: https://jackaudio.org/
+* Pipewire: https://gitlab.freedesktop.org/pipewire/pipewire
+* CachyOS Linux: https://github.com/CachyOS/linux-cachyos 
+* FalkTX: https://github.com/falkTX/Carla
+* Robbert-vdh: https://github.com/robbert-vdh/yabridge
+* Archlinux: https://archlinux.org/
+* Linuxaudio: https://linuxaudio.org/
+
+Other people of note: Jack Winter, Paul Davis and the whole Linuxaudio community.
 
 
 
