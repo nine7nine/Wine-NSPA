@@ -1,0 +1,290 @@
+From: Jinoh Kang <jinoh.kang.kr@gmail.com>
+Subject: [PATCH v5 11/13] loader: Switch stack if the old stack address is in reserved range.
+Message-Id: <f37db1fc-90e9-fe99-7aa9-e239612b59aa@gmail.com>
+Date: Sat, 5 Mar 2022 23:54:57 +0900
+In-Reply-To: <7a3d3b9e-7d1a-9fde-99a7-bd47d51fda35@gmail.com>
+References: <7a3d3b9e-7d1a-9fde-99a7-bd47d51fda35@gmail.com>
+
+Today, the preloader abandons reserved address ranges that conflict with
+the call stack area.
+
+Fix this by attempting to copy the stack somewhere else, and switching
+to it before entering the ld.so entry point.  This way, the preloader
+does not have to give up the address reservation.
+
+Since this is a potentially risky change, this behaviour is hidden
+behind the "WINEPRELOADREMAPSTACK" environment variable.  To activate
+the behaviour, the user needs to set
+"WINEPRELOADREMAPSTACK=on-conflict".  After sufficient testing has
+been done via staging process, the new behaviour could be the default
+and the environment variables removed.
+
+Note that changes to argv and envp is *not* visible in
+/proc/PID/{environ,cmdline} after the stack has been switched, since
+kernel mm pointer fields are still pointing to the old stack.
+
+Signed-off-by: Jinoh Kang <jinoh.kang.kr@gmail.com>
+---
+
+Notes:
+    v1 -> v2:
+    - s/offset/delta/g
+    - shift VMA_STACK to 0x10 from 0x08 (now taken by VMA_SIGPAGE)
+    
+    v3 -> v4:
+    - add comments and documentation
+    
+    v4 -> v5: no changes
+
+ loader/preloader.c | 148 ++++++++++++++++++++++++++++++++++++++-------
+ 1 file changed, 127 insertions(+), 21 deletions(-)
+
+diff --git a/loader/preloader.c b/loader/preloader.c
+index 11111111111..11111111111 100644
+--- a/loader/preloader.c
++++ b/loader/preloader.c
+@@ -258,6 +258,7 @@ enum vma_type_flags
+ #ifdef __arm__
+     VMA_SIGPAGE = 0x08,
+ #endif
++    VMA_STACK   = 0x10,
+ };
+ 
+ struct vma_area
+@@ -294,6 +295,7 @@ enum remap_policy
+ #ifdef __arm__
+     REMAP_POLICY_DEFAULT_SIGPAGE = REMAP_POLICY_SKIP,
+ #endif
++    REMAP_POLICY_DEFAULT_STACK   = REMAP_POLICY_SKIP,
+ };
+ 
+ /*
+@@ -1261,6 +1263,77 @@ static void stackargs_switch_stack( struct stackarg_info *newinfo, struct stacka
+     newinfo->auxv_end = (void *)((unsigned long)oldinfo->auxv_end + delta);
+ }
+ 
++/*
++ * relocate_argvec
++ *
++ * Copy argument / environment vector from src to dest, fixing up addresses so
++ * that addresses relative to src are now relative to dest.
++ */
++static size_t relocate_argvec( char **dest, char **src, size_t count )
++{
++    size_t i;
++    unsigned long delta = (unsigned long)dest - (unsigned long)src;
++
++    for (i = 0; i < count && src[i]; i++)
++        dest[i] = src[i] + delta;
++
++    dest[i] = 0;
++    return i;
++}
++
++/*
++ * relocate_auxvec
++ *
++ * Copy auxiliary vector from src to dest, fixing up addresses so that addresses
++ * relative to src are now relative to dest.
++ */
++static size_t relocate_auxvec( struct wld_auxv *dest, struct wld_auxv *src )
++{
++    size_t i;
++    unsigned long delta = (unsigned long)dest - (unsigned long)src;
++
++    for (i = 0; src[i].a_type != AT_NULL; i++)
++    {
++        dest[i].a_type = src[i].a_type;
++        switch (dest[i].a_type)
++        {
++        case AT_RANDOM:
++        case AT_PLATFORM:
++        case AT_BASE_PLATFORM:
++        case AT_EXECFN:
++            if (src[i].a_un.a_val >= (unsigned long)src)
++            {
++                dest[i].a_un.a_val = src[i].a_un.a_val + delta;
++                break;
++            }
++            /* fallthrough */
++        default:
++            dest[i].a_un.a_val = src[i].a_un.a_val;
++            break;
++        }
++    }
++
++    return i;
++}
++
++/*
++ * copy_stackargs
++ *
++ * Copy the initial stack containing program arguments to newstack, fixing up
++ * addresses as appropriate.
++ */
++static void copy_stackargs( struct stackarg_info *newinfo, struct stackarg_info *oldinfo, void *newstack, void *newstackend )
++{
++    stackargs_switch_stack( newinfo, oldinfo, newstack );
++
++    *(int *)newstack = *(int *)oldinfo->stack;
++    relocate_argvec( newinfo->argv, oldinfo->argv, newinfo->envp - newinfo->argv );
++    relocate_argvec( newinfo->envp, oldinfo->envp, (char **)newinfo->auxv - newinfo->envp );
++    relocate_auxvec( newinfo->auxv, oldinfo->auxv );
++    wld_memmove( newinfo->auxv_end, oldinfo->auxv_end,
++                 (unsigned long)newstackend - (unsigned long)newinfo->auxv_end );
++}
++
+ /*
+  * set_auxiliary_values
+  *
+@@ -2133,7 +2206,7 @@ static int remap_multiple_vmas( struct vma_area_list *list, unsigned long delta,
+  *
+  * Parse /proc/self/maps into the given VMA area list.
+  */
+-static void scan_vma( struct vma_area_list *list, size_t *act_count )
++static void scan_vma( struct vma_area_list *list, size_t *act_count, void *stack_ptr )
+ {
+     int fd;
+     size_t n = 0;
+@@ -2157,6 +2230,9 @@ static void scan_vma( struct vma_area_list *list, size_t *act_count )
+         {
+             if (parse_maps_line( &item, line ) >= 0)
+             {
++                if (item.start <= (unsigned long)stack_ptr &&
++                    item.end   >  (unsigned long)stack_ptr)
++                    item.type_flags |= VMA_STACK;
+                 if (list->list_end < list->alloc_end) insert_vma_entry( list, &item );
+                 n++;
+             }
+@@ -2187,7 +2263,7 @@ static void free_vma_list( struct vma_area_list *list )
+  *
+  * Parse /proc/self/maps into a newly allocated VMA area list.
+  */
+-static void alloc_scan_vma( struct vma_area_list *listp )
++static void alloc_scan_vma( struct vma_area_list *listp, void *stack_ptr )
+ {
+     size_t max_count = page_size / sizeof(struct vma_area);
+     struct vma_area_list vma_list;
+@@ -2202,7 +2278,7 @@ static void alloc_scan_vma( struct vma_area_list *listp )
+         vma_list.list_end = vma_list.base;
+         vma_list.alloc_end = vma_list.base + max_count;
+ 
+-        scan_vma( &vma_list, &max_count );
++        scan_vma( &vma_list, &max_count, stack_ptr );
+         if (vma_list.list_end - vma_list.base == max_count)
+         {
+             wld_memmove(listp, &vma_list, sizeof(*listp));
+@@ -2459,7 +2535,7 @@ static int remap_vdso( struct vma_area_list *vma_list, struct preloader_state *s
+ 
+     /* Refresh VMA list */
+     free_vma_list( vma_list );
+-    alloc_scan_vma( vma_list );
++    alloc_scan_vma( vma_list, state->s.stack );
+     return 1;
+ 
+ remap_restore:
+@@ -2507,7 +2583,7 @@ static int remap_sigpage( struct vma_area_list *vma_list, struct preloader_state
+ 
+     /* Refresh VMA list */
+     free_vma_list( vma_list );
+-    alloc_scan_vma( vma_list );
++    alloc_scan_vma( vma_list, state->s.stack );
+     return 1;
+ 
+ remap_restore:
+@@ -2518,29 +2594,58 @@ remap_restore:
+ }
+ #endif
+ 
++/*
++ * remap_stack
++ *
++ * Perform stack remapping if it conflicts with one of the reserved address ranges.
++ */
++static int remap_stack( struct vma_area_list *vma_list, struct preloader_state *state )
++{
++    unsigned long stack_start, stack_size;
++    struct stackarg_info newinfo;
++    void *new_stack, *new_stack_base;
++    int result, i;
++
++    if (find_vma_envelope_range( vma_list, VMA_STACK,
++                                 &stack_start, &stack_size ) < 0) return 0;
++
++    result = check_remap_policy( state, "WINEPRELOADREMAPSTACK",
++                                 REMAP_POLICY_DEFAULT_STACK,
++                                 stack_start, stack_size );
++    if (result < 0) goto remove_from_reserve;
++    if (result == 0) return 0;
++
++    new_stack_base = wld_mmap( NULL, stack_size, PROT_READ | PROT_WRITE,
++                               MAP_PRIVATE | MAP_ANONYMOUS | MAP_GROWSDOWN, -1, 0 );
++    if (new_stack_base == (void *)-1) goto remove_from_reserve;
++
++    new_stack = (void *)((unsigned long)new_stack_base + ((unsigned long)state->s.stack - stack_start));
++    copy_stackargs( &newinfo, &state->s, new_stack, (void *)((unsigned long)new_stack_base + stack_size) );
++
++    wld_memmove( &state->s, &newinfo, sizeof(state->s) );
++
++    free_vma_list( vma_list );
++    alloc_scan_vma( vma_list, state->s.stack );
++    return 1;
++
++remove_from_reserve:
++    while ((i = find_preload_reserved_area( (void *)stack_start, stack_size )) >= 0)
++        remove_preload_range( i );
++    return -1;
++}
++
+ /*
+  * map_reserve_preload_ranges
+  *
+  * Attempt to reserve memory ranges into preload_info.
+- * If any preload_info entry overlaps with stack, remove the entry instead of
+- * reserving.
+  */
+-static void map_reserve_preload_ranges( const struct vma_area_list *vma_list,
+-                                        const struct stackarg_info *stackinfo )
++static void map_reserve_preload_ranges( const struct vma_area_list *vma_list )
+ {
+     size_t i;
+-    unsigned long exclude_start = (unsigned long)stackinfo->stack - 1;
+-    unsigned long exclude_end = (unsigned long)stackinfo->auxv + 1;
+ 
+     for (i = 0; preload_info[i].size; i++)
+     {
+-        if (exclude_end   >  (unsigned long)preload_info[i].addr &&
+-            exclude_start <= (unsigned long)preload_info[i].addr + preload_info[i].size - 1)
+-        {
+-            remove_preload_range( i );
+-            i--;
+-        }
+-        else if (map_reserve_unmapped_range( vma_list, preload_info[i].addr, preload_info[i].size ) < 0)
++        if (map_reserve_unmapped_range( vma_list, preload_info[i].addr, preload_info[i].size ) < 0)
+         {
+             /* don't warn for low 64k */
+             if (preload_info[i].addr >= (void *)0x10000
+@@ -2603,15 +2708,16 @@ void* wld_start( void **stack )
+     reserve = stackargs_getenv( &state.s, "WINEPRELOADRESERVE" );
+     if (reserve) preload_reserve( reserve );
+ 
+-    alloc_scan_vma( &vma_list );
+-    map_reserve_preload_ranges( &vma_list, &state.s );
++    alloc_scan_vma( &vma_list, state.s.stack );
++    map_reserve_preload_ranges( &vma_list );
+ 
+     remap_done = 0;
+     remap_done |= remap_vdso( &vma_list, &state ) > 0;
+ #ifdef __arm__
+     remap_done |= remap_sigpage( &vma_list, &state ) > 0;
+ #endif
+-    if (remap_done) map_reserve_preload_ranges( &vma_list, &state.s );
++    remap_done |= remap_stack( &vma_list, &state ) > 0;
++    if (remap_done) map_reserve_preload_ranges( &vma_list );
+ 
+     /* add an executable page at the top of the address space to defeat
+      * broken no-exec protections that play with the code selector limit */
+
+-- 
+2.36.0
+

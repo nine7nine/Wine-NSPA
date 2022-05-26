@@ -1,0 +1,135 @@
+From: Jinoh Kang <jinoh.kang.kr@gmail.com>
+Subject: [PATCH v5 06/13] loader: Explicitly munmap() the preloader's ELF EHDR.
+Message-Id: <4d6905c0-7ea3-77c1-24b5-b56f8dda3b6e@gmail.com>
+Date: Sat, 5 Mar 2022 23:54:37 +0900
+In-Reply-To: <7a3d3b9e-7d1a-9fde-99a7-bd47d51fda35@gmail.com>
+References: <7a3d3b9e-7d1a-9fde-99a7-bd47d51fda35@gmail.com>
+
+Today, the preloader reserves some predefined address ranges without
+checking if there are any overlapping virtual memory mappings.
+
+One side effect of this behaviour is that the preloader's ELF EHDR gets
+unmapped.  Note the following overlapping address ranges:
+
+- 0x00110000 - 0x68000000: low memory area (preload_info)
+- 0x08040000 - 0x08041000: preloader ELF EHDR (x86)
+- 0x00400000 - 0x00401000: preloader ELF EHDR (AMD64)
+
+In practice, unmapping the preloader ELF EHDR is harmless; this is
+because the dynamic linker does not recognise the preloader binary.
+
+Make the unmapping behaviour explicit by calling munmap() on the
+preloader's ELF EHDR.
+
+Signed-off-by: Jinoh Kang <jinoh.kang.kr@gmail.com>
+---
+
+Notes:
+    v1 -> v2: fix comparing text segment start against EHDR start
+    
+    v4 -> v5: no changes
+
+ loader/preloader.c | 30 ++++++++++++++++++++++++++++++
+ 1 file changed, 30 insertions(+)
+
+diff --git a/loader/preloader.c b/loader/preloader.c
+index 11111111111..11111111111 100644
+--- a/loader/preloader.c
++++ b/loader/preloader.c
+@@ -227,6 +227,7 @@ struct
+  *  then jumps to the address wld_start returns.
+  */
+ void _start(void);
++extern char __executable_start[];
+ extern char _end[];
+ __ASM_GLOBAL_FUNC(_start,
+                   __ASM_CFI("\t.cfi_undefined %eip\n")
+@@ -346,6 +347,15 @@ __ASM_GLOBAL_FUNC(wld_mmap,
+                   __ASM_CFI(".cfi_adjust_cfa_offset -4\n\t")
+                   "\tret\n" )
+ 
++static inline int wld_munmap( void *addr, size_t len )
++{
++    int ret;
++    __asm__ __volatile__( "pushl %%ebx; movl %2,%%ebx; int $0x80; popl %%ebx"
++                          : "=a" (ret) : "0" (91 /* SYS_munmap */), "r" (addr), "c" (len)
++                          : "memory" );
++    return SYSCALL_RET(ret);
++}
++
+ static inline int wld_prctl( int code, long arg )
+ {
+     long ret;
+@@ -365,6 +375,7 @@ void *thread_data[256];
+  *  then jumps to the address wld_start returns.
+  */
+ void _start(void);
++extern char __executable_start[];
+ extern char _end[];
+ __ASM_GLOBAL_FUNC(_start,
+                   __ASM_CFI(".cfi_undefined %rip\n\t")
+@@ -428,6 +439,9 @@ SYSCALL_FUNC( wld_mmap, 9 /* SYS_mmap */ );
+ int wld_mprotect( const void *addr, size_t len, int prot );
+ SYSCALL_FUNC( wld_mprotect, 10 /* SYS_mprotect */ );
+ 
++int wld_munmap( void *addr, size_t len );
++SYSCALL_FUNC( wld_munmap, 11 /* SYS_munmap */ );
++
+ int wld_prctl( int code, long arg );
+ SYSCALL_FUNC( wld_prctl, 157 /* SYS_prctl */ );
+ 
+@@ -454,6 +468,7 @@ void *thread_data[256];
+  *  then jumps to the address wld_start returns.
+  */
+ void _start(void);
++extern char __executable_start[];
+ extern char _end[];
+ __ASM_GLOBAL_FUNC(_start,
+                   "mov x0, SP\n\t"
+@@ -534,6 +549,9 @@ SYSCALL_FUNC( wld_mmap, 222 /* SYS_mmap */ );
+ int wld_mprotect( const void *addr, size_t len, int prot );
+ SYSCALL_FUNC( wld_mprotect, 226 /* SYS_mprotect */ );
+ 
++int wld_munmap( void *addr, size_t len );
++SYSCALL_FUNC( wld_munmap, 215 /* SYS_munmap */ );
++
+ int wld_prctl( int code, long arg );
+ SYSCALL_FUNC( wld_prctl, 167 /* SYS_prctl */ );
+ 
+@@ -560,6 +578,7 @@ void *thread_data[256];
+  *  then jumps to the address wld_start returns.
+  */
+ void _start(void);
++extern char __executable_start[];
+ extern char _end[];
+ __ASM_GLOBAL_FUNC(_start,
+                   "mov r0, sp\n\t"
+@@ -632,6 +651,9 @@ void *wld_mmap( void *start, size_t len, int prot, int flags, int fd, off_t offs
+ int wld_mprotect( const void *addr, size_t len, int prot );
+ SYSCALL_FUNC( wld_mprotect, 125 /* SYS_mprotect */ );
+ 
++int wld_munmap( void *addr, size_t len );
++SYSCALL_FUNC( wld_munmap, 91 /* SYS_munmap */ );
++
+ int wld_prctl( int code, long arg );
+ SYSCALL_FUNC( wld_prctl, 172 /* SYS_prctl */ );
+ 
+@@ -1567,6 +1589,14 @@ void* wld_start( void **stack )
+     preloader_start = (char *)_start - ((unsigned long)_start & page_mask);
+     preloader_end = (char *)((unsigned long)(_end + page_mask) & ~page_mask);
+ 
++    if ((unsigned long)preloader_start >= (unsigned long)__executable_start + page_size)
++    {
++        /* Unmap preloader's ELF EHDR */
++        wld_munmap( __executable_start,
++                    ((unsigned long)preloader_start -
++                     (unsigned long)__executable_start) & ~page_mask );
++    }
++
+ #ifdef DUMP_AUX_INFO
+     wld_printf( "stack = %p\n", state.s.stack );
+     for( i = 0; i < state.s.argc; i++ ) wld_printf("argv[%lx] = %s\n", i, state.s.argv[i]);
+
+-- 
+2.36.0
+

@@ -1,0 +1,106 @@
+From: Jinoh Kang <jinoh.kang.kr@gmail.com>
+Subject: [PATCH v3 02/13] loader: Remove GCC <=4.x EBX register spilling workaround for i386.
+Message-Id: <3d4a3a79-7b6c-83cc-66fe-157e1dd0c920@gmail.com>
+Date: Wed, 26 Jan 2022 00:24:40 +0900
+In-Reply-To: <ed8913ee-6dd0-751d-3ec2-75d4865a6ed4@gmail.com>
+References: <ed8913ee-6dd0-751d-3ec2-75d4865a6ed4@gmail.com>
+
+Arbitrarily manipulating the stack pointer in inline assembly interferes
+with stack unwinding and debugging experience.  Note that it's
+impossible to reliably specify unwinding information in inline assembly,
+other than adjusting CFA offset.
+
+The workaround appears to be due to "buggy" register allocation that
+manifests in GCC <= 4.x when emitting position-independent code.
+This is not an issue, since the preloader isn't a position-independent
+executable or a shared library.
+
+Fix this by getting rid of extra spilling and value transfer of the EBX
+register, and telling the compiler to allocate EBX directly.
+
+Signed-off-by: Jinoh Kang <jinoh.kang.kr@gmail.com>
+---
+ loader/preloader.c | 28 ++++++++++++++--------------
+ 1 file changed, 14 insertions(+), 14 deletions(-)
+
+diff --git a/loader/preloader.c b/loader/preloader.c
+index 11111111111..11111111111 100644
+--- a/loader/preloader.c
++++ b/loader/preloader.c
+@@ -241,32 +241,32 @@ __ASM_GLOBAL_FUNC(_start,
+ static inline __attribute__((noreturn)) void wld_exit( int code )
+ {
+     for (;;)  /* avoid warning */
+-        __asm__ __volatile__( "pushl %%ebx; movl %1,%%ebx; int $0x80; popl %%ebx"
+-                              : : "a" (1 /* SYS_exit */), "r" (code) );
++        __asm__ __volatile__( "int $0x80"
++                              : : "a" (1 /* SYS_exit */), "b" (code) );
+ }
+ 
+ static inline int wld_open( const char *name, int flags )
+ {
+     long ret;
+-    __asm__ __volatile__( "pushl %%ebx; movl %2,%%ebx; int $0x80; popl %%ebx"
+-                          : "=a" (ret) : "0" (5 /* SYS_open */), "r" (name), "c" (flags) );
++    __asm__ __volatile__( "int $0x80"
++                          : "=a" (ret) : "0" (5 /* SYS_open */), "b" (name), "c" (flags) );
+     return SYSCALL_RET(ret);
+ }
+ 
+ static inline int wld_close( int fd )
+ {
+     long ret;
+-    __asm__ __volatile__( "pushl %%ebx; movl %2,%%ebx; int $0x80; popl %%ebx"
+-                          : "=a" (ret) : "0" (6 /* SYS_close */), "r" (fd) );
++    __asm__ __volatile__( "int $0x80"
++                          : "=a" (ret) : "0" (6 /* SYS_close */), "b" (fd) );
+     return SYSCALL_RET(ret);
+ }
+ 
+ static inline ssize_t wld_read( int fd, void *buffer, size_t len )
+ {
+     long ret;
+-    __asm__ __volatile__( "pushl %%ebx; movl %2,%%ebx; int $0x80; popl %%ebx"
++    __asm__ __volatile__( "int $0x80"
+                           : "=a" (ret)
+-                          : "0" (3 /* SYS_read */), "r" (fd), "c" (buffer), "d" (len)
++                          : "0" (3 /* SYS_read */), "b" (fd), "c" (buffer), "d" (len)
+                           : "memory" );
+     return SYSCALL_RET(ret);
+ }
+@@ -274,16 +274,16 @@ static inline ssize_t wld_read( int fd, void *buffer, size_t len )
+ static inline ssize_t wld_write( int fd, const void *buffer, size_t len )
+ {
+     long ret;
+-    __asm__ __volatile__( "pushl %%ebx; movl %2,%%ebx; int $0x80; popl %%ebx"
+-                          : "=a" (ret) : "0" (4 /* SYS_write */), "r" (fd), "c" (buffer), "d" (len) );
++    __asm__ __volatile__( "int $0x80"
++                          : "=a" (ret) : "0" (4 /* SYS_write */), "b" (fd), "c" (buffer), "d" (len) );
+     return SYSCALL_RET(ret);
+ }
+ 
+ static inline int wld_mprotect( const void *addr, size_t len, int prot )
+ {
+     long ret;
+-    __asm__ __volatile__( "pushl %%ebx; movl %2,%%ebx; int $0x80; popl %%ebx"
+-                          : "=a" (ret) : "0" (125 /* SYS_mprotect */), "r" (addr), "c" (len), "d" (prot) );
++    __asm__ __volatile__( "int $0x80"
++                          : "=a" (ret) : "0" (125 /* SYS_mprotect */), "b" (addr), "c" (len), "d" (prot) );
+     return SYSCALL_RET(ret);
+ }
+ 
+@@ -329,8 +329,8 @@ __ASM_GLOBAL_FUNC(wld_mmap,
+ static inline int wld_prctl( int code, long arg )
+ {
+     long ret;
+-    __asm__ __volatile__( "pushl %%ebx; movl %2,%%ebx; int $0x80; popl %%ebx"
+-                          : "=a" (ret) : "0" (172 /* SYS_prctl */), "r" (code), "c" (arg) );
++    __asm__ __volatile__( "int $0x80"
++                          : "=a" (ret) : "0" (172 /* SYS_prctl */), "b" (code), "c" (arg) );
+     return SYSCALL_RET(ret);
+ }
+ 
+
+-- 
+2.36.0
+

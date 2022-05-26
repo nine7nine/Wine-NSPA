@@ -1,0 +1,160 @@
+From: Jinoh Kang <jinoh.kang.kr@gmail.com>
+Subject: [PATCH v5 10/13] loader: Relocate sigpage on conflict with reserved ranges in ARM.
+Message-Id: <50ac588a-fc28-03db-41e0-732d6cc6de1c@gmail.com>
+Date: Sat, 5 Mar 2022 23:54:53 +0900
+In-Reply-To: <7a3d3b9e-7d1a-9fde-99a7-bd47d51fda35@gmail.com>
+References: <7a3d3b9e-7d1a-9fde-99a7-bd47d51fda35@gmail.com>
+
+Today, the preloader makes no attempt to remap the sigpage when it
+conflicts with reserved addresses.  If libc doesn't have its own signal
+restorer, this results in inability to return from signal handlers.
+
+Fix this by relocating sigpage to another address whenever possible.
+
+Since this is a potentially risky change, this behaviour is hidden
+behind the "WINEPRELOADREMAPSIGPAGE" environment variable.  To activate
+the behaviour, the user needs to set
+"WINEPRELOADREMAPSIGPAGE=on-conflict".  After sufficient testing has
+been done via staging process, the new behaviour could be the default
+and the environment variables removed.
+
+Signed-off-by: Jinoh Kang <jinoh.kang.kr@gmail.com>
+---
+
+Notes:
+    v1 -> v2: new patch
+    
+    v3 -> v4:
+    - add documentation for remap_sigpage
+    - fix indentation
+    
+    v4 -> v5: no changes
+
+ loader/preloader.c | 75 ++++++++++++++++++++++++++++++++++++++++++----
+ 1 file changed, 70 insertions(+), 5 deletions(-)
+
+diff --git a/loader/preloader.c b/loader/preloader.c
+index 11111111111..11111111111 100644
+--- a/loader/preloader.c
++++ b/loader/preloader.c
+@@ -252,9 +252,12 @@ struct linebuffer
+  */
+ enum vma_type_flags
+ {
+-    VMA_NORMAL = 0x01,
+-    VMA_VDSO   = 0x02,
+-    VMA_VVAR   = 0x04,
++    VMA_NORMAL  = 0x01,
++    VMA_VDSO    = 0x02,
++    VMA_VVAR    = 0x04,
++#ifdef __arm__
++    VMA_SIGPAGE = 0x08,
++#endif
+ };
+ 
+ struct vma_area
+@@ -287,7 +290,10 @@ enum remap_policy
+     REMAP_POLICY_SKIP = 2,
+     LAST_REMAP_POLICY,
+ 
+-    REMAP_POLICY_DEFAULT_VDSO = REMAP_POLICY_SKIP,
++    REMAP_POLICY_DEFAULT_VDSO    = REMAP_POLICY_SKIP,
++#ifdef __arm__
++    REMAP_POLICY_DEFAULT_SIGPAGE = REMAP_POLICY_SKIP,
++#endif
+ };
+ 
+ /*
+@@ -1947,6 +1953,10 @@ static int parse_maps_line( struct vma_area *entry, const char *line )
+             item.type_flags |= VMA_VDSO;
+         else if (wld_strcmp(ptr, "[vvar]") == 0)
+             item.type_flags |= VMA_VVAR;
++#ifdef __arm__
++        else if (wld_strcmp(ptr, "[sigpage]") == 0)
++            item.type_flags |= VMA_SIGPAGE;
++#endif
+     }
+ 
+     *entry = item;
+@@ -2459,6 +2469,55 @@ remap_restore:
+     return -1;
+ }
+ 
++#ifdef __arm__
++/*
++ * remap_sigpage
++ *
++ * Perform sigpage remapping if it conflicts with one of the reserved address ranges.
++ *
++ * sigpage remapping shouldn't really be necessary, since modern libcs
++ * use their own signal restorer anyway.  But better be safe than sorry...
++ */
++static int remap_sigpage( struct vma_area_list *vma_list, struct preloader_state *state )
++{
++    int result;
++    unsigned long sigpage_start, sigpage_size, delta;
++    void *new_sigpage;
++
++    if (find_vma_envelope_range( vma_list, VMA_SIGPAGE,
++                                 &sigpage_start, &sigpage_size ) < 0) return 0;
++
++    result = check_remap_policy( state, "WINEPRELOADREMAPSIGPAGE",
++                                 REMAP_POLICY_DEFAULT_SIGPAGE,
++                                 sigpage_start, sigpage_size );
++    if (result <= 0) return result;
++
++    new_sigpage = wld_mmap( NULL, sigpage_size, PROT_NONE,
++                            MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0 );
++    if (new_sigpage == (void *)-1) return -1;
++
++    delta = (unsigned long)new_sigpage - sigpage_start;
++    if (remap_multiple_vmas( vma_list, delta, VMA_SIGPAGE, 0 ) < 0) goto remap_restore;
++
++    if (test_remap_successful( vma_list, state, sigpage_start, sigpage_size, delta ) < 0)
++    {
++        /* mapping restore done by test_remap_successful */
++        return -1;
++    }
++
++    /* Refresh VMA list */
++    free_vma_list( vma_list );
++    alloc_scan_vma( vma_list );
++    return 1;
++
++remap_restore:
++    if (remap_multiple_vmas( vma_list, delta, -1, 1 ) < 0)
++        fatal_error( "Cannot restore remapped VMAs\n" );
++
++    return -1;
++}
++#endif
++
+ /*
+  * map_reserve_preload_ranges
+  *
+@@ -2514,6 +2573,7 @@ void* wld_start( void **stack )
+     struct wine_preload_info **wine_main_preload_info;
+     struct preloader_state state = { 0 };
+     struct vma_area_list vma_list = { NULL };
++    int remap_done;
+ 
+     parse_stackargs( &state.s, *stack );
+ 
+@@ -2546,7 +2606,12 @@ void* wld_start( void **stack )
+     alloc_scan_vma( &vma_list );
+     map_reserve_preload_ranges( &vma_list, &state.s );
+ 
+-    if (remap_vdso( &vma_list, &state ) > 0) map_reserve_preload_ranges( &vma_list, &state.s );
++    remap_done = 0;
++    remap_done |= remap_vdso( &vma_list, &state ) > 0;
++#ifdef __arm__
++    remap_done |= remap_sigpage( &vma_list, &state ) > 0;
++#endif
++    if (remap_done) map_reserve_preload_ranges( &vma_list, &state.s );
+ 
+     /* add an executable page at the top of the address space to defeat
+      * broken no-exec protections that play with the code selector limit */
+
+-- 
+2.36.0
+
