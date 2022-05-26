@@ -1,8 +1,8 @@
-# Wine-NSPA
+# Wine-NSPA: 
 
 ![My Image](/examples/images/wine-nspa-Banner.png)
 
-### Wine-NSPA is a Real-Time / Proaudio-Centric build of Wine(-TKG). 
+### A Real-Time Proaudio-Centric Build of Wine(-TKG). 
 
 This fork tries to integrate all of the performance and RT related features, that help proaudio apps run better.
 Fsync/futex_waitv is currently the prefered method for improving syncronization support. ( it requires kernel-level
@@ -16,15 +16,15 @@ related threads to RT. Have a look below;
 
 ![My Image](/examples/images/wine-nspa_wine_proc_threads.png)
 
-Here, we can see wine's own process threads are running as Real-time. What you can't see here is that these threads
+Here, we can see wine's own process threads are running as Real-Time. What you can't see here is that these threads
 are mostly futex-related and are running with SCHED_RR policy, while the highest RT priority threads are FIFO. The main 
-process threads do not run as Real-time... Next, have a look at application threads; 
+process threads do not run as Real-Time... Next, have a look at application threads; 
 
 ![My Image](/examples/images/wine-nspa_app_threads.png)
 
-Here, the very highest priority RT threads are FIFO (wineAPI TIME_CRITICAL = -76); while all lower RT priority threads 
-are SCHED_RR. Notably, these lower RT priority threads are important; they are worker threads and the Wine-rt patch 
-can't set them as Real-Time. Have you ever ran into a multi-processor mode in a plugin that causes xruns and 
+Here, the very highest priority RT threads are FIFO (winAPI TIME_CRITICAL = -76); while all lower RT priority threads 
+are SCHED_RR. Notably, the very loweest RT priority threads are important; these are worker threads and the Wine-rt patch 
+can't set them as Real-Time properly. ~ Have you ever ran into a multi-processor mode in a plugin that causes xruns and 
 glitching? Well, it's likely because the plugin's worker threads weren't running with Real-Time priorities.
 
 In Wine-NSPA, various Environment Variables must be set for an application to make use of this fork's features.
@@ -35,7 +35,7 @@ enabled. Have a look here; https://github.com/nine7nine/Wine-NSPA/tree/main/exam
 
 * WINE_RT_PRIO=78 - Set RT thread Prioties from Wineserver. *note: sets highest priority, then decrements by 2.
 * WINE_RT_POLICY="FF" - Set RT Policy from Wineserver. *note: TIME_CRITICAL threads are hardcoded to SCHED_FIFO.
-* NTDLL_RT_PRIO=5 - Set RT thread priorities from Ntdll. *note: these are basically NT threads; APCs, non-winAPI pthreads. 
+* NTDLL_RT_PRIO=5 - Set RT thread priorities from Ntdll. *note: these are basically NT threads; APCs or non-winAPI pthreads. 
 * NTDLL_RT_POLICY="RR" - Set NTDLL scheduling policy. *supports FF, RR and TS.
 * WINEESYNC=1 - Esync server-side synchronization. note: Fsync is better.
 * WINEFSYNC=1 - Fsync kernel-side / futex_waitv / futex-based synchronization.
