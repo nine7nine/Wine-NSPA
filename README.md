@@ -1,5 +1,7 @@
 # Wine-NSPA
 
+![My Image](/examples/images/wine-nspa-Banner.png)
+
 Wine-NSPA is a Real-Time / Proaudio-centric builds of Wine(-TKG). 
 
 This fork tries to integrate all of the performance and RT related features, that help proaudio apps run better.
