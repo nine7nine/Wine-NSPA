@@ -50,8 +50,8 @@ This is a rough summary, for now. More details will be added later.
 As mentioned above, some features in Wine-NSPA require kernel support. I provide my own kernel sources + Archlinux 
 PKGBUILDs for my own custom kernel. Found here;
 
-* Archlinux PKGBUILD - https://github.com/nine7nine/pkgbuilds-linux-nspa/tree/master/linux-cachy-nspa-rt
-* My Linux Kernel Sources - https://github.com/nine7nine/linux-cachy-nspa
+* Archlinux PKGBUILD - https://github.com/nine7nine/Linux-NSPA-pkgbuild
+* My Linux Kernel Sources - https://github.com/nine7nine/Linux-NSPA
 
 Credits/Shoutouts:
 
