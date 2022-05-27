@@ -1,0 +1,728 @@
+From: Jinoh Kang <jinoh.kang.kr@gmail.com>
+Subject: [PATCH 1/6] include: Move WIN32_MEMORY_RANGE_ENTRY from winnt.h to winbase.h.
+Message-Id: <d8105173-f9a2-317e-1c27-ddd290627f7a@gmail.com>
+Date: Thu, 20 Jan 2022 02:28:01 +0900
+
+Signed-off-by: Jinoh Kang <jinoh.kang.kr@gmail.com>
+---
+ include/winbase.h | 6 ++++++
+ include/winnt.h   | 6 ------
+ 2 files changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/include/winbase.h b/include/winbase.h
+index 11111111111..11111111111 100644
+--- a/include/winbase.h
++++ b/include/winbase.h
+@@ -1760,6 +1760,12 @@ typedef struct _WIN32_FIND_STREAM_DATA {
+     WCHAR cStreamName[MAX_PATH + 36];
+ } WIN32_FIND_STREAM_DATA,*PWIN32_FIND_STREAM_DATA;
+ 
++typedef struct _WIN32_MEMORY_RANGE_ENTRY
++{
++    PVOID  VirtualAddress;
++    SIZE_T NumberOfBytes;
++} WIN32_MEMORY_RANGE_ENTRY, *PWIN32_MEMORY_RANGE_ENTRY;
++
+ WINBASEAPI BOOL        WINAPI ActivateActCtx(HANDLE,ULONG_PTR *);
+ WINADVAPI  BOOL        WINAPI AddAccessAllowedAce(PACL,DWORD,DWORD,PSID);
+ WINADVAPI  BOOL        WINAPI AddAccessAllowedAceEx(PACL,DWORD,DWORD,DWORD,PSID);
+diff --git a/include/winnt.h b/include/winnt.h
+index 11111111111..11111111111 100644
+--- a/include/winnt.h
++++ b/include/winnt.h
+@@ -776,12 +776,6 @@ typedef struct DECLSPEC_ALIGN(8) MEM_EXTENDED_PARAMETER {
+     } DUMMYUNIONNAME;
+ } MEM_EXTENDED_PARAMETER, *PMEM_EXTENDED_PARAMETER;
+ 
+-typedef struct _WIN32_MEMORY_RANGE_ENTRY
+-{
+-    PVOID  VirtualAddress;
+-    SIZE_T NumberOfBytes;
+-} WIN32_MEMORY_RANGE_ENTRY, *PWIN32_MEMORY_RANGE_ENTRY;
+-
+ #define	PAGE_NOACCESS		0x01
+ #define	PAGE_READONLY		0x02
+ #define	PAGE_READWRITE		0x04
+
+-- 
+2.36.0
+
+From: Jinoh Kang <jinoh.kang.kr@gmail.com>
+Subject: [PATCH 2/6] include: Add definition for NtSetInformationVirtualMemory.
+Message-Id: <15046b06-e1fb-351c-eb51-a8458d4ca540@gmail.com>
+Date: Thu, 20 Jan 2022 02:29:00 +0900
+In-Reply-To: <d8105173-f9a2-317e-1c27-ddd290627f7a@gmail.com>
+References: <d8105173-f9a2-317e-1c27-ddd290627f7a@gmail.com>
+
+Signed-off-by: Jinoh Kang <jinoh.kang.kr@gmail.com>
+---
+ include/winternl.h     | 14 ++++++++++++++
+ tools/winapi/win32.api |  1 +
+ 2 files changed, 15 insertions(+)
+
+diff --git a/include/winternl.h b/include/winternl.h
+index 11111111111..11111111111 100644
+--- a/include/winternl.h
++++ b/include/winternl.h
+@@ -1985,6 +1985,19 @@ typedef struct _TIMER_BASIC_INFORMATION
+     BOOLEAN       TimerState;
+ } TIMER_BASIC_INFORMATION, *PTIMER_BASIC_INFORMATION;
+ 
++typedef enum
++{
++    VmPrefetchInformation,
++    VmPagePriorityInformation,
++    VmCfgCallTargetInformation
++} VIRTUAL_MEMORY_INFORMATION_CLASS, *PVIRTUAL_MEMORY_INFORMATION_CLASS;
++
++typedef struct _MEMORY_RANGE_ENTRY
++{
++    PVOID  VirtualAddress;
++    SIZE_T NumberOfBytes;
++} MEMORY_RANGE_ENTRY, *PMEMORY_RANGE_ENTRY;
++
+ 
+ /* return type of RtlDetermineDosPathNameType_U (FIXME: not the correct names) */
+ typedef enum
+@@ -4133,6 +4146,7 @@ NTSYSAPI NTSTATUS  WINAPI NtSetInformationObject(HANDLE, OBJECT_INFORMATION_CLAS
+ NTSYSAPI NTSTATUS  WINAPI NtSetInformationProcess(HANDLE,PROCESS_INFORMATION_CLASS,PVOID,ULONG);
+ NTSYSAPI NTSTATUS  WINAPI NtSetInformationThread(HANDLE,THREADINFOCLASS,LPCVOID,ULONG);
+ NTSYSAPI NTSTATUS  WINAPI NtSetInformationToken(HANDLE,TOKEN_INFORMATION_CLASS,PVOID,ULONG);
++NTSYSAPI NTSTATUS  WINAPI NtSetInformationVirtualMemory(HANDLE,VIRTUAL_MEMORY_INFORMATION_CLASS,ULONG_PTR,PMEMORY_RANGE_ENTRY,PVOID,ULONG);
+ NTSYSAPI NTSTATUS  WINAPI NtSetIntervalProfile(ULONG,KPROFILE_SOURCE);
+ NTSYSAPI NTSTATUS  WINAPI NtSetIoCompletion(HANDLE,ULONG_PTR,ULONG_PTR,NTSTATUS,SIZE_T);
+ NTSYSAPI NTSTATUS  WINAPI NtSetLdtEntries(ULONG,LDT_ENTRY,ULONG,LDT_ENTRY);
+diff --git a/tools/winapi/win32.api b/tools/winapi/win32.api
+index 11111111111..11111111111 100644
+--- a/tools/winapi/win32.api
++++ b/tools/winapi/win32.api
+@@ -3245,6 +3245,7 @@ TOKEN_TYPE
+ UCHAR
+ UINT
+ ULONG
++VIRTUAL_MEMORY_INFORMATION_CLASS
+ WCHAR
+ WORD
+ int
+
+-- 
+2.36.0
+
+From: Jinoh Kang <jinoh.kang.kr@gmail.com>
+Subject: [PATCH 3/6] ntdll/tests: Add tests for NtSetInformationVirtualMemory.
+Message-Id: <51b84edf-78d6-8ace-b1a5-94eb4ea0d39c@gmail.com>
+Date: Thu, 20 Jan 2022 02:29:15 +0900
+In-Reply-To: <d8105173-f9a2-317e-1c27-ddd290627f7a@gmail.com>
+References: <d8105173-f9a2-317e-1c27-ddd290627f7a@gmail.com>
+
+Signed-off-by: Jinoh Kang <jinoh.kang.kr@gmail.com>
+---
+
+Notes:
+    v2 -> v3: Guard wow64 status code tests with todo_wine
+    v4 -> v5: fix one wow64 test item
+    v5 -> v6: use ULongToPtr/PtrToUlong macro; edit subject
+
+ dlls/ntdll/tests/virtual.c | 164 +++++++++++++++++++++++++++++++++++++
+ 1 file changed, 164 insertions(+)
+
+diff --git a/dlls/ntdll/tests/virtual.c b/dlls/ntdll/tests/virtual.c
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/tests/virtual.c
++++ b/dlls/ntdll/tests/virtual.c
+@@ -39,6 +39,9 @@ static void * (WINAPI *pRtlFindExportedR
+ static BOOL (WINAPI *pIsWow64Process)(HANDLE, PBOOL);
+ static NTSTATUS (WINAPI *pNtAllocateVirtualMemoryEx)(HANDLE, PVOID *, SIZE_T *, ULONG, ULONG,
+                                                      MEM_EXTENDED_PARAMETER *, ULONG);
++static NTSTATUS (WINAPI *pNtSetInformationVirtualMemory)(HANDLE, VIRTUAL_MEMORY_INFORMATION_CLASS,
++                                                         ULONG_PTR, PMEMORY_RANGE_ENTRY,
++                                                         PVOID, ULONG);
+ static const BOOL is_win64 = sizeof(void*) != sizeof(int);
+ static BOOL is_wow64;
+ 
+@@ -1132,6 +1135,165 @@ static void test_syscalls(void)
+     UnmapViewOfFile( ptr );
+ }
+ 
++static void test_prefetch(void)
++{
++    NTSTATUS status;
++    MEMORY_RANGE_ENTRY entries[2] = {{ 0 }};
++    ULONG reservedarg = 0;
++    char stackmem[] = "Test stack mem";
++    static char testmem[] = "Test memory range data";
++
++    if (!pNtSetInformationVirtualMemory)
++    {
++        skip("no NtSetInformationVirtualMemory in ntdll\n");
++        return;
++    }
++
++    status = pNtSetInformationVirtualMemory( NtCurrentProcess(), -1UL, 1, entries, NULL, 32);
++    ok( status == STATUS_INVALID_PARAMETER_2,
++        "NtSetInformationVirtualMemory unexpected status on invalid info class (1): %08x\n", status);
++
++    status = pNtSetInformationVirtualMemory( NtCurrentProcess(), -1UL, 0, NULL, NULL, 0);
++    ok( status == STATUS_INVALID_PARAMETER_2 || (is_wow64 && status == STATUS_INVALID_PARAMETER_3),
++        "NtSetInformationVirtualMemory unexpected status on invalid info class (2): %08x\n", status);
++    if (is_wow64)
++    {
++        todo_wine
++        ok( status == STATUS_INVALID_PARAMETER_3,
++            "wow64 NtSetInformationVirtualMemory unexpected status on invalid info class (2): %08x\n", status);
++    }
++
++    status = pNtSetInformationVirtualMemory( NtCurrentProcess(), -1UL, 1, NULL, NULL, 32);
++    ok( status == STATUS_INVALID_PARAMETER_2 || (is_wow64 && status == STATUS_ACCESS_VIOLATION),
++        "NtSetInformationVirtualMemory unexpected status on invalid info class (3): %08x\n", status);
++    if (is_wow64)
++    {
++        todo_wine
++        ok( status == STATUS_ACCESS_VIOLATION,
++            "wow64 NtSetInformationVirtualMemory unexpected status on invalid info class (3): %08x\n", status);
++    }
++
++    status = pNtSetInformationVirtualMemory( NtCurrentProcess(), VmPrefetchInformation,
++                                             1, entries, NULL, 0 );
++    ok( status == STATUS_INVALID_PARAMETER_5 ||
++        broken( is_wow64 && status == STATUS_INVALID_PARAMETER_6 ) /* win10 1507 */,
++        "NtSetInformationVirtualMemory unexpected status on NULL info data (1): %08x\n", status);
++
++    status = pNtSetInformationVirtualMemory( NtCurrentProcess(), VmPrefetchInformation,
++                                             1, NULL, NULL, 0 );
++    ok( status == STATUS_INVALID_PARAMETER_5 || (is_wow64 && status == STATUS_ACCESS_VIOLATION),
++        "NtSetInformationVirtualMemory unexpected status on NULL info data (2): %08x\n", status);
++    if (is_wow64)
++    {
++        todo_wine
++        ok( status == STATUS_ACCESS_VIOLATION,
++            "wow64 NtSetInformationVirtualMemory unexpected status on NULL info data (2): %08x\n", status);
++    }
++
++    status = pNtSetInformationVirtualMemory( NtCurrentProcess(), VmPrefetchInformation,
++                                             0, NULL, NULL, 0 );
++    ok( status == STATUS_INVALID_PARAMETER_5 || (is_wow64 && status == STATUS_INVALID_PARAMETER_3),
++        "NtSetInformationVirtualMemory unexpected status on NULL info data (3): %08x\n", status);
++    if (is_wow64)
++    {
++        todo_wine
++        ok( status == STATUS_INVALID_PARAMETER_3,
++            "wow64 NtSetInformationVirtualMemory unexpected status on NULL info data (3): %08x\n", status);
++    }
++
++    status = pNtSetInformationVirtualMemory( NtCurrentProcess(), VmPrefetchInformation,
++                                             1, entries, &reservedarg, sizeof(reservedarg) * 2 );
++    ok( status == STATUS_INVALID_PARAMETER_6,
++        "NtSetInformationVirtualMemory unexpected status on extended info data (1): %08x\n", status);
++
++    status = pNtSetInformationVirtualMemory( NtCurrentProcess(), VmPrefetchInformation,
++                                             0, NULL, &reservedarg, sizeof(reservedarg) * 2 );
++    ok( status == STATUS_INVALID_PARAMETER_6 || (is_wow64 && status == STATUS_INVALID_PARAMETER_3),
++        "NtSetInformationVirtualMemory unexpected status on extended info data (2): %08x\n", status);
++    if (is_wow64)
++    {
++        todo_wine
++        ok( status == STATUS_INVALID_PARAMETER_3,
++            "wow64 NtSetInformationVirtualMemory unexpected status on extended info data (2): %08x\n", status);
++    }
++
++    status = pNtSetInformationVirtualMemory( NtCurrentProcess(), VmPrefetchInformation,
++                                             1, entries, &reservedarg, sizeof(reservedarg) / 2 );
++    ok( status == STATUS_INVALID_PARAMETER_6,
++        "NtSetInformationVirtualMemory unexpected status on shrunk info data (1): %08x\n", status);
++
++    status = pNtSetInformationVirtualMemory( NtCurrentProcess(), VmPrefetchInformation,
++                                             0, NULL, &reservedarg, sizeof(reservedarg) / 2 );
++    ok( status == STATUS_INVALID_PARAMETER_6 || (is_wow64 && status == STATUS_INVALID_PARAMETER_3),
++        "NtSetInformationVirtualMemory unexpected status on shrunk info data (2): %08x\n", status);
++    if (is_wow64)
++    {
++        todo_wine
++        ok( status == STATUS_INVALID_PARAMETER_3,
++            "wow64 NtSetInformationVirtualMemory unexpected status on shrunk info data (2): %08x\n", status);
++    }
++
++    status = pNtSetInformationVirtualMemory( NtCurrentProcess(), VmPrefetchInformation,
++                                             0, NULL, &reservedarg, sizeof(reservedarg) );
++    ok( status == STATUS_INVALID_PARAMETER_3,
++        "NtSetInformationVirtualMemory unexpected status on 0 entries: %08x\n", status);
++
++    status = pNtSetInformationVirtualMemory( NtCurrentProcess(), VmPrefetchInformation,
++                                             1, NULL, &reservedarg, sizeof(reservedarg) );
++    ok( status == STATUS_ACCESS_VIOLATION,
++        "NtSetInformationVirtualMemory unexpected status on NULL entries: %08x\n", status);
++
++    entries[0].VirtualAddress = NULL;
++    entries[0].NumberOfBytes = 0;
++    status = pNtSetInformationVirtualMemory( NtCurrentProcess(), VmPrefetchInformation,
++                                             1, entries, &reservedarg, sizeof(reservedarg) );
++    ok( status == STATUS_INVALID_PARAMETER_4 ||
++        broken( is_wow64 && status == STATUS_INVALID_PARAMETER_6 ) /* win10 1507 */,
++        "NtSetInformationVirtualMemory unexpected status on 1 empty entry: %08x\n", status);
++
++    entries[0].VirtualAddress = NULL;
++    entries[0].NumberOfBytes = page_size;
++    status = pNtSetInformationVirtualMemory( NtCurrentProcess(), VmPrefetchInformation,
++                                             1, entries, &reservedarg, sizeof(reservedarg) );
++    ok( status == STATUS_SUCCESS ||
++        broken( is_wow64 && status == STATUS_INVALID_PARAMETER_6 ) /* win10 1507 */,
++        "NtSetInformationVirtualMemory unexpected status on 1 NULL address entry: %08x\n", status);
++
++    entries[0].VirtualAddress = ULongToPtr(PtrToUlong(testmem) & -(ULONG_PTR)page_size);
++    entries[0].NumberOfBytes = page_size;
++    status = pNtSetInformationVirtualMemory( NtCurrentProcess(), VmPrefetchInformation,
++                                             1, entries, &reservedarg, sizeof(reservedarg) );
++    ok( status == STATUS_SUCCESS ||
++        broken( is_wow64 && status == STATUS_INVALID_PARAMETER_6 ) /* win10 1507 */,
++        "NtSetInformationVirtualMemory unexpected status on 1 page-aligned entry: %08x\n", status);
++
++    entries[0].VirtualAddress = testmem;
++    entries[0].NumberOfBytes = sizeof(testmem);
++    status = pNtSetInformationVirtualMemory( NtCurrentProcess(), VmPrefetchInformation,
++                                             1, entries, &reservedarg, sizeof(reservedarg) );
++    ok( status == STATUS_SUCCESS ||
++        broken( is_wow64 && status == STATUS_INVALID_PARAMETER_6 ) /* win10 1507 */,
++        "NtSetInformationVirtualMemory unexpected status on 1 entry: %08x\n", status);
++
++    entries[0].VirtualAddress = NULL;
++    entries[0].NumberOfBytes = page_size;
++    status = pNtSetInformationVirtualMemory( NtCurrentProcess(), VmPrefetchInformation,
++                                             1, entries, &reservedarg, sizeof(reservedarg) );
++    ok( status == STATUS_SUCCESS ||
++        broken( is_wow64 && status == STATUS_INVALID_PARAMETER_6 ) /* win10 1507 */,
++        "NtSetInformationVirtualMemory unexpected status on 1 unmapped entry: %08x\n", status);
++
++    entries[0].VirtualAddress = ULongToPtr(PtrToUlong(testmem) & -(ULONG_PTR)page_size);
++    entries[0].NumberOfBytes = page_size;
++    entries[1].VirtualAddress = ULongToPtr(PtrToUlong(stackmem) & -(ULONG_PTR)page_size);
++    entries[1].NumberOfBytes = page_size;
++    status = pNtSetInformationVirtualMemory( NtCurrentProcess(), VmPrefetchInformation,
++                                             2, entries, &reservedarg, sizeof(reservedarg) );
++    ok( status == STATUS_SUCCESS ||
++        broken( is_wow64 && status == STATUS_INVALID_PARAMETER_6 ) /* win10 1507 */,
++        "NtSetInformationVirtualMemory unexpected status on 2 page-aligned entries: %08x\n", status);
++}
++
+ START_TEST(virtual)
+ {
+     HMODULE mod;
+@@ -1160,6 +1322,7 @@ START_TEST(virtual)
+     pRtlFindExportedRoutineByName = (void *)GetProcAddress(mod, "RtlFindExportedRoutineByName");
+     pRtlGetEnabledExtendedFeatures = (void *)GetProcAddress(mod, "RtlGetEnabledExtendedFeatures");
+     pNtAllocateVirtualMemoryEx = (void *)GetProcAddress(mod, "NtAllocateVirtualMemoryEx");
++    pNtSetInformationVirtualMemory = (void *)GetProcAddress(mod, "NtSetInformationVirtualMemory");
+ 
+     NtQuerySystemInformation(SystemBasicInformation, &sbi, sizeof(sbi), NULL);
+     trace("system page size %#lx\n", sbi.PageSize);
+@@ -1171,4 +1334,5 @@ START_TEST(virtual)
+     test_NtMapViewOfSection();
+     test_user_shared_data();
+     test_syscalls();
++    test_prefetch();
+ }
+
+-- 
+2.36.0
+
+From: Jinoh Kang <jinoh.kang.kr@gmail.com>
+Subject: [PATCH 4/6] ntdll: Implement NtSetInformationVirtualMemory (intra-process case).
+Message-Id: <2415db87-0a75-d9a2-09c7-2eb24e6ddad2@gmail.com>
+Date: Thu, 20 Jan 2022 02:29:20 +0900
+In-Reply-To: <d8105173-f9a2-317e-1c27-ddd290627f7a@gmail.com>
+References: <d8105173-f9a2-317e-1c27-ddd290627f7a@gmail.com>
+
+Signed-off-by: Jinoh Kang <jinoh.kang.kr@gmail.com>
+---
+
+Notes:
+    v2 -> v3:
+    - Remove autoconf check for madvise; assume it always exists
+    - ntdll/unix/virtual: fix code style
+    - ntdll/unix/virtual: edit fixme message in prefetch_memory
+    - ntdll/unix/virtual: validate addresses argument first in prefetch_memory
+    - wow64/virtual: use ULongToPtr() macro
+    - wow64/virtual: separate 32-bit and 64-bit variables in wow64_NtSetInformationVirtualMemory
+
+ dlls/ntdll/ntdll.spec     |  2 ++
+ dlls/ntdll/unix/loader.c  |  1 +
+ dlls/ntdll/unix/virtual.c | 64 +++++++++++++++++++++++++++++++++++++++
+ dlls/wow64/struct32.h     |  6 ++++
+ dlls/wow64/syscall.h      |  1 +
+ dlls/wow64/virtual.c      | 53 ++++++++++++++++++++++++++++++++
+ 6 files changed, 127 insertions(+)
+
+diff --git a/dlls/ntdll/ntdll.spec b/dlls/ntdll/ntdll.spec
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/ntdll.spec
++++ b/dlls/ntdll/ntdll.spec
+@@ -390,6 +390,7 @@
+ @ stdcall -syscall NtSetInformationProcess(long long ptr long)
+ @ stdcall -syscall NtSetInformationThread(long long ptr long)
+ @ stdcall -syscall NtSetInformationToken(long long ptr long)
++@ stdcall -syscall NtSetInformationVirtualMemory(long long ptr ptr ptr long)
+ @ stdcall -syscall NtSetIntervalProfile(long long)
+ @ stdcall -syscall NtSetIoCompletion(ptr long long long long)
+ @ stdcall -syscall NtSetLdtEntries(long int64 long int64)
+@@ -1419,6 +1420,7 @@
+ @ stdcall -private -syscall ZwSetInformationProcess(long long ptr long) NtSetInformationProcess
+ @ stdcall -private -syscall ZwSetInformationThread(long long ptr long) NtSetInformationThread
+ @ stdcall -private -syscall ZwSetInformationToken(long long ptr long) NtSetInformationToken
++@ stdcall -private -syscall ZwSetInformationVirtualMemory(long long ptr ptr ptr long) NtSetInformationVirtualMemory
+ @ stdcall -private -syscall ZwSetIntervalProfile(long long) NtSetIntervalProfile
+ @ stdcall -private -syscall ZwSetIoCompletion(ptr long long long long) NtSetIoCompletion
+ @ stdcall -private -syscall ZwSetLdtEntries(long int64 long int64) NtSetLdtEntries
+diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -312,6 +312,7 @@ static void * const syscalls[] =
+     NtSetInformationProcess,
+     NtSetInformationThread,
+     NtSetInformationToken,
++    NtSetInformationVirtualMemory,
+     NtSetIntervalProfile,
+     NtSetIoCompletion,
+     NtSetLdtEntries,
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -5314,6 +5314,70 @@ NTSTATUS WINAPI NtAreMappedFilesTheSame(PVOID addr1, PVOID addr2)
+ }
+ 
+ 
++static NTSTATUS prefetch_memory( HANDLE process, ULONG_PTR count,
++                                 PMEMORY_RANGE_ENTRY addresses, ULONG flags )
++{
++    ULONG_PTR i;
++    PVOID base;
++    SIZE_T size;
++    static unsigned int once;
++
++    if (!once++)
++    {
++        FIXME( "(process=%p,flags=%u) NtSetInformationVirtualMemory(VmPrefetchInformation) partial stub\n",
++                process, flags );
++    }
++
++    for (i = 0; i < count; i++)
++    {
++        if (!addresses[i].NumberOfBytes) return STATUS_INVALID_PARAMETER_4;
++    }
++
++    if (process != NtCurrentProcess()) return STATUS_SUCCESS;
++
++    for (i = 0; i < count; i++)
++    {
++        MEMORY_RANGE_ENTRY entry;
++        memcpy( &entry, &addresses[i], sizeof(MEMORY_RANGE_ENTRY) );
++
++        base = ROUND_ADDR( entry.VirtualAddress, page_mask );
++        size = ROUND_SIZE( entry.VirtualAddress, entry.NumberOfBytes );
++
++        madvise( base, size, MADV_WILLNEED );
++    }
++
++    return STATUS_SUCCESS;
++}
++
++/***********************************************************************
++ *           NtSetInformationVirtualMemory   (NTDLL.@)
++ *           ZwSetInformationVirtualMemory   (NTDLL.@)
++ */
++NTSTATUS WINAPI NtSetInformationVirtualMemory( HANDLE process,
++                                               VIRTUAL_MEMORY_INFORMATION_CLASS info_class,
++                                               ULONG_PTR count, PMEMORY_RANGE_ENTRY addresses,
++                                               PVOID ptr, ULONG size )
++{
++    TRACE("(%p, info_class=%d, %lu, %p, %p, %u)\n",
++          process, info_class, count, addresses, ptr, size);
++
++    switch (info_class)
++    {
++        case VmPrefetchInformation:
++            if (!ptr) return STATUS_INVALID_PARAMETER_5;
++            if (size != sizeof(ULONG)) return STATUS_INVALID_PARAMETER_6;
++            if (!count) return STATUS_INVALID_PARAMETER_3;
++            if (!addresses) return STATUS_ACCESS_VIOLATION;
++            return prefetch_memory( process, count, addresses, *(ULONG *)ptr );
++
++        default:
++            FIXME("(%p,info_class=%d,%lu,%p,%p,%u) Unknown information class\n",
++                  process, info_class, count, addresses, ptr, size);
++            return STATUS_INVALID_PARAMETER_2;
++    }
++}
++
++
+ /**********************************************************************
+  *           NtFlushInstructionCache  (NTDLL.@)
+  */
+diff --git a/dlls/wow64/struct32.h b/dlls/wow64/struct32.h
+index 11111111111..11111111111 100644
+--- a/dlls/wow64/struct32.h
++++ b/dlls/wow64/struct32.h
+@@ -650,6 +650,12 @@ typedef struct
+     ULONG                       Reserved4;
+ } SYSTEM_EXTENDED_THREAD_INFORMATION32;
+ 
++typedef struct
++{
++    ULONG VirtualAddress;
++    ULONG NumberOfBytes;
++} MEMORY_RANGE_ENTRY32;
++
+ struct __server_iovec32
+ {
+     ULONG        ptr;
+diff --git a/dlls/wow64/syscall.h b/dlls/wow64/syscall.h
+index 11111111111..11111111111 100644
+--- a/dlls/wow64/syscall.h
++++ b/dlls/wow64/syscall.h
+@@ -211,6 +211,7 @@
+     SYSCALL_ENTRY( NtSetInformationProcess ) \
+     SYSCALL_ENTRY( NtSetInformationThread ) \
+     SYSCALL_ENTRY( NtSetInformationToken ) \
++    SYSCALL_ENTRY( NtSetInformationVirtualMemory ) \
+     SYSCALL_ENTRY( NtSetIntervalProfile ) \
+     SYSCALL_ENTRY( NtSetIoCompletion ) \
+     SYSCALL_ENTRY( NtSetLdtEntries ) \
+diff --git a/dlls/wow64/virtual.c b/dlls/wow64/virtual.c
+index 11111111111..11111111111 100644
+--- a/dlls/wow64/virtual.c
++++ b/dlls/wow64/virtual.c
+@@ -33,6 +33,21 @@
+ WINE_DEFAULT_DEBUG_CHANNEL(wow);
+ 
+ 
++static MEMORY_RANGE_ENTRY *memory_range_entry_array_32to64( const MEMORY_RANGE_ENTRY32 *addresses32,
++                                                            ULONG_PTR count )
++{
++    MEMORY_RANGE_ENTRY *addresses = Wow64AllocateTemp( sizeof(MEMORY_RANGE_ENTRY) * count );
++    ULONG_PTR i;
++
++    for (i = 0; i < count; i++)
++    {
++        addresses[i].VirtualAddress = ULongToPtr( addresses32[i].VirtualAddress );
++        addresses[i].NumberOfBytes = addresses32[i].NumberOfBytes;
++    }
++
++    return addresses;
++}
++
+ /**********************************************************************
+  *           wow64_NtAllocateVirtualMemory
+  */
+@@ -470,6 +485,44 @@ NTSTATUS WINAPI wow64_NtResetWriteWatch( UINT *args )
+ }
+ 
+ 
++/**********************************************************************
++ *           wow64_NtSetInformationVirtualMemory
++ */
++NTSTATUS WINAPI wow64_NtSetInformationVirtualMemory( UINT *args )
++{
++    HANDLE process = get_handle( &args );
++    VIRTUAL_MEMORY_INFORMATION_CLASS info_class = get_ulong( &args );
++    ULONG_PTR count = get_ulong( &args );
++    MEMORY_RANGE_ENTRY32 *addresses32 = get_ptr( &args );
++    PVOID ptr32 = get_ptr( &args );
++    ULONG len32 = get_ulong( &args );
++
++    MEMORY_RANGE_ENTRY *addresses;
++    PVOID ptr;
++    ULONG len;
++
++    if (!count) return STATUS_INVALID_PARAMETER_3;
++    if (!addresses32) return STATUS_ACCESS_VIOLATION;
++    addresses = memory_range_entry_array_32to64( addresses32, count );
++
++    switch (info_class)
++    {
++    case VmPrefetchInformation:
++        if (!ptr32) return STATUS_INVALID_PARAMETER_5;
++        if (len32 != sizeof(ULONG)) return STATUS_INVALID_PARAMETER_6;
++        ptr = ptr32;  /* TODO */
++        len = sizeof(ULONG);
++        break;
++    default:
++        FIXME( "(%p,info_class=%u,%u,%p,%p,%u): not implemented\n",
++               process, info_class, count, addresses32, ptr32, len32 );
++        return STATUS_INVALID_PARAMETER_2;
++    }
++
++    return NtSetInformationVirtualMemory( process, info_class, count, addresses, ptr, len );
++}
++
++
+ /**********************************************************************
+  *           wow64_NtSetLdtEntries
+  */
+
+-- 
+2.36.0
+
+From: Jinoh Kang <jinoh.kang.kr@gmail.com>
+Subject: [PATCH 5/6] kernel32/tests: Add tests for PrefetchVirtualMemory.
+Message-Id: <b8e25651-99d8-2e1e-066e-27fbe1b1d27b@gmail.com>
+Date: Thu, 20 Jan 2022 02:29:25 +0900
+In-Reply-To: <d8105173-f9a2-317e-1c27-ddd290627f7a@gmail.com>
+References: <d8105173-f9a2-317e-1c27-ddd290627f7a@gmail.com>
+
+Signed-off-by: Jinoh Kang <jinoh.kang.kr@gmail.com>
+---
+
+Notes:
+    v3 -> v4: account for broken wow64 behaviour in win10 1507
+    v5 -> v6: use ULongToPtr/PtrToUlong macro; edit subject
+
+ dlls/kernel32/tests/virtual.c | 50 +++++++++++++++++++++++++++++++++++
+ 1 file changed, 50 insertions(+)
+
+diff --git a/dlls/kernel32/tests/virtual.c b/dlls/kernel32/tests/virtual.c
+index 11111111111..11111111111 100644
+--- a/dlls/kernel32/tests/virtual.c
++++ b/dlls/kernel32/tests/virtual.c
+@@ -37,6 +37,7 @@
+ 
+ static HINSTANCE hkernel32, hkernelbase, hntdll;
+ static SYSTEM_INFO si;
++static BOOL is_wow64;
+ static UINT   (WINAPI *pGetWriteWatch)(DWORD,LPVOID,SIZE_T,LPVOID*,ULONG_PTR*,ULONG*);
+ static UINT   (WINAPI *pResetWriteWatch)(LPVOID,SIZE_T);
+ static NTSTATUS (WINAPI *pNtAreMappedFilesTheSame)(PVOID,PVOID);
+@@ -51,6 +52,7 @@ static BOOL   (WINAPI *pGetProcessDEPPolicy)(HANDLE, LPDWORD, PBOOL);
+ static BOOL   (WINAPI *pIsWow64Process)(HANDLE, PBOOL);
+ static NTSTATUS (WINAPI *pNtProtectVirtualMemory)(HANDLE, PVOID *, SIZE_T *, ULONG, ULONG *);
+ static PVOID (WINAPI *pVirtualAllocFromApp)(PVOID, SIZE_T, DWORD, DWORD);
++static BOOL  (WINAPI *pPrefetchVirtualMemory)(HANDLE, ULONG_PTR, PWIN32_MEMORY_RANGE_ENTRY, ULONG);
+ 
+ /* ############################### */
+ 
+@@ -4469,6 +4471,50 @@ todo_wine
+     CloseHandle(mapping);
+ }
+ 
++static void test_PrefetchVirtualMemory(void)
++{
++    WIN32_MEMORY_RANGE_ENTRY entries[2];
++    char stackmem[] = "Test stack mem";
++    static char testmem[] = "Test memory range data";
++    unsigned int page_size = si.dwPageSize;
++
++    if (!pPrefetchVirtualMemory)
++    {
++        skip("no PrefetchVirtualMemory in kernelbase\n");
++        return;
++    }
++
++    todo_wine
++    ok( !pPrefetchVirtualMemory( GetCurrentProcess(), 0, NULL, 0 ),
++        "PrefetchVirtualMemory unexpected success on 0 entries\n" );
++
++    entries[0].VirtualAddress = ULongToPtr(PtrToUlong(testmem) & -(ULONG_PTR)page_size);
++    entries[0].NumberOfBytes = page_size;
++    ok( pPrefetchVirtualMemory( GetCurrentProcess(), 1, entries, 0 ) ||
++        broken( is_wow64 && GetLastError() == ERROR_INVALID_PARAMETER ) /* win10 1507 */,
++        "PrefetchVirtualMemory unexpected status on 1 page-aligned entry: %d\n", GetLastError() );
++
++    entries[0].VirtualAddress = testmem;
++    entries[0].NumberOfBytes = sizeof(testmem);
++    ok( pPrefetchVirtualMemory( GetCurrentProcess(), 1, entries, 0 ) ||
++        broken( is_wow64 && GetLastError() == ERROR_INVALID_PARAMETER ) /* win10 1507 */,
++        "PrefetchVirtualMemory unexpected status on 1 entry: %d\n", GetLastError() );
++
++    entries[0].VirtualAddress = NULL;
++    entries[0].NumberOfBytes = page_size;
++    ok( pPrefetchVirtualMemory( GetCurrentProcess(), 1, entries, 0 ) ||
++        broken( is_wow64 && GetLastError() == ERROR_INVALID_PARAMETER ) /* win10 1507 */,
++        "PrefetchVirtualMemory unexpected status on 1 unmapped entry: %d\n", GetLastError() );
++
++    entries[0].VirtualAddress = ULongToPtr(PtrToUlong(testmem) & -(ULONG_PTR)page_size);
++    entries[0].NumberOfBytes = page_size;
++    entries[1].VirtualAddress = ULongToPtr(PtrToUlong(stackmem) & -(ULONG_PTR)page_size);
++    entries[1].NumberOfBytes = page_size;
++    ok( pPrefetchVirtualMemory( GetCurrentProcess(), 2, entries, 0 ) ||
++        broken( is_wow64 && GetLastError() == ERROR_INVALID_PARAMETER ) /* win10 1507 */,
++        "PrefetchVirtualMemory unexpected status on 2 page-aligned entries: %d\n", GetLastError() );
++}
++
+ START_TEST(virtual)
+ {
+     int argc;
+@@ -4524,10 +4570,13 @@ START_TEST(virtual)
+     pRtlRemoveVectoredExceptionHandler = (void *)GetProcAddress( hntdll, "RtlRemoveVectoredExceptionHandler" );
+     pNtProtectVirtualMemory = (void *)GetProcAddress( hntdll, "NtProtectVirtualMemory" );
+     pVirtualAllocFromApp = (void *)GetProcAddress( hkernelbase, "VirtualAllocFromApp" );
++    pPrefetchVirtualMemory = (void *)GetProcAddress( hkernelbase, "PrefetchVirtualMemory" );
+ 
+     GetSystemInfo(&si);
+     trace("system page size %#lx\n", si.dwPageSize);
+ 
++    if (!pIsWow64Process || !pIsWow64Process( GetCurrentProcess(), &is_wow64 )) is_wow64 = FALSE;
++
+     test_shared_memory(FALSE);
+     test_shared_memory_ro(FALSE, FILE_MAP_READ|FILE_MAP_WRITE);
+     test_shared_memory_ro(FALSE, FILE_MAP_COPY);
+@@ -4547,6 +4596,7 @@ START_TEST(virtual)
+     test_IsBadWritePtr();
+     test_IsBadCodePtr();
+     test_write_watch();
++    test_PrefetchVirtualMemory();
+ #if defined(__i386__) || defined(__x86_64__)
+     test_stack_commit();
+ #endif
+
+-- 
+2.36.0
+
+From: Jinoh Kang <jinoh.kang.kr@gmail.com>
+Subject: [PATCH 6/6] kernelbase: Implement PrefetchVirtualMemory.
+Message-Id: <d3471266-7666-0cc0-7240-a0c980438db2@gmail.com>
+Date: Thu, 20 Jan 2022 02:29:31 +0900
+In-Reply-To: <d8105173-f9a2-317e-1c27-ddd290627f7a@gmail.com>
+References: <d8105173-f9a2-317e-1c27-ddd290627f7a@gmail.com>
+
+Signed-off-by: Jinoh Kang <jinoh.kang.kr@gmail.com>
+---
+ dlls/kernel32/tests/virtual.c | 1 -
+ dlls/kernelbase/memory.c      | 9 +++++----
+ 2 files changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/dlls/kernel32/tests/virtual.c b/dlls/kernel32/tests/virtual.c
+index 11111111111..11111111111 100644
+--- a/dlls/kernel32/tests/virtual.c
++++ b/dlls/kernel32/tests/virtual.c
+@@ -4484,7 +4484,6 @@ static void test_PrefetchVirtualMemory(void)
+         return;
+     }
+ 
+-    todo_wine
+     ok( !pPrefetchVirtualMemory( GetCurrentProcess(), 0, NULL, 0 ),
+         "PrefetchVirtualMemory unexpected success on 0 entries\n" );
+ 
+diff --git a/dlls/kernelbase/memory.c b/dlls/kernelbase/memory.c
+index 11111111111..11111111111 100644
+--- a/dlls/kernelbase/memory.c
++++ b/dlls/kernelbase/memory.c
+@@ -365,11 +365,12 @@ LPVOID WINAPI DECLSPEC_HOTPATCH VirtualAllocFromApp( void *addr, SIZE_T size,
+ /***********************************************************************
+  *             PrefetchVirtualMemory   (kernelbase.@)
+  */
+-BOOL WINAPI /* DECLSPEC_HOTPATCH */ PrefetchVirtualMemory( HANDLE process, ULONG_PTR count,
+-                                                           WIN32_MEMORY_RANGE_ENTRY *addresses, ULONG flags )
++BOOL WINAPI DECLSPEC_HOTPATCH PrefetchVirtualMemory( HANDLE process, ULONG_PTR count,
++                                                     WIN32_MEMORY_RANGE_ENTRY *addresses, ULONG flags )
+ {
+-    FIXME( "process %p, count %p, addresses %p, flags %#lx stub.\n", process, (void *)count, addresses, flags );
+-    return TRUE;
++    return set_ntstatus( NtSetInformationVirtualMemory( process, VmPrefetchInformation,
++                                                        count, (PMEMORY_RANGE_ENTRY)addresses,
++                                                        &flags, sizeof(flags) ));
+ }
+ 
+ 
+
+-- 
+2.36.0
+
