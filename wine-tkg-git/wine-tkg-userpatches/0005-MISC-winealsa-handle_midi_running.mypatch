@@ -1,0 +1,235 @@
+From: Akihiro Sagawa <sagawa.aki@gmail.com>
+Subject: [PATCH 1/5] midimap: Handle MIDI running status.
+Message-Id: <20220526233716.F18F.375B48EC@gmail.com>
+Date: Thu, 26 May 2022 23:38:43 +0900
+
+Wine's midiOutShortMsg() can't handle the MIDI message if the status
+byte is omitted. Omitting status byte is valid and called "running
+status".
+
+Wine-Bug: https://bugs.winehq.org/show_bug.cgi?id=53003
+Signed-off-by: Akihiro Sagawa <sagawa.aki@gmail.com>
+---
+ dlls/midimap/midimap.c | 30 +++++++++++++++++++++++++++---
+ 1 file changed, 27 insertions(+), 3 deletions(-)
+
+diff --git a/dlls/midimap/midimap.c b/dlls/midimap/midimap.c
+index 12555f5309a..e04fe721364 100644
+--- a/dlls/midimap/midimap.c
++++ b/dlls/midimap/midimap.c
+@@ -101,6 +101,7 @@ typedef	struct tagMIDIMAPDATA
+     struct tagMIDIMAPDATA*	self;
+     MIDIOUTPORT*	ChannelMap[16];
+     MIDIOPENDESC	midiDesc;
++    BYTE		runningStatus;
+     WORD		wCbFlags;
+ } MIDIMAPDATA;
+ 
+@@ -301,6 +302,7 @@ static DWORD modOpen(DWORD_PTR *lpdwUser, LPMIDIOPENDESC lpDesc, DWORD dwFlags)
+ 	mom->self = mom;
+ 	mom->wCbFlags = HIWORD(dwFlags & CALLBACK_TYPEMASK);
+ 	mom->midiDesc = *lpDesc;
++	mom->runningStatus = 0;
+ 
+ 	for (chn = 0; chn < 16; chn++)
+ 	{
+@@ -380,6 +382,7 @@ static DWORD modLongData(MIDIMAPDATA* mom, LPMIDIHDR lpMidiHdr, DWORD_PTR dwPara
+ 	    if (ret != MMSYSERR_NOERROR) break;
+ 	}
+     }
++    mom->runningStatus = 0;
+     lpMidiHdr->dwFlags &= ~MHDR_INQUEUE;
+     lpMidiHdr->dwFlags |= MHDR_DONE;
+     MIDIMAP_NotifyClient(mom, MOM_DONE, (DWORD_PTR)lpMidiHdr, 0L);
+@@ -388,16 +391,31 @@ static DWORD modLongData(MIDIMAPDATA* mom, LPMIDIHDR lpMidiHdr, DWORD_PTR dwPara
+ 
+ static DWORD modData(MIDIMAPDATA* mom, DWORD_PTR dwParam)
+ {
+-    BYTE	lb = LOBYTE(LOWORD(dwParam));
+-    WORD	chn = lb & 0x0F;
++    BYTE	status = LOBYTE(LOWORD(dwParam));
++    WORD	chn;
+     DWORD	ret = MMSYSERR_NOERROR;
+ 
+     if (MIDIMAP_IsBadData(mom))
+ 	return MMSYSERR_ERROR;
+ 
++    if (status < 0x80)
++    {
++        if (mom->runningStatus)
++        {
++            status = mom->runningStatus;
++            dwParam = ((LOWORD(dwParam) << 8) | status);
++        }
++        else
++        {
++            FIXME("ooch %Ix\n", dwParam);
++            return MMSYSERR_NOERROR;
++        }
++    }
++    chn = status & 0x0F;
++
+     if (!mom->ChannelMap[chn]) return MMSYSERR_NOERROR;
+ 
+-    switch (lb & 0xF0)
++    switch (status & 0xF0)
+     {
+     case 0x80:
+     case 0x90:
+@@ -423,6 +441,7 @@ static DWORD modData(MIDIMAPDATA* mom, DWORD_PTR dwParam)
+ 	    }
+ 	    ret = midiOutShortMsg(mom->ChannelMap[chn]->hMidi, dwParam);
+ 	}
++	mom->runningStatus = status;
+ 	break;
+     case 0xF0:
+ 	for (chn = 0; chn < 16; chn++)
+@@ -430,6 +449,9 @@ static DWORD modData(MIDIMAPDATA* mom, DWORD_PTR dwParam)
+ 	    if (mom->ChannelMap[chn]->loaded > 0)
+ 		ret = midiOutShortMsg(mom->ChannelMap[chn]->hMidi, dwParam);
+ 	}
++	/* system common message */
++	if (status <= 0xF7)
++	    mom->runningStatus = 0;
+ 	break;
+     default:
+ 	FIXME("ooch %Ix\n", dwParam);
+@@ -511,6 +533,8 @@ static	DWORD	modReset(MIDIMAPDATA* mom)
+ 	    if (ret != MMSYSERR_NOERROR) break;
+ 	}
+     }
++    mom->runningStatus = 0;
++
+     return ret;
+ }
+ 
+
+From: Akihiro Sagawa <sagawa.aki@gmail.com>
+Subject: [PATCH 2/5] winealsa: Use the symbolic name for MIDI_CTL_ALL_SOUNDS_OFF.
+Message-Id: <20220526233718.F193.375B48EC@gmail.com>
+Date: Thu, 26 May 2022 23:38:45 +0900
+
+
+MIDI_CTL_ALL_SOUNDS_OFF is channel dependent.
+
+Signed-off-by: Akihiro Sagawa <sagawa.aki@gmail.com>
+---
+ dlls/winealsa.drv/alsamidi.c | 5 +----
+ 1 file changed, 1 insertion(+), 4 deletions(-)
+
+diff --git a/dlls/winealsa.drv/alsamidi.c b/dlls/winealsa.drv/alsamidi.c
+index 12a469533d9..ccb9146ed2b 100644
+--- a/dlls/winealsa.drv/alsamidi.c
++++ b/dlls/winealsa.drv/alsamidi.c
+@@ -922,13 +922,10 @@ static UINT midi_out_reset(WORD dev_id)
+     if (!dests[dev_id].bEnabled) return MIDIERR_NODEVICE;
+ 
+     /* stop all notes */
+-    /* FIXME: check if 0x78B0 is channel dependent or not. I coded it so that
+-     * it's channel dependent...
+-     */
+     for (chn = 0; chn < 16; chn++)
+     {
+         /* turn off every note */
+-        midi_out_data(dev_id, 0x7800 | MIDI_CMD_CONTROL | chn);
++        midi_out_data(dev_id, (MIDI_CTL_ALL_SOUNDS_OFF << 8) | MIDI_CMD_CONTROL | chn);
+         /* remove sustain on all channels */
+         midi_out_data(dev_id, (MIDI_CTL_SUSTAIN << 8) | MIDI_CMD_CONTROL | chn);
+     }
+
+From: Akihiro Sagawa <sagawa.aki@gmail.com>
+Subject: [PATCH 3/5] winealsa: Handle MIDI running status.
+Message-Id: <20220526233720.F197.375B48EC@gmail.com>
+Date: Thu, 26 May 2022 23:38:47 +0900
+
+Signed-off-by: Akihiro Sagawa <sagawa.aki@gmail.com>
+---
+ dlls/winealsa.drv/alsamidi.c | 31 ++++++++++++++++++++++++++++---
+ 1 file changed, 28 insertions(+), 3 deletions(-)
+
+diff --git a/dlls/winealsa.drv/alsamidi.c b/dlls/winealsa.drv/alsamidi.c
+index ccb9146ed2b..6350e3e4265 100644
+--- a/dlls/winealsa.drv/alsamidi.c
++++ b/dlls/winealsa.drv/alsamidi.c
+@@ -55,6 +55,7 @@ struct midi_dest
+ {
+     BOOL                bEnabled;
+     MIDIOPENDESC        midiDesc;
++    BYTE                runningStatus;
+     WORD                wFlags;
+     MIDIOUTCAPSW        caps;
+     snd_seq_t          *seq;
+@@ -539,6 +540,7 @@ static UINT midi_out_open(WORD dev_id, MIDIOPENDESC *midi_desc, UINT flags, stru
+         return MMSYSERR_NOTENABLED;
+     }
+ 
++    dest->runningStatus = 0;
+     dest->wFlags = HIWORD(flags & CALLBACK_TYPEMASK);
+     dest->midiDesc = *midi_desc;
+     dest->seq = midi_seq;
+@@ -639,9 +641,7 @@ static UINT midi_out_close(WORD dev_id, struct notify_context *notify)
+ 
+ static UINT midi_out_data(WORD dev_id, UINT data)
+ {
+-    BYTE evt = LOBYTE(LOWORD(data));
+-    BYTE d1  = HIBYTE(LOWORD(data));
+-    BYTE d2  = LOBYTE(HIWORD(data));
++    BYTE evt = LOBYTE(LOWORD(data)), d1, d2;
+     struct midi_dest *dest;
+ 
+     TRACE("(%04X, %08X);\n", dev_id, data);
+@@ -656,6 +656,28 @@ static UINT midi_out_data(WORD dev_id, UINT data)
+         WARN("can't play !\n");
+         return MIDIERR_NODEVICE;
+     }
++
++    if (evt & 0x80)
++    {
++        d1 = HIBYTE(LOWORD(data));
++        d2 = LOBYTE(HIWORD(data));
++        if (evt < 0xF0)
++            dest->runningStatus = evt;
++        else if (evt <= 0xF7)
++            dest->runningStatus = 0;
++    }
++    else if (dest->runningStatus)
++    {
++        evt = dest->runningStatus;
++        d1 = LOBYTE(LOWORD(data));
++        d2 = HIBYTE(LOWORD(data));
++    }
++    else
++    {
++        FIXME("ooch %x\n", data);
++        return MMSYSERR_NOERROR;
++    }
++
+     switch (dest->caps.wTechnology)
+     {
+     case MOD_SYNTH:
+@@ -724,6 +746,7 @@ static UINT midi_out_data(WORD dev_id, UINT data)
+             {
+                 BYTE reset_sysex_seq[] = {MIDI_CMD_COMMON_SYSEX, 0x7e, 0x7f, 0x09, 0x01, 0xf7};
+                 snd_seq_ev_set_sysex(&event, sizeof(reset_sysex_seq), reset_sysex_seq);
++                dest->runningStatus = 0;
+                 break;
+             }
+             case 0x01:	/* MTC Quarter frame */
+@@ -855,6 +878,7 @@ static UINT midi_out_long_data(WORD dev_id, MIDIHDR *hdr, UINT hdr_size, struct
+         return MMSYSERR_NOTENABLED;
+     }
+ 
++    dest->runningStatus = 0;
+     hdr->dwFlags &= ~MHDR_INQUEUE;
+     hdr->dwFlags |= MHDR_DONE;
+     set_out_notify(notify, dest, dev_id, MOM_DONE, (DWORD_PTR)hdr, 0);
+@@ -929,6 +953,7 @@ static UINT midi_out_reset(WORD dev_id)
+         /* remove sustain on all channels */
+         midi_out_data(dev_id, (MIDI_CTL_SUSTAIN << 8) | MIDI_CMD_CONTROL | chn);
+     }
++    dests[dev_id].runningStatus = 0;
+     /* FIXME: the LongData buffers must also be returned to the app */
+     return MMSYSERR_NOERROR;
+ }
+
+
