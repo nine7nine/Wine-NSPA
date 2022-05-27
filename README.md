@@ -33,17 +33,17 @@ enabled. Have a look here; https://github.com/nine7nine/Wine-NSPA/tree/main/exam
 
 ### List of useful Wine-NSPA env variables
 
-* WINE_RT_PRIO=78 - Set RT thread Prioties from Wineserver. *note: sets highest priority, then decrements by 2.
-* WINE_RT_POLICY="FF" - Set RT Policy from Wineserver. *note: TIME_CRITICAL threads = SCHED_FIFO.
-* NTDLL_RT_PRIO=5 - Set RT thread priorities from Ntdll. *note: NT threads: fsync'd APCs or non-winAPI pthreads. 
-* NTDLL_RT_POLICY="RR" - Set NTDLL scheduling policy. *supports FF, RR and TS.
-* WINEESYNC=1 - Esync server-side synchronization. note: Fsync is better.
-* WINEFSYNC=1 - Fsync kernel-side / futex_waitv / futex-based synchronization.
-* WINEFSYNC_SPINCOUNT=128 - Fsync spincount.
-* WINE_LOGICAL_CPUS_AS_CORES=1 - treat logical cores as cpus.
-* WINE_LARGE_ADDRESS_AWARE=1 - allow 32bit applications to use more memory.
-* STAGING_WRITECOPY=0 - Staging's writecopy patch. *note: cannot be used with kernel writewatch.
-* WINE_DISABLE_KERNEL_WRITEWATCH=0 - kernel writewatch. *note: requires kernel support.
+* WINE_RT_PRIO=78 : Set RT thread Prioties from Wineserver -> Sets highest priority, then decrements by 2.
+* WINE_RT_POLICY="FF" : Set RT Policy from Wineserver. -> TIME_CRITICAL threads = SCHED_FIFO.
+* NTDLL_RT_PRIO=5 : Set RT thread priorities from Ntdll -> NT threads: fsync'd APCs or non-winAPI pthreads. 
+* NTDLL_RT_POLICY="RR" : Set NTDLL scheduling policy. -> supports FF, RR and TS.
+* WINEESYNC=1 : Esync server-side synchronization. -> Fsync is better.
+* WINEFSYNC=1 : Fsync kernel-side synchronization. -> futex-based, futex_waitv (linux-5.16+).
+* WINEFSYNC_SPINCOUNT=128 : Fsync spincount.
+* WINE_LOGICAL_CPUS_AS_CORES=1 : treat logical cores as cpus.
+* WINE_LARGE_ADDRESS_AWARE=1 : allow 32bit applications to use more memory.
+* STAGING_WRITECOPY=0 : Staging's writecopy patch. -> cannot be used with kernel writewatch.
+* WINE_DISABLE_KERNEL_WRITEWATCH=0 : kernel writewatch. -> requires kernel support.
 
 This is a rough summary, for now. More details will be added later.
 
