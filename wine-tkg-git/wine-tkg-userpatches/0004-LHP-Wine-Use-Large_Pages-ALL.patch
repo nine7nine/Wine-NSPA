@@ -1,0 +1,168 @@
+From 4e292a112052659b77ac69e52be44fb6c003dec6 Mon Sep 17 00:00:00 2001
+From: Kai Krakow <kai@kaishome.de>
+Date: Mon, 10 Dec 2018 01:21:55 +0100
+Subject: [PATCH] [local] ntdll: Add support for huge pages
+
+Wine already supports GetLargePageMinimum() and returns the correct page
+size. But it doesn't advise the Linux kernel to actually make use of
+this when applications use VirtualAlloc(). This commit fixes it.
+
+Signed-off-by: Kai Krakow <kai@kaishome.de>
+---
+ dlls/ntdll/virtual.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/dlls/ntdll/virtual.c b/dlls/ntdll/virtual.c
+index a4186005959..3e232a53bf2 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -2595,6 +2595,10 @@ NTSTATUS WINAPI NtAllocateVirtualMemory( HANDLE process, PVOID *ret, ULONG zero_
+         }
+     }
+ 
++#ifdef MADV_HUGEPAGE
++    if (base && (type & MEM_LARGE_PAGES)) madvise( base, size, MADV_HUGEPAGE );
++#endif
++
+     if (!status) VIRTUAL_DEBUG_DUMP_VIEW( view );
+ 
+     if (use_locks) server_leave_uninterrupted_section( &csVirtual, &sigset );
+
+From a2457b9f7fd2a11ea55fc97e69a5e0fc207862ab Mon Sep 17 00:00:00 2001
+From: Kai Krakow <kai@kaishome.de>
+Date: Thu, 13 Dec 2018 01:21:17 +0100
+Subject: [PATCH] [local] wineserver: Add large pages to create_mapping().
+
+Signed-off-by: Kai Krakow <kai@kaishome.de>
+---
+ server/mapping.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/server/mapping.c b/server/mapping.c
+index 14d131e556a..839968c2f8a 100644
+--- a/server/mapping.c
++++ b/server/mapping.c
+@@ -962,6 +962,12 @@ static struct mapping *create_mapping( s
+                                                  FILE_SYNCHRONOUS_IO_NONALERT ))) goto error;
+         allow_fd_caching( mapping->fd );
+     }
++
++#ifdef MADV_HUGEPAGE
++    if (mapping->committed && (flags & SEC_LARGE_PAGES))
++        madvise( mapping->committed, mapping->size, MADV_HUGEPAGE );
++#endif
++
+     return mapping;
+ 
+  error:
+
+From ca9d0b607555c0b535ca8457d774e63288ac337a Mon Sep 17 00:00:00 2001
+From: Kai Krakow <kai@kaishome.de>
+Date: Wed, 6 Feb 2019 22:09:21 +0100
+Subject: [PATCH] [local] ntdll: Silence FIXMEs for "info class not supported"
+
+This really messes up logging in some games and may reduce performance.
+
+Github-Link: https://github.com/kakra/wine-proton/issues/9
+Signed-off-by: Kai Krakow <kai@kaishome.de>
+---
+ dlls/ntdll/thread.c | 16 ++++++++++++----
+ 1 file changed, 12 insertions(+), 4 deletions(-)
+
+diff --git a/dlls/ntdll/thread.c b/dlls/ntdll/thread.c
+index 910980b97d7..b57952810e6 100644
+--- a/dlls/ntdll/unix/thread.c
++++ b/dlls/ntdll/unix/thread.c
+@@ -1264,8 +1264,12 @@ NTSTATUS WINAPI NtQueryInformationThread( HANDLE handle, THREADINFOCLASS class,
+     case ThreadPriorityBoost:
+     case ThreadSetTlsArrayAddress:
+     default:
+-        FIXME( "info class %d not supported yet\n", class );
+-        return STATUS_NOT_IMPLEMENTED;
++        {
++            static int once[MaxThreadInfoClass];
++            if (!once[class]++)
++                FIXME( "info class %d not supported yet\n", class );
++            return STATUS_NOT_IMPLEMENTED;
++        }
+     }
+ }
+ 
+@@ -1421,8 +1425,12 @@ NTSTATUS WINAPI NtSetInformationThread( HANDLE handle, THREADINFOCLASS class,
+     case ThreadSetTlsArrayAddress:
+     case ThreadIsIoPending:
+     default:
+-        FIXME( "info class %d not supported yet\n", class );
+-        return STATUS_NOT_IMPLEMENTED;
++        {
++            static int once[MaxThreadInfoClass];
++            if (!once[class]++)
++                FIXME( "info class %d not supported yet\n", class );
++            return STATUS_NOT_IMPLEMENTED;
++        }
+     }
+ }
+From 8215ffcc0911bcc93c2deff21de1d8a9cb150250 Mon Sep 17 00:00:00 2001
+From: Kai Krakow <kai@kaishome.de>
+Date: Mon, 10 Dec 2018 23:17:49 +0100
+Subject: [PATCH] [hack] advapi32: Fake SeLockMemoryPrivilege to enable large
+ pages.
+
+This commit pretends the user is having the SeLockMemoryPrivilege so
+games can make use of large pages.
+
+Signed-off-by: Kai Krakow <kai@kaishome.de>
+---
+ dlls/advapi32/lsa.c | 36 ++++++++++++++++++++++++++++++++++++
+ 1 file changed, 36 insertions(+)
+
+diff --git a/dlls/advapi32/lsa.c b/dlls/advapi32/lsa.c
+index 354db65929a..0dea9bf23dc 100644
+--- a/dlls/advapi32/lsa.c
++++ b/dlls/advapi32/lsa.c
+@@ -230,7 +231,43 @@ NTSTATUS WINAPI LsaEnumerateAccountRight
+     PLSA_UNICODE_STRING *rights,
+     PULONG count)
+ {
++    static WCHAR seLockMemoryPrivilege[] = {'S','e','L','o','c','k','M','e','m','o','r','y','P','r','i','v','i','l','e','g','e',0};
++    static const PWCHAR static_rights[] = {
++        seLockMemoryPrivilege,
++    };
++
++    int buffer_size = 0;
++    PLSA_UNICODE_STRING buffer_pos = NULL;
++
+     FIXME("(%p,%p,%p,%p) stub\n", policy, sid, rights, count);
++
++    for (int i = 0; i < ARRAY_SIZE(static_rights); i++)
++    {
++        buffer_size += sizeof(PLSA_UNICODE_STRING);
++        buffer_size += sizeof(LSA_UNICODE_STRING);
++        buffer_size += sizeof(WCHAR) * (lstrlenW(static_rights[i]) + 1);
++    };
++
++    buffer_pos = heap_alloc(buffer_size);
++    if (buffer_pos)
++    {
++        *rights = buffer_pos;
++        *count = ARRAY_SIZE(static_rights);
++        buffer_pos += ARRAY_SIZE(static_rights);
++
++        for (int i = 0; i < ARRAY_SIZE(static_rights); i++)
++        {
++            int len = lstrlenW(static_rights[i]);
++            buffer_pos->Length = len * sizeof(WCHAR);
++            buffer_pos->MaximumLength = buffer_pos->Length + sizeof(WCHAR);
++            buffer_pos->Buffer = (void *)(buffer_pos + 1);
++            lstrcpyW(buffer_pos->Buffer, static_rights[i]);
++            rights[i] = buffer_pos;
++            buffer_pos = (void *)&buffer_pos->Buffer[len + 2];
++        }
++        return STATUS_SUCCESS;
++    }
++
+     *rights = 0;
+     *count = 0;
+     return STATUS_OBJECT_NAME_NOT_FOUND;
+
+

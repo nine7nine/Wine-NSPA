@@ -1,0 +1,508 @@
+From 84a4027aec7d6ac12303a792fc76b6d55d4afb4e Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Thu, 24 Dec 2020 16:11:56 +0100
+Subject: [PATCH] ntdll: Track active keyed events on the client side.
+
+---
+ dlls/ntdll/unix/sync.c | 70 +++++++++++++++++++++++++++++++++++++++---
+ 1 file changed, 66 insertions(+), 4 deletions(-)
+
+diff --git a/dlls/ntdll/unix/sync.c b/dlls/ntdll/unix/sync.c
+index 442243d8bcf..d830c9295d3 100644
+--- a/dlls/ntdll/unix/sync.c
++++ b/dlls/ntdll/unix/sync.c
+@@ -69,6 +69,58 @@ WINE_DEFAULT_DEBUG_CHANNEL(sync);
+ 
+ HANDLE keyed_event = 0;
+ 
++static pthread_mutex_t keyed_mutex = PTHREAD_MUTEX_INITIALIZER;
++
++struct keyed_entry
++{
++    client_ptr_t key;
++    LONG         ref;
++    HANDLE       handle;
++    BOOLEAN      alertable;
++};
++
++static struct keyed_entry keyed_entries[256];
++static size_t nb_keyed_entries;
++
++static inline struct keyed_entry *keyed_entry_acquire( HANDLE handle, client_ptr_t key, BOOLEAN alertable )
++{
++    struct keyed_entry *entry;
++    DWORD i;
++
++    mutex_lock( &keyed_mutex );
++    for (i = 0; i < nb_keyed_entries; ++i)
++    {
++        if (!keyed_entries[i].ref) continue;
++        if (keyed_entries[i].key == key) break;
++    }
++    if (i == nb_keyed_entries) for (i = 0; i <= nb_keyed_entries; ++i)
++    {
++        if (!keyed_entries[i].ref) break;
++    }
++    assert(i < ARRAY_SIZE(keyed_entries));
++    if (i == nb_keyed_entries) nb_keyed_entries++;
++
++    entry = keyed_entries + i;
++    if (!entry->ref++)
++    {
++        entry->key = key;
++        entry->handle = handle;
++        entry->alertable = alertable;
++    }
++
++    if (entry->handle != handle) WARN("inconsistent keyed event handle %p, previously %p\n", handle, entry->handle);
++    if (entry->alertable != alertable) WARN("inconsistent keyed event alertable %d, previously %d\n", alertable, entry->alertable);
++    mutex_unlock( &keyed_mutex );
++    return entry;
++}
++
++static inline void keyed_entry_release( struct keyed_entry *entry )
++{
++    mutex_lock( &keyed_mutex );
++    if (!--entry->ref) while (nb_keyed_entries && !keyed_entries[nb_keyed_entries - 1].ref) nb_keyed_entries--;
++    mutex_unlock( &keyed_mutex );
++}
++
+ static const char *debugstr_timeout( const LARGE_INTEGER *timeout )
+ {
+     if (!timeout) return "(infinite)";
+@@ -1862,16 +1914,21 @@ NTSTATUS WINAPI NtOpenKeyedEvent( HANDLE
+ NTSTATUS WINAPI NtWaitForKeyedEvent( HANDLE handle, const void *key,
+                                      BOOLEAN alertable, const LARGE_INTEGER *timeout )
+ {
++    struct keyed_entry *entry;
+     select_op_t select_op;
+     UINT flags = SELECT_INTERRUPTIBLE;
++    NTSTATUS status;
+ 
+-    if (!handle) handle = keyed_event;
+     if ((ULONG_PTR)key & 1) return STATUS_INVALID_PARAMETER_1;
++    entry = keyed_entry_acquire( handle, wine_server_client_ptr( key ), alertable );
++    if (!handle) handle = keyed_event;
+     if (alertable) flags |= SELECT_ALERTABLE;
+     select_op.keyed_event.op     = SELECT_KEYED_EVENT_WAIT;
+     select_op.keyed_event.handle = wine_server_obj_handle( handle );
+     select_op.keyed_event.key    = wine_server_client_ptr( key );
+-    return server_wait( &select_op, sizeof(select_op.keyed_event), flags, timeout );
++    status = server_wait( &select_op, sizeof(select_op.keyed_event), flags, timeout );
++    keyed_entry_release( entry );
++    return status;
+ }
+ 
+ 
+@@ -1881,16 +1938,21 @@ NTSTATUS WINAPI NtWaitForKeyedEvent( HAN
+ NTSTATUS WINAPI NtReleaseKeyedEvent( HANDLE handle, const void *key,
+                                      BOOLEAN alertable, const LARGE_INTEGER *timeout )
+ {
++    struct keyed_entry *entry;
+     select_op_t select_op;
+     UINT flags = SELECT_INTERRUPTIBLE;
++    NTSTATUS status;    
+ 
+-    if (!handle) handle = keyed_event;
+     if ((ULONG_PTR)key & 1) return STATUS_INVALID_PARAMETER_1;
++    entry = keyed_entry_acquire( handle, wine_server_client_ptr( key ), alertable );
++    if (!handle) handle = keyed_event;
+     if (alertable) flags |= SELECT_ALERTABLE;
+     select_op.keyed_event.op     = SELECT_KEYED_EVENT_RELEASE;
+     select_op.keyed_event.handle = wine_server_obj_handle( handle );
+     select_op.keyed_event.key    = wine_server_client_ptr( key );
+-    return server_wait( &select_op, sizeof(select_op.keyed_event), flags, timeout );
++    status = server_wait( &select_op, sizeof(select_op.keyed_event), flags, timeout );
++    keyed_entry_release( entry );
++    return status;
+ }
+ 
+ 
+From 373d7d21d1ca9409fe08b5289e5952793238537f Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Thu, 24 Dec 2020 16:41:43 +0100
+Subject: [PATCH] ntdll: Implement client-side keyed events on top of futexes.
+
+Because RtlWaitOnAddress needs a special treatment, and already has
+a fast path, we only enable this keyed event fast path when keyed
+event handle is 0.
+---
+ dlls/ntdll/unix/sync.c | 164 ++++++++++++++++++++++++++++++++++++++---
+ 1 file changed, 152 insertions(+), 12 deletions(-)
+
+diff --git a/dlls/ntdll/unix/sync.c b/dlls/ntdll/unix/sync.c
+index d830c9295d3..8ccdbe6017a 100644
+--- a/dlls/ntdll/unix/sync.c
++++ b/dlls/ntdll/unix/sync.c
+@@ -158,6 +158,8 @@ static inline ULONGLONG monotonic_counter(void)
+ 
+ #define FUTEX_WAIT 0
+ #define FUTEX_WAKE 1
++#define FUTEX_WAIT_BITSET 9
++#define FUTEX_WAKE_BITSET 10
+ 
+ static int futex_private = 128;
+ 
+@@ -171,6 +173,21 @@ static inline int futex_wake( const int *addr, int val )
+     return syscall( __NR_futex, addr, FUTEX_WAKE | futex_private, val, NULL, 0, 0 );
+ }
+ 
++static inline int futex_wait_abs( const int *addr, int val, struct timespec *timeout )
++{
++    return syscall( __NR_futex, addr, FUTEX_WAIT_BITSET | futex_private, val, timeout, 0, 0xffffffff );
++}
++
++static inline int futex_wait_bitset( const int *addr, int val, struct timespec *timeout, int mask )
++{
++    return syscall( __NR_futex, addr, FUTEX_WAIT_BITSET | futex_private, val, timeout, 0, mask );
++}
++
++static inline int futex_wake_bitset( const int *addr, int val, int mask )
++{
++    return syscall( __NR_futex, addr, FUTEX_WAKE_BITSET | futex_private, val, NULL, 0, mask );
++}
++
+ static inline int use_futexes(void)
+ {
+     static int supported = -1;
+@@ -1740,6 +1757,9 @@ NTSTATUS WINAPI NtOpenKeyedEvent( HANDLE *handle, ACCESS_MASK access, const OBJE
+     return ret;
+ }
+ 
++static inline NTSTATUS fast_wait_for_keyed_event( struct keyed_entry *entry, const LARGE_INTEGER *timeout );
++static inline NTSTATUS fast_release_keyed_event( struct keyed_entry *entry, const LARGE_INTEGER *timeout );
++
+ /******************************************************************************
+  *              NtWaitForKeyedEvent (NTDLL.@)
+  */
+@@ -1753,12 +1773,15 @@ NTSTATUS WINAPI NtWaitForKeyedEvent( HANDLE handle, const void *key,
+ 
+     if ((ULONG_PTR)key & 1) return STATUS_INVALID_PARAMETER_1;
+     entry = keyed_entry_acquire( handle, wine_server_client_ptr( key ), alertable );
+-    if (!handle) handle = keyed_event;
+-    if (alertable) flags |= SELECT_ALERTABLE;
+-    select_op.keyed_event.op     = SELECT_KEYED_EVENT_WAIT;
+-    select_op.keyed_event.handle = wine_server_obj_handle( handle );
+-    select_op.keyed_event.key    = wine_server_client_ptr( key );
+-    status = server_wait( &select_op, sizeof(select_op.keyed_event), flags, timeout );
++    if ((status = fast_wait_for_keyed_event( entry, timeout )) == STATUS_NOT_IMPLEMENTED)
++    {
++        if (!handle) handle = keyed_event;
++        if (alertable) flags |= SELECT_ALERTABLE;
++        select_op.keyed_event.op     = SELECT_KEYED_EVENT_WAIT;
++        select_op.keyed_event.handle = wine_server_obj_handle( handle );
++        select_op.keyed_event.key    = wine_server_client_ptr( key );
++        status = server_wait( &select_op, sizeof(select_op.keyed_event), flags, timeout );
++    }
+     keyed_entry_release( entry );
+     return status;
+ }
+@@ -1777,12 +1800,15 @@ NTSTATUS WINAPI NtReleaseKeyedEvent( HANDLE handle, const void *key,
+ 
+     if ((ULONG_PTR)key & 1) return STATUS_INVALID_PARAMETER_1;
+     entry = keyed_entry_acquire( handle, wine_server_client_ptr( key ), alertable );
+-    if (!handle) handle = keyed_event;
+-    if (alertable) flags |= SELECT_ALERTABLE;
+-    select_op.keyed_event.op     = SELECT_KEYED_EVENT_RELEASE;
+-    select_op.keyed_event.handle = wine_server_obj_handle( handle );
+-    select_op.keyed_event.key    = wine_server_client_ptr( key );
+-    status = server_wait( &select_op, sizeof(select_op.keyed_event), flags, timeout );
++    if ((status = fast_release_keyed_event( entry, timeout )) == STATUS_NOT_IMPLEMENTED)
++    {
++        if (!handle) handle = keyed_event;
++        if (alertable) flags |= SELECT_ALERTABLE;
++        select_op.keyed_event.op     = SELECT_KEYED_EVENT_RELEASE;
++        select_op.keyed_event.handle = wine_server_obj_handle( handle );
++        select_op.keyed_event.key    = wine_server_client_ptr( key );
++        status = server_wait( &select_op, sizeof(select_op.keyed_event), flags, timeout );
++    }
+     keyed_entry_release( entry );
+     return status;
+ }
+@@ -2727,3 +2753,117 @@ void set_async_direct_result( HANDLE *op
+ 
+     return;
+ }
++
++#ifdef __linux__
++
++struct fast_keyed_entry
++{
++    int wait_cs; /* 0: unlocked, 1: locked, 2: contested */
++    int wake_cs; /* 0: unlocked, 1: locked, 2: contested */
++    int signal; /* 0: not signaled, 1: signaled, 2: acked */
++};
++
++static struct fast_keyed_entry fast_keyed_table[256];
++
++static int futex_cs_enter( int *futex, struct timespec *timespec )
++{
++    NTSTATUS status = STATUS_SUCCESS;
++    int ret;
++    if (InterlockedCompareExchange( futex, 1, 0 ) == 0) return STATUS_SUCCESS;
++    do
++    {
++        if (*futex != 2 && InterlockedCompareExchange( futex, 2, 1 ) == 0) continue;
++        if (!(ret = futex_wait_abs( futex, 2, timespec ))) continue;
++        else if (ret == -1 && errno == ETIMEDOUT) status = STATUS_TIMEOUT;
++        else if (ret == -1 && errno != EAGAIN) ERR("futex_wait_abs unexpectedly failed, errno: %d\n", errno);
++    }
++    while (!status && InterlockedCompareExchange( futex, 2, 0 ) != 0);
++    return status;
++}
++
++static void futex_cs_leave( int *futex )
++{
++    if (InterlockedExchange( futex, 0 ) == 2) futex_wake( futex, 1 );
++}
++
++static struct timespec *nt_timeout_to_timespec( struct timespec *timespec, const LARGE_INTEGER *timeout )
++{
++    LARGE_INTEGER diff;
++    struct timespec now;
++    if (!timeout) return NULL;
++
++    if (timeout->QuadPart > 0)
++    {
++        NtQuerySystemTime( &diff );
++        diff.QuadPart -= timeout->QuadPart;
++    }
++    else diff = *timeout;
++
++    clock_gettime(CLOCK_MONOTONIC, &now);
++    timespec->tv_sec  = now.tv_sec + (now.tv_nsec / 100 - diff.QuadPart) / TICKSPERSEC;
++    timespec->tv_nsec = (now.tv_nsec / 100 - diff.QuadPart) % TICKSPERSEC * 100;
++    return timespec;
++}
++
++static inline NTSTATUS fast_wait_for_keyed_event( struct keyed_entry *entry, const LARGE_INTEGER *timeout )
++{
++    struct fast_keyed_entry *fast = &fast_keyed_table[entry - keyed_entries];
++    struct timespec time, *timespec = nt_timeout_to_timespec( &time, timeout );
++    NTSTATUS status = STATUS_SUCCESS;
++    int ret;
++
++    if (!use_futexes() || entry->handle || entry->alertable) return STATUS_NOT_IMPLEMENTED;
++
++    if ((status = futex_cs_enter( &fast->wait_cs, timespec ))) return status;
++    /* wait for signal, and ack it */
++    while (!status && InterlockedCompareExchange( &fast->signal, 2, 1 ) != 1)
++    {
++        if (!(ret = futex_wait_abs( &fast->signal, 0, timespec ))) continue;
++        else if (ret == -1 && errno == ETIMEDOUT) status = STATUS_TIMEOUT;
++        else if (ret == -1 && errno != EAGAIN) ERR("futex_wait_abs unexpectedly failed, errno: %d\n", errno);
++    }
++    /* if we acked, wake the signaler */
++    if (!status) futex_wake( &fast->signal, 1 );
++    futex_cs_leave( &fast->wait_cs );
++    return status;
++}
++
++static inline NTSTATUS fast_release_keyed_event( struct keyed_entry *entry, const LARGE_INTEGER *timeout )
++{
++    struct fast_keyed_entry *fast = &fast_keyed_table[entry - keyed_entries];
++    struct timespec time, *timespec = nt_timeout_to_timespec( &time, timeout );
++    NTSTATUS status = STATUS_SUCCESS;
++    int ret;
++
++    if (!use_futexes() || entry->handle || entry->alertable) return STATUS_NOT_IMPLEMENTED;
++
++    if ((status = futex_cs_enter( &fast->wake_cs, timespec ))) return status;
++    /* signal and wake waiter */
++    InterlockedExchange( &fast->signal, 1 );
++    futex_wake( &fast->signal, 1 );
++    /* wait for ack, and reset */
++    while (!status && InterlockedCompareExchange( &fast->signal, 0, 2 ) == 1)
++    {
++        if (!(ret = futex_wait_abs( &fast->signal, 1, timespec ))) continue;
++        else if (ret == -1 && errno == ETIMEDOUT) status = STATUS_TIMEOUT;
++        else if (ret == -1 && errno != EAGAIN) ERR("futex_wait_abs unexpectedly failed, errno: %d\n", errno);
++    }
++    /* if we timedout, reset and check ack */
++    if (status == STATUS_TIMEOUT && InterlockedExchange( &fast->signal, 0 ) == 2) status = STATUS_SUCCESS;
++    futex_cs_leave( &fast->wake_cs );
++    return status;
++}
++
++#else
++
++static inline NTSTATUS fast_wait_for_keyed_event( struct keyed_entry *entry, const LARGE_INTEGER *timeout )
++{
++    return STATUS_NOT_IMPLEMENTED;
++}
++
++static inline NTSTATUS fast_release_keyed_event( struct keyed_entry *entry, const LARGE_INTEGER *timeout )
++{
++    return STATUS_NOT_IMPLEMENTED;
++}
++
++#endif
+
+--- a/dlls/msvcrt/concurrency.c	2021-12-30 22:21:01.343853652 -0500
++++ b/dlls/msvcrt/concurrency.c	2021-12-30 22:20:47.114767202 -0500
+@@ -359,8 +359,6 @@ static CRITICAL_SECTION default_schedule
+ static SchedulerPolicy default_scheduler_policy;
+ static ThreadScheduler *default_scheduler;
+ 
+-static HANDLE keyed_event;
+-
+ static void create_default_scheduler(void);
+ 
+ /* ??0improper_lock@Concurrency@@QAE@PBD@Z */
+@@ -1713,14 +1711,6 @@ critical_section* __thiscall critical_se
+ {
+     TRACE("(%p)\n", this);
+ 
+-    if(!keyed_event) {
+-        HANDLE event;
+-
+-        NtCreateKeyedEvent(&event, GENERIC_READ|GENERIC_WRITE, NULL, 0);
+-        if(InterlockedCompareExchangePointer(&keyed_event, event, NULL) != NULL)
+-            NtClose(event);
+-    }
+-
+     this->unk_thread_id = 0;
+     this->head = this->tail = NULL;
+     return this;
+@@ -1773,7 +1763,7 @@ static inline void cs_lock(critical_sect
+     last = InterlockedExchangePointer(&cs->tail, q);
+     if(last) {
+         last->next = q;
+-        NtWaitForKeyedEvent(keyed_event, q, 0, NULL);
++        NtWaitForKeyedEvent(0, q, 0, NULL);
+     }
+ 
+     cs_set_head(cs, q);
+@@ -1850,7 +1840,7 @@ void __thiscall critical_section_unlock(
+     }
+ #endif
+ 
+-    NtReleaseKeyedEvent(keyed_event, this->unk_active.next, 0, NULL);
++    NtReleaseKeyedEvent( 0, this->unk_active.next, 0, NULL);
+ }
+ 
+ /* ?native_handle@critical_section@Concurrency@@QAEAAV12@XZ */
+@@ -1892,13 +1882,13 @@ bool __thiscall critical_section_try_loc
+         GetSystemTimeAsFileTime(&ft);
+         to.QuadPart = ((LONGLONG)ft.dwHighDateTime<<32) +
+             ft.dwLowDateTime + (LONGLONG)timeout*10000;
+-        status = NtWaitForKeyedEvent(keyed_event, q, 0, &to);
++        status = NtWaitForKeyedEvent(0, q, 0, &to);
+         if(status == STATUS_TIMEOUT) {
+             if(!InterlockedExchange(&q->free, TRUE))
+                 return FALSE;
+             /* A thread has signaled the event and is block waiting. */
+             /* We need to catch the event to wake the thread.        */
+-            NtWaitForKeyedEvent(keyed_event, q, 0, NULL);
++            NtWaitForKeyedEvent(0, q, 0, NULL);
+         }
+     }
+ 
+@@ -2144,10 +2134,10 @@ static size_t evt_wait(thread_wait *wait
+     if(!evt_transition(&wait->signaled, EVT_RUNNING, EVT_WAITING))
+         return evt_end_wait(wait, events, count);
+ 
+-    status = NtWaitForKeyedEvent(keyed_event, wait, 0, evt_timeout(&ntto, timeout));
++    status = NtWaitForKeyedEvent(0, wait, 0, evt_timeout(&ntto, timeout));
+ 
+     if(status && !evt_transition(&wait->signaled, EVT_WAITING, EVT_RUNNING))
+-        NtWaitForKeyedEvent(keyed_event, wait, 0, NULL);
++        NtWaitForKeyedEvent(0, wait, 0, NULL);
+ 
+     return evt_end_wait(wait, events, count);
+ }
+@@ -2223,7 +2213,7 @@ void __thiscall event_set(event *this)
+     for(entry=wakeup; entry; entry=next) {
+         next = entry->next;
+         entry->next = entry->prev = NULL;
+-        NtReleaseKeyedEvent(keyed_event, entry->wait, 0, NULL);
++        NtReleaseKeyedEvent( 0, entry->wait, 0, NULL);
+     }
+ }
+ 
+@@ -2428,14 +2418,6 @@ reader_writer_lock* __thiscall reader_wr
+ {
+     TRACE("(%p)\n", this);
+ 
+-    if (!keyed_event) {
+-        HANDLE event;
+-
+-        NtCreateKeyedEvent(&event, GENERIC_READ|GENERIC_WRITE, NULL, 0);
+-        if (InterlockedCompareExchangePointer(&keyed_event, event, NULL) != NULL)
+-            NtClose(event);
+-    }
+-
+     memset(this, 0, sizeof(*this));
+     return this;
+ }
+@@ -2482,11 +2464,11 @@ void __thiscall reader_writer_lock_lock(
+     last = InterlockedExchangePointer((void**)&this->writer_tail, &q);
+     if (last) {
+         last->next = &q;
+-        NtWaitForKeyedEvent(keyed_event, &q, 0, NULL);
++        NtWaitForKeyedEvent(0, &q, 0, NULL);
+     } else {
+         this->writer_head = &q;
+         if (InterlockedOr(&this->count, WRITER_WAITING))
+-            NtWaitForKeyedEvent(keyed_event, &q, 0, NULL);
++            NtWaitForKeyedEvent(0, &q, 0, NULL);
+     }
+ 
+     this->thread_id = GetCurrentThreadId();
+@@ -2525,17 +2507,17 @@ void __thiscall reader_writer_lock_lock_
+             if (InterlockedCompareExchange(&this->count, count+1, count) == count) break;
+ 
+         if (count & WRITER_WAITING)
+-            NtWaitForKeyedEvent(keyed_event, &q, 0, NULL);
++            NtWaitForKeyedEvent(0, &q, 0, NULL);
+ 
+         head = InterlockedExchangePointer((void**)&this->reader_head, NULL);
+         while(head && head != &q) {
+             rwl_queue *next = head->next;
+             InterlockedIncrement(&this->count);
+-            NtReleaseKeyedEvent(keyed_event, head, 0, NULL);
++            NtReleaseKeyedEvent( 0, head, 0, NULL);
+             head = next;
+         }
+     } else {
+-        NtWaitForKeyedEvent(keyed_event, &q, 0, NULL);
++        NtWaitForKeyedEvent(0, &q, 0, NULL);
+     }
+ }
+ 
+@@ -2606,14 +2588,14 @@ void __thiscall reader_writer_lock_unloc
+         count = InterlockedDecrement(&this->count);
+         if (count != WRITER_WAITING)
+             return;
+-        NtReleaseKeyedEvent(keyed_event, this->writer_head, 0, NULL);
++        NtReleaseKeyedEvent( 0, this->writer_head, 0, NULL);
+         return;
+     }
+ 
+     this->thread_id = 0;
+     next = this->writer_head->next;
+     if (next) {
+-        NtReleaseKeyedEvent(keyed_event, next, 0, NULL);
++        NtReleaseKeyedEvent( 0, next, 0, NULL);
+         return;
+     }
+     InterlockedAnd(&this->count, ~WRITER_WAITING);
+@@ -2621,7 +2603,7 @@ void __thiscall reader_writer_lock_unloc
+     while (head) {
+         next = head->next;
+         InterlockedIncrement(&this->count);
+-        NtReleaseKeyedEvent(keyed_event, head, 0, NULL);
++        NtReleaseKeyedEvent( 0, head, 0, NULL);
+         head = next;
+     }
+ 
+@@ -2947,8 +2929,6 @@ void msvcrt_free_concurrency(void)
+         operator_delete(default_scheduler);
+     }
+ 
+-    if(keyed_event)
+-      NtClose(keyed_event);
+ }
+ 
+ void msvcrt_free_scheduler_thread(void)
+
