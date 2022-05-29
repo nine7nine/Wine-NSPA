@@ -156,3 +156,279 @@ index 503230e4634..6d937675bcb 100644
  
 -- 
 GitLab
+
+From 06b3471605dc1e7d1466774b745435ecef845be4 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Pedro=20Perdig=C3=A3o?= <pperdigao@codeweavers.com>
+Date: Fri, 6 May 2022 17:56:28 +0100
+Subject: [PATCH 1/2] user32/tests: Test an out-of-order RECT in
+ RedrawWindow().
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Signed-off-by: Pedro Perdigão <pperdigao@codeweavers.com>
+Signed-off-by: Alexandre Julliard <julliard@winehq.org>
+---
+ dlls/user32/tests/msg.c | 65 +++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 62 insertions(+), 3 deletions(-)
+
+diff --git a/dlls/user32/tests/msg.c b/dlls/user32/tests/msg.c
+index c0a74d8edbe..84833e8b1be 100644
+--- a/dlls/user32/tests/msg.c
++++ b/dlls/user32/tests/msg.c
+@@ -8174,8 +8174,9 @@ void dump_region(HRGN hrgn)
+     HeapFree( GetProcessHeap(), 0, data );
+ }
+ 
+-#define check_update_rgn( hwnd, hrgn ) check_update_rgn_( __LINE__, hwnd, hrgn )
+-static void check_update_rgn_( int line, HWND hwnd, HRGN hrgn )
++#define todo_check_update_rgn( hwnd, hrgn ) check_update_rgn_( __LINE__, TRUE, hwnd, hrgn )
++#define check_update_rgn( hwnd, hrgn ) check_update_rgn_( __LINE__, FALSE, hwnd, hrgn )
++static void check_update_rgn_( int line, BOOL todo, HWND hwnd, HRGN hrgn )
+ {
+     INT ret;
+     RECT r1, r2;
+@@ -8186,7 +8187,10 @@ static void check_update_rgn_( int line, HWND hwnd, HRGN hrgn )
+     ok( ret != ERROR, "GetUpdateRgn failed\n" );
+     if (ret == NULLREGION)
+     {
+-        ok_(__FILE__,line)( !hrgn, "Update region shouldn't be empty\n" );
++        if(todo)
++            todo_wine ok_(__FILE__,line)( !hrgn, "Update region shouldn't be empty\n" );
++        else
++            ok_(__FILE__,line)( !hrgn, "Update region shouldn't be empty\n" );
+     }
+     else
+     {
+@@ -8393,6 +8397,61 @@ static void test_paint_messages(void)
+     ok(ret, "RedrawWindow returned %d instead of TRUE\n", ret);
+     check_update_rgn( hwnd, 0 );
+ 
++    /* test a zeroed rectangle */
++    RedrawWindow( hwnd, NULL, 0, RDW_VALIDATE|RDW_NOFRAME|RDW_NOERASE );
++    SetRect( &rect, 0, 0, 0, 0 );
++    ret = RedrawWindow( hwnd, &rect, NULL, RDW_INVALIDATE );
++    ok(ret, "RedrawWindow returned %d instead of TRUE\n", ret);
++    check_update_rgn( hwnd, 0 );
++
++    /* a well ordered rectangle */
++    RedrawWindow( hwnd, NULL, 0, RDW_VALIDATE|RDW_NOFRAME|RDW_NOERASE );
++    SetRect( &rect, 10, 5, 17, 21 );
++    ret = RedrawWindow( hwnd, &rect, NULL, RDW_INVALIDATE );
++    ok(ret, "RedrawWindow returned %d instead of TRUE\n", ret);
++    SetRectRgn( hrgn, 10, 5, 17, 21 );
++    check_update_rgn( hwnd, hrgn );
++
++    /* empty rectangle, top and bottom are swapped but left and right have
++       the same value */
++    RedrawWindow( hwnd, NULL, 0, RDW_VALIDATE|RDW_NOFRAME|RDW_NOERASE );
++    SetRect( &rect, 5, 30, 5, 10 );
++    ret = RedrawWindow( hwnd, &rect, NULL, RDW_INVALIDATE );
++    ok(ret, "RedrawWindow returned %d instead of TRUE\n", ret);
++    check_update_rgn( hwnd, 0 );
++
++    /* empty rectangle, left and right are swapped but top and bottom have
++       the same value */
++    RedrawWindow( hwnd, NULL, 0, RDW_VALIDATE|RDW_NOFRAME|RDW_NOERASE );
++    SetRect( &rect, 17, 10, 5, 10 );
++    ret = RedrawWindow( hwnd, &rect, NULL, RDW_INVALIDATE );
++    ok(ret, "RedrawWindow returned %d instead of TRUE\n", ret);
++    check_update_rgn( hwnd, 0 );
++
++    /* Left and right are swapped */
++    RedrawWindow( hwnd, NULL, 0, RDW_VALIDATE|RDW_NOFRAME|RDW_NOERASE );
++    SetRect( &rect, 21, 12, 7, 30 );
++    ret = RedrawWindow( hwnd, &rect, NULL, RDW_INVALIDATE );
++    ok(ret, "RedrawWindow returned %d instead of TRUE\n", ret);
++    SetRectRgn( hrgn, 7, 12, 21, 30 );
++    todo_check_update_rgn( hwnd, hrgn );
++
++    /* Top and bottom are swapped */
++    RedrawWindow( hwnd, NULL, 0, RDW_VALIDATE|RDW_NOFRAME|RDW_NOERASE );
++    SetRect( &rect, 7, 30, 21, 12 );
++    ret = RedrawWindow( hwnd, &rect, NULL, RDW_INVALIDATE );
++    ok(ret, "RedrawWindow returned %d instead of TRUE\n", ret);
++    SetRectRgn( hrgn, 7, 12, 21, 30 );
++    todo_check_update_rgn( hwnd, hrgn );
++
++    /* both reference points are swapped */
++    RedrawWindow( hwnd, NULL, 0, RDW_VALIDATE|RDW_NOFRAME|RDW_NOERASE );
++    SetRect( &rect, 21, 30, 7, 12 );
++    ret = RedrawWindow( hwnd, &rect, NULL, RDW_INVALIDATE );
++    ok(ret, "RedrawWindow returned %d instead of TRUE\n", ret);
++    SetRectRgn( hrgn, 7, 12, 21, 30 );
++    todo_check_update_rgn( hwnd, hrgn );
++
+     /* flush pending messages */
+     flush_events();
+     flush_sequence();
+-- 
+GitLab
+
+
+From 1146bde39e1de69667d4efdc0da94490ba8e87cc Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Pedro=20Perdig=C3=A3o?= <pperdigao@codeweavers.com>
+Date: Fri, 6 May 2022 18:07:28 +0100
+Subject: [PATCH 2/2] win32u: Allow an out-of-order RECT in RedrawWindow().
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Signed-off-by: Pedro Perdigão <pperdigao@codeweavers.com>
+Signed-off-by: Alexandre Julliard <julliard@winehq.org>
+---
+ dlls/user32/tests/msg.c | 16 ++++++----------
+ dlls/win32u/dce.c       |  7 +++++--
+ 2 files changed, 11 insertions(+), 12 deletions(-)
+
+diff --git a/dlls/user32/tests/msg.c b/dlls/user32/tests/msg.c
+index 84833e8b1be..2705914d5e5 100644
+--- a/dlls/user32/tests/msg.c
++++ b/dlls/user32/tests/msg.c
+@@ -8174,9 +8174,8 @@ void dump_region(HRGN hrgn)
+     HeapFree( GetProcessHeap(), 0, data );
+ }
+ 
+-#define todo_check_update_rgn( hwnd, hrgn ) check_update_rgn_( __LINE__, TRUE, hwnd, hrgn )
+-#define check_update_rgn( hwnd, hrgn ) check_update_rgn_( __LINE__, FALSE, hwnd, hrgn )
+-static void check_update_rgn_( int line, BOOL todo, HWND hwnd, HRGN hrgn )
++#define check_update_rgn( hwnd, hrgn ) check_update_rgn_( __LINE__, hwnd, hrgn )
++static void check_update_rgn_( int line, HWND hwnd, HRGN hrgn )
+ {
+     INT ret;
+     RECT r1, r2;
+@@ -8187,10 +8186,7 @@ static void check_update_rgn_( int line, BOOL todo, HWND hwnd, HRGN hrgn )
+     ok( ret != ERROR, "GetUpdateRgn failed\n" );
+     if (ret == NULLREGION)
+     {
+-        if(todo)
+-            todo_wine ok_(__FILE__,line)( !hrgn, "Update region shouldn't be empty\n" );
+-        else
+-            ok_(__FILE__,line)( !hrgn, "Update region shouldn't be empty\n" );
++        ok_(__FILE__,line)( !hrgn, "Update region shouldn't be empty\n" );
+     }
+     else
+     {
+@@ -8434,7 +8430,7 @@ static void test_paint_messages(void)
+     ret = RedrawWindow( hwnd, &rect, NULL, RDW_INVALIDATE );
+     ok(ret, "RedrawWindow returned %d instead of TRUE\n", ret);
+     SetRectRgn( hrgn, 7, 12, 21, 30 );
+-    todo_check_update_rgn( hwnd, hrgn );
++    check_update_rgn( hwnd, hrgn );
+ 
+     /* Top and bottom are swapped */
+     RedrawWindow( hwnd, NULL, 0, RDW_VALIDATE|RDW_NOFRAME|RDW_NOERASE );
+@@ -8442,7 +8438,7 @@ static void test_paint_messages(void)
+     ret = RedrawWindow( hwnd, &rect, NULL, RDW_INVALIDATE );
+     ok(ret, "RedrawWindow returned %d instead of TRUE\n", ret);
+     SetRectRgn( hrgn, 7, 12, 21, 30 );
+-    todo_check_update_rgn( hwnd, hrgn );
++    check_update_rgn( hwnd, hrgn );
+ 
+     /* both reference points are swapped */
+     RedrawWindow( hwnd, NULL, 0, RDW_VALIDATE|RDW_NOFRAME|RDW_NOERASE );
+@@ -8450,7 +8446,7 @@ static void test_paint_messages(void)
+     ret = RedrawWindow( hwnd, &rect, NULL, RDW_INVALIDATE );
+     ok(ret, "RedrawWindow returned %d instead of TRUE\n", ret);
+     SetRectRgn( hrgn, 7, 12, 21, 30 );
+-    todo_check_update_rgn( hwnd, hrgn );
++    check_update_rgn( hwnd, hrgn );
+ 
+     /* flush pending messages */
+     flush_events();
+diff --git a/dlls/win32u/dce.c b/dlls/win32u/dce.c
+index c41067af464..fbde3f3d0ec 100644
+--- a/dlls/win32u/dce.c
++++ b/dlls/win32u/dce.c
+@@ -1457,8 +1457,11 @@ BOOL WINAPI NtUserRedrawWindow( HWND hwnd, const RECT *rect, HRGN hrgn, UINT fla
+ 
+     if (rect && !hrgn)
+     {
+-        if (IsRectEmpty( rect )) rect = &empty;
+-        ret = redraw_window_rects( hwnd, flags, rect, 1 );
++        RECT ordered = *rect;
++
++        order_rect( &ordered );
++        if (IsRectEmpty( &ordered )) ordered = empty;
++        ret = redraw_window_rects( hwnd, flags, &ordered, 1 );
+     }
+     else if (!hrgn)
+     {
+-- 
+GitLab
+
+From 7dd952d5a90ac9f18d119cb03292ca0d1cbff72c Mon Sep 17 00:00:00 2001
+From: Huw Davies <huw@codeweavers.com>
+Date: Fri, 6 May 2022 10:35:10 +0100
+Subject: [PATCH] dllhost: Try to load the dll server's factory at the start.
+
+This lets dllhost quit early if the factory cannot be loaded.
+
+Signed-off-by: Huw Davies <huw@codeweavers.com>
+Signed-off-by: Alexandre Julliard <julliard@winehq.org>
+---
+ programs/dllhost/dllhost.c | 23 +++++++++++------------
+ 1 file changed, 11 insertions(+), 12 deletions(-)
+
+diff --git a/programs/dllhost/dllhost.c b/programs/dllhost/dllhost.c
+index 83700826f8b..9e3455ee15a 100644
+--- a/programs/dllhost/dllhost.c
++++ b/programs/dllhost/dllhost.c
+@@ -34,6 +34,7 @@ struct factory
+     IMarshal IMarshal_iface;
+     CLSID clsid;
+     LONG ref;
++    IClassFactory *dll_factory;
+ };
+ 
+ static inline struct factory *impl_from_IClassFactory(IClassFactory *iface)
+@@ -90,7 +91,10 @@ static ULONG WINAPI factory_Release(IClassFactory *iface)
+     TRACE("(%p)->%lu\n", iface, ref);
+ 
+     if (!ref)
++    {
++        if (factory->dll_factory) IClassFactory_Release(factory->dll_factory);
+         HeapFree(GetProcessHeap(), 0, factory);
++    }
+ 
+     return ref;
+ }
+@@ -166,18 +170,10 @@ static HRESULT WINAPI marshal_MarshalInterface(IMarshal *iface, IStream *stream,
+         void *pv, DWORD dwDestContext, void *pvDestContext, DWORD mshlflags)
+ {
+     struct factory *factory = impl_from_IMarshal(iface);
+-    IUnknown *object;
+-    HRESULT hr;
+ 
+     TRACE("(%p,%s,%p,%08lx,%p,%08lx)\n", stream, wine_dbgstr_guid(iid), pv, dwDestContext, pvDestContext, mshlflags);
+ 
+-    hr = CoGetClassObject(&factory->clsid, CLSCTX_INPROC_SERVER, NULL, iid, (void **)&object);
+-    if (hr == S_OK)
+-    {
+-        hr = CoMarshalInterface(stream, iid, object, dwDestContext, pvDestContext, mshlflags);
+-        IUnknown_Release(object);
+-    }
+-    return hr;
++    return CoMarshalInterface(stream, iid, (IUnknown *)factory->dll_factory, dwDestContext, pvDestContext, mshlflags);
+ }
+ 
+ static HRESULT WINAPI marshal_UnmarshalInterface(IMarshal *iface, IStream *stream,
+@@ -275,10 +271,13 @@ static HRESULT WINAPI surrogate_LoadDllServer(ISurrogate *iface, const CLSID *cl
+     factory->IMarshal_iface.lpVtbl = &Marshal_Vtbl;
+     factory->clsid = *clsid;
+     factory->ref = 1;
++    factory->dll_factory = NULL;
+ 
+-    hr = CoRegisterClassObject(clsid, (IUnknown *)&factory->IClassFactory_iface,
+-                               CLSCTX_LOCAL_SERVER, REGCLS_SURROGATE, &surrogate->cookie);
+-    if (hr != S_OK)
++    hr = CoGetClassObject(clsid, CLSCTX_INPROC_SERVER, NULL, &IID_IClassFactory, (void **)&factory->dll_factory);
++    if (SUCCEEDED(hr))
++        hr = CoRegisterClassObject(clsid, (IUnknown *)&factory->IClassFactory_iface,
++                                   CLSCTX_LOCAL_SERVER, REGCLS_SURROGATE, &surrogate->cookie);
++    if (FAILED(hr))
+         IClassFactory_Release(&factory->IClassFactory_iface);
+     else
+     {
+-- 
+GitLab
