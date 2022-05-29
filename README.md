@@ -1,6 +1,6 @@
 # Wine-NSPA: 
 
-![My Image](/examples/images/wine-nspa-Banner.png)
+![My Image](/examples/images/Wine-NSPA_desktop.png)
 
 ### A Real-Time Proaudio-Centric Build of Wine(-TKG). 
 
