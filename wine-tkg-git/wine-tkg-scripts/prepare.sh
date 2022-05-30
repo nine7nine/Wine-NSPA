@@ -143,24 +143,7 @@ update_configure() {
 }
 
 _init() {
-msg2 '       .---.`               `.---.'
-msg2 '    `/syhhhyso-           -osyhhhys/`'
-msg2 '   .syNMdhNNhss/``.---.``/sshNNhdMNys.'
-msg2 '   +sdMh.`+MNsssssssssssssssNM+`.hMds+'
-msg2 '   :syNNdhNNhssssssssssssssshNNhdNNys:'
-msg2 '    /ssyhhhysssssssssssssssssyhhhyss/'
-msg2 '    .ossssssssssssssssssssssssssssso.'
-msg2 '   :sssssssssssssssssssssssssssssssss:'
-msg2 '  /sssssssssssssssssssssssssssssssssss/'
-msg2 ' :sssssssssssssoosssssssoosssssssssssss:'
-msg2 ' osssssssssssssoosssssssoossssssssssssso'
-msg2 ' osssssssssssyyyyhhhhhhhyyyyssssssssssso'
-msg2 ' /yyyyyyhhdmmmmNNNNNNNNNNNmmmmdhhyyyyyy/'
-msg2 '  smmmNNNNNNNNNNNNNNNNNNNNNNNNNNNNNmmms'
-msg2 '   /dNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNd/'
-msg2 '    `:sdNNNNNNNNNNNNNNNNNNNNNNNNNds:`'
-msg2 '       `-+shdNNNNNNNNNNNNNNNdhs+-`'
-msg2 '             `.-:///////:-.`'
+msg2 ' A Real-Time Capable and Proaudio-Centric Build of Wine(-TKG)'
 msg2 ''
 
   # load default configuration from files

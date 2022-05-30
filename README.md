@@ -4,7 +4,8 @@
 ![My Image](/examples/images/Wine-NSPA_desktop.png)
 
 __Wine-NSPA Wiki;__ https://github.com/nine7nine/Wine-NSPA/wiki
- Wine-NSPA focuses on the integration of performance enhancements and RT related features that help proaudio apps run better. Currently, Fsync/futex_waitv is the prefered method for improving syncronization primitives support, which requires kernel-level support (linux-5.16+). I have implemented improved Scheduling and RT support via out-of-tree patchwork and my own modifications to Wine. This fork also integrates the out-of-tree Wineserver Shared Memory patchset, the Wine Low Fragmentation Heap patchwork and a number of other out-of-tree patchsets. Some of these other features require kernel-level support.
+
+Wine-NSPA focuses on the integration of performance enhancements and RT related features that help proaudio apps run better. Currently, Fsync/futex_waitv is the prefered method for improving syncronization primitives support, which requires kernel-level support (linux-5.16+). I have implemented improved Scheduling and RT support via out-of-tree patchwork and my own modifications to Wine. This fork also integrates the out-of-tree Wineserver Shared Memory patchset, the Wine Low Fragmentation Heap patchwork and a number of other out-of-tree patchsets. Some of these other features require kernel-level support.
 
 Wine-NSPA is currently based on Wine-7.5; due to newer versions having some regressions and bugs that affect some applications that I use (showstopping bugs). Wine-7.5 seems to be fairly solid and I don't have any desire to chase every development release. That said; I do pickup upstream bugfixes, MRs and the occasional patch from WineHQ Bugzilla. Additionally, Wine-TKG is used as a base; as it's a powerful build system, flexible, easy to use and significantly reduces maintenance burden. It also supports Archlinux / Makepkg, which makes building and packaging Wine a straightforward process.
 
