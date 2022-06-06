@@ -3188,29 +3188,7 @@ _polish() {
 
 	  # Set custom version tags
 	  local _version_tags=()
-	  _version_tags+=(TkG) # watermark to keep track of TkG builds independently of the settings
-	  if [ "$_use_staging" = "true" ]; then
-	    _version_tags+=(Staging)
-	  else
-	    _version_tags+=(Plain)
-	  fi
-	  if [ "$_use_esync" = "true" ] || [ "$_staging_esync" = "true" ]; then
-	   _version_tags+=(Esync)
-	  fi
-	  if [ "$_use_fsync" = "true" ] && [ "$_staging_esync" = "true" ]; then
-	    _version_tags+=(Fsync)
-	  fi
-	  if [ "$_use_pba" = "true" ] && [ "$_pba_version" != "none" ]; then
-	    _version_tags+=(PBA)
-	  fi
-	  if [ "$_use_legacy_gallium_nine" = "true" ]; then
-	    _version_tags+=(Nine)
-	  fi
-	  if [ "$_use_vkd3dlib" = "false" ]; then
-	    if [ "$_dxvk_dxgi" != "true" ] && git merge-base --is-ancestor 74dc0c5df9c3094352caedda8ebe14ed2dfd615e HEAD; then
-	      _version_tags+=(Vkd3d DXVK-Compatible)
-	    fi
-	  fi
+	  _version_tags+=(NSPA) # watermark to keep track of TkG builds independently of the settings
 	  if [ "$_versioning_string" = "wine_srcdir" ]; then
 	    sed -i "s/\\\\\"\\\\\\\1.*\"/\\\\\"\\\\\\\1  ( ${_version_tags[*]} )\\\\\"/g" "${_versioning_path}"
 	    sed -i "s/\\\\\"\\\\\\\1.*\"/\\\\\"\\\\\\\1  ( ${_version_tags[*]} )\\\\\"/g" "${srcdir}/${_winesrcdir}/configure"
