@@ -319,11 +319,7 @@ user_patcher() {
 	  if [[ "$_CONDITION" =~ [yY] ]] || [ "$_user_patches_no_confirm" = "true" ]; then
 	    for _f in ${_patches[@]}; do
 	      if [ -e "${_f}" ]; then
-	        msg2 "######################################################"
-	        msg2 ""
 	        msg2 "Reverting your own ${_userpatch_target} patch ${_f}"
-	        msg2 ""
-	        msg2 "######################################################"
 	        echo -e "\nReverting your own patch ${_f##*/}" >> "$_where"/prepare.log #" Coloring confusion
 	        if ! patch -Np1 -R < "${_f}" >> "$_where"/prepare.log; then
 	          error "Patch application has failed. The error was logged to $_where/prepare.log for your convenience."
@@ -349,11 +345,7 @@ user_patcher() {
 	  if [[ "$_CONDITION" =~ [yY] ]] || [ "$_user_patches_no_confirm" = "true" ]; then
 	    for _f in ${_patches[@]}; do
 	      if [ -e "${_f}" ]; then
-	        msg2 "######################################################"
-	        msg2 ""
 	        msg2 "Applying your own ${_userpatch_target} patch ${_f}"
-	        msg2 ""
-	        msg2 "######################################################"
 	        echo -e "\nApplying your own patch ${_f##*/}" >> "$_where"/prepare.log #" Coloring confusion
 	        if ! patch -Np1 < "${_f}" >> "$_where"/prepare.log; then
 	          error "Patch application has failed. The error was logged to $_where/prepare.log for your convenience."
