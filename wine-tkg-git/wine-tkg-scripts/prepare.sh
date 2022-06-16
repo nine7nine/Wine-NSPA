@@ -143,12 +143,12 @@ update_configure() {
 }
 
 _init() {
-
-msg2 ' <----------------------> Wine-NSPA <----------------------->'
+msg2 ''
+msg2 ' _______________________> WINE-NSPA <________________________'
 msg2 ''
 msg2 ' A Real-Time Capable and Proaudio-Centric Build of Wine(-TKG)'
+msg2 ' ____________________________________________________________'
 msg2 ''
-msg2 ' <---------------------------------------------------------->'
 
   # load default configuration from files
   if [ -e "$_where"/proton_tkg_token ]; then
@@ -172,33 +172,7 @@ msg2 ' <---------------------------------------------------------->'
     # If the state tracker isn't found, prompt the user with useful stuff.
     # This is to prevent the prompt to come back until packaging is done
     if [ ! -e "$_where"/BIG_UGLY_FROGMINER ]; then
-      msg2 '#################################################################'
-      msg2 ''
-      msg2 'You can configure your wine build flavour (right now for example)'
-      if [ -e "$_EXT_CONFIG_PATH" ]; then
-        msg2 "by editing the $_EXT_CONFIG_PATH file."
-        msg2 ''
-        msg2 'In case you are only using a partial config file, remaining'
-        msg2 'values will be loaded from the .cfg file next to this script !'
-      elif [ -e "$_proton_tkg_path"/proton_tkg_token ]; then
-        msg2 'by editing the proton-tkg.cfg file in the proton-tkg dir,'
-        msg2 'or by creating a custom config, for example'
-        msg2 '~/.config/frogminer/proton-tkg.cfg (path set in config file)'
-        msg2 'to override some or all of its values.'
-      else
-        msg2 'by editing the customization.cfg file next to this PKGBUILD,'
-        msg2 'or by creating a custom config, for example'
-        msg2 '~/.config/frogminer/wine-tkg.cfg (path set in config file)'
-        msg2 'to override some or all of its values.'
-      fi
-      msg2 ''
-      msg2 "Current path is '$_where'"
-      msg2 ''
-      msg2 'If you are rebuilding using the same configuration, you may want'
-      msg2 'to delete/move previously built package if in the same dir.'
-      msg2 ''
-      msg2 '###################################TkG##########was##########here'
-      read -rp "When you are ready, press enter to continue."
+      read -rp "      >> When you are ready, press >ENTER< to continue."
 
       if [ -e "$_EXT_CONFIG_PATH" ]; then
         source "$_EXT_CONFIG_PATH" && msg2 "External config loaded" # load external configuration from file again, in case of changes.
