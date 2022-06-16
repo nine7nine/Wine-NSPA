@@ -1,0 +1,272 @@
+From: Haoyang Chen <chenhaoyang@uniontech.com>
+#Subject: [PATCH] hidclass.sys: Fix a leak in hid_device_thread()
+Message-Id: <c6af8e6f-a4cd-11a9-6afe-e175220354c3@uniontech.com>
+Date: Wed, 9 Sep 2020 14:40:18 +0800
+
+From daf4ffcceeb9b30c93b6808d3797c4d756d6251f Mon Sep 17 00:00:00 2001
+From: Haoyang Chen <chenhaoyang@uniontech.com>
+Date: Wed, 9 Sep 2020 14:35:58 +0800
+Subject: [PATCH] hidclass.sys: Fix a leak in hid_device_thread().
+
+Signed-off-by: Haoyang Chen <chenhaoyang@uniontech.com>
+---
+ dlls/hidclass.sys/device.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/dlls/hidclass.sys/device.c b/dlls/hidclass.sys/device.c
+index 11111111111..11111111111 100644
+--- a/dlls/hidclass.sys/device.c
++++ b/dlls/hidclass.sys/device.c
+@@ -364,6 +364,8 @@ static DWORD CALLBACK hid_device_thread(void *args)
+         res = WaitForSingleObject(ext->u.pdo.halt_event, polled ? ext->u.pdo.poll_interval : 0);
+     } while (res == WAIT_TIMEOUT);
+ 
++    HeapFree(GetProcessHeap(), 0, packet);
++
+     TRACE( "device thread exiting, res %#lx\n", res );
+     return 1;
+ }
+Subject: [PATCH] msi: Fix page fault when a patch does not contain a cabinet.
+
+Taken from https://bugs.winehq.org/show_bug.cgi?id=50148
+
+diff --git a/dlls/msi/files.c b/dlls/msi/files.c
+index 11111111111..11111111111 100644
+--- a/dlls/msi/files.c
++++ b/dlls/msi/files.c
+@@ -827,7 +827,7 @@ UINT ACTION_PatchFiles( MSIPACKAGE *package )
+             data.cb      = patchfiles_cb;
+             data.user    = &cursor;
+ 
+-            if (!msi_cabextract( package, mi, &data ))
++            if (mi->cabinet && !msi_cabextract( package, mi, &data ))
+             {
+                 ERR("Failed to extract cabinet: %s\n", debugstr_w(mi->cabinet));
+                 rc = ERROR_INSTALL_FAILURE;
+From: Myah Caron <qsniyg@protonmail.com>
+Subject: [PATCH resend 1/3] ntdll: Use Vista's algorithm for RtlEncode/DecodePointer.
+Message-Id: <t6E_KbjMO57JXjdT_S0DgMaDnoDBHGKG3Le0dXDYT9Jx5kb6maLOtD3xB3vIwzd4EUfXPipQs3pp_795_Kl-HHHTnrqdVbOzzZB20fuBMBQ=@protonmail.com>
+Date: Thu, 11 Mar 2021 02:44:10 +0000
+
+The algorithm is described here:
+https://web.archive.org/web/20100603042315/http://blogs.msdn.com/b/michael_howard/archive/2006/08/16/702707.aspx
+
+It still appears to be the same algorithm used in Windows 10.
+
+Signed-off-by: Myah Caron <qsniyg@protonmail.com>
+---
+ dlls/ntdll/rtl.c | 34 ++++++++++++++++++++++++++++++++--
+ 1 file changed, 32 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/ntdll/rtl.c b/dlls/ntdll/rtl.c
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/rtl.c
++++ b/dlls/ntdll/rtl.c
+@@ -1592,19 +1592,49 @@ static DWORD_PTR get_pointer_obfuscator( void )
+     return pointer_obfuscator;
+ }
+ 
++/***********************************************************************
++ * rotl_ptr (internal)
++ */
++#ifdef _WIN64
++#define ROT_BITS 64
++#else
++#define ROT_BITS 32
++#endif
++
++static DWORD_PTR rotl_ptr( DWORD_PTR num, int shift )
++{
++    shift &= ROT_BITS - 1;
++    return (num << shift) | (num >> (ROT_BITS-shift));
++}
++
++static DWORD_PTR rotr_ptr( DWORD_PTR num, int shift )
++{
++    shift &= ROT_BITS - 1;
++    return (num >> shift) | (num << (ROT_BITS-shift));
++}
++
++#undef ROT_BITS
++
+ /*************************************************************************
+  * RtlEncodePointer   [NTDLL.@]
+  */
+ PVOID WINAPI RtlEncodePointer( PVOID ptr )
+ {
++
+     DWORD_PTR ptrval = (DWORD_PTR) ptr;
+-    return (PVOID)(ptrval ^ get_pointer_obfuscator());
++    DWORD_PTR cookie = get_pointer_obfuscator();
++
++    ptrval = (ptrval ^ cookie);
++    return (PVOID)rotr_ptr(ptrval, cookie);
+ }
+ 
+ PVOID WINAPI RtlDecodePointer( PVOID ptr )
+ {
+     DWORD_PTR ptrval = (DWORD_PTR) ptr;
+-    return (PVOID)(ptrval ^ get_pointer_obfuscator());
++    DWORD_PTR cookie = get_pointer_obfuscator();
++
++    ptrval = rotl_ptr(ptrval, cookie);
++    return (PVOID)(ptrval ^ cookie);
+ }
+ 
+ /*************************************************************************
+-- 
+2.36.1
+
+From: Myah Caron <qsniyg@protonmail.com>
+Subject: [PATCH resend 2/3] ntdll: Implement ProcessCookie for NtQueryInformationProcess.
+Message-Id: <kOZB-Qr3zAOzuV6t2aRc7ldQGANigaQuL58so2yBFj5AnoiD8ZeA85bXhsjGDyO1XeT00jJC68tA7a5kEkvEeBGuKandT7bwIdne1WbS-Mk=@protonmail.com>
+Date: Thu, 11 Mar 2021 02:44:40 +0000
+
+The entropy is based on
+https://web.archive.org/web/20100603042315/http://blogs.msdn.com/b/michael_howard/archive/2006/08/16/702707.aspx
+
+Signed-off-by: Myah Caron <qsniyg@protonmail.com>
+---
+I've opted not to include the rdtsc instruction for patch simplicity. It would require either intrinsics or inline assembly, and I'm not sure what's the right way to integrate this under wine.
+
+Since the SystemCalls and PageFaults fields are not currently implemented under wine, the entropy currently isn't as good as it could be. I initially thought of (ab)using SystemInterruptInformation's getrandom usage, but I figured that would be even more of a hack. If this (or something else) would be preferred however, please let me know.
+
+ dlls/ntdll/unix/process.c | 28 ++++++++++++++++++++++++++--
+ 1 file changed, 26 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/ntdll/unix/process.c b/dlls/ntdll/unix/process.c
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/unix/process.c
++++ b/dlls/ntdll/unix/process.c
+@@ -65,6 +65,7 @@
+ #include "windef.h"
+ #include "winternl.h"
+ #include "winioctl.h"
++#include "ddk/wdm.h"
+ #include "unix_private.h"
+ #include "wine/condrv.h"
+ #include "wine/server.h"
+@@ -1056,6 +1057,30 @@ void fill_vm_counters( VM_COUNTERS_EX *pvmi, int unix_pid )
+ 
+ #endif
+ 
++static ULONG get_process_cookie( void )
++{
++    static ULONG process_cookie;
++
++    if (!process_cookie)
++    {
++        SYSTEM_PERFORMANCE_INFORMATION spi;
++
++        ULONG cookie = user_shared_data->TickCount.High1Time;
++        cookie ^= user_shared_data->TickCount.LowPart;
++        cookie ^= user_shared_data->InterruptTime.LowPart;
++
++        NtQuerySystemInformation( SystemPerformanceInformation, &spi, sizeof( spi ), NULL );
++        cookie ^= spi.SystemCalls;
++        cookie ^= spi.PageFaults;
++
++        /* cookie ^= (ULONG)rdtsc */
++
++        InterlockedExchange( (LONG*)&process_cookie, cookie );
++    }
++
++    return process_cookie;
++}
++
+ #define UNIMPLEMENTED_INFO_CLASS(c) \
+     case c: \
+         FIXME( "(process=%p) Unimplemented information class: " #c "\n", handle); \
+@@ -1494,11 +1519,10 @@ NTSTATUS WINAPI NtQueryInformationProcess( HANDLE handle, PROCESSINFOCLASS class
+         break;
+ 
+     case ProcessCookie:
+-        FIXME( "ProcessCookie (%p,%p,0x%08x,%p) stub\n", handle, info, size, ret_len );
+         if (handle == NtCurrentProcess())
+         {
+             len = sizeof(ULONG);
+-            if (size == len) *(ULONG *)info = 0;
++            if (size == len) *(ULONG *)info = get_process_cookie();
+             else ret = STATUS_INFO_LENGTH_MISMATCH;
+         }
+         else ret = STATUS_INVALID_PARAMETER;
+
+-- 
+2.36.1
+
+From: Myah Caron <qsniyg@protonmail.com>
+Subject: [PATCH resend 3/3] ntdll: Use ProcessCookie in RtlEncode/DecodePointer.
+Message-Id: <Y-LCRs9OnrXxeFO0BFMHAFAaxb7EfqhOmo-_aY-O6t3B6WtiNGLX-RLiczvv7CAVX2hgv1BhxM7As4OYkB52JSPv8Jr8nWzxq6itDyf-jDA=@protonmail.com>
+Date: Thu, 11 Mar 2021 02:45:08 +0000
+
+Signed-off-by: Myah Caron <qsniyg@protonmail.com>
+---
+ dlls/ntdll/rtl.c | 30 +++++++++++-------------------
+ 1 file changed, 11 insertions(+), 19 deletions(-)
+
+diff --git a/dlls/ntdll/rtl.c b/dlls/ntdll/rtl.c
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/rtl.c
++++ b/dlls/ntdll/rtl.c
+@@ -1566,30 +1566,22 @@ WCHAR * WINAPI RtlIpv6AddressToStringW(const IN6_ADDR *address, WCHAR *str)
+ }
+ 
+ /***********************************************************************
+- * get_pointer_obfuscator (internal)
++ * get_process_cookie (internal)
+  */
+-static DWORD_PTR get_pointer_obfuscator( void )
++static ULONG get_process_cookie( void )
+ {
+-    static DWORD_PTR pointer_obfuscator;
++    static ULONG process_cookie;
+ 
+-    if (!pointer_obfuscator)
++    if (!process_cookie)
+     {
+-        ULONG seed = NtGetTickCount();
+-        ULONG_PTR rand;
++        ULONG cookie;
++        NtQueryInformationProcess( NtCurrentProcess(), ProcessCookie, &cookie,
++                                   sizeof( cookie ), NULL );
+ 
+-        /* generate a random value for the obfuscator */
+-        rand = RtlUniform( &seed );
+-
+-        /* handle 64bit pointers */
+-        rand ^= (ULONG_PTR)RtlUniform( &seed ) << ((sizeof (DWORD_PTR) - sizeof (ULONG))*8);
+-
+-        /* set the high bits so dereferencing obfuscated pointers will (usually) crash */
+-        rand |= (ULONG_PTR)0xc0000000 << ((sizeof (DWORD_PTR) - sizeof (ULONG))*8);
+-
+-        InterlockedCompareExchangePointer( (void**) &pointer_obfuscator, (void*) rand, NULL );
++        InterlockedExchange( (LONG*)&process_cookie, cookie );
+     }
+ 
+-    return pointer_obfuscator;
++    return process_cookie;
+ }
+ 
+ /***********************************************************************
+@@ -1622,7 +1614,7 @@ PVOID WINAPI RtlEncodePointer( PVOID ptr )
+ {
+ 
+     DWORD_PTR ptrval = (DWORD_PTR) ptr;
+-    DWORD_PTR cookie = get_pointer_obfuscator();
++    DWORD_PTR cookie = (DWORD_PTR) get_process_cookie();
+ 
+     ptrval = (ptrval ^ cookie);
+     return (PVOID)rotr_ptr(ptrval, cookie);
+@@ -1631,7 +1623,7 @@ PVOID WINAPI RtlEncodePointer( PVOID ptr )
+ PVOID WINAPI RtlDecodePointer( PVOID ptr )
+ {
+     DWORD_PTR ptrval = (DWORD_PTR) ptr;
+-    DWORD_PTR cookie = get_pointer_obfuscator();
++    DWORD_PTR cookie = (DWORD_PTR) get_process_cookie();
+ 
+     ptrval = rotl_ptr(ptrval, cookie);
+     return (PVOID)(ptrval ^ cookie);
+-- 
+2.36.1
+
+

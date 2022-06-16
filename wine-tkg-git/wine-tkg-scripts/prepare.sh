@@ -143,8 +143,12 @@ update_configure() {
 }
 
 _init() {
+
+msg2 ' <----------------------> Wine-NSPA <----------------------->'
+msg2 ''
 msg2 ' A Real-Time Capable and Proaudio-Centric Build of Wine(-TKG)'
 msg2 ''
+msg2 ' <---------------------------------------------------------->'
 
   # load default configuration from files
   if [ -e "$_where"/proton_tkg_token ]; then

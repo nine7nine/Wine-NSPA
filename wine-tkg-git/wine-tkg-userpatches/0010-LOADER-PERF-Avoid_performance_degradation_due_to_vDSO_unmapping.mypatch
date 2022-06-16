@@ -1,7 +1,197 @@
-From 2fdc42b28b032855b6cb2b9955e29205931410a2 Mon Sep 17 00:00:00 2001
 From: Jinoh Kang <jinoh.kang.kr@gmail.com>
-Date: Thu, 30 Dec 2021 00:22:50 +0900
-Subject: [PATCH 1/9] loader: Refactor argv/envp/auxv management.
+Subject: [PATCH v3 01/13] loader: Use long instead of int for syscall return type in i386 code.
+Message-Id: <ed8913ee-6dd0-751d-3ec2-75d4865a6ed4@gmail.com>
+Date: Wed, 26 Jan 2022 00:23:22 +0900
+
+Although int = long effectively in i386, this makes it clear that a
+machine word-width value is being returned.
+
+Also, future patches adding syscalls returning pointers can use the same
+type (long) for return value consistently.
+
+Signed-off-by: Jinoh Kang <jinoh.kang.kr@gmail.com>
+---
+
+Notes:
+    v1 -> v2: don't change SYSCALL_RET().
+
+ loader/preloader.c | 12 ++++++------
+ 1 file changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/loader/preloader.c b/loader/preloader.c
+index 11111111111..11111111111 100644
+--- a/loader/preloader.c
++++ b/loader/preloader.c
+@@ -247,7 +247,7 @@ static inline __attribute__((noreturn)) void wld_exit( int code )
+ 
+ static inline int wld_open( const char *name, int flags )
+ {
+-    int ret;
++    long ret;
+     __asm__ __volatile__( "pushl %%ebx; movl %2,%%ebx; int $0x80; popl %%ebx"
+                           : "=a" (ret) : "0" (5 /* SYS_open */), "r" (name), "c" (flags) );
+     return SYSCALL_RET(ret);
+@@ -255,7 +255,7 @@ static inline int wld_open( const char *name, int flags )
+ 
+ static inline int wld_close( int fd )
+ {
+-    int ret;
++    long ret;
+     __asm__ __volatile__( "pushl %%ebx; movl %2,%%ebx; int $0x80; popl %%ebx"
+                           : "=a" (ret) : "0" (6 /* SYS_close */), "r" (fd) );
+     return SYSCALL_RET(ret);
+@@ -263,7 +263,7 @@ static inline int wld_close( int fd )
+ 
+ static inline ssize_t wld_read( int fd, void *buffer, size_t len )
+ {
+-    int ret;
++    long ret;
+     __asm__ __volatile__( "pushl %%ebx; movl %2,%%ebx; int $0x80; popl %%ebx"
+                           : "=a" (ret)
+                           : "0" (3 /* SYS_read */), "r" (fd), "c" (buffer), "d" (len)
+@@ -273,7 +273,7 @@ static inline ssize_t wld_read( int fd, void *buffer, size_t len )
+ 
+ static inline ssize_t wld_write( int fd, const void *buffer, size_t len )
+ {
+-    int ret;
++    long ret;
+     __asm__ __volatile__( "pushl %%ebx; movl %2,%%ebx; int $0x80; popl %%ebx"
+                           : "=a" (ret) : "0" (4 /* SYS_write */), "r" (fd), "c" (buffer), "d" (len) );
+     return SYSCALL_RET(ret);
+@@ -281,7 +281,7 @@ static inline ssize_t wld_write( int fd, const void *buffer, size_t len )
+ 
+ static inline int wld_mprotect( const void *addr, size_t len, int prot )
+ {
+-    int ret;
++    long ret;
+     __asm__ __volatile__( "pushl %%ebx; movl %2,%%ebx; int $0x80; popl %%ebx"
+                           : "=a" (ret) : "0" (125 /* SYS_mprotect */), "r" (addr), "c" (len), "d" (prot) );
+     return SYSCALL_RET(ret);
+@@ -328,7 +328,7 @@ __ASM_GLOBAL_FUNC(wld_mmap,
+ 
+ static inline int wld_prctl( int code, long arg )
+ {
+-    int ret;
++    long ret;
+     __asm__ __volatile__( "pushl %%ebx; movl %2,%%ebx; int $0x80; popl %%ebx"
+                           : "=a" (ret) : "0" (172 /* SYS_prctl */), "r" (code), "c" (arg) );
+     return SYSCALL_RET(ret);
+
+-- 
+2.36.1
+
+From: Jinoh Kang <jinoh.kang.kr@gmail.com>
+Subject: [PATCH v3 02/13] loader: Remove GCC <=4.x EBX register spilling workaround for i386.
+Message-Id: <3d4a3a79-7b6c-83cc-66fe-157e1dd0c920@gmail.com>
+Date: Wed, 26 Jan 2022 00:24:40 +0900
+In-Reply-To: <ed8913ee-6dd0-751d-3ec2-75d4865a6ed4@gmail.com>
+References: <ed8913ee-6dd0-751d-3ec2-75d4865a6ed4@gmail.com>
+
+Arbitrarily manipulating the stack pointer in inline assembly interferes
+with stack unwinding and debugging experience.  Note that it's
+impossible to reliably specify unwinding information in inline assembly,
+other than adjusting CFA offset.
+
+The workaround appears to be due to "buggy" register allocation that
+manifests in GCC <= 4.x when emitting position-independent code.
+This is not an issue, since the preloader isn't a position-independent
+executable or a shared library.
+
+Fix this by getting rid of extra spilling and value transfer of the EBX
+register, and telling the compiler to allocate EBX directly.
+
+Signed-off-by: Jinoh Kang <jinoh.kang.kr@gmail.com>
+---
+ loader/preloader.c | 28 ++++++++++++++--------------
+ 1 file changed, 14 insertions(+), 14 deletions(-)
+
+diff --git a/loader/preloader.c b/loader/preloader.c
+index 11111111111..11111111111 100644
+--- a/loader/preloader.c
++++ b/loader/preloader.c
+@@ -241,32 +241,32 @@ __ASM_GLOBAL_FUNC(_start,
+ static inline __attribute__((noreturn)) void wld_exit( int code )
+ {
+     for (;;)  /* avoid warning */
+-        __asm__ __volatile__( "pushl %%ebx; movl %1,%%ebx; int $0x80; popl %%ebx"
+-                              : : "a" (1 /* SYS_exit */), "r" (code) );
++        __asm__ __volatile__( "int $0x80"
++                              : : "a" (1 /* SYS_exit */), "b" (code) );
+ }
+ 
+ static inline int wld_open( const char *name, int flags )
+ {
+     long ret;
+-    __asm__ __volatile__( "pushl %%ebx; movl %2,%%ebx; int $0x80; popl %%ebx"
+-                          : "=a" (ret) : "0" (5 /* SYS_open */), "r" (name), "c" (flags) );
++    __asm__ __volatile__( "int $0x80"
++                          : "=a" (ret) : "0" (5 /* SYS_open */), "b" (name), "c" (flags) );
+     return SYSCALL_RET(ret);
+ }
+ 
+ static inline int wld_close( int fd )
+ {
+     long ret;
+-    __asm__ __volatile__( "pushl %%ebx; movl %2,%%ebx; int $0x80; popl %%ebx"
+-                          : "=a" (ret) : "0" (6 /* SYS_close */), "r" (fd) );
++    __asm__ __volatile__( "int $0x80"
++                          : "=a" (ret) : "0" (6 /* SYS_close */), "b" (fd) );
+     return SYSCALL_RET(ret);
+ }
+ 
+ static inline ssize_t wld_read( int fd, void *buffer, size_t len )
+ {
+     long ret;
+-    __asm__ __volatile__( "pushl %%ebx; movl %2,%%ebx; int $0x80; popl %%ebx"
++    __asm__ __volatile__( "int $0x80"
+                           : "=a" (ret)
+-                          : "0" (3 /* SYS_read */), "r" (fd), "c" (buffer), "d" (len)
++                          : "0" (3 /* SYS_read */), "b" (fd), "c" (buffer), "d" (len)
+                           : "memory" );
+     return SYSCALL_RET(ret);
+ }
+@@ -274,16 +274,16 @@ static inline ssize_t wld_read( int fd, void *buffer, size_t len )
+ static inline ssize_t wld_write( int fd, const void *buffer, size_t len )
+ {
+     long ret;
+-    __asm__ __volatile__( "pushl %%ebx; movl %2,%%ebx; int $0x80; popl %%ebx"
+-                          : "=a" (ret) : "0" (4 /* SYS_write */), "r" (fd), "c" (buffer), "d" (len) );
++    __asm__ __volatile__( "int $0x80"
++                          : "=a" (ret) : "0" (4 /* SYS_write */), "b" (fd), "c" (buffer), "d" (len) );
+     return SYSCALL_RET(ret);
+ }
+ 
+ static inline int wld_mprotect( const void *addr, size_t len, int prot )
+ {
+     long ret;
+-    __asm__ __volatile__( "pushl %%ebx; movl %2,%%ebx; int $0x80; popl %%ebx"
+-                          : "=a" (ret) : "0" (125 /* SYS_mprotect */), "r" (addr), "c" (len), "d" (prot) );
++    __asm__ __volatile__( "int $0x80"
++                          : "=a" (ret) : "0" (125 /* SYS_mprotect */), "b" (addr), "c" (len), "d" (prot) );
+     return SYSCALL_RET(ret);
+ }
+ 
+@@ -329,8 +329,8 @@ __ASM_GLOBAL_FUNC(wld_mmap,
+ static inline int wld_prctl( int code, long arg )
+ {
+     long ret;
+-    __asm__ __volatile__( "pushl %%ebx; movl %2,%%ebx; int $0x80; popl %%ebx"
+-                          : "=a" (ret) : "0" (172 /* SYS_prctl */), "r" (code), "c" (arg) );
++    __asm__ __volatile__( "int $0x80"
++                          : "=a" (ret) : "0" (172 /* SYS_prctl */), "b" (code), "c" (arg) );
+     return SYSCALL_RET(ret);
+ }
+ 
+
+-- 
+2.36.1
+
+From: Jinoh Kang <jinoh.kang.kr@gmail.com>
+Subject: [PATCH v5 03/13] loader: Refactor argv/envp/auxv management.
+Message-Id: <13f24c14-b870-d400-a8f6-dcc7eb0df05a@gmail.com>
+Date: Sat, 5 Mar 2022 23:54:25 +0900
+In-Reply-To: <7a3d3b9e-7d1a-9fde-99a7-bd47d51fda35@gmail.com>
+References: <7a3d3b9e-7d1a-9fde-99a7-bd47d51fda35@gmail.com>
 
 Collect scattered variables holding stack addresses (e.g. pargc, argv,
 envp, auxv) in one place.
@@ -12,11 +202,25 @@ leaving pointer variables stale.
 
 Signed-off-by: Jinoh Kang <jinoh.kang.kr@gmail.com>
 ---
- loader/preloader.c | 146 +++++++++++++++++++++++++++++++++++----------
- 1 file changed, 115 insertions(+), 31 deletions(-)
+
+Notes:
+    v1 -> v2:
+    - Zero argc slot before writing to it
+    - s/stackargs_eat_args/stackargs_shift_args/
+    - s/shift_stackargs/stackargs_switch_stack/
+    - s/offset/delta/
+    - slightly change auxv append logic to match the original closer
+    
+    v3 -> v4:
+    - add comments
+    
+    v4 -> v5: no changes
+
+ loader/preloader.c | 269 +++++++++++++++++++++++++++++++++------------
+ 1 file changed, 199 insertions(+), 70 deletions(-)
 
 diff --git a/loader/preloader.c b/loader/preloader.c
-index 585be50624f..c3dae88ecd0 100644
+index 11111111111..11111111111 100644
 --- a/loader/preloader.c
 +++ b/loader/preloader.c
 @@ -164,6 +164,25 @@ struct wld_auxv
@@ -45,7 +249,7 @@ index 585be50624f..c3dae88ecd0 100644
  /*
   * The __bb_init_func is an empty function only called when file is
   * compiled with gcc flags "-fprofile-arcs -ftest-coverage".  This
-@@ -674,6 +693,13 @@ static inline void *wld_memset( void *dest, int val, size_t len )
+@@ -674,6 +693,32 @@ static inline void *wld_memset( void *dest, int val, size_t len )
      return dest;
  }
  
@@ -56,10 +260,29 @@ index 585be50624f..c3dae88ecd0 100644
 +    return ptr - str;
 +}
 +
++static inline void *wld_memmove( void *dest, const void *src, size_t len )
++{
++    unsigned char *destp = dest;
++    const unsigned char *srcp = src;
++
++    if ((unsigned long)dest - (unsigned long)src < len)
++    {
++        destp += len;
++        srcp += len;
++        while (len--) *--destp = *--srcp;
++    }
++    else
++    {
++        while (len--) *destp++ = *srcp++;
++    }
++
++    return dest;
++}
++
  /*
   * wld_printf - just the basics
   *
-@@ -794,6 +820,74 @@ static void dump_auxiliary( struct wld_auxv *av )
+@@ -794,72 +839,167 @@ static void dump_auxiliary( struct wld_auxv *av )
  }
  #endif
  
@@ -103,15 +326,15 @@ index 585be50624f..c3dae88ecd0 100644
 + */
 +static char *stackargs_getenv( const struct stackarg_info *info, const char *name )
 +{
++    char **envp = info->envp;
 +    size_t namelen = wld_strlen( name );
-+    char **envp;
 +
-+    for (envp = info->envp; *envp; envp++)
++    while (*envp)
 +    {
 +        if (wld_strncmp( *envp, name, namelen ) == 0 &&
 +            (*envp)[namelen] == '=') return *envp + namelen + 1;
++        envp++;
 +    }
-+
 +    return NULL;
 +}
 +
@@ -131,10 +354,141 @@ index 585be50624f..c3dae88ecd0 100644
 +    *(int *)info->stack = info->argc;
 +}
 +
++/*
++ * stackargs_switch_stack
++ *
++ * Fix up variables in oldinfo to the given stack base, and return
++ * the new information to newinfo (does not modify oldinfo).
++ */
++static void stackargs_switch_stack( struct stackarg_info *newinfo, struct stackarg_info *oldinfo, void *newstack )
++{
++    unsigned long delta = (unsigned long)newstack - (unsigned long)oldinfo->stack;
++
++    /* NOTE it is legal that newinfo == oldinfo */
++    newinfo->stack = newstack;
++    newinfo->argc = oldinfo->argc;
++    newinfo->argv = (void *)((unsigned long)oldinfo->argv + delta);
++    newinfo->envp = (void *)((unsigned long)oldinfo->envp + delta);
++    newinfo->auxv = (void *)((unsigned long)oldinfo->auxv + delta);
++    newinfo->auxv_end = (void *)((unsigned long)oldinfo->auxv_end + delta);
++}
++
  /*
   * set_auxiliary_values
   *
-@@ -1369,47 +1463,36 @@ static void set_process_name( int argc, char *argv[] )
+  * Set the new auxiliary values
+  */
+-static void set_auxiliary_values( struct wld_auxv *av, const struct wld_auxv *new_av,
+-                                  const struct wld_auxv *delete_av, void **stack )
++static void set_auxiliary_values( struct preloader_state *state,
++                                  const struct wld_auxv *new_av,
++                                  const struct wld_auxv *delete_av )
+ {
+-    int i, j, av_count = 0, new_count = 0, delete_count = 0;
+-    char *src, *dst;
+-
+-    /* count how many aux values we have already */
+-    while (av[av_count].a_type != AT_NULL) av_count++;
++    size_t i, new_count = 0, delete_count = 0;
++    unsigned long dst;
++    struct wld_auxv *avpd, *avps, *avp;
++    int is_deleted;
+ 
+     /* delete unwanted values */
+-    for (j = 0; delete_av[j].a_type != AT_NULL; j++)
++    for (avps = avpd = state->s.auxv; avps + 1 != state->s.auxv_end; avps++)
+     {
+-        for (i = 0; i < av_count; i++) if (av[i].a_type == delete_av[j].a_type)
++        is_deleted = 0;
++        for (i = 0; delete_av[i].a_type != AT_NULL; i++)
++        {
++            if (avps->a_type == new_av[i].a_type)
++            {
++                is_deleted = 1;
++                break;
++            }
++        }
++        if (is_deleted)
+         {
+-            av[i].a_type = av[av_count-1].a_type;
+-            av[i].a_un.a_val = av[av_count-1].a_un.a_val;
+-            av[--av_count].a_type = AT_NULL;
+             delete_count++;
+-            break;
++            continue;
++        }
++        if (avpd != avps)
++        {
++            avpd->a_type = avps->a_type;
++            avpd->a_un.a_val = avps->a_un.a_val;
+         }
++        avpd++;
+     }
++    avpd->a_type = AT_NULL;
++    avpd->a_un.a_val = 0;
++    state->s.auxv_end = avpd + 1;
+ 
+     /* count how many values we have in new_av that aren't in av */
+-    for (j = 0; new_av[j].a_type != AT_NULL; j++)
++    for (i = 0; new_av[i].a_type != AT_NULL; i++)
+     {
+-        for (i = 0; i < av_count; i++) if (av[i].a_type == new_av[j].a_type) break;
+-        if (i == av_count) new_count++;
++        for (avp = state->s.auxv; avp + 1 != state->s.auxv_end; avp++) if (avp->a_type == new_av[i].a_type) break;
++        if (avp + 1 == state->s.auxv_end) new_count++;
+     }
+ 
+-    src = (char *)*stack;
+-    dst = src - (new_count - delete_count) * sizeof(*av);
+-    dst = (char *)((unsigned long)dst & ~15);
+-    if (dst < src)   /* need to make room for the extra values */
+-    {
+-        int len = (char *)(av + av_count + 1) - src;
+-        for (i = 0; i < len; i++) dst[i] = src[i];
+-    }
+-    else if (dst > src)  /* get rid of unused values */
+-    {
+-        int len = (char *)(av + av_count + 1) - src;
+-        for (i = len - 1; i >= 0; i--) dst[i] = src[i];
+-    }
+-    *stack = dst;
+-    av = (struct wld_auxv *)((char *)av + (dst - src));
++    dst = ((unsigned long)state->s.stack -
++           (new_count - delete_count) * sizeof(struct wld_auxv)) & ~15;
++    wld_memmove( (void *)dst, state->s.stack,
++                 (unsigned long)state->s.auxv_end -
++                 (unsigned long)state->s.stack );
++    stackargs_switch_stack( &state->s, &state->s, (void *)dst );
+ 
+     /* now set the values */
+-    for (j = 0; new_av[j].a_type != AT_NULL; j++)
++    for (i = 0; new_av[i].a_type != AT_NULL; i++)
+     {
+-        for (i = 0; i < av_count; i++) if (av[i].a_type == new_av[j].a_type) break;
+-        if (i < av_count) av[i].a_un.a_val = new_av[j].a_un.a_val;
++        for (avp = state->s.auxv; avp + 1 != state->s.auxv_end; avp++) if (avp->a_type == new_av[i].a_type) break;
++        if (avp + 1 != state->s.auxv_end) avp->a_un.a_val = new_av[i].a_un.a_val;
+         else
+         {
+-            av[av_count].a_type     = new_av[j].a_type;
+-            av[av_count].a_un.a_val = new_av[j].a_un.a_val;
+-            av_count++;
++            avp->a_type     = new_av[i].a_type;
++            avp->a_un.a_val = new_av[i].a_un.a_val;
++            state->s.auxv_end++;
+         }
+     }
++    state->s.auxv_end[-1].a_type = AT_NULL;
++    state->s.auxv_end[-1].a_un.a_val = 0;
+ 
+ #ifdef DUMP_AUX_INFO
+     wld_printf("New auxiliary info:\n");
+-    dump_auxiliary( av );
++    dump_auxiliary( state->s.auxv );
+ #endif
+ }
+ 
+@@ -1369,47 +1509,36 @@ static void set_process_name( int argc, char *argv[] )
   */
  void* wld_start( void **stack )
  {
@@ -152,11 +506,10 @@ index 585be50624f..c3dae88ecd0 100644
 -    pargc = *stack;
 -    argv = (char **)pargc + 1;
 -    if (*pargc < 2) fatal_error( "Usage: %s wine_binary [args]\n", argv[0] );
-+    parse_stackargs( &state.s, *stack );
- 
+-
 -    /* skip over the parameters */
 -    p = argv + *pargc + 1;
-+    if (state.s.argc < 2) fatal_error( "Usage: %s wine_binary [args]\n", state.s.argv[0] );
++    parse_stackargs( &state.s, *stack );
  
 -    /* skip over the environment */
 -    while (*p)
@@ -165,7 +518,8 @@ index 585be50624f..c3dae88ecd0 100644
 -        if (!wld_strncmp( *p, res, sizeof(res)-1 )) reserve = *p + sizeof(res) - 1;
 -        p++;
 -    }
--
++    if (state.s.argc < 2) fatal_error( "Usage: %s wine_binary [args]\n", state.s.argv[0] );
+ 
 -    av = (struct wld_auxv *)(p+1);
 -    page_size = get_auxiliary( av, AT_PAGESZ, 4096 );
 +    page_size = get_auxiliary( state.s.auxv, AT_PAGESZ, 4096 );
@@ -195,7 +549,7 @@ index 585be50624f..c3dae88ecd0 100644
          {
              remove_preload_range( i );
              i--;
-@@ -1436,7 +1519,7 @@ void* wld_start( void **stack )
+@@ -1436,7 +1565,7 @@ void* wld_start( void **stack )
          wld_mprotect( (char *)0x80000000 - page_size, page_size, PROT_EXEC | PROT_READ );
  
      /* load the main binary */
@@ -204,7 +558,7 @@ index 585be50624f..c3dae88ecd0 100644
  
      /* load the ELF interpreter */
      interp = (char *)main_binary_map.l_addr + main_binary_map.l_interp;
-@@ -1453,14 +1536,14 @@ void* wld_start( void **stack )
+@@ -1453,14 +1582,14 @@ void* wld_start( void **stack )
      SET_NEW_AV( 2, AT_PHNUM, main_binary_map.l_phnum );
      SET_NEW_AV( 3, AT_PAGESZ, page_size );
      SET_NEW_AV( 4, AT_BASE, ld_so_map.l_addr );
@@ -221,7 +575,7 @@ index 585be50624f..c3dae88ecd0 100644
      {
          delete_av[i++].a_type = AT_SYSINFO;
          delete_av[i++].a_type = AT_SYSINFO_EHDR;
-@@ -1468,11 +1551,12 @@ void* wld_start( void **stack )
+@@ -1468,14 +1597,13 @@ void* wld_start( void **stack )
      delete_av[i].a_type = AT_NULL;
  
      /* get rid of first argument */
@@ -232,31 +586,51 @@ index 585be50624f..c3dae88ecd0 100644
 +    stackargs_shift_args( &state.s, 1 );
  
 -    set_auxiliary_values( av, new_av, delete_av, stack );
-+    *stack = state.s.stack;
-+    set_auxiliary_values( state.s.auxv, new_av, delete_av, stack );
-+    /* state is invalid from this point onward */
++    set_auxiliary_values( &state, new_av, delete_av );
  
  #ifdef DUMP_AUX_INFO
-     wld_printf("new stack = %p\n", *stack);
+-    wld_printf("new stack = %p\n", *stack);
++    wld_printf("new stack = %p\n", state.s.stack);
+     wld_printf("jumping to %p\n", (void *)ld_so_map.l_entry);
+ #endif
+ #ifdef DUMP_MAPS
+@@ -1490,6 +1618,7 @@ void* wld_start( void **stack )
+     }
+ #endif
+ 
++    *stack = state.s.stack;
+     return (void *)ld_so_map.l_entry;
+ }
+ 
+
 -- 
-GitLab
+2.36.1
 
-
-From ec429cf5b444faaa02b261c93cafaf007b0bcf4e Mon Sep 17 00:00:00 2001
 From: Jinoh Kang <jinoh.kang.kr@gmail.com>
-Date: Thu, 30 Dec 2021 00:23:35 +0900
-Subject: [PATCH 2/9] loader: Refactor number parsing to own function.
+Subject: [PATCH v5 04/13] loader: Refactor number parsing to own function.
+Message-Id: <8390d840-3809-562a-35cf-e7038a9c9685@gmail.com>
+Date: Sat, 5 Mar 2022 23:54:28 +0900
+In-Reply-To: <7a3d3b9e-7d1a-9fde-99a7-bd47d51fda35@gmail.com>
+References: <7a3d3b9e-7d1a-9fde-99a7-bd47d51fda35@gmail.com>
 
 Improve readability of WINEPRELOADRESERVE parsing code, and also make
 the parser available for other purposes in future patches.
 
 Signed-off-by: Jinoh Kang <jinoh.kang.kr@gmail.com>
 ---
+
+Notes:
+    v3 -> v4:
+    - document parse_ul() function
+    - don't remove constness of preload_reserve() argument
+    
+    v4 -> v5: no changes
+
  loader/preloader.c | 62 ++++++++++++++++++++++++++++++++++------------
  1 file changed, 46 insertions(+), 16 deletions(-)
 
 diff --git a/loader/preloader.c b/loader/preloader.c
-index c3dae88ecd0..c964e2aeeb2 100644
+index 11111111111..11111111111 100644
 --- a/loader/preloader.c
 +++ b/loader/preloader.c
 @@ -68,6 +68,7 @@
@@ -267,8 +641,8 @@ index c3dae88ecd0..c964e2aeeb2 100644
  #include <sys/types.h>
  #include <sys/stat.h>
  #include <fcntl.h>
-@@ -700,6 +701,42 @@ static size_t wld_strlen( const char *str )
-     return ptr - str;
+@@ -719,6 +720,42 @@ static inline void *wld_memmove( void *dest, const void *src, size_t len )
+     return dest;
  }
  
 +/*
@@ -282,11 +656,11 @@ index c3dae88ecd0..c964e2aeeb2 100644
 +static inline unsigned long parse_ul( const char *nptr, char **endptr, unsigned int radix, int *overflow )
 +{
 +    const char *p = nptr;
-+    unsigned long value, max_radix_mul;
++    unsigned long value, thresh;
 +    int ovfl = 0;
 +
 +    value = 0;
-+    max_radix_mul = ULONG_MAX / radix;
++    thresh = ULONG_MAX / radix;
 +    for (;;)
 +    {
 +        unsigned int digit;
@@ -295,7 +669,7 @@ index c3dae88ecd0..c964e2aeeb2 100644
 +        else if (*p >= 'A' && *p <= 'Z') digit = *p - 'A' + 10;
 +        else break;
 +        if (digit >= radix) break;
-+        if (value > max_radix_mul) ovfl = 1;
++        if (value > thresh) ovfl = 1;
 +        value *= radix;
 +        if (value > value + digit) ovfl = 1;
 +        value += digit;
@@ -310,7 +684,7 @@ index c3dae88ecd0..c964e2aeeb2 100644
  /*
   * wld_printf - just the basics
   *
-@@ -1339,27 +1376,20 @@ found:
+@@ -1385,27 +1422,20 @@ found:
   */
  static void preload_reserve( const char *str )
  {
@@ -347,15 +721,16 @@ index c3dae88ecd0..c964e2aeeb2 100644
  
      /* sanity checks */
      if (end <= start) start = end = NULL;
+
 -- 
-GitLab
+2.36.1
 
-
-From f52676bad99cabebd6cbc86c7b5aea660c199097 Mon Sep 17 00:00:00 2001
 From: Jinoh Kang <jinoh.kang.kr@gmail.com>
-Date: Thu, 30 Dec 2021 00:24:03 +0900
-Subject: [PATCH 3/9] loader: Generalise is_addr_reserved to find overlapping
- address ranges.
+Subject: [PATCH v5 05/13] loader: Generalise is_addr_reserved to find overlapping address ranges.
+Message-Id: <9f0be424-0643-068b-a0a9-033d088b0de4@gmail.com>
+Date: Sat, 5 Mar 2022 23:54:32 +0900
+In-Reply-To: <7a3d3b9e-7d1a-9fde-99a7-bd47d51fda35@gmail.com>
+References: <7a3d3b9e-7d1a-9fde-99a7-bd47d51fda35@gmail.com>
 
 Rename is_addr_reserved to find_preload_reserved_area, with the
 following changes:
@@ -366,14 +741,23 @@ following changes:
 
 Signed-off-by: Jinoh Kang <jinoh.kang.kr@gmail.com>
 ---
+
+Notes:
+    v1 -> v2: handle overflows
+    
+    v3 -> v4:
+    - add comments and documentation
+    
+    v4 -> v5: no changes
+
  loader/preloader.c | 27 +++++++++++++++++++--------
  1 file changed, 19 insertions(+), 8 deletions(-)
 
 diff --git a/loader/preloader.c b/loader/preloader.c
-index c964e2aeeb2..cce9353bdb4 100644
+index 11111111111..11111111111 100644
 --- a/loader/preloader.c
 +++ b/loader/preloader.c
-@@ -1423,18 +1423,29 @@ error:
+@@ -1469,18 +1469,29 @@ error:
      fatal_error( "invalid WINEPRELOADRESERVE value '%s'\n", str );
  }
  
@@ -401,7 +785,7 @@ index c964e2aeeb2..cce9353bdb4 100644
 -            (const char *)addr <  (const char *)preload_info[i].addr + preload_info[i].size)
 -            return 1;
 +        if (end   >= (unsigned long)preload_info[i].addr &&
-+            start <  (unsigned long)preload_info[i].addr + preload_info[i].size)
++            start <= (unsigned long)preload_info[i].addr + preload_info[i].size - 1)
 +            return i;
      }
 -    return 0;
@@ -409,7 +793,7 @@ index c964e2aeeb2..cce9353bdb4 100644
  }
  
  /* remove a range from the preload list */
-@@ -1457,7 +1468,7 @@ static int is_in_preload_range( const struct wld_auxv *av, int type )
+@@ -1503,7 +1514,7 @@ static int is_in_preload_range( const struct wld_auxv *av, int type )
  {
      while (av->a_type != AT_NULL)
      {
@@ -418,7 +802,7 @@ index c964e2aeeb2..cce9353bdb4 100644
          av++;
      }
      return 0;
-@@ -1545,7 +1556,7 @@ void* wld_start( void **stack )
+@@ -1591,7 +1602,7 @@ void* wld_start( void **stack )
  
      /* add an executable page at the top of the address space to defeat
       * broken no-exec protections that play with the code selector limit */
@@ -427,14 +811,16 @@ index c964e2aeeb2..cce9353bdb4 100644
          wld_mprotect( (char *)0x80000000 - page_size, page_size, PROT_EXEC | PROT_READ );
  
      /* load the main binary */
+
 -- 
-GitLab
+2.36.1
 
-
-From b998f7dd86b7ef70962378ce4c58caa476fc2c77 Mon Sep 17 00:00:00 2001
 From: Jinoh Kang <jinoh.kang.kr@gmail.com>
-Date: Wed, 29 Dec 2021 23:29:36 +0900
-Subject: [PATCH 4/9] loader: Explicitly munmap() the preloader's ELF EHDR.
+Subject: [PATCH v5 06/13] loader: Explicitly munmap() the preloader's ELF EHDR.
+Message-Id: <4d6905c0-7ea3-77c1-24b5-b56f8dda3b6e@gmail.com>
+Date: Sat, 5 Mar 2022 23:54:37 +0900
+In-Reply-To: <7a3d3b9e-7d1a-9fde-99a7-bd47d51fda35@gmail.com>
+References: <7a3d3b9e-7d1a-9fde-99a7-bd47d51fda35@gmail.com>
 
 Today, the preloader reserves some predefined address ranges without
 checking if there are any overlapping virtual memory mappings.
@@ -454,11 +840,17 @@ preloader's ELF EHDR.
 
 Signed-off-by: Jinoh Kang <jinoh.kang.kr@gmail.com>
 ---
+
+Notes:
+    v1 -> v2: fix comparing text segment start against EHDR start
+    
+    v4 -> v5: no changes
+
  loader/preloader.c | 30 ++++++++++++++++++++++++++++++
  1 file changed, 30 insertions(+)
 
 diff --git a/loader/preloader.c b/loader/preloader.c
-index cce9353bdb4..88865587975 100644
+index 11111111111..11111111111 100644
 --- a/loader/preloader.c
 +++ b/loader/preloader.c
 @@ -227,6 +227,7 @@ struct
@@ -484,7 +876,7 @@ index cce9353bdb4..88865587975 100644
 +
  static inline int wld_prctl( int code, long arg )
  {
-     int ret;
+     long ret;
 @@ -365,6 +375,7 @@ void *thread_data[256];
   *  then jumps to the address wld_start returns.
   */
@@ -539,7 +931,7 @@ index cce9353bdb4..88865587975 100644
  int wld_prctl( int code, long arg );
  SYSCALL_FUNC( wld_prctl, 172 /* SYS_prctl */ );
  
-@@ -1521,6 +1543,14 @@ void* wld_start( void **stack )
+@@ -1567,6 +1589,14 @@ void* wld_start( void **stack )
      preloader_start = (char *)_start - ((unsigned long)_start & page_mask);
      preloader_end = (char *)((unsigned long)(_end + page_mask) & ~page_mask);
  
@@ -554,90 +946,66 @@ index cce9353bdb4..88865587975 100644
  #ifdef DUMP_AUX_INFO
      wld_printf( "stack = %p\n", state.s.stack );
      for( i = 0; i < state.s.argc; i++ ) wld_printf("argv[%lx] = %s\n", i, state.s.argv[i]);
+
 -- 
-GitLab
+2.36.1
 
-
-From 022473abca8c4baab2d630688d492be282015132 Mon Sep 17 00:00:00 2001
 From: Jinoh Kang <jinoh.kang.kr@gmail.com>
-Date: Sat, 30 Apr 2022 15:58:38 +0900
-Subject: [PATCH 5/9] loader: Don't clobber existing memory mappings when
- reserving addresses.
+Subject: [PATCH v5 07/13] loader: Don't clobber existing memory mappings when reserving addresses.
+Message-Id: <4b537c66-d094-b452-6f07-2dcb8fb713ca@gmail.com>
+Date: Sat, 5 Mar 2022 23:54:41 +0900
+In-Reply-To: <7a3d3b9e-7d1a-9fde-99a7-bd47d51fda35@gmail.com>
+References: <7a3d3b9e-7d1a-9fde-99a7-bd47d51fda35@gmail.com>
 
 The main role of the preloader is to reserve specific virtual memory
-address ranges used for special purposes on Windows, before Wine could
-be loaded.
+address ranges used for special purposes on Windows, before the actual
+Wine loader could be loaded.
 
 It achieves this goal via the following process:
 
-(1) It prevents future allocation of any addresses in the reserved
-    ranges.  Specifically, it issues a series of mmap() calls with
-    PROT_NONE protection to reserve those ranges, so that the OS won't
-    allocate any of the reserved addresses for other users (i.e. Unix
-    system libraries).
+1. It eliminates future allocations of addresses in the reserved ranges.
+   Specifically, it issues a series of mmap() calls with PROT_NONE
+   protection to reserve those ranges, so that the OS won't allocate any
+   of the reserved addresses for other users (i.e. Unix system
+   libraries).
 
-(2) It eliminates existing references to any addresses in the reserved
-    ranges.  Specifically, if the vDSO had occupied one of the reserved
-    ranges, the preloader removes it from the auxiliary vector
-    (AT_SYSINFO*).
+2. It eliminates current references of addresses in the reserved ranges.
+   Specifically, if the vDSO had occupied one of the reserved ranges,
+   the preloader removes it from the auxiliary vector (AT_SYSINFO*).
 
-(3) If (2) is not possible because the address is in use (e.g. current
-    thread stack), it gives up reservation and removes the reserved
-    range from preload_info.
+3. If (2) is not possible because the address is in use (e.g. current
+   call stack), it gives up reservation and removes the reserved range
+   from preload_info.
 
-Today, each virtual memory area (VMA) is treated as follows when it
-overlaps with Wine's reserved address ranges.
+Each virtual memory area (VMA) is treated as follows when it overlaps
+with Wine's reserved address ranges.
 
-- Preloader code/data: Preloader should leave no trace of itself after
-  Wine has been loaded.  Thus, no current references to preloader code
-  or data remain.  (2) is a no-op in this case.
-  Meanwhile, if any part of the preloader overlaps with a reserved
-  range, that part is overwritten.  This could lead to crash if it ever
-  touched any part of code or data that are still being used.
-
-- vDSO/vvar: These are overwritten and ignored completely when they
-  overlap with any reserved range.  In other words, both (1) and (2)
-  are performed.
-
-- Stack: Since the stack is always in use, (2) is not possible.
-  Therefore, (3) is performed.
+a. Preloader code/data: (1)
+b. vDSO: (1), then (2)
+c. Stack: (3)
 
 There are a few issues with this approach:
 
-1. Existing VMAs that overlap with any reserved ranges are forcibly
-   overwritten during (1).  There is actually no need to overwrite them,
-   since existing VMAs themselves automatically act as reservations by
-   nature (i.e. no future allocations would overlap any existing VMAs).
-   Furthermore, arbitrarily overwriting any memory in use would cause
-   the preloader to crash.  The only treatment required for existing
-   VMAs is either (2) or (3), not (1).
+i.   VMAs are forcibly overwritten even if they are already allocated.
+     This is unnecessary for already mapped VMAs as long as (2) is
+     performed, since the OS won't reuse addresses from existing VMAs
+     for future allocations anyway.  The only step required for such
+     VMAs are either (2) or (3), not (1).
 
-2. (1) irrevocably overwrites some useful preexisting VMAs such as vDSO
-   if they overlap with any reserved ranges.  Newer versions of Linux
-   kernel supports relocating vDSO, which can be used to move it outside
-   of reserved address ranges instead of discarding it.  To do so,
-   however, we first have to allocate a _new_ address for such VMAs
-   before the overlapping address range could be reserved.  Notice a
-   chicken-egg problem here:
+ii.  (1) irrevocably overwrites some useful preexisting useful VMAs
+     such as vDSO and vvar.  The vDSO can be relocated in newer versions
+     of Linux kernel, so it's more useful to keep it.  To do so,
+     however, we have to first allocate a _new_ address for such VMAs.
+     This is possible only after filling all the other reserved ranges;
+     otherwise, the OS might allocate a to-be-reserved address for us.
 
-   - If we perform (1) before allocating a new address for vDSO, the
-     vDSO goes away even before we get a chance to relocate it.
+     Therefore, there needs to be a way to mmap()-fill all unallocated
+     regions inside the reserved ranges, while still keeping existing
+     VMAs intact.
 
-   - If we allocate a new address for vDSO before performing (1),
-     the new address allocated by the OS might end up overlapping with
-     one of the reserved ranges.
-
-   What we need here is a way to mmap()-fill all unallocated regions
-   inside the reserved ranges, *while* still keeping existing VMAs
-   intact.  In this way, we can perform (1) foremost to avoid allocating
-   a reserved address for relocated vDSO.  After the vDSO is relocated
-   to a safe address, we can perform (1) once more to finalise the
-   reservation.
-
-3. Only the stack receives the special treatment of not being
-   overwritten by PROT_NONE allocation from (1).  Theoretically other
-   VMAs that are in use such as the preloader code and data shall
-   receive the equal treatment anyway.
+iii. Only (c) receives the special treatment of not being overwritten by
+     PROT_NONE allocation from (1).  Theoretically other VMAs that are
+     in active use such as (a) shall receive the equal treatment anyway.
 
 Fix this by reading /proc/self/maps for existing VMAs, and splitting
 mmap() calls to avoid erasing existing memory mappings.
@@ -647,25 +1015,56 @@ it fails entirely if there exist *any* overlapping memory mappings.
 
 Signed-off-by: Jinoh Kang <jinoh.kang.kr@gmail.com>
 ---
- loader/preloader.c | 485 ++++++++++++++++++++++++++++++++++++++++++---
- 1 file changed, 459 insertions(+), 26 deletions(-)
+
+Notes:
+    v1 -> v2:
+    - linebuffer_init()
+      - add comment on subtracting 1 from ->limit
+    - linebuffer_getline()
+      - fix typo in memmove size
+    - parse_maps_line()
+      - use -page_size for max page address instad of ULONG_MAX
+    - lookup_vma_entry()
+      - skip forward if mid->end == address in binary search
+    - free_vma_list()
+      - use NULL instead of 0
+    - alloc_scan_vma()
+      - use page_size instead of hard-coded 4096
+      - use -1 instead of MAP_FAILED macro for consistency
+    - map_reserve_preload_ranges()
+      - compute exclude region from stackarg_info instead of directly receiving it
+      - make agnostic to pointer comparison signedness
+      - make explicit one-byte padding before and after padding region
+      - handle potential off-by-one overflow
+    
+    v3 -> v4:
+    - edit commit message
+    - add comments and documentation
+    - rename linebuffer "overflow" field to "truncated"
+    - remove redundant "delim" parameter from linebuffer_getline
+    - make const the "line" argument of parse_maps_line
+    - slightly rewrite insert_vma_entry
+    
+    v4 -> v5: no changes
+
+ loader/preloader.c | 392 ++++++++++++++++++++++++++++++++++++++++++---
+ 1 file changed, 369 insertions(+), 23 deletions(-)
 
 diff --git a/loader/preloader.c b/loader/preloader.c
-index 88865587975..7925a23e821 100644
+index 11111111111..11111111111 100644
 --- a/loader/preloader.c
 +++ b/loader/preloader.c
-@@ -184,6 +184,32 @@ struct preloader_state
+@@ -184,6 +184,31 @@ struct preloader_state
      struct stackarg_info s;
  };
  
-+/* Buffer for line-buffered I/O read. */
 +struct linebuffer
 +{
-+    char *base;     /* start of the buffer */
-+    char *limit;    /* last byte of the buffer (for NULL terminator) */
-+    char *head;     /* next byte to write to */
-+    char *tail;     /* next byte to read from */
-+    int truncated;  /* line truncated? (if true, skip until next line) */
++    char *base;
++    char *limit;
++    char *head;
++    char *tail;
++    int truncated;
 +};
 +
 +struct vma_area
@@ -687,37 +1086,10 @@ index 88865587975..7925a23e821 100644
  /*
   * The __bb_init_func is an empty function only called when file is
   * compiled with gcc flags "-fprofile-arcs -ftest-coverage".  This
-@@ -723,6 +749,44 @@ static size_t wld_strlen( const char *str )
-     return ptr - str;
+@@ -742,6 +767,17 @@ static inline void *wld_memmove( void *dest, const void *src, size_t len )
+     return dest;
  }
  
-+static inline void *wld_memmove( void *dest, const void *src, size_t len )
-+{
-+    unsigned char *destp = dest;
-+    const unsigned char *srcp = src;
-+
-+    /* Two area overlaps and src precedes dest?
-+     *
-+     * Note: comparing pointers to different objects leads to undefined
-+     * behavior in C; therefore, we cast them to unsigned long for comparison
-+     * (which is implementation-defined instead).  This also allows us to rely
-+     * on unsigned overflow on dest < src (forward copy case) in which case the
-+     * LHS exceeds len and makes the condition false.
-+     */
-+    if ((unsigned long)dest - (unsigned long)src < len)
-+    {
-+        destp += len;
-+        srcp += len;
-+        while (len--) *--destp = *--srcp;
-+    }
-+    else
-+    {
-+        while (len--) *destp++ = *srcp++;
-+    }
-+
-+    return dest;
-+}
-+
 +static inline void *wld_memchr( const void *mem, int val, size_t len )
 +{
 +    const unsigned char *ptr = mem, *end = (const unsigned char *)ptr + len;
@@ -732,7 +1104,7 @@ index 88865587975..7925a23e821 100644
  /*
   * parse_ul - parse an unsigned long number with given radix
   *
-@@ -1516,6 +1580,392 @@ static void set_process_name( int argc, char *argv[] )
+@@ -1562,6 +1598,333 @@ static void set_process_name( int argc, char *argv[] )
      for (i = 1; i < argc; i++) argv[i] -= off;
  }
  
@@ -744,7 +1116,7 @@ index 88865587975..7925a23e821 100644
 +static void linebuffer_init( struct linebuffer *lbuf, char *base, size_t len )
 +{
 +    lbuf->base = base;
-+    lbuf->limit = base + (len - 1);  /* NULL terminator */
++    lbuf->limit = base + (len - 1);  /* extra NULL byte */
 +    lbuf->head = base;
 +    lbuf->tail = base;
 +    lbuf->truncated = 0;
@@ -754,8 +1126,8 @@ index 88865587975..7925a23e821 100644
 + * linebuffer_getline
 + *
 + * Retrieve a line from the linebuffer.
-+ * If a line is longer than the allocated buffer, then the line is truncated;
-+ * the truncated flag is set to indicate this condition.
++ * If a line is longer than the allocated buffer, then the line is truncated.
++ * In this case, the truncated flag is set to indicate this condition.
 + */
 +static char *linebuffer_getline( struct linebuffer *lbuf )
 +{
@@ -763,44 +1135,30 @@ index 88865587975..7925a23e821 100644
 +
 +    while ((lnp = wld_memchr( lbuf->tail, '\n', lbuf->head - lbuf->tail )))
 +    {
-+        /* Consume the current line from the buffer. */
 +        line = lbuf->tail;
 +        lbuf->tail = lnp + 1;
-+
 +        if (!lbuf->truncated)
 +        {
 +            *lnp = '\0';
 +            return line;
 +        }
-+
-+        /* Remainder of a previously truncated line; ignore it. */
 +        lbuf->truncated = 0;
 +    }
 +
-+    if (lbuf->tail == lbuf->base && lbuf->head == lbuf->limit)
++    if (lbuf->base == lbuf->tail)
 +    {
-+        /* We have not encountered the end of the current line yet; however,
-+         * the buffer is full and cannot be compacted to accept more
-+         * characters.  Truncate the line here, and consume it from the buffer.
-+         */
-+        line = lbuf->tail;
-+        lbuf->tail = lbuf->head;
-+
-+        /* Ignore any further characters until the start of the next line. */
-+        lbuf->truncated = 1;
-+        *lbuf->head = '\0';
-+        return line;
++        if (lbuf->head == lbuf->limit)
++        {
++            line = lbuf->tail;
++            lbuf->tail = lbuf->head;
++            lbuf->truncated = 1;
++            *lbuf->head = '\0';
++            return line;
++        }
 +    }
-+
-+    if (lbuf->tail != lbuf->base)
-+    {
-+        /* Compact the buffer.  Make room for reading more data by zapping the
-+         * leading gap in the buffer.
-+         */
-+        wld_memmove( lbuf->base, lbuf->tail, lbuf->head - lbuf->tail);
-+        lbuf->head -= lbuf->tail - lbuf->base;
-+        lbuf->tail = lbuf->base;
-+    }
++    else wld_memmove( lbuf->base, lbuf->tail, lbuf->head - lbuf->tail);
++    lbuf->head -= lbuf->tail - lbuf->base;
++    lbuf->tail = lbuf->base;
 +
 +    return NULL;
 +}
@@ -851,7 +1209,7 @@ index 88865587975..7925a23e821 100644
 +    if (*ptr != ' ') fatal_error( "parse error in /proc/self/maps\n" );
 +    ptr++;
 +
-+    parse_ul( ptr, &ptr, 10, NULL );
++    parse_ul( ptr, &ptr, 16, NULL );
 +    if (*ptr != ' ') fatal_error( "parse error in /proc/self/maps\n" );
 +    ptr++;
 +
@@ -899,11 +1257,10 @@ index 88865587975..7925a23e821 100644
 +static int map_reserve_unmapped_range( const struct vma_area_list *list, void *addr, size_t size )
 +{
 +    unsigned long range_start = (unsigned long)addr,
-+                  range_end = (unsigned long)addr + size,
-+                  last_addr;
++                  range_end = (unsigned long)addr + size;
 +    const struct vma_area *start, *item;
++    unsigned long last_addr = range_start;
 +
-+    last_addr = range_start;
 +    start = lookup_vma_entry( list, range_start );
 +    for (item = start; item != list->list_end && item->start < range_end; item++)
 +    {
@@ -943,7 +1300,7 @@ index 88865587975..7925a23e821 100644
 +        mid = right - 1;  /* optimisation: start search from end */
 +        for (;;)
 +        {
-+            if (mid->end < item->end) left = mid + 1;
++            if (mid->start < item->start) left = mid + 1;
 +            else right = mid;
 +            if (left >= right) break;
 +            mid = left + (right - left) / 2;
@@ -960,7 +1317,7 @@ index 88865587975..7925a23e821 100644
 + *
 + * Parse /proc/self/maps into the given VMA area list.
 + */
-+static void scan_vma( struct vma_area_list *list, size_t *real_count )
++static void scan_vma( struct vma_area_list *list, size_t *act_count )
 +{
 +    int fd;
 +    size_t n = 0;
@@ -991,50 +1348,7 @@ index 88865587975..7925a23e821 100644
 +    }
 +
 +    wld_close(fd);
-+    *real_count = n;
-+}
-+
-+/*
-+ * unmap_range_keep_reservations
-+ *
-+ * Equivalent to munmap(), except that any area overlapping with preload ranges
-+ * are not unmapped but instead (re-)reserved with map_reserve_range().
-+ */
-+static void unmap_range_keep_reservations( void *addr, size_t size )
-+{
-+    unsigned long range_start = (unsigned long)addr,
-+                  range_end = (unsigned long)addr + size,
-+                  seg_start, reserve_start, reserve_end;
-+    int i;
-+
-+    for (seg_start = range_start; seg_start < range_end; seg_start = reserve_end)
-+    {
-+        reserve_start = range_end;
-+        reserve_end = range_end;
-+
-+        for (i = 0; preload_info[i].size; i++)
-+        {
-+            if ((unsigned long)preload_info[i].addr + preload_info[i].size > seg_start &&
-+                (unsigned long)preload_info[i].addr < reserve_start)
-+            {
-+                reserve_start = (unsigned long)preload_info[i].addr;
-+                reserve_end = reserve_start + preload_info[i].size;
-+            }
-+        }
-+
-+        if (reserve_start < seg_start) reserve_start = seg_start;
-+        if (reserve_end > range_end) reserve_end = range_end;
-+
-+        if (reserve_start > seg_start &&
-+            wld_munmap( (void *)seg_start, reserve_start - seg_start) < 0)
-+            wld_printf( "preloader: Warning: failed to unmap range %p-%p\n",
-+                        (void *)seg_start, (void *)reserve_start );
-+
-+        if (reserve_start < reserve_end &&
-+            map_reserve_range( (void *)reserve_start, reserve_end - reserve_start ) < 0)
-+            wld_printf( "preloader: Warning: failed to free and reserve range %p-%p\n",
-+                        (void *)reserve_start, (void *)reserve_end );
-+    }
++    *act_count = n;
 +}
 +
 +/*
@@ -1045,9 +1359,8 @@ index 88865587975..7925a23e821 100644
 +static void free_vma_list( struct vma_area_list *list )
 +{
 +    if (list->base)
-+        unmap_range_keep_reservations( list->base,
-+                                       ((unsigned char *)list->alloc_end -
-+                                        (unsigned char *)list->base) );
++        wld_munmap( list->base,
++                    (unsigned char *)list->alloc_end - (unsigned char *)list->base );
 +    list->base = NULL;
 +    list->list_end = NULL;
 +    list->alloc_end = NULL;
@@ -1125,7 +1438,7 @@ index 88865587975..7925a23e821 100644
  
  /*
   *  wld_start
-@@ -1532,6 +1982,7 @@ void* wld_start( void **stack )
+@@ -1578,6 +1941,7 @@ void* wld_start( void **stack )
      struct wld_link_map main_binary_map, ld_so_map;
      struct wine_preload_info **wine_main_preload_info;
      struct preloader_state state = { 0 };
@@ -1133,20 +1446,7 @@ index 88865587975..7925a23e821 100644
  
      parse_stackargs( &state.s, *stack );
  
-@@ -1546,9 +1997,9 @@ void* wld_start( void **stack )
-     if ((unsigned long)preloader_start >= (unsigned long)__executable_start + page_size)
-     {
-         /* Unmap preloader's ELF EHDR */
--        wld_munmap( __executable_start,
--                    ((unsigned long)preloader_start -
--                     (unsigned long)__executable_start) & ~page_mask );
-+        unmap_range_keep_reservations( __executable_start,
-+                                       ((unsigned long)preloader_start -
-+                                        (unsigned long)__executable_start) & ~page_mask );
-     }
- 
- #ifdef DUMP_AUX_INFO
-@@ -1560,29 +2011,9 @@ void* wld_start( void **stack )
+@@ -1606,29 +1970,9 @@ void* wld_start( void **stack )
      /* reserve memory that Wine needs */
      reserve = stackargs_getenv( &state.s, "WINEPRELOADRESERVE" );
      if (reserve) preload_reserve( reserve );
@@ -1179,37 +1479,43 @@ index 88865587975..7925a23e821 100644
  
      /* add an executable page at the top of the address space to defeat
       * broken no-exec protections that play with the code selector limit */
-@@ -1645,6 +2076,8 @@ void* wld_start( void **stack )
+@@ -1689,6 +2033,8 @@ void* wld_start( void **stack )
      }
  #endif
  
 +    free_vma_list( &vma_list );
 +
+     *stack = state.s.stack;
      return (void *)ld_so_map.l_entry;
  }
- 
+
 -- 
-GitLab
+2.36.1
 
-
-From b9973ecef7eed0931119869cc06488e859a444be Mon Sep 17 00:00:00 2001
 From: Jinoh Kang <jinoh.kang.kr@gmail.com>
-Date: Sat, 1 Jan 2022 05:34:54 +0900
-Subject: [PATCH 6/9] loader: Fix return type of get_auxiliary().
+Subject: [PATCH v5 08/13] loader: Fix return type of get_auxiliary().
+Message-Id: <f3b52c4e-0dcd-30a6-b1b9-106f1aaba339@gmail.com>
+Date: Sat, 5 Mar 2022 23:54:45 +0900
+In-Reply-To: <7a3d3b9e-7d1a-9fde-99a7-bd47d51fda35@gmail.com>
+References: <7a3d3b9e-7d1a-9fde-99a7-bd47d51fda35@gmail.com>
 
 This is required for fetching pointer-valued vectors (e.g.
 AT_SYSINFO_EHDR).
 
 Signed-off-by: Jinoh Kang <jinoh.kang.kr@gmail.com>
 ---
+
+Notes:
+    v4 -> v5: no changes
+
  loader/preloader.c | 2 +-
  1 file changed, 1 insertion(+), 1 deletion(-)
 
 diff --git a/loader/preloader.c b/loader/preloader.c
-index 7925a23e821..00335bf0dab 100644
+index 11111111111..11111111111 100644
 --- a/loader/preloader.c
 +++ b/loader/preloader.c
-@@ -1085,7 +1085,7 @@ static void set_auxiliary_values( struct wld_auxv *av, const struct wld_auxv *ne
+@@ -1103,7 +1103,7 @@ static void set_auxiliary_values( struct preloader_state *state,
   *
   * Get a field of the auxiliary structure
   */
@@ -1218,14 +1524,16 @@ index 7925a23e821..00335bf0dab 100644
  {
    for ( ; av->a_type != AT_NULL; av++)
        if( av->a_type == type ) return av->a_un.a_val;
+
 -- 
-GitLab
+2.36.1
 
-
-From d73de681bbf27502314a08394907e5b536523c4c Mon Sep 17 00:00:00 2001
 From: Jinoh Kang <jinoh.kang.kr@gmail.com>
-Date: Thu, 30 Dec 2021 00:50:07 +0900
-Subject: [PATCH 7/9] loader: Relocate vDSO on conflict with reserved ranges.
+Subject: [PATCH v5 09/13] loader: Relocate vDSO on conflict with reserved ranges.
+Message-Id: <b878a484-f5d7-ef52-c49f-9ad8a7ec03e6@gmail.com>
+Date: Sat, 5 Mar 2022 23:54:49 +0900
+In-Reply-To: <7a3d3b9e-7d1a-9fde-99a7-bd47d51fda35@gmail.com>
+References: <7a3d3b9e-7d1a-9fde-99a7-bd47d51fda35@gmail.com>
 
 Today, the preloader removes the vDSO entries (AT_SYSINFO*) from the
 auxiliary vector when it conflicts with one of the predefined reserved
@@ -1251,11 +1559,34 @@ behaviour could be the default and the environment variables removed.
 Wine-Bug: https://bugs.winehq.org/show_bug.cgi?id=52313
 Signed-off-by: Jinoh Kang <jinoh.kang.kr@gmail.com>
 ---
- loader/preloader.c | 617 ++++++++++++++++++++++++++++++++++++++++++++-
- 1 file changed, 614 insertions(+), 3 deletions(-)
+
+Notes:
+    v1 -> v2:
+    - s/offset/delta/g
+    - remap_vdso()
+      - significantly improve kernel vdso_mremap() support detection logic
+      - add comments
+      - only modify AT_SYSINFO* if it's in vDSO range
+      - guard against vdso_start + vdso_size overflow
+      - remove erroneous MAP_GROWSDOWN
+    - fix remap_multiple_vmas() when revert = 1
+    - some refactoring
+    
+    v3 -> v4:
+    - add/edit some comments and documentation
+    - explain why reading /proc/self/maps is necessary for identifying vDSO
+      in comments
+    - change code style to match the rest
+    - decompose find_remap_area into find_vma_envelope_range and
+      check_remap_policy
+    
+    v4 -> v5: no changes
+
+ loader/preloader.c | 580 ++++++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 577 insertions(+), 3 deletions(-)
 
 diff --git a/loader/preloader.c b/loader/preloader.c
-index 00335bf0dab..28fb1dd8ffe 100644
+index 11111111111..11111111111 100644
 --- a/loader/preloader.c
 +++ b/loader/preloader.c
 @@ -72,6 +72,7 @@
@@ -1288,14 +1619,13 @@ index 00335bf0dab..28fb1dd8ffe 100644
  
  static struct wine_preload_info preload_info[] =
  {
-@@ -165,6 +174,19 @@ struct wld_auxv
+@@ -165,6 +174,18 @@ struct wld_auxv
      } a_un;
  };
  
 +typedef unsigned long wld_sigset_t[8 / sizeof(unsigned long)];
 +
-+struct wld_sigaction
-+{
++struct wld_sigaction {
 +    /* Prefix all fields since they may collide with macros from libc headers */
 +    void (*wld_sa_sigaction)(int, siginfo_t *, void *);
 +    unsigned long wld_sa_flags;
@@ -1308,22 +1638,20 @@ index 00335bf0dab..28fb1dd8ffe 100644
  /* Aggregates information about initial program stack and variables
   * (e.g. argv and envp) that reside in it.
   */
-@@ -194,10 +216,61 @@ struct linebuffer
-     int truncated;  /* line truncated? (if true, skip until next line) */
+@@ -193,10 +214,55 @@ struct linebuffer
+     int truncated;
  };
  
 +/*
 + * Flags that specify the kind of each VMA entry read from /proc/self/maps.
 + *
-+ * On Linux, vDSO hard-codes vvar's address relative to vDSO.  Therefore, it is
-+ * necessary to maintain vvar's position relative to vDSO when they are
-+ * remapped.  We cannot just remap one of them and leave the other one behind;
-+ * they have to be moved as a single unit.  Doing so requires identifying the
-+ * *exact* size and boundaries of *both* mappings.  This is met by a few
-+ * challenges:
++ * On Linux, Reading /proc/self/maps is the only reliable way to identify the
++ * exact range of vDSO/vvar mapping.  The reason is twofold:
 + *
-+ * 1. vvar's size *and* its location relative to vDSO is *not* guaranteed by
-+ *    Linux userspace ABI, and has changed all the time.
++ * 1. vDSO usually hard-codes vvar's offset relative to vDSO. Therefore,
++ *    remapping vDSO requires vvar to be also remapped as well.  However, vvar's
++ *    size and its location relative to vDSO is *not* guaranteed by ABI, and has
++ *    changed all the time.
 + *
 + *    - x86: [vvar] orginally resided at a fixed address 0xffffffffff5ff000
 + *      (64-bit) [1], but was later changed so that it precedes [vdso] [2].
@@ -1333,18 +1661,14 @@ index 00335bf0dab..28fb1dd8ffe 100644
 + *    - AArch32: [vvar] is a single page and precedes [vdso] [4].
 + *
 + *    - AArch64: [vvar] is two pages long and precedes [vdso] [5].
-+ *      Before v5.9, however, [vvar] was a single page [6].
++ *      Before v5.9, [vvar] was a single page [6].
 + *
-+ * 2. It's very difficult to infer vDSO and vvar's size and offset relative to
-+ *    each other just from vDSO data.  Since vvar's symbol does not exist in
-+ *    vDSO's symtab, determining the layout would require parsing vDSO's code.
++ * 2. It's very difficult to deduce vDSO and vvar's size and offset relative to
++ *    each other.  Since vvar's symbol does not exist in vDSO's symtab,
++ *    determining the layout would require parsing vDSO's code.
 + *
-+ * 3. Determining the size of both mappings is not a trivial task.  Even if we
-+ *    parse vDSO's ELF header, we cannot still measure the size of vvar.
-+ *
-+ * Therefore, the only reliable method to identify the range of the mappings is
-+ * to read from /proc/self/maps.  This is also what the CRIU (Checkpoint
-+ * Restore In Userspace) project uses for relocating vDSO [7].
++ * Also note that CRIU (Checkpoint Restore In Userspace) has maps parsing code
++ * just for relocating vDSO [7].
 + *
 + * [1] https://lwn.net/Articles/615809/
 + * [2] https://elixir.bootlin.com/linux/v5.16.3/source/arch/x86/entry/vdso/vma.c#L246
@@ -1352,7 +1676,7 @@ index 00335bf0dab..28fb1dd8ffe 100644
 + * [4] https://elixir.bootlin.com/linux/v5.16.3/source/arch/arm/kernel/vdso.c#L236
 + * [5] https://elixir.bootlin.com/linux/v5.16.3/source/arch/arm64/kernel/vdso.c#L214
 + * [6] https://elixir.bootlin.com/linux/v5.8/source/arch/arm64/kernel/vdso.c#L161
-+ * [7] https://github.com/checkpoint-restore/criu/blob/2f0f12839673c7d82cfc18e99d7e35ed7192906b/criu/vdso.c
++ * [7] https://github.com/checkpoint-restore/criu/blob/a315774e11b4da1eb36446ae996eac1695a129a6/criu/vdso.c
 + */
 +enum vma_type_flags
 +{
@@ -1370,7 +1694,7 @@ index 00335bf0dab..28fb1dd8ffe 100644
  };
  
  struct vma_area_list
-@@ -210,6 +283,60 @@ struct vma_area_list
+@@ -209,6 +275,57 @@ struct vma_area_list
  #define FOREACH_VMA(list, item) \
      for ((item) = (list)->base; (item) != (list)->list_end; (item)++)
  
@@ -1390,55 +1714,51 @@ index 00335bf0dab..28fb1dd8ffe 100644
 +};
 +
 +/*
-+ * Used in the signal handler that tests if mremap() on vDSO works on the
-+ * current kernel.
++ * Used in a signal handler that tests if mremap() on vDSO works on the current
++ * kernel.
 + */
-+struct remap_test_block
-+{
-+    /*
-+     * The old address range of vDSO or sigpage.  Used to test if pages are
-+     * remapped properly.
-+     */
++struct remap_test_block {
++    /* The old address range of vDSO or sigpage. Used to test if pages are remapped properly. */
 +    unsigned long old_mapping_start;
 +    unsigned long old_mapping_size;
 +
-+    /*
-+     * A snapshot of the VMA area list of the current process.  Used to restore
-+     * vDSO mappings on remapping failure from the signal handler.
-+     */
 +    struct vma_area_list *vma_list;
 +
 +    /*
-+     * The difference between the new mapping's address and the old mapping's
-+     * address.  Set to 0 if the handler reverted mappings to old state before
-+     * returning.
++     * Difference between the base address of the new mapping and the old mapping.
++     *
++     * Set to zero if the handler reverted mappings to old state before returning
++     * in order to safely return when it detects failed remapping.
 +     */
 +    unsigned long delta;
 +
 +    /*
-+     * Set to 1 by the signal handler if it determines that the remapping was
-+     * successfully recognised by the kernel.
++     * Whether remapping was successfully recognised by the kernel.
++     *
++     * If the signal handler is never called (due to e.g. being blocked), it is counted
++     * as being unsuccessful.
 +     */
 +    unsigned char is_successful;
 +
 +    /*
-+     * Set to 1 by the signal handler if it determines that the remapping was
-+     * not recognised by the kernel.
-+     */
++     * Whether remapping could not be recognised by the kernel.
++     *
++     * If both is_successful and is_failed are set, is_failed takes precedence.
++     * The flags are intentionally made redundant to detect multiple successive
++     * invocation of the signal handler due to external signal delivery. */
 +    unsigned char is_failed;
 +} remap_test;
 +
  /*
   * The __bb_init_func is an empty function only called when file is
   * compiled with gcc flags "-fprofile-arcs -ftest-coverage".  This
-@@ -245,6 +372,16 @@ struct
+@@ -244,6 +361,15 @@ struct
      unsigned int  garbage : 25;
  } thread_ldt = { -1, (unsigned long)thread_data, 0xfffff, 1, 0, 0, 1, 0, 1, 0 };
  
 +typedef unsigned long wld_old_sigset_t;
 +
-+struct wld_old_sigaction
-+{
++struct wld_old_sigaction {
 +    /* Prefix all fields since they may collide with macros from libc headers */
 +    void (*wld_sa_sigaction)(int, siginfo_t *, void *);
 +    wld_old_sigset_t wld_sa_mask;
@@ -1448,7 +1768,7 @@ index 00335bf0dab..28fb1dd8ffe 100644
  
  /*
   * The _start function is the entry and exit point of this program
-@@ -382,6 +519,16 @@ static inline int wld_munmap( void *addr, size_t len )
+@@ -381,6 +507,16 @@ static inline int wld_munmap( void *addr, size_t len )
      return SYSCALL_RET(ret);
  }
  
@@ -1464,8 +1784,8 @@ index 00335bf0dab..28fb1dd8ffe 100644
 +
  static inline int wld_prctl( int code, long arg )
  {
-     int ret;
-@@ -390,6 +537,67 @@ static inline int wld_prctl( int code, long arg )
+     long ret;
+@@ -389,6 +525,64 @@ static inline int wld_prctl( int code, long arg )
      return SYSCALL_RET(ret);
  }
  
@@ -1483,12 +1803,10 @@ index 00335bf0dab..28fb1dd8ffe 100644
 +    __asm__ __volatile__( "pushl %%ebx; movl %2,%%ebx; int $0x80; popl %%ebx"
 +                          : "=a" (ret) : "0" (174 /* SYS_rt_sigaction */), "r" (signum), "c" (act), "d" (old_act), "S" (sizeof(act->wld_sa_mask))
 +                          : "memory" );
-+    if (ret == -38 /* ENOSYS */)
-+    {
++    if (ret == -38 /* ENOSYS */) {
 +        struct wld_old_sigaction act_buf, old_act_buf, *act_real, *old_act_real;
 +
-+        if (act)
-+        {
++        if (act) {
 +            act_real = &act_buf;
 +            act_buf.wld_sa_sigaction = act->wld_sa_sigaction;
 +            copy_old_sigset(&act_buf.wld_sa_mask, &act->wld_sa_mask);
@@ -1502,8 +1820,7 @@ index 00335bf0dab..28fb1dd8ffe 100644
 +                              : "=a" (ret) : "0" (67 /* SYS_sigaction */), "r" (signum), "c" (act_real), "d" (old_act_real)
 +                              : "memory" );
 +
-+        if (old_act && ret >= 0)
-+        {
++        if (old_act && ret >= 0) {
 +            old_act->wld_sa_sigaction = old_act_buf.wld_sa_sigaction;
 +            old_act->wld_sa_flags = old_act_buf.wld_sa_flags;
 +            old_act->wld_sa_restorer = old_act_buf.wld_sa_restorer;
@@ -1533,7 +1850,7 @@ index 00335bf0dab..28fb1dd8ffe 100644
  #elif defined(__x86_64__)
  
  void *thread_data[256];
-@@ -468,9 +676,15 @@ SYSCALL_FUNC( wld_mprotect, 10 /* SYS_mprotect */ );
+@@ -467,9 +661,15 @@ SYSCALL_FUNC( wld_mprotect, 10 /* SYS_mprotect */ );
  int wld_munmap( void *addr, size_t len );
  SYSCALL_FUNC( wld_munmap, 11 /* SYS_munmap */ );
  
@@ -1549,7 +1866,7 @@ index 00335bf0dab..28fb1dd8ffe 100644
  uid_t wld_getuid(void);
  SYSCALL_NOERR( wld_getuid, 102 /* SYS_getuid */ );
  
-@@ -578,9 +792,26 @@ SYSCALL_FUNC( wld_mprotect, 226 /* SYS_mprotect */ );
+@@ -577,9 +777,26 @@ SYSCALL_FUNC( wld_mprotect, 226 /* SYS_mprotect */ );
  int wld_munmap( void *addr, size_t len );
  SYSCALL_FUNC( wld_munmap, 215 /* SYS_munmap */ );
  
@@ -1576,7 +1893,7 @@ index 00335bf0dab..28fb1dd8ffe 100644
  uid_t wld_getuid(void);
  SYSCALL_NOERR( wld_getuid, 174 /* SYS_getuid */ );
  
-@@ -680,9 +911,26 @@ SYSCALL_FUNC( wld_mprotect, 125 /* SYS_mprotect */ );
+@@ -679,9 +896,26 @@ SYSCALL_FUNC( wld_mprotect, 125 /* SYS_mprotect */ );
  int wld_munmap( void *addr, size_t len );
  SYSCALL_FUNC( wld_munmap, 91 /* SYS_munmap */ );
  
@@ -1603,7 +1920,7 @@ index 00335bf0dab..28fb1dd8ffe 100644
  uid_t wld_getuid(void);
  SYSCALL_NOERR( wld_getuid, 24 /* SYS_getuid */ );
  
-@@ -1657,6 +1905,7 @@ static char *linebuffer_getline( struct linebuffer *lbuf )
+@@ -1661,6 +1895,7 @@ static char *linebuffer_getline( struct linebuffer *lbuf )
  static int parse_maps_line( struct vma_area *entry, const char *line )
  {
      struct vma_area item = { 0 };
@@ -1611,7 +1928,7 @@ index 00335bf0dab..28fb1dd8ffe 100644
      char *ptr = (char *)line;
      int overflow;
  
-@@ -1687,11 +1936,11 @@ static int parse_maps_line( struct vma_area *entry, const char *line )
+@@ -1691,11 +1926,11 @@ static int parse_maps_line( struct vma_area *entry, const char *line )
      if (*ptr != ' ') fatal_error( "parse error in /proc/self/maps\n" );
      ptr++;
  
@@ -1625,7 +1942,7 @@ index 00335bf0dab..28fb1dd8ffe 100644
      if (*ptr != ' ') fatal_error( "parse error in /proc/self/maps\n" );
      ptr++;
  
-@@ -1699,6 +1948,17 @@ static int parse_maps_line( struct vma_area *entry, const char *line )
+@@ -1703,6 +1938,17 @@ static int parse_maps_line( struct vma_area *entry, const char *line )
      if (*ptr != ' ') fatal_error( "parse error in /proc/self/maps\n" );
      ptr++;
  
@@ -1643,7 +1960,7 @@ index 00335bf0dab..28fb1dd8ffe 100644
      *entry = item;
      return 0;
  }
-@@ -1799,6 +2059,76 @@ static void insert_vma_entry( struct vma_area_list *list, const struct vma_area
+@@ -1802,6 +2048,76 @@ static void insert_vma_entry( struct vma_area_list *list, const struct vma_area
      return;
  }
  
@@ -1720,23 +2037,10 @@ index 00335bf0dab..28fb1dd8ffe 100644
  /*
   * scan_vma
   *
-@@ -1966,6 +2296,285 @@ static void map_reserve_preload_ranges( const struct vma_area_list *vma_list,
+@@ -1887,6 +2203,262 @@ static void alloc_scan_vma( struct vma_area_list *listp )
      }
  }
  
-+/*
-+ * refresh_vma_and_reserve_preload_ranges
-+ *
-+ * Refresh the process VMA list, and try to reserve memory ranges in preload_info.
-+ */
-+static void refresh_vma_and_reserve_preload_ranges( struct vma_area_list *vma_list,
-+                                                    const struct stackarg_info *stackinfo )
-+{
-+    free_vma_list( vma_list );
-+    alloc_scan_vma( vma_list );
-+    map_reserve_preload_ranges( vma_list, stackinfo );
-+}
-+
 +/*
 + * stackargs_get_remap_policy
 + *
@@ -1832,10 +2136,8 @@ index 00335bf0dab..28fb1dd8ffe 100644
 +        remap_test.delta = 0;
 +    }
 +
-+    /* The signal handler might be called several times due to externally
-+     * originated spurious signals, so overwrite with the latest status just to
-+     * be safe.
-+     */
++    /* Signal handler might be called several times externally,
++     * so overwrite with the latest status just to be safe. */
 +    remap_test.is_failed = 1;
 +}
 +#endif
@@ -1847,21 +2149,21 @@ index 00335bf0dab..28fb1dd8ffe 100644
 + *
 + * Remapping vDSO requires explicit kernel support for most architectures, but
 + * the support is missing in old Linux kernels (pre-4.8).  Among other things,
-+ * vDSO contains the default signal restorer (sigreturn trampoline) and the
-+ * fast syscall gate (SYSENTER) on Intel IA-32.  The kernel keeps track of
-+ * their addresses per process, and they need to be updated accordingly if the
-+ * vDSO address changes.  Without proper support, mremap() on vDSO does not
-+ * indicate failure, but the kernel still uses old addresses for the vDSO
-+ * components, resulting in crashes or other unpredictable behaviour if any of
-+ * those addresses are used.
++ * vDSO contains the default signal restorer (sigreturn trampoline) and on i386
++ * the fast syscall gate (which uses SYSENTER on Intel CPUs).  The kernel keeps
++ * track of the addresses of both of these things per process, and those
++ * addresses need to be updated accordingly if the vDSO address changes.
++ * Without proper support, mremap() on vDSO still succeeds, but the kernel still
++ * uses old addresses for the vDSO components, resulting in crashes or other
++ * unpredictable behaviour if any of those addresses are used.
 + *
 + * We attempt to detect this condition by installing a signal handler and
 + * sending a signal to ourselves.  The signal handler will test if the restorer
-+ * address (plus the syscall gate on i386) falls in the old address range; if
-+ * this is the case, we remap the vDSO to its old address and report failure
-+ * (i.e. no support from kernel).  If the addresses do not overlap with the old
-+ * address range, the kernel is new enough to support vDSO remapping and we can
-+ * proceed as normal.
++ * address falls in the old address range; if this is the case, we remap the
++ * vDSO to its old address and report failure (i.e. no support from kernel).  On
++ * i386, we additionally check for the syscall gate.  If the addresses do not
++ * overlap with the old address range, the kernel is new enough to support vDSO
++ * remapping and we can proceed as normal.
 + */
 +static int test_remap_successful( struct vma_area_list *vma_list, struct preloader_state *state,
 +                                  unsigned long old_mapping_start, unsigned long old_mapping_size,
@@ -1876,8 +2178,7 @@ index 00335bf0dab..28fb1dd8ffe 100644
 +
 +    /* x86-64 doesn't use SYSENTER for syscalls, and requires sa_restorer for
 +     * signal handlers.  We can safely relocate vDSO without kernel support
-+     * (vdso_mremap).
-+     */
++     * (vdso_mremap). */
 +    return 0;
 +#else
 +    struct wld_sigaction sigact;
@@ -1925,18 +2226,8 @@ index 00335bf0dab..28fb1dd8ffe 100644
 +    if (wld_sigaction( REMAP_TEST_SIG, &sigact, &sigact ) < 0) fatal_error( "cannot unregister test signal handler\n" );
 +    if (result == -1) fatal_error( "cannot raise test signal\n" );
 +
-+    /* Now that the signal handler invocation is no longer possible, we can
-+     * safely access the result.
-+     *
-+     * If neither is_successful nor is_failed is set, it signifies that the
-+     * signal handler was not called or did not return properly.  In this case,
-+     * failure is assumed.
-+     *
-+     * If both is_successful and is_failed are set, it signifies that the
-+     * signal handler was called successively multiple times.  This may be due
-+     * to externally originated spurious signals.  In this case, is_failed
-+     * takes precedence.
-+     */
++    /* Now that the signal handler can no longer be called,
++     * we can safely access the result data. */
 +    if (remap_test.is_failed || !remap_test.is_successful) {
 +        if (remap_test.delta && remap_multiple_vmas( remap_test.vma_list, remap_test.delta, -1, 1 ) < 0)
 +            fatal_error( "Cannot restore remapped VMAs\n" );
@@ -1994,7 +2285,9 @@ index 00335bf0dab..28fb1dd8ffe 100644
 +        }
 +    }
 +
-+    refresh_vma_and_reserve_preload_ranges( vma_list, &state->s );
++    /* Refresh VMA list */
++    free_vma_list( vma_list );
++    alloc_scan_vma( vma_list );
 +    return 1;
 +
 +remap_restore:
@@ -2003,19 +2296,20 @@ index 00335bf0dab..28fb1dd8ffe 100644
 +
 +    return -1;
 +}
- 
++
  /*
-  *  wld_start
-@@ -2015,6 +2624,8 @@ void* wld_start( void **stack )
+  * map_reserve_preload_ranges
+  *
+@@ -1974,6 +2546,8 @@ void* wld_start( void **stack )
      alloc_scan_vma( &vma_list );
      map_reserve_preload_ranges( &vma_list, &state.s );
  
-+    remap_vdso( &vma_list, &state );
++    if (remap_vdso( &vma_list, &state ) > 0) map_reserve_preload_ranges( &vma_list, &state.s );
 +
      /* add an executable page at the top of the address space to defeat
       * broken no-exec protections that play with the code selector limit */
      if (find_preload_reserved_area( (char *)0x80000000 - page_size, page_size ) >= 0)
-@@ -2044,7 +2655,7 @@ void* wld_start( void **stack )
+@@ -2003,7 +2577,7 @@ void* wld_start( void **stack )
  #undef SET_NEW_AV
  
      i = 0;
@@ -2024,15 +2318,16 @@ index 00335bf0dab..28fb1dd8ffe 100644
      if (is_in_preload_range( state.s.auxv, AT_SYSINFO ) || is_in_preload_range( state.s.auxv, AT_SYSINFO_EHDR ))
      {
          delete_av[i++].a_type = AT_SYSINFO;
+
 -- 
-GitLab
+2.36.1
 
-
-From dce1ac68d0ee7040f2f30703c6229fd5f1d84787 Mon Sep 17 00:00:00 2001
 From: Jinoh Kang <jinoh.kang.kr@gmail.com>
-Date: Fri, 6 May 2022 01:37:18 +0900
-Subject: [PATCH 8/9] loader: Relocate sigpage on conflict with reserved ranges
- in ARM.
+Subject: [PATCH v5 10/13] loader: Relocate sigpage on conflict with reserved ranges in ARM.
+Message-Id: <50ac588a-fc28-03db-41e0-732d6cc6de1c@gmail.com>
+Date: Sat, 5 Mar 2022 23:54:53 +0900
+In-Reply-To: <7a3d3b9e-7d1a-9fde-99a7-bd47d51fda35@gmail.com>
+References: <7a3d3b9e-7d1a-9fde-99a7-bd47d51fda35@gmail.com>
 
 Today, the preloader makes no attempt to remap the sigpage when it
 conflicts with reserved addresses.  If libc doesn't have its own signal
@@ -2049,14 +2344,24 @@ and the environment variables removed.
 
 Signed-off-by: Jinoh Kang <jinoh.kang.kr@gmail.com>
 ---
- loader/preloader.c | 68 +++++++++++++++++++++++++++++++++++++++++++---
- 1 file changed, 64 insertions(+), 4 deletions(-)
+
+Notes:
+    v1 -> v2: new patch
+    
+    v3 -> v4:
+    - add documentation for remap_sigpage
+    - fix indentation
+    
+    v4 -> v5: no changes
+
+ loader/preloader.c | 75 ++++++++++++++++++++++++++++++++++++++++++----
+ 1 file changed, 70 insertions(+), 5 deletions(-)
 
 diff --git a/loader/preloader.c b/loader/preloader.c
-index 28fb1dd8ffe..8cfa89b944d 100644
+index 11111111111..11111111111 100644
 --- a/loader/preloader.c
 +++ b/loader/preloader.c
-@@ -260,9 +260,12 @@ struct linebuffer
+@@ -252,9 +252,12 @@ struct linebuffer
   */
  enum vma_type_flags
  {
@@ -2072,7 +2377,7 @@ index 28fb1dd8ffe..8cfa89b944d 100644
  };
  
  struct vma_area
-@@ -295,7 +298,10 @@ enum remap_policy
+@@ -287,7 +290,10 @@ enum remap_policy
      REMAP_POLICY_SKIP = 2,
      LAST_REMAP_POLICY,
  
@@ -2084,7 +2389,7 @@ index 28fb1dd8ffe..8cfa89b944d 100644
  };
  
  /*
-@@ -1957,6 +1963,10 @@ static int parse_maps_line( struct vma_area *entry, const char *line )
+@@ -1947,6 +1953,10 @@ static int parse_maps_line( struct vma_area *entry, const char *line )
              item.type_flags |= VMA_VDSO;
          else if (wld_strcmp(ptr, "[vvar]") == 0)
              item.type_flags |= VMA_VVAR;
@@ -2095,7 +2400,7 @@ index 28fb1dd8ffe..8cfa89b944d 100644
      }
  
      *entry = item;
-@@ -2576,6 +2586,53 @@ remap_restore:
+@@ -2459,6 +2469,55 @@ remap_restore:
      return -1;
  }
  
@@ -2135,7 +2440,9 @@ index 28fb1dd8ffe..8cfa89b944d 100644
 +        return -1;
 +    }
 +
-+    refresh_vma_and_reserve_preload_ranges( vma_list, &state->s );
++    /* Refresh VMA list */
++    free_vma_list( vma_list );
++    alloc_scan_vma( vma_list );
 +    return 1;
 +
 +remap_restore:
@@ -2147,27 +2454,40 @@ index 28fb1dd8ffe..8cfa89b944d 100644
 +#endif
 +
  /*
-  *  wld_start
+  * map_reserve_preload_ranges
   *
-@@ -2625,6 +2682,9 @@ void* wld_start( void **stack )
+@@ -2514,6 +2573,7 @@ void* wld_start( void **stack )
+     struct wine_preload_info **wine_main_preload_info;
+     struct preloader_state state = { 0 };
+     struct vma_area_list vma_list = { NULL };
++    int remap_done;
+ 
+     parse_stackargs( &state.s, *stack );
+ 
+@@ -2546,7 +2606,12 @@ void* wld_start( void **stack )
+     alloc_scan_vma( &vma_list );
      map_reserve_preload_ranges( &vma_list, &state.s );
  
-     remap_vdso( &vma_list, &state );
+-    if (remap_vdso( &vma_list, &state ) > 0) map_reserve_preload_ranges( &vma_list, &state.s );
++    remap_done = 0;
++    remap_done |= remap_vdso( &vma_list, &state ) > 0;
 +#ifdef __arm__
-+    remap_sigpage( &vma_list, &state );
++    remap_done |= remap_sigpage( &vma_list, &state ) > 0;
 +#endif
++    if (remap_done) map_reserve_preload_ranges( &vma_list, &state.s );
  
      /* add an executable page at the top of the address space to defeat
       * broken no-exec protections that play with the code selector limit */
+
 -- 
-GitLab
+2.36.1
 
-
-From ff151dbb4144d7f618fbc141cec6aa2958d07da4 Mon Sep 17 00:00:00 2001
 From: Jinoh Kang <jinoh.kang.kr@gmail.com>
-Date: Fri, 6 May 2022 01:37:48 +0900
-Subject: [PATCH 9/9] loader: Switch stack if the old stack address is in
- reserved range.
+Subject: [PATCH v5 11/13] loader: Switch stack if the old stack address is in reserved range.
+Message-Id: <f37db1fc-90e9-fe99-7aa9-e239612b59aa@gmail.com>
+Date: Sat, 5 Mar 2022 23:54:57 +0900
+In-Reply-To: <7a3d3b9e-7d1a-9fde-99a7-bd47d51fda35@gmail.com>
+References: <7a3d3b9e-7d1a-9fde-99a7-bd47d51fda35@gmail.com>
 
 Today, the preloader abandons reserved address ranges that conflict with
 the call stack area.
@@ -2189,14 +2509,25 @@ kernel mm pointer fields are still pointing to the old stack.
 
 Signed-off-by: Jinoh Kang <jinoh.kang.kr@gmail.com>
 ---
- loader/preloader.c | 157 ++++++++++++++++++++++++++++++++++++++-------
- 1 file changed, 133 insertions(+), 24 deletions(-)
+
+Notes:
+    v1 -> v2:
+    - s/offset/delta/g
+    - shift VMA_STACK to 0x10 from 0x08 (now taken by VMA_SIGPAGE)
+    
+    v3 -> v4:
+    - add comments and documentation
+    
+    v4 -> v5: no changes
+
+ loader/preloader.c | 148 ++++++++++++++++++++++++++++++++++++++-------
+ 1 file changed, 127 insertions(+), 21 deletions(-)
 
 diff --git a/loader/preloader.c b/loader/preloader.c
-index 8cfa89b944d..658a7022fed 100644
+index 11111111111..11111111111 100644
 --- a/loader/preloader.c
 +++ b/loader/preloader.c
-@@ -266,6 +266,7 @@ enum vma_type_flags
+@@ -258,6 +258,7 @@ enum vma_type_flags
  #ifdef __arm__
      VMA_SIGPAGE = 0x08,
  #endif
@@ -2204,7 +2535,7 @@ index 8cfa89b944d..658a7022fed 100644
  };
  
  struct vma_area
-@@ -302,6 +303,7 @@ enum remap_policy
+@@ -294,6 +295,7 @@ enum remap_policy
  #ifdef __arm__
      REMAP_POLICY_DEFAULT_SIGPAGE = REMAP_POLICY_SKIP,
  #endif
@@ -2212,8 +2543,8 @@ index 8cfa89b944d..658a7022fed 100644
  };
  
  /*
-@@ -1265,6 +1267,82 @@ static void stackargs_shift_args( struct stackarg_info *info, int num_args )
-     *(int *)info->stack = info->argc;
+@@ -1261,6 +1263,77 @@ static void stackargs_switch_stack( struct stackarg_info *newinfo, struct stacka
+     newinfo->auxv_end = (void *)((unsigned long)oldinfo->auxv_end + delta);
  }
  
 +/*
@@ -2240,12 +2571,12 @@ index 8cfa89b944d..658a7022fed 100644
 + * Copy auxiliary vector from src to dest, fixing up addresses so that addresses
 + * relative to src are now relative to dest.
 + */
-+static void relocate_auxvec( struct wld_auxv *dest, struct wld_auxv *src, size_t count )
++static size_t relocate_auxvec( struct wld_auxv *dest, struct wld_auxv *src )
 +{
 +    size_t i;
 +    unsigned long delta = (unsigned long)dest - (unsigned long)src;
 +
-+    for (i = 0; i < count; i++)
++    for (i = 0; src[i].a_type != AT_NULL; i++)
 +    {
 +        dest[i].a_type = src[i].a_type;
 +        switch (dest[i].a_type)
@@ -2265,6 +2596,8 @@ index 8cfa89b944d..658a7022fed 100644
 +            break;
 +        }
 +    }
++
++    return i;
 +}
 +
 +/*
@@ -2275,19 +2608,12 @@ index 8cfa89b944d..658a7022fed 100644
 + */
 +static void copy_stackargs( struct stackarg_info *newinfo, struct stackarg_info *oldinfo, void *newstack, void *newstackend )
 +{
-+    unsigned long delta = (unsigned long)newstack - (unsigned long)oldinfo->stack;
++    stackargs_switch_stack( newinfo, oldinfo, newstack );
 +
-+    newinfo->stack = newstack;
-+    newinfo->argc = oldinfo->argc;
-+    newinfo->argv = (void *)((unsigned long)oldinfo->argv + delta);
-+    newinfo->envp = (void *)((unsigned long)oldinfo->envp + delta);
-+    newinfo->auxv = (void *)((unsigned long)oldinfo->auxv + delta);
-+    newinfo->auxv_end = (void *)((unsigned long)oldinfo->auxv_end + delta);
-+
-+    *(int *)newstack = *(int *)oldinfo->stack;  /* Copy argc */
++    *(int *)newstack = *(int *)oldinfo->stack;
 +    relocate_argvec( newinfo->argv, oldinfo->argv, newinfo->envp - newinfo->argv );
 +    relocate_argvec( newinfo->envp, oldinfo->envp, (char **)newinfo->auxv - newinfo->envp );
-+    relocate_auxvec( newinfo->auxv, oldinfo->auxv, newinfo->auxv_end - newinfo->auxv );
++    relocate_auxvec( newinfo->auxv, oldinfo->auxv );
 +    wld_memmove( newinfo->auxv_end, oldinfo->auxv_end,
 +                 (unsigned long)newstackend - (unsigned long)newinfo->auxv_end );
 +}
@@ -2295,16 +2621,16 @@ index 8cfa89b944d..658a7022fed 100644
  /*
   * set_auxiliary_values
   *
-@@ -2144,7 +2222,7 @@ static int remap_multiple_vmas( struct vma_area_list *list, unsigned long delta,
+@@ -2133,7 +2206,7 @@ static int remap_multiple_vmas( struct vma_area_list *list, unsigned long delta,
   *
   * Parse /proc/self/maps into the given VMA area list.
   */
--static void scan_vma( struct vma_area_list *list, size_t *real_count )
-+static void scan_vma( struct vma_area_list *list, size_t *real_count, void *stack_ptr )
+-static void scan_vma( struct vma_area_list *list, size_t *act_count )
++static void scan_vma( struct vma_area_list *list, size_t *act_count, void *stack_ptr )
  {
      int fd;
      size_t n = 0;
-@@ -2168,6 +2246,9 @@ static void scan_vma( struct vma_area_list *list, size_t *real_count )
+@@ -2157,6 +2230,9 @@ static void scan_vma( struct vma_area_list *list, size_t *act_count )
          {
              if (parse_maps_line( &item, line ) >= 0)
              {
@@ -2314,7 +2640,7 @@ index 8cfa89b944d..658a7022fed 100644
                  if (list->list_end < list->alloc_end) insert_vma_entry( list, &item );
                  n++;
              }
-@@ -2242,7 +2323,7 @@ static void free_vma_list( struct vma_area_list *list )
+@@ -2187,7 +2263,7 @@ static void free_vma_list( struct vma_area_list *list )
   *
   * Parse /proc/self/maps into a newly allocated VMA area list.
   */
@@ -2323,7 +2649,7 @@ index 8cfa89b944d..658a7022fed 100644
  {
      size_t max_count = page_size / sizeof(struct vma_area);
      struct vma_area_list vma_list;
-@@ -2257,7 +2338,7 @@ static void alloc_scan_vma( struct vma_area_list *listp )
+@@ -2202,7 +2278,7 @@ static void alloc_scan_vma( struct vma_area_list *listp )
          vma_list.list_end = vma_list.base;
          vma_list.alloc_end = vma_list.base + max_count;
  
@@ -2332,69 +2658,25 @@ index 8cfa89b944d..658a7022fed 100644
          if (vma_list.list_end - vma_list.base == max_count)
          {
              wld_memmove(listp, &vma_list, sizeof(*listp));
-@@ -2272,25 +2353,14 @@ static void alloc_scan_vma( struct vma_area_list *listp )
-  * map_reserve_preload_ranges
-  *
-  * Attempt to reserve memory ranges into preload_info.
-- * If any preload_info entry overlaps with stack, remove the entry instead of
-- * reserving.
-  */
--static void map_reserve_preload_ranges( const struct vma_area_list *vma_list,
--                                        const struct stackarg_info *stackinfo )
-+static void map_reserve_preload_ranges( const struct vma_area_list *vma_list )
- {
-     size_t i;
--    unsigned long exclude_start = (unsigned long)stackinfo->stack - 1;
--    unsigned long exclude_end = (unsigned long)stackinfo->auxv + 1;
+@@ -2459,7 +2535,7 @@ static int remap_vdso( struct vma_area_list *vma_list, struct preloader_state *s
  
-     for (i = 0; preload_info[i].size; i++)
-     {
--        if (exclude_end   >  (unsigned long)preload_info[i].addr &&
--            exclude_start <= (unsigned long)preload_info[i].addr + preload_info[i].size - 1)
--        {
--            remove_preload_range( i );
--            i--;
--        }
--        else if (map_reserve_unmapped_range( vma_list, preload_info[i].addr, preload_info[i].size ) < 0)
-+        if (map_reserve_unmapped_range( vma_list, preload_info[i].addr, preload_info[i].size ) < 0)
-         {
-             /* don't warn for low 64k */
-             if (preload_info[i].addr >= (void *)0x10000
-@@ -2311,12 +2381,11 @@ static void map_reserve_preload_ranges( const struct vma_area_list *vma_list,
-  *
-  * Refresh the process VMA list, and try to reserve memory ranges in preload_info.
-  */
--static void refresh_vma_and_reserve_preload_ranges( struct vma_area_list *vma_list,
--                                                    const struct stackarg_info *stackinfo )
-+static void refresh_vma_and_reserve_preload_ranges( struct vma_area_list *vma_list, void *stack_ptr )
- {
+     /* Refresh VMA list */
      free_vma_list( vma_list );
 -    alloc_scan_vma( vma_list );
--    map_reserve_preload_ranges( vma_list, stackinfo );
-+    alloc_scan_vma( vma_list, stack_ptr );
-+    map_reserve_preload_ranges( vma_list );
- }
- 
- /*
-@@ -2576,7 +2645,7 @@ static int remap_vdso( struct vma_area_list *vma_list, struct preloader_state *s
-         }
-     }
- 
--    refresh_vma_and_reserve_preload_ranges( vma_list, &state->s );
-+    refresh_vma_and_reserve_preload_ranges( vma_list, state->s.stack );
++    alloc_scan_vma( vma_list, state->s.stack );
      return 1;
  
  remap_restore:
-@@ -2622,7 +2691,7 @@ static int remap_sigpage( struct vma_area_list *vma_list, struct preloader_state
-         return -1;
-     }
+@@ -2507,7 +2583,7 @@ static int remap_sigpage( struct vma_area_list *vma_list, struct preloader_state
  
--    refresh_vma_and_reserve_preload_ranges( vma_list, &state->s );
-+    refresh_vma_and_reserve_preload_ranges( vma_list, state->s.stack );
+     /* Refresh VMA list */
+     free_vma_list( vma_list );
+-    alloc_scan_vma( vma_list );
++    alloc_scan_vma( vma_list, state->s.stack );
      return 1;
  
  remap_restore:
-@@ -2633,6 +2702,45 @@ remap_restore:
+@@ -2518,29 +2594,58 @@ remap_restore:
  }
  #endif
  
@@ -2428,7 +2710,8 @@ index 8cfa89b944d..658a7022fed 100644
 +
 +    wld_memmove( &state->s, &newinfo, sizeof(state->s) );
 +
-+    refresh_vma_and_reserve_preload_ranges( vma_list, state->s.stack );
++    free_vma_list( vma_list );
++    alloc_scan_vma( vma_list, state->s.stack );
 +    return 1;
 +
 +remove_from_reserve:
@@ -2438,9 +2721,34 @@ index 8cfa89b944d..658a7022fed 100644
 +}
 +
  /*
-  *  wld_start
+  * map_reserve_preload_ranges
   *
-@@ -2678,13 +2786,14 @@ void* wld_start( void **stack )
+  * Attempt to reserve memory ranges into preload_info.
+- * If any preload_info entry overlaps with stack, remove the entry instead of
+- * reserving.
+  */
+-static void map_reserve_preload_ranges( const struct vma_area_list *vma_list,
+-                                        const struct stackarg_info *stackinfo )
++static void map_reserve_preload_ranges( const struct vma_area_list *vma_list )
+ {
+     size_t i;
+-    unsigned long exclude_start = (unsigned long)stackinfo->stack - 1;
+-    unsigned long exclude_end = (unsigned long)stackinfo->auxv + 1;
+ 
+     for (i = 0; preload_info[i].size; i++)
+     {
+-        if (exclude_end   >  (unsigned long)preload_info[i].addr &&
+-            exclude_start <= (unsigned long)preload_info[i].addr + preload_info[i].size - 1)
+-        {
+-            remove_preload_range( i );
+-            i--;
+-        }
+-        else if (map_reserve_unmapped_range( vma_list, preload_info[i].addr, preload_info[i].size ) < 0)
++        if (map_reserve_unmapped_range( vma_list, preload_info[i].addr, preload_info[i].size ) < 0)
+         {
+             /* don't warn for low 64k */
+             if (preload_info[i].addr >= (void *)0x10000
+@@ -2603,15 +2708,16 @@ void* wld_start( void **stack )
      reserve = stackargs_getenv( &state.s, "WINEPRELOADRESERVE" );
      if (reserve) preload_reserve( reserve );
  
@@ -2449,14 +2757,89 @@ index 8cfa89b944d..658a7022fed 100644
 +    alloc_scan_vma( &vma_list, state.s.stack );
 +    map_reserve_preload_ranges( &vma_list );
  
-     remap_vdso( &vma_list, &state );
+     remap_done = 0;
+     remap_done |= remap_vdso( &vma_list, &state ) > 0;
  #ifdef __arm__
-     remap_sigpage( &vma_list, &state );
+     remap_done |= remap_sigpage( &vma_list, &state ) > 0;
  #endif
-+    remap_stack( &vma_list, &state );
+-    if (remap_done) map_reserve_preload_ranges( &vma_list, &state.s );
++    remap_done |= remap_stack( &vma_list, &state ) > 0;
++    if (remap_done) map_reserve_preload_ranges( &vma_list );
  
      /* add an executable page at the top of the address space to defeat
       * broken no-exec protections that play with the code selector limit */
+
 -- 
-GitLab
+2.36.1
+
+From: Jinoh Kang <jinoh.kang.kr@gmail.com>
+Subject: [PATCH v3 12/13] loader: Enable dumping additional vectors in dump_auxiliary.
+Message-Id: <6ec8f3d1-f7b6-fe99-0fb4-44fd5bab2d08@gmail.com>
+Date: Wed, 26 Jan 2022 00:25:51 +0900
+In-Reply-To: <ed8913ee-6dd0-751d-3ec2-75d4865a6ed4@gmail.com>
+References: <ed8913ee-6dd0-751d-3ec2-75d4865a6ed4@gmail.com>
+
+Signed-off-by: Jinoh Kang <jinoh.kang.kr@gmail.com>
+---
+ loader/preloader.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/loader/preloader.c b/loader/preloader.c
+index 11111111111..11111111111 100644
+--- a/loader/preloader.c
++++ b/loader/preloader.c
+@@ -1161,6 +1161,11 @@ static void dump_auxiliary( struct wld_auxv *av )
+         NAME(AT_SYSINFO),
+         NAME(AT_SYSINFO_EHDR),
+         NAME(AT_UID),
++        NAME(AT_SECURE),
++        NAME(AT_RANDOM),
++        NAME(AT_HWCAP2),
++        NAME(AT_EXECFN),
++        NAME(AT_MINSIGSTKSZ),
+         { 0, NULL }
+     };
+ #undef NAME
+
+-- 
+2.36.1
+
+From: Jinoh Kang <jinoh.kang.kr@gmail.com>
+Subject: [PATCH v5 13/13] loader: Enable all remap logic by default.
+Message-Id: <6ee41e7e-31ce-08ac-a177-53d793a1a69d@gmail.com>
+Date: Sat, 5 Mar 2022 23:55:01 +0900
+In-Reply-To: <7a3d3b9e-7d1a-9fde-99a7-bd47d51fda35@gmail.com>
+References: <7a3d3b9e-7d1a-9fde-99a7-bd47d51fda35@gmail.com>
+
+Signed-off-by: Jinoh Kang <jinoh.kang.kr@gmail.com>
+---
+
+Notes:
+    v4 -> v5: no changes
+
+ loader/preloader.c | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/loader/preloader.c b/loader/preloader.c
+index 11111111111..11111111111 100644
+--- a/loader/preloader.c
++++ b/loader/preloader.c
+@@ -291,11 +291,11 @@ enum remap_policy
+     REMAP_POLICY_SKIP = 2,
+     LAST_REMAP_POLICY,
+ 
+-    REMAP_POLICY_DEFAULT_VDSO    = REMAP_POLICY_SKIP,
++    REMAP_POLICY_DEFAULT_VDSO    = REMAP_POLICY_ON_CONFLICT,
+ #ifdef __arm__
+-    REMAP_POLICY_DEFAULT_SIGPAGE = REMAP_POLICY_SKIP,
++    REMAP_POLICY_DEFAULT_SIGPAGE = REMAP_POLICY_ON_CONFLICT,
+ #endif
+-    REMAP_POLICY_DEFAULT_STACK   = REMAP_POLICY_SKIP,
++    REMAP_POLICY_DEFAULT_STACK   = REMAP_POLICY_ON_CONFLICT,
+ };
+ 
+ /*
+
+-- 
+2.36.1
 
