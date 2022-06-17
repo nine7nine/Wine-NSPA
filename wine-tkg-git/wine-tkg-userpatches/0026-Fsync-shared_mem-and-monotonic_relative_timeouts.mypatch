@@ -1,0 +1,477 @@
+From ff118147bf8fed0a44d4e69b7e6e72e8eb46d751 Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Wed, 27 Apr 2022 15:52:53 -0500
+Subject: [PATCH] fsync: Reuse shared mem indices.
+
+CW-Bug-Id: #20560
+---
+ server/console.c |  1 +
+ server/device.c  |  2 ++
+ server/event.c   |  2 ++
+ server/fd.c      |  1 +
+ server/fsync.c   | 66 +++++++++++++++++++++++++++++++++++++++++++++---
+ server/fsync.h   |  1 +
+ server/process.c |  1 +
+ server/queue.c   |  1 +
+ server/thread.c  |  3 +++
+ server/timer.c   |  2 ++
+ 10 files changed, 77 insertions(+), 3 deletions(-)
+
+diff --git a/server/console.c b/server/console.c
+index dc391bfb77f..83c20037904 100644
+--- a/server/console.c
++++ b/server/console.c
+@@ -897,6 +897,7 @@ static void console_server_destroy( stru
+     assert( obj->ops == &console_server_ops );
+     disconnect_console_server( server );
+     if (server->fd) release_object( server->fd );
++    if (server->fsync_idx) fsync_free_shm_idx( server->fsync_idx );
+ }
+ 
+ static struct object *console_server_lookup_name( struct object *obj, struct unicode_str *name,
+diff --git a/server/device.c b/server/device.c
+index 61d00111125..28e90370b38 100644
+--- a/server/device.c
++++ b/server/device.c
+@@ -854,6 +854,7 @@ static void device_manager_destroy( struct object *obj )
+ 
+     if (do_esync())
+         close( manager->esync_fd );
++    if (manager->fsync_idx) fsync_free_shm_idx( manager->fsync_idx );
+ }
+ 
+ static struct device_manager *create_device_manager(void)
+@@ -866,6 +867,7 @@ static struct device_manager *create_device_manager(void)
+         list_init( &manager->devices );
+         list_init( &manager->requests );
+         wine_rb_init( &manager->kernel_objects, compare_kernel_object );
++        manager->fsync_idx = 0;
+ 
+         if (do_fsync())
+             manager->fsync_idx = fsync_alloc_shm( 0, 0 );
+diff --git a/server/event.c b/server/event.c
+index 5562f1a571c..cf96d9064cc 100644
+--- a/server/event.c
++++ b/server/event.c
+@@ -162,6 +162,7 @@ struct event *create_event( struct object *root, const struct unicode_str *name,
+             list_init( &event->kernel_object );
+             event->manual_reset = manual_reset;
+             event->signaled     = initial_state;
++            event->fsync_idx = 0;
+ 
+             if (do_fsync())
+                 event->fsync_idx = fsync_alloc_shm( initial_state, 0 );
+@@ -301,6 +302,7 @@ static void event_destroy( struct object *obj )
+ 
+     if (do_esync())
+         close( event->esync_fd );
++    if (event->fsync_idx) fsync_free_shm_idx( event->fsync_idx );
+ }
+ 
+ struct keyed_event *create_keyed_event( struct object *root, const struct unicode_str *name,
+diff --git a/server/fd.c b/server/fd.c
+index 0bd29c016d0..61c03b3a746 100644
+--- a/server/fd.c
++++ b/server/fd.c
+@@ -1602,6 +1602,7 @@ static void fd_destroy( struct object *obj )
+ 
+     if (do_esync())
+         close( fd->esync_fd );
++    if (fd->fsync_idx) fsync_free_shm_idx( fd->fsync_idx );
+ }
+ 
+ /* check if the desired access is possible without violating */
+diff --git a/server/fsync.c b/server/fsync.c
+index b86e66b587b..4d477e3aa1e 100644
+--- a/server/fsync.c
++++ b/server/fsync.c
+@@ -26,6 +26,7 @@
+ #include <stdio.h>
+ #include <stdarg.h>
+ #include <sys/mman.h>
++#include <stdint.h>
+ #ifdef HAVE_SYS_STAT_H
+ # include <sys/stat.h>
+ #endif
+@@ -85,6 +86,12 @@ static long pagesize;
+ 
+ static int is_fsync_initialized;
+ 
++static uint64_t *shm_idx_free_map;
++static uint32_t shm_idx_free_map_size; /* uint64_t word count */
++static uint32_t shm_idx_free_search_start_hint;
++
++#define BITS_IN_FREE_MAP_WORD (8 * sizeof(*shm_idx_free_map))
++
+ static void shm_cleanup(void)
+ {
+     close( shm_fd );
+@@ -124,6 +131,11 @@ void fsync_init(void)
+ 
+     fprintf( stderr, "fsync: up and running.\n" );
+ 
++    shm_idx_free_map_size = 256;
++    shm_idx_free_map = malloc( shm_idx_free_map_size * sizeof(*shm_idx_free_map) );
++    memset( shm_idx_free_map, 0xff, shm_idx_free_map_size * sizeof(*shm_idx_free_map) );
++    shm_idx_free_map[0] &= ~(uint64_t)1; /* Avoid allocating shm_index 0. */
++
+     atexit( shm_cleanup );
+ }
+ 
+@@ -197,6 +209,7 @@ static void fsync_destroy( struct object *obj )
+     struct fsync *fsync = (struct fsync *)obj;
+     if (fsync->type == FSYNC_MUTEX)
+         list_remove( &fsync->mutex_entry );
++    fsync_free_shm_idx( fsync->shm_idx );
+ }
+ 
+ static void *get_shm( unsigned int idx )
+@@ -235,12 +248,22 @@ static void *get_shm( unsigned int idx )
+     return (void *)((unsigned long)shm_addrs[entry] + offset);
+ }
+ 
+-/* FIXME: This is rather inefficient... */
+-static unsigned int shm_idx_counter = 1;
++static int alloc_shm_idx_from_word( unsigned int word_index )
++{
++    int ret;
++
++    if (!shm_idx_free_map[word_index]) return 0;
++
++    ret = __builtin_ctzll( shm_idx_free_map[word_index] );
++    shm_idx_free_map[word_index] &= ~((uint64_t)1 << ret);
++    shm_idx_free_search_start_hint = shm_idx_free_map[word_index] ? word_index : word_index + 1;
++    return word_index * BITS_IN_FREE_MAP_WORD + ret;
++}
+ 
+ unsigned int fsync_alloc_shm( int low, int high )
+ {
+ #ifdef __linux__
++    unsigned int i;
+     int shm_idx;
+     int *shm;
+ 
+@@ -249,7 +272,29 @@ unsigned int fsync_alloc_shm( int low, int high )
+     if (!is_fsync_initialized)
+         return 0;
+ 
+-    shm_idx = shm_idx_counter++;
++    /* shm_idx_free_search_start_hint is always at the first word with a free index or before that. */
++    for (i = shm_idx_free_search_start_hint; i < shm_idx_free_map_size; ++i)
++        if ((shm_idx = alloc_shm_idx_from_word( i ))) break;
++
++    if (!shm_idx)
++    {
++        uint32_t old_size, new_size;
++        uint64_t *new_alloc;
++
++        old_size = shm_idx_free_map_size;
++        new_size = old_size + 256;
++        new_alloc = realloc( shm_idx_free_map, new_size * sizeof(*new_alloc) );
++        if (!new_alloc)
++        {
++            fprintf( stderr, "fsync: couldn't expand shm_idx_free_map to size %zd.",
++                new_size * sizeof(*new_alloc) );
++            return 0;
++        }
++        memset( new_alloc + old_size, 0xff, (new_size - old_size) * sizeof(*new_alloc) );
++        shm_idx_free_map = new_alloc;
++        shm_idx_free_map_size = new_size;
++        shm_idx = alloc_shm_idx_from_word( old_size );
++    }
+ 
+     while (shm_idx * 8 >= shm_size)
+     {
+@@ -274,6 +319,21 @@ unsigned int fsync_alloc_shm( int low, int high )
+ #endif
+ }
+ 
++void fsync_free_shm_idx( int shm_idx )
++{
++    unsigned int idx;
++    uint64_t mask;
++
++    assert( shm_idx );
++    assert( shm_idx < shm_idx_free_map_size * BITS_IN_FREE_MAP_WORD );
++    idx = shm_idx / BITS_IN_FREE_MAP_WORD;
++    mask = (uint64_t)1 << (shm_idx % BITS_IN_FREE_MAP_WORD);
++    assert( !(shm_idx_free_map[idx] & mask) );
++    shm_idx_free_map[idx] |= mask;
++    if (idx < shm_idx_free_search_start_hint)
++        shm_idx_free_search_start_hint = idx;
++}
++
+ static int type_matches( enum fsync_type type1, enum fsync_type type2 )
+ {
+     return (type1 == type2) ||
+diff --git a/server/fsync.h b/server/fsync.h
+index a91939b7f0a..ee1a729e77e 100644
+--- a/server/fsync.h
++++ b/server/fsync.h
+@@ -21,6 +21,7 @@
+ extern int do_fsync(void);
+ extern void fsync_init(void);
+ extern unsigned int fsync_alloc_shm( int low, int high );
++extern void fsync_free_shm_idx( int shm_idx );
+ extern void fsync_wake_futex( unsigned int shm_idx );
+ extern void fsync_clear_futex( unsigned int shm_idx );
+ extern void fsync_wake_up( struct object *obj );
+diff --git a/server/process.c b/server/process.c
+index fc8b0d7bc56..fcdb5f3bd84 100644
+--- a/server/process.c
++++ b/server/process.c
+@@ -805,6 +805,7 @@ static void process_destroy( struct object *obj )
+     free( process->dir_cache );
+     free( process->image );
+     if (do_esync()) close( process->esync_fd );
++    if (process->fsync_idx) fsync_free_shm_idx( process->fsync_idx );
+ }
+ 
+ /* dump a process on stdout for debugging purposes */
+diff --git a/server/queue.c b/server/queue.c
+index 48c8f3aa38b..d72540e5e45 100644
+--- a/server/queue.c
++++ b/server/queue.c
+@@ -1213,6 +1213,7 @@ static void msg_queue_destroy( struct ob
+     release_object( queue->input );
+     if (queue->hooks) release_object( queue->hooks );
+     if (queue->fd) release_object( queue->fd );
++    if (queue->fsync_idx) fsync_free_shm_idx( queue->fsync_idx );
+ }
+ 
+ static void msg_queue_poll_event( struct fd *fd, int event )
+diff --git a/server/thread.c b/server/thread.c
+index ff3b805a2d6..c1c0e04c593 100644
+--- a/server/thread.c
++++ b/server/thread.c
+@@ -487,6 +487,8 @@ struct thread *create_thread( int fd, struct process *process, const struct secu
+         }
+     }
+ 
++    thread->fsync_idx = 0;
++
+     if (do_fsync())
+     {
+         thread->fsync_idx = fsync_alloc_shm( 0, 0 );
+@@ -588,6 +590,7 @@ static void destroy_thread( struct object *obj )
+ 
+     if (do_esync())
+         close( thread->esync_fd );
++    if (thread->fsync_idx) fsync_free_shm_idx( thread->fsync_idx );
+ }
+ 
+ /* dump a thread on stdout for debugging purposes */
+diff --git a/server/timer.c b/server/timer.c
+index c8b08be2ab4..492381eee3f 100644
+--- a/server/timer.c
++++ b/server/timer.c
+@@ -120,6 +120,7 @@ static struct timer *create_timer( struct object *root, const struct unicode_str
+             timer->timeout  = NULL;
+             timer->thread   = NULL;
+             timer->esync_fd = -1;
++            timer->fsync_idx = 0;
+ 
+             if (do_fsync())
+                 timer->fsync_idx = fsync_alloc_shm( 0, 0 );
+@@ -257,6 +258,7 @@ static void timer_destroy( struct object
+ 
+     if (timer->timeout) remove_timeout_user( timer->timeout );
+     if (timer->thread) release_object( timer->thread );
++    if (timer->fsync_idx) fsync_free_shm_idx( timer->fsync_idx );
+ }
+ 
+ /* create a timer */
+
+From 5e13a5d9a2be11612ddd0c6a980942da57c461ff Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Fri, 29 Apr 2022 16:57:13 -0500
+Subject: [PATCH] fsync: Use CLOCK_MONOTONIC for relative timeouts.
+
+CW-Bug-Id: #20548
+
+Test shows that relative wait timeouts on Windows do not
+include the time spent is suspend. Using CLOCK_MONOTONIC
+on Linux is a closer approximation for that.
+---
+ dlls/ntdll/unix/fsync.c | 88 +++++++++++++++++++++++++----------------
+ 1 file changed, 54 insertions(+), 34 deletions(-)
+
+diff --git a/dlls/ntdll/unix/fsync.c b/dlls/ntdll/unix/fsync.c
+index 04aa97efc46..99ee2c93bc8 100644
+--- a/dlls/ntdll/unix/fsync.c
++++ b/dlls/ntdll/unix/fsync.c
+@@ -83,13 +83,50 @@ struct timespec64
+     long long tv_nsec;
+ };
+ 
+-static LONGLONG update_timeout( ULONGLONG end )
++static LONGLONG nt_time_from_ts( struct timespec *ts )
+ {
+-    LARGE_INTEGER now;
++    return ticks_from_time_t( ts->tv_sec ) + (ts->tv_nsec + 50) / 100;
++}
++
++static void get_wait_end_time( const LARGE_INTEGER **timeout, struct timespec64 *end, clockid_t *clock_id )
++{
++    ULONGLONG nt_end;
++
++    if (!*timeout) return;
++    if ((*timeout)->QuadPart == TIMEOUT_INFINITE)
++    {
++        *timeout = NULL;
++        return;
++    }
++
++    if ((*timeout)->QuadPart > 0)
++    {
++        nt_end = (*timeout)->QuadPart;
++        *clock_id = CLOCK_REALTIME;
++    }
++    else
++    {
++        struct timespec ts;
++
++        clock_gettime( CLOCK_MONOTONIC, &ts );
++        nt_end = nt_time_from_ts( &ts ) - (*timeout)->QuadPart;
++        *clock_id = CLOCK_MONOTONIC;
++    }
++
++    nt_end -= SECS_1601_TO_1970 * TICKSPERSEC;
++    end->tv_sec = nt_end / (ULONGLONG)TICKSPERSEC;
++    end->tv_nsec = (nt_end % TICKSPERSEC) * 100;
++}
++
++static LONGLONG update_timeout( const struct timespec64 *end, clockid_t clock_id )
++{
++    struct timespec end_ts, ts;
+     LONGLONG timeleft;
+ 
+-    NtQuerySystemTime( &now );
+-    timeleft = end - now.QuadPart;
++    clock_gettime( clock_id, &ts );
++    end_ts.tv_sec = end->tv_sec;
++    end_ts.tv_nsec = end->tv_nsec;
++    timeleft = nt_time_from_ts( &end_ts ) - nt_time_from_ts( &ts );
+     if (timeleft < 0) timeleft = 0;
+     return timeleft;
+ }
+@@ -112,21 +149,12 @@ static void simulate_sched_quantum(void)
+ }
+ 
+ static inline int futex_wait_multiple( const struct futex_waitv *futexes,
+-        int count, const ULONGLONG *end )
++        int count, const struct timespec64 *end, clockid_t clock_id )
+ {
+    if (end)
+-   {
+-        struct timespec64 timeout;
+-        ULONGLONG tmp = *end - SECS_1601_TO_1970 * TICKSPERSEC;
+-        timeout.tv_sec = tmp / (ULONGLONG)TICKSPERSEC;
+-        timeout.tv_nsec = (tmp % TICKSPERSEC) * 100;
+-
+-        return syscall( __NR_futex_waitv, futexes, count, 0, &timeout, CLOCK_REALTIME );
+-   }
++        return syscall( __NR_futex_waitv, futexes, count, 0, end, clock_id );
+    else
+-   {
+         return syscall( __NR_futex_waitv, futexes, count, 0, NULL, 0 );
+-   }
+ }
+ 
+ static inline int futex_wake( int *addr, int val )
+@@ -693,7 +721,8 @@ NTSTATUS fsync_query_mutex( HANDLE handle, void *info, ULONG *ret_len )
+     return STATUS_SUCCESS;
+ }
+ 
+-static NTSTATUS do_single_wait( int *addr, int val, ULONGLONG *end, BOOLEAN alertable )
++static NTSTATUS do_single_wait( int *addr, int val, const struct timespec64 *end, clockid_t clock_id,
++                                BOOLEAN alertable )
+ {
+     struct futex_waitv futexes[2];
+     int ret;
+@@ -710,14 +739,14 @@ static NTSTATUS do_single_wait( int *add
+ 
+         futex_vector_set( &futexes[1], &apc_event->signaled, 0 );
+ 
+-        ret = futex_wait_multiple( futexes, 2, end );
++        ret = futex_wait_multiple( futexes, 2, end, clock_id );
+ 
+         if (__atomic_load_n( &apc_event->signaled, __ATOMIC_SEQ_CST ))
+             return STATUS_USER_APC;
+     }
+     else
+     {
+-        ret = futex_wait_multiple( futexes, 1, end );
++        ret = futex_wait_multiple( futexes, 1, end, clock_id );
+     }
+ 
+     if (!ret)
+@@ -736,11 +765,11 @@ static NTSTATUS __fsync_wait_objects( DWORD count, const HANDLE *handles,
+     struct fsync *objs[MAXIMUM_WAIT_OBJECTS];
+     BOOL msgwait = FALSE, waited = FALSE;
+     int has_fsync = 0, has_server = 0;
++    clockid_t clock_id = 0;
++    struct timespec64 end;
+     int dummy_futex = 0;
+     LONGLONG timeleft;
+-    LARGE_INTEGER now;
+     DWORD waitcount;
+-    ULONGLONG end;
+     int i, ret;
+ 
+     /* Grab the APC futex if we don't already have it. */
+@@ -761,16 +790,7 @@ static NTSTATUS __fsync_wait_objects( DWORD count, const HANDLE *handles,
+         }
+     }
+ 
+-    NtQuerySystemTime( &now );
+-    if (timeout)
+-    {
+-        if (timeout->QuadPart == TIMEOUT_INFINITE)
+-            timeout = NULL;
+-        else if (timeout->QuadPart > 0)
+-            end = timeout->QuadPart;
+-        else
+-            end = now.QuadPart - timeout->QuadPart;
+-    }
++    get_wait_end_time( &timeout, &end, &clock_id );
+ 
+     for (i = 0; i < count; i++)
+     {
+@@ -806,7 +826,7 @@ static NTSTATUS __fsync_wait_objects( DWORD count, const HANDLE *handles,
+             TRACE(", timeout = INFINITE.\n");
+         else
+         {
+-            timeleft = update_timeout( end );
++            timeleft = update_timeout( &end, clock_id );
+             TRACE(", timeout = %ld.%07ld sec.\n",
+                 (long) (timeleft / TICKSPERSEC), (long) (timeleft % TICKSPERSEC));
+         }
+@@ -953,7 +973,7 @@ static NTSTATUS __fsync_wait_objects( DWORD count, const HANDLE *handles,
+                 return STATUS_TIMEOUT;
+             }
+ 
+-            ret = futex_wait_multiple( futexes, waitcount, timeout ? &end : NULL );
++            ret = futex_wait_multiple( futexes, waitcount, timeout ? &end : NULL, clock_id );
+ 
+             /* FUTEX_WAIT_MULTIPLE can succeed or return -EINTR, -EAGAIN,
+              * -EFAULT/-EACCES, -ETIMEDOUT. In the first three cases we need to
+@@ -1015,7 +1035,7 @@ static NTSTATUS __fsync_wait_objects( DWORD count, const HANDLE *handles,
+ 
+                     while ((current = __atomic_load_n( &mutex->tid, __ATOMIC_SEQ_CST )))
+                     {
+-                        status = do_single_wait( &mutex->tid, current, timeout ? &end : NULL, alertable );
++                        status = do_single_wait( &mutex->tid, current, timeout ? &end : NULL, clock_id, alertable );
+                         if (status != STATUS_PENDING)
+                             break;
+                     }
+@@ -1027,7 +1047,7 @@ static NTSTATUS __fsync_wait_objects( DWORD count, const HANDLE *handles,
+ 
+                     while (!__atomic_load_n( &event->signaled, __ATOMIC_SEQ_CST ))
+                     {
+-                        status = do_single_wait( &event->signaled, 0, timeout ? &end : NULL, alertable );
++                        status = do_single_wait( &event->signaled, 0, timeout ? &end : NULL, clock_id, alertable );
+                         if (status != STATUS_PENDING)
+                             break;
+                     }
+
