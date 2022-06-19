@@ -1585,131 +1585,6 @@ index d12ea7f759c..52891cbf563 100644
          }
          else
              *bmp = NULL;
-From fbe234d4c2aff76c8a49deea29612b87e9a7bc39 Mon Sep 17 00:00:00 2001
-From: Paul Gofman <pgofman@codeweavers.com>
-Date: Thu, 10 Feb 2022 16:17:41 +0300
-Subject: [PATCH] ntdll: Guard against syscall stack overrun.
-
----
- dlls/ntdll/unix/signal_arm.c    |  4 ++++
- dlls/ntdll/unix/signal_arm64.c  |  4 ++++
- dlls/ntdll/unix/signal_i386.c   |  4 ++++
- dlls/ntdll/unix/signal_x86_64.c |  4 ++++
- dlls/ntdll/unix/unix_private.h  | 10 +++++++++-
- dlls/ntdll/unix/virtual.c       |  5 +++++
- 6 files changed, 30 insertions(+), 1 deletion(-)
-
-diff --git a/dlls/ntdll/unix/signal_arm.c b/dlls/ntdll/unix/signal_arm.c
-index eaa41d9e139..ff4dbedccac 100644
---- a/dlls/ntdll/unix/signal_arm.c
-+++ b/dlls/ntdll/unix/signal_arm.c
-@@ -835,6 +835,10 @@ static BOOL handle_syscall_fault( ucontext_t *context, EXCEPTION_RECORD *rec )
-            (DWORD)IP_sig(context), (DWORD)SP_sig(context), (DWORD)LR_sig(context),
-            (DWORD)PC_sig(context), (DWORD)CPSR_sig(context) );
- 
-+    if (rec->ExceptionCode == STATUS_ACCESS_VIOLATION
-+            && is_inside_syscall_stack_guard( (char *)rec->ExceptionInformation[1] ))
-+        ERR_(seh)( "Syscall stack overrun.\n ");
-+
-     if (ntdll_get_thread_data()->jmp_buf)
-     {
-         TRACE( "returning to handler\n" );
-diff --git a/dlls/ntdll/unix/signal_arm64.c b/dlls/ntdll/unix/signal_arm64.c
-index 26910173b81..ba3e3564c1a 100644
---- a/dlls/ntdll/unix/signal_arm64.c
-+++ b/dlls/ntdll/unix/signal_arm64.c
-@@ -860,6 +860,10 @@ static BOOL handle_syscall_fault( ucontext_t *context, EXCEPTION_RECORD *rec )
-           (DWORD64)REGn_sig(28, context), (DWORD64)FP_sig(context),
-           (DWORD64)LR_sig(context), (DWORD64)SP_sig(context) );
- 
-+    if (rec->ExceptionCode == STATUS_ACCESS_VIOLATION
-+            && is_inside_syscall_stack_guard( (char *)rec->ExceptionInformation[1] ))
-+        ERR_(seh)( "Syscall stack overrun.\n ");
-+
-     if (ntdll_get_thread_data()->jmp_buf)
-     {
-         TRACE( "returning to handler\n" );
-diff --git a/dlls/ntdll/unix/signal_i386.c b/dlls/ntdll/unix/signal_i386.c
-index 53da5d3ac59..a0afd33ea13 100644
---- a/dlls/ntdll/unix/signal_i386.c
-+++ b/dlls/ntdll/unix/signal_i386.c
-@@ -1757,6 +1757,10 @@ static BOOL handle_syscall_fault( ucontext_t *sigcontext, void *stack_ptr,
-           context->Ebp, context->Esp, context->SegCs, context->SegDs,
-           context->SegEs, context->SegFs, context->SegGs, context->EFlags );
- 
-+    if (rec->ExceptionCode == STATUS_ACCESS_VIOLATION
-+            && is_inside_syscall_stack_guard( (char *)rec->ExceptionInformation[1] ))
-+        ERR_(seh)( "Syscall stack overrun.\n ");
-+
-     if (ntdll_get_thread_data()->jmp_buf)
-     {
-         TRACE( "returning to handler\n" );
-diff --git a/dlls/ntdll/unix/signal_x86_64.c b/dlls/ntdll/unix/signal_x86_64.c
-index 7d7f9090986..b1cc682649b 100644
---- a/dlls/ntdll/unix/signal_x86_64.c
-+++ b/dlls/ntdll/unix/signal_x86_64.c
-@@ -2792,6 +2792,10 @@ static BOOL handle_syscall_fault( ucontext_t *sigcontext, EXCEPTION_RECORD *rec,
-     TRACE_(seh)( " r12=%016lx r13=%016lx r14=%016lx r15=%016lx\n",
-                  context->R12, context->R13, context->R14, context->R15 );
- 
-+    if (rec->ExceptionCode == STATUS_ACCESS_VIOLATION
-+            && is_inside_syscall_stack_guard( (char *)rec->ExceptionInformation[1] ))
-+        ERR_(seh)( "Syscall stack overrun.\n ");
-+
-     if (ntdll_get_thread_data()->jmp_buf)
-     {
-         TRACE_(seh)( "returning to handler\n" );
-diff --git a/dlls/ntdll/unix/unix_private.h b/dlls/ntdll/unix/unix_private.h
-index 9bc19e75228..4bf0e7cb84e 100644
---- a/dlls/ntdll/unix/unix_private.h
-+++ b/dlls/ntdll/unix/unix_private.h
-@@ -88,7 +88,8 @@ static const SIZE_T teb_size = 0x3800;  /* TEB64 + TEB32 + debug info */
- static const SIZE_T signal_stack_mask = 0xffff;
- static const SIZE_T signal_stack_size = 0x10000 - 0x3800;
- static const SIZE_T kernel_stack_size = 0x100000;
--static const SIZE_T min_kernel_stack  = 0x2000;
-+static const SIZE_T kernel_stack_guard_size = 0x1000;
-+static const SIZE_T min_kernel_stack  = 0x3000;
- static const LONG teb_offset = 0x2000;
- 
- #define FILE_WRITE_TO_END_OF_FILE      ((LONGLONG)-1)
-@@ -331,6 +332,13 @@ static inline BOOL is_inside_signal_stack( void *ptr )
-             (char *)ptr < (char *)get_signal_stack() + signal_stack_size);
- }
- 
-+static inline BOOL is_inside_syscall_stack_guard( const char *stack_ptr )
-+{
-+    const char *kernel_stack = ntdll_get_thread_data()->kernel_stack;
-+
-+    return (stack_ptr >= kernel_stack && stack_ptr < kernel_stack + kernel_stack_guard_size);
-+}
-+
- static inline void mutex_lock( pthread_mutex_t *mutex )
- {
-     if (!process_exiting) pthread_mutex_lock( mutex );
-diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
-index e7caf162ee1..10e2bf1477c 100644
---- a/dlls/ntdll/unix/virtual.c
-+++ b/dlls/ntdll/unix/virtual.c
-@@ -3225,6 +3225,7 @@ NTSTATUS virtual_alloc_thread_stack( INITIAL_TEB *stack, ULONG_PTR zero_bits, SI
-                                      SIZE_T commit_size, SIZE_T extra_size )
- {
-     struct file_view *view;
-+    char *kernel_stack;
-     NTSTATUS status;
-     sigset_t sigset;
-     SIZE_T size;
-@@ -3268,6 +3269,10 @@ NTSTATUS virtual_alloc_thread_stack( INITIAL_TEB *stack, ULONG_PTR zero_bits, SI
-             delete_view( view );
-             goto done;
-         }
-+        /* setup kernel stack no access guard page */
-+        kernel_stack = (char *)view->base + view->size;
-+        set_page_vprot( kernel_stack, kernel_stack_guard_size, VPROT_COMMITTED );
-+        mprotect_range( kernel_stack, kernel_stack_guard_size, 0, 0 );
-     }
- 
-     /* note: limit is lower than base since the stack grows down */
 From 298fcc110a2a7294a10b6e0683f9305fca95740d Mon Sep 17 00:00:00 2001
 From: Paul Gofman <pgofman@codeweavers.com>
 Date: Tue, 1 Feb 2022 22:39:42 +0300
@@ -1781,4 +1656,209 @@ index 0547ee94b19..9200491afd0 100644
  # endif
  #else
  # define __ASM_SEH(str)
+
+From: "Jiangyi Chen" <cjy520lcy@163.com>
+#Subject: [PATCH] shell32: Use CP_UTF8 in __SHCloneStrAtoW.
+Message-Id: <26bf0c42.3726.178151abb94.Coremail.cjy520lcy@163.com>
+Date: Tue, 9 Mar 2021 11:49:36 +0800 (CST)
+
+From 55b69cbacc40a684b6abafee155aa8fa63218433 Mon Sep 17 00:00:00 2001
+From: Jiangyi Chen <chenjiangyi@uniontech.com>
+Date: Tue, 9 Mar 2021 11:46:53 +0800
+Subject: [PATCH] shell32: Use CP_UTF8 in __SHCloneStrAtoW. Fix problem that
+ some paths cannot be opened by ShellExecuteA or ShellExecuteExA.
+
+Signed-off-by: Jiangyi Chen <chenjiangyi@uniontech.com>
+---
+ dlls/shell32/shell32_main.h | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/shell32/shell32_main.h b/dlls/shell32/shell32_main.h
+index 11111111111..11111111111 100644
+--- a/dlls/shell32/shell32_main.h
++++ b/dlls/shell32/shell32_main.h
+@@ -170,9 +170,9 @@ static inline BOOL SHELL_OsIsUnicode(void)
+ 
+ static inline WCHAR * __SHCloneStrAtoW(WCHAR ** target, const char * source)
+ {
+-	int len = MultiByteToWideChar(CP_ACP, 0, source, -1, NULL, 0);
++	int len = MultiByteToWideChar(CP_UTF8, 0, source, -1, NULL, 0);
+ 	*target = SHAlloc(len*sizeof(WCHAR));
+-	MultiByteToWideChar(CP_ACP, 0, source, -1, *target, len);
++	MultiByteToWideChar(CP_UTF8, 0, source, -1, *target, len);
+ 	return *target;
+ }
+ 
+
+-- 
+2.36.1
+
+From: Louis Lenders <xerox.xerox2000x@gmail.com>
+Subject: [PATCH] Add RtlDosPathNameToRelativeNtPathName_U
+Message-Id: <20210201175953.6137-1-xerox.xerox2000x@gmail.com>
+Date: Mon,  1 Feb 2021 18:59:53 +0100
+
+Trying to get scoop running in wine, turned out it needs robocopy.exe. As wine lacks robocopy, i had to fall
+back to native robocopy, in this case from windows 8.1. Then one gets crash below.
+
+Call from 7BC2C17A to unimplemented function ntdll.dll.RtlDosPathNameToRelativeNtPathName_U, aborting
+wine: Unimplemented function ntdll.dll.RtlDosPathNameToRelativeNtPathName_U called at address 7BC2C17A (thread 0024), starting debugger...
+
+So I added similar code as for RtlDosPathNameToNtPathName_U --> RtlDosPathNameToNtPathName_U_WithStatus
+and that makes robocopy  work
+
+Signed-off-by: Louis Lenders <xerox.xerox2000x@gmail.com>
+---
+ dlls/ntdll/ntdll.spec |  1 +
+ dlls/ntdll/path.c     | 11 +++++++++++
+ 2 files changed, 12 insertions(+)
+
+diff --git a/dlls/ntdll/ntdll.spec b/dlls/ntdll/ntdll.spec
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/ntdll.spec
++++ b/dlls/ntdll/ntdll.spec
+@@ -621,6 +621,7 @@
+ # @ stub RtlDosApplyFileIsolationRedirection_Ustr
+ @ stdcall RtlDosPathNameToNtPathName_U(wstr ptr ptr ptr)
+ @ stdcall RtlDosPathNameToNtPathName_U_WithStatus(wstr ptr ptr ptr)
++@ stdcall RtlDosPathNameToRelativeNtPathName_U(wstr ptr ptr ptr)
+ @ stdcall RtlDosPathNameToRelativeNtPathName_U_WithStatus(wstr ptr ptr ptr)
+ @ stdcall RtlDosSearchPath_U(wstr wstr wstr long ptr ptr)
+ # @ stub RtlDosSearchPath_Ustr
+diff --git a/dlls/ntdll/path.c b/dlls/ntdll/path.c
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/path.c
++++ b/dlls/ntdll/path.c
+@@ -330,6 +330,17 @@ NTSTATUS WINAPI RtlDosPathNameToRelativeNtPathName_U_WithStatus(const WCHAR *dos
+     return RtlDosPathNameToNtPathName_U_WithStatus(dos_path, ntpath, file_part, NULL);
+ }
+ 
++/**************************************************************************
++ *        RtlDosPathNameToRelativeNtPathName_U [NTDLL.@]
++ *
++ * See RtlDosPathNameToRelativeNtPathName_U_WithStatus
++ */
++BOOLEAN WINAPI RtlDosPathNameToRelativeNtPathName_U(const WCHAR *dos_path,
++    UNICODE_STRING *ntpath, WCHAR **file_part, RTL_RELATIVE_NAME *relative)
++{
++    return RtlDosPathNameToRelativeNtPathName_U_WithStatus(dos_path, ntpath, file_part, relative) == STATUS_SUCCESS;
++}
++
+ /**************************************************************************
+  *        RtlReleaseRelativeName [NTDLL.@]
+  */
+
+-- 
+2.36.1
+
+From 7130d843a12757b75c5588a9e19f9f4a4b9ea7ae Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Tue, 8 Feb 2022 17:27:13 +0100
+Subject: [PATCH] server: Seal shared memory mappings against future writes.
+
+So that even if we leak console handles, we will, at least, stop messing
+with these once and for all. This only prevents write(2) and mmap(2), as
+we've already mmaped the writable pages we don't need it anymore.
+
+This fixes Dead Cells hanging on launch, as it writes its DXVK logs to
+one of the thread input shared memory handles, causing GetFocus to loop
+forever as the sequence number got overwritten.
+
+CW-Bug-Id: #20128
+---
+ configure.ac     |  1 +
+ server/mapping.c | 24 ++++++++++++++++++++++++
+ 2 files changed, 25 insertions(+)
+
+diff --git a/configure.ac b/configure.ac
+index bc4f47d9889..22229880023 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -1994,6 +1994,7 @@ AC_CHECK_FUNCS(\
+ 	getrandom \
+ 	kqueue \
+ 	mach_continuous_time \
++	memfd_create \
+ 	pipe2 \
+ 	port_create \
+ 	posix_fadvise \
+diff --git a/server/mapping.c b/server/mapping.c
+index ecbfbee7ea1..4514a877177 100644
+--- a/server/mapping.c
++++ b/server/mapping.c
+@@ -268,6 +268,7 @@ int grow_file( int unix_fd, file_pos_t new_size )
+     return 0;
+ }
+ 
++#ifndef HAVE_MEMFD_CREATE
+ /* simplified version of mkstemps() */
+ static int make_temp_file( char name[16] )
+ {
+@@ -301,10 +302,23 @@ static int check_current_dir_for_exec(void)
+     unlink( tmpfn );
+     return (ret != MAP_FAILED);
+ }
++#endif
+ 
+ /* create a temp file for anonymous mappings */
+ static int create_temp_file( file_pos_t size )
+ {
++#ifdef HAVE_MEMFD_CREATE
++    int fd = memfd_create( "wine-mapping", MFD_ALLOW_SEALING );
++    if (fd != -1)
++    {
++        if (!grow_file( fd, size ))
++        {
++            close( fd );
++            fd = -1;
++        }
++    }
++    else file_set_error();
++#else
+     static int temp_dir_fd = -1;
+     char tmpfn[16];
+     int fd;
+@@ -337,6 +351,7 @@ static int create_temp_file( file_pos_t size )
+     else file_set_error();
+ 
+     if (temp_dir_fd != server_dir_fd) fchdir( server_dir_fd );
++#endif
+     return fd;
+ }
+ 
+@@ -1103,6 +1118,10 @@ int get_page_size(void)
+     return page_mask + 1;
+ }
+ 
++#ifndef F_SEAL_FUTURE_WRITE
++#define F_SEAL_FUTURE_WRITE 0x0010  /* prevent future writes while mapped */
++#endif
++
+ struct object *create_user_data_mapping( struct object *root, const struct unicode_str *name,
+                                          unsigned int attr, const struct security_descriptor *sd )
+ {
+@@ -1112,6 +1131,7 @@ struct object *create_user_data_mapping( struct object *root, const struct unico
+     if (!(mapping = create_mapping( root, name, attr, sizeof(KSHARED_USER_DATA),
+                                     SEC_COMMIT, 0, FILE_READ_DATA | FILE_WRITE_DATA, sd ))) return NULL;
+     ptr = mmap( NULL, mapping->size, PROT_WRITE, MAP_SHARED, get_unix_fd( mapping->fd ), 0 );
++
+     if (ptr != MAP_FAILED)
+     {
+         user_shared_data = ptr;
+@@ -1123,11 +1143,15 @@ struct object *create_user_data_mapping( struct object *root, const struct unico
+ struct object *create_shared_mapping( struct object *root, const struct unicode_str *name,
+                                       mem_size_t size, const struct security_descriptor *sd, void **ptr )
+ {
++    static int seals = F_SEAL_FUTURE_WRITE | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_SEAL;
+     struct mapping *mapping;
+ 
+     if (!(mapping = create_mapping( root, name, OBJ_OPENIF, size, SEC_COMMIT, 0,
+                                     FILE_READ_DATA | FILE_WRITE_DATA, sd ))) return NULL;
+     *ptr = mmap( NULL, mapping->size, PROT_WRITE, MAP_SHARED, get_unix_fd( mapping->fd ), 0 );
++
++    fcntl( get_unix_fd( mapping->fd ), F_ADD_SEALS, seals );
++
+     if (*ptr == MAP_FAILED)
+     {
+         release_object( &mapping->obj );
 
