@@ -1862,3 +1862,291 @@ index ecbfbee7ea1..4514a877177 100644
      {
          release_object( &mapping->obj );
 
+From 0efe17babd733761b64226f069c53bbfc5bdb179 Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Wed, 15 Jun 2022 17:21:55 -0500
+Subject: [PATCH] ntdll: Do not open directory file when setting the same
+ directory path.
+
+Signed-off-by: Paul Gofman <pgofman@codeweavers.com>
+---
+ dlls/ntdll/path.c | 22 +++++++++++++++++-----
+ 1 file changed, 17 insertions(+), 5 deletions(-)
+
+diff --git a/dlls/ntdll/path.c b/dlls/ntdll/path.c
+index cccd000a6c6..889d020bd8e 100644
+--- a/dlls/ntdll/path.c
++++ b/dlls/ntdll/path.c
+@@ -905,13 +905,13 @@ ULONG WINAPI RtlGetCurrentDirectory_U(ULONG buflen, LPWSTR buf)
+ NTSTATUS WINAPI RtlSetCurrentDirectory_U(const UNICODE_STRING* dir)
+ {
+     FILE_FS_DEVICE_INFORMATION device_info;
++    ULONG size, compare_size;
+     OBJECT_ATTRIBUTES attr;
+     UNICODE_STRING newdir;
+     IO_STATUS_BLOCK io;
+     CURDIR *curdir;
+     HANDLE handle;
+     NTSTATUS nts;
+-    ULONG size;
+     PWSTR ptr;
+ 
+     newdir.Buffer = NULL;
+@@ -929,6 +929,22 @@ NTSTATUS WINAPI RtlSetCurrentDirectory_U(const UNICODE_STRING* dir)
+         goto out;
+     }
+ 
++    size = newdir.Length / sizeof(WCHAR);
++    ptr = newdir.Buffer;
++    ptr += 4;  /* skip \??\ prefix */
++    size -= 4;
++
++    if (size && ptr[size - 1] == '\\') compare_size = size - 1;
++    else                               compare_size = size;
++
++    if (curdir->DosPath.Length == (compare_size + 1) * sizeof(WCHAR)
++        && !wcsnicmp( curdir->DosPath.Buffer, ptr, compare_size ))
++    {
++        TRACE( "dir %s is the same as current.\n", debugstr_us(dir) );
++        nts = STATUS_SUCCESS;
++        goto out;
++    }
++
+     attr.Length = sizeof(attr);
+     attr.RootDirectory = 0;
+     attr.Attributes = OBJ_CASE_INSENSITIVE;
+@@ -953,10 +969,6 @@ NTSTATUS WINAPI RtlSetCurrentDirectory_U(const UNICODE_STRING* dir)
+     curdir->Handle = handle;
+ 
+     /* append trailing \ if missing */
+-    size = newdir.Length / sizeof(WCHAR);
+-    ptr = newdir.Buffer;
+-    ptr += 4;  /* skip \??\ prefix */
+-    size -= 4;
+     if (size && ptr[size - 1] != '\\') ptr[size++] = '\\';
+ 
+     /* convert \??\UNC\ path to \\ prefix */
+-- 
+GitLab
+
+From 911c647fbcdc4bb1222ac35707b1dd1ffc9d2809 Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Thu, 16 Jun 2022 13:41:44 -0500
+Subject: [PATCH 1/3] ntdll: Factor out validate_context_xstate() function.
+
+Signed-off-by: Paul Gofman <pgofman@codeweavers.com>
+---
+ dlls/ntdll/unix/signal_i386.c   |  4 +---
+ dlls/ntdll/unix/signal_x86_64.c |  4 +---
+ dlls/ntdll/unix/thread.c        | 17 +++++++++++++++++
+ dlls/ntdll/unix/unix_private.h  |  1 +
+ 4 files changed, 20 insertions(+), 6 deletions(-)
+
+diff --git a/dlls/ntdll/unix/signal_i386.c b/dlls/ntdll/unix/signal_i386.c
+index 7be0c39c424..a515b21cc2e 100644
+--- a/dlls/ntdll/unix/signal_i386.c
++++ b/dlls/ntdll/unix/signal_i386.c
+@@ -1098,9 +1098,7 @@ NTSTATUS WINAPI NtGetContextThread( HANDLE handle, CONTEXT *context )
+             XSTATE *xstate = (XSTATE *)((char *)context_ex + context_ex->XState.Offset);
+             unsigned int mask;
+ 
+-            if (context_ex->XState.Length < offsetof(XSTATE, YmmContext)
+-                || context_ex->XState.Length > sizeof(XSTATE))
+-                return STATUS_INVALID_PARAMETER;
++            if (!validate_context_xstate( context )) return STATUS_INVALID_PARAMETER;
+ 
+             mask = (xstate_compaction_enabled ? xstate->CompactionMask : xstate->Mask) & XSTATE_MASK_GSSE;
+             xstate->Mask = frame->xstate.Mask & mask;
+diff --git a/dlls/ntdll/unix/signal_x86_64.c b/dlls/ntdll/unix/signal_x86_64.c
+index 6c87e347eac..3aac1bc3e75 100644
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -1918,9 +1918,7 @@ NTSTATUS WINAPI NtGetContextThread( HANDLE handle, CONTEXT *context )
+         XSTATE *xstate = (XSTATE *)((char *)context_ex + context_ex->XState.Offset);
+         unsigned int mask;
+ 
+-        if (context_ex->XState.Length < offsetof(XSTATE, YmmContext)
+-            || context_ex->XState.Length > sizeof(XSTATE))
+-            return STATUS_INVALID_PARAMETER;
++        if (!validate_context_xstate( context )) return STATUS_INVALID_PARAMETER;
+ 
+         mask = (xstate_compaction_enabled ? xstate->CompactionMask : xstate->Mask) & XSTATE_MASK_GSSE;
+         xstate->Mask = frame->xstate.Mask & mask;
+diff --git a/dlls/ntdll/unix/thread.c b/dlls/ntdll/unix/thread.c
+index ad47a5fce74..6289b8eadca 100644
+--- a/dlls/ntdll/unix/thread.c
++++ b/dlls/ntdll/unix/thread.c
+@@ -152,6 +152,23 @@ void fpu_to_fpux( XMM_SAVE_AREA32 *fpux, const I386_FLOATING_SAVE_AREA *fpu )
+ }
+ 
+ 
++/***********************************************************************
++ *           validate_context_xstate
++ */
++BOOL validate_context_xstate( CONTEXT *context )
++{
++    CONTEXT_EX *context_ex;
++
++    context_ex = (CONTEXT_EX *)(context + 1);
++
++    if (context_ex->XState.Length < offsetof(XSTATE, YmmContext)
++        || context_ex->XState.Length > sizeof(XSTATE))
++        return FALSE;
++
++    return TRUE;
++}
++
++
+ /***********************************************************************
+  *           get_server_context_flags
+  */
+diff --git a/dlls/ntdll/unix/unix_private.h b/dlls/ntdll/unix/unix_private.h
+index 795fc148479..5e101bbe363 100644
+--- a/dlls/ntdll/unix/unix_private.h
++++ b/dlls/ntdll/unix/unix_private.h
+@@ -185,6 +185,7 @@ extern void DECLSPEC_NORETURN abort_process( int status ) DECLSPEC_HIDDEN;
+ extern void DECLSPEC_NORETURN exit_process( int status ) DECLSPEC_HIDDEN;
+ extern void wait_suspend( CONTEXT *context ) DECLSPEC_HIDDEN;
+ extern NTSTATUS send_debug_event( EXCEPTION_RECORD *rec, CONTEXT *context, BOOL first_chance ) DECLSPEC_HIDDEN;
++extern BOOL validate_context_xstate( CONTEXT *context ) DECLSPEC_HIDDEN;
+ extern NTSTATUS set_thread_context( HANDLE handle, const void *context, BOOL *self, USHORT machine ) DECLSPEC_HIDDEN;
+ extern NTSTATUS get_thread_context( HANDLE handle, void *context, BOOL *self, USHORT machine ) DECLSPEC_HIDDEN;
+ extern NTSTATUS alloc_object_attributes( const OBJECT_ATTRIBUTES *attr, struct object_attributes **ret,
+-- 
+GitLab
+
+
+From 9f36c3c40a0e838633cc2521502f9edd6e4bccd0 Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Thu, 16 Jun 2022 13:50:10 -0500
+Subject: [PATCH 2/3] ntdll: Validate context xstate at once in
+ NtGetContextThread().
+
+Signed-off-by: Paul Gofman <pgofman@codeweavers.com>
+---
+ dlls/ntdll/unix/signal_i386.c   | 4 ++--
+ dlls/ntdll/unix/signal_x86_64.c | 4 ++--
+ dlls/ntdll/unix/thread.c        | 2 ++
+ 3 files changed, 6 insertions(+), 4 deletions(-)
+
+diff --git a/dlls/ntdll/unix/signal_i386.c b/dlls/ntdll/unix/signal_i386.c
+index a515b21cc2e..95e7a69a6e1 100644
+--- a/dlls/ntdll/unix/signal_i386.c
++++ b/dlls/ntdll/unix/signal_i386.c
+@@ -1003,6 +1003,8 @@ NTSTATUS WINAPI NtGetContextThread( HANDLE handle, CONTEXT *context )
+     BOOL self = (handle == GetCurrentThread());
+     NTSTATUS ret;
+ 
++    if (!validate_context_xstate( context )) return STATUS_INVALID_PARAMETER;
++
+     /* debug registers require a server call */
+     if (needed_flags & CONTEXT_DEBUG_REGISTERS) self = FALSE;
+ 
+@@ -1098,8 +1100,6 @@ NTSTATUS WINAPI NtGetContextThread( HANDLE handle, CONTEXT *context )
+             XSTATE *xstate = (XSTATE *)((char *)context_ex + context_ex->XState.Offset);
+             unsigned int mask;
+ 
+-            if (!validate_context_xstate( context )) return STATUS_INVALID_PARAMETER;
+-
+             mask = (xstate_compaction_enabled ? xstate->CompactionMask : xstate->Mask) & XSTATE_MASK_GSSE;
+             xstate->Mask = frame->xstate.Mask & mask;
+             xstate->CompactionMask = xstate_compaction_enabled ? (0x8000000000000000 | mask) : 0;
+diff --git a/dlls/ntdll/unix/signal_x86_64.c b/dlls/ntdll/unix/signal_x86_64.c
+index 3aac1bc3e75..11e652e1dca 100644
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -1832,6 +1832,8 @@ NTSTATUS WINAPI NtGetContextThread( HANDLE handle, CONTEXT *context )
+     DWORD needed_flags = context->ContextFlags & ~CONTEXT_AMD64;
+     BOOL self = (handle == GetCurrentThread());
+ 
++    if (!validate_context_xstate( context )) return STATUS_INVALID_PARAMETER;
++
+     /* debug registers require a server call */
+     if (needed_flags & CONTEXT_DEBUG_REGISTERS) self = FALSE;
+ 
+@@ -1918,8 +1920,6 @@ NTSTATUS WINAPI NtGetContextThread( HANDLE handle, CONTEXT *context )
+         XSTATE *xstate = (XSTATE *)((char *)context_ex + context_ex->XState.Offset);
+         unsigned int mask;
+ 
+-        if (!validate_context_xstate( context )) return STATUS_INVALID_PARAMETER;
+-
+         mask = (xstate_compaction_enabled ? xstate->CompactionMask : xstate->Mask) & XSTATE_MASK_GSSE;
+         xstate->Mask = frame->xstate.Mask & mask;
+         xstate->CompactionMask = xstate_compaction_enabled ? (0x8000000000000000 | mask) : 0;
+diff --git a/dlls/ntdll/unix/thread.c b/dlls/ntdll/unix/thread.c
+index 6289b8eadca..b393315e6fe 100644
+--- a/dlls/ntdll/unix/thread.c
++++ b/dlls/ntdll/unix/thread.c
+@@ -159,6 +159,8 @@ BOOL validate_context_xstate( CONTEXT *context )
+ {
+     CONTEXT_EX *context_ex;
+ 
++    if (!((context->ContextFlags & 0x40) && (cpu_info.ProcessorFeatureBits & CPU_FEATURE_AVX))) return TRUE;
++
+     context_ex = (CONTEXT_EX *)(context + 1);
+ 
+     if (context_ex->XState.Length < offsetof(XSTATE, YmmContext)
+-- 
+GitLab
+
+
+From 69b11d38a44e9eed4894497d5bbb1ad9b6304ce4 Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Thu, 16 Jun 2022 13:25:39 -0500
+Subject: [PATCH 3/3] ntdll: Validate xstate alignment in
+ validate_context_xstate().
+
+Signed-off-by: Paul Gofman <pgofman@codeweavers.com>
+---
+ dlls/ntdll/tests/exception.c | 14 ++++++++++++++
+ dlls/ntdll/unix/thread.c     |  2 ++
+ 2 files changed, 16 insertions(+)
+
+diff --git a/dlls/ntdll/tests/exception.c b/dlls/ntdll/tests/exception.c
+index 820e435bc1b..06a38756f80 100644
+--- a/dlls/ntdll/tests/exception.c
++++ b/dlls/ntdll/tests/exception.c
+@@ -9445,6 +9445,7 @@ static void test_extended_context(void)
+     CONTEXT_EX *context_ex;
+     CONTEXT *context;
+     unsigned data[8];
++    NTSTATUS status;
+     HANDLE thread;
+     ULONG64 mask;
+     XSTATE *xs;
+@@ -10227,6 +10228,19 @@ static void test_extended_context(void)
+     thread = CreateThread(NULL, 0, test_extended_context_thread, 0, CREATE_SUSPENDED, NULL);
+     ok(!!thread, "Failed to create thread.\n");
+ 
++    /* Unaligned xstate. */
++    length = sizeof(context_buffer);
++    memset(context_buffer, 0xcc, sizeof(context_buffer));
++    bret = pInitializeContext(context_buffer, CONTEXT_FULL | CONTEXT_XSTATE | CONTEXT_FLOATING_POINT,
++            &context, &length);
++    ok(bret, "Got unexpected bret %#x.\n", bret);
++    context_ex = (CONTEXT_EX *)(context + 1);
++    context_ex->XState.Offset += 0x10;
++    status = pNtGetContextThread(thread, context);
++    ok(status == STATUS_INVALID_PARAMETER, "Unexpected status %#lx.\n", status);
++    status = pNtGetContextThread(GetCurrentThread(), context);
++    ok(status == STATUS_INVALID_PARAMETER, "Unexpected status %#lx.\n", status);
++
+     bret = pInitializeContext(context_buffer, CONTEXT_FULL | CONTEXT_XSTATE | CONTEXT_FLOATING_POINT,
+             &context, &length);
+     ok(bret, "Got unexpected bret %#x.\n", bret);
+diff --git a/dlls/ntdll/unix/thread.c b/dlls/ntdll/unix/thread.c
+index b393315e6fe..00ee607a671 100644
+--- a/dlls/ntdll/unix/thread.c
++++ b/dlls/ntdll/unix/thread.c
+@@ -167,6 +167,8 @@ BOOL validate_context_xstate( CONTEXT *context )
+         || context_ex->XState.Length > sizeof(XSTATE))
+         return FALSE;
+ 
++    if (((ULONG_PTR)context_ex + context_ex->XState.Offset) & 63) return FALSE;
++
+     return TRUE;
+ }
+ 
+-- 
+GitLab
+

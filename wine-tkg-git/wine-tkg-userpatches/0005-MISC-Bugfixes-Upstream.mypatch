@@ -461,3 +461,216 @@ index 11111111111..11111111111 100644
      {
          if ((err_callback_result = err_callback( display, error_evt, err_callback_arg )))
          {
+From c57eda2432fc81b29a631c0296831220792c8380 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Sun, 22 May 2022 18:53:54 +0200
+Subject: [PATCH] server: Avoid using pointer value after realloc.
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Signed-off-by: Rémi Bernon <rbernon@codeweavers.com>
+Signed-off-by: Alexandre Julliard <julliard@winehq.org>
+---
+ server/queue.c | 17 ++++++++---------
+ 1 file changed, 8 insertions(+), 9 deletions(-)
+
+diff --git a/server/queue.c b/server/queue.c
+index d79add56fba..934cf358059 100644
+--- a/server/queue.c
++++ b/server/queue.c
+@@ -3348,15 +3348,14 @@ DECL_HANDLER(get_cursor_history)
+ DECL_HANDLER(get_rawinput_buffer)
+ {
+     struct thread_input *input = current->queue->input;
+-    data_size_t size = 0, next_size = 0;
++    data_size_t size = 0, next_size = 0, pos = 0;
+     struct list *ptr;
+-    char *buf, *cur, *tmp;
++    char *buf, *tmp;
+     int count = 0, buf_size = 16 * sizeof(struct hardware_msg_data);
+ 
+     if (!req->buffer_size) buf = NULL;
+     else if (!(buf = mem_alloc( buf_size ))) return;
+ 
+-    cur = buf;
+     ptr = list_head( &input->msg_list );
+     while (ptr)
+     {
+@@ -3369,31 +3368,31 @@ DECL_HANDLER(get_rawinput_buffer)
+ 
+         next_size = req->rawinput_size + extra_size;
+         if (size + next_size > req->buffer_size) break;
+-        if (cur + data->size > buf + get_reply_max_size()) break;
+-        if (cur + data->size > buf + buf_size)
++        if (pos + data->size > get_reply_max_size()) break;
++        if (pos + data->size > buf_size)
+         {
+             buf_size += buf_size / 2 + extra_size;
+             if (!(tmp = realloc( buf, buf_size )))
+             {
++                free( buf );
+                 set_error( STATUS_NO_MEMORY );
+                 return;
+             }
+-            cur = tmp + (cur - buf);
+             buf = tmp;
+         }
+ 
+-        memcpy( cur, data, data->size );
++        memcpy( buf + pos, data, data->size );
+         list_remove( &msg->entry );
+         free_message( msg );
+ 
+         size += next_size;
+-        cur += sizeof(*data);
++        pos += sizeof(*data);
+         count++;
+     }
+ 
+     reply->next_size = next_size;
+     reply->count = count;
+-    set_reply_data_ptr( buf, cur - buf );
++    set_reply_data_ptr( buf, pos );
+ }
+ 
+ DECL_HANDLER(update_rawinput_devices)
+-- 
+GitLab
+
+From 00012d3381c4fdd81d2e9c5fc7de5c74e7740cf9 Mon Sep 17 00:00:00 2001
+From: Torge Matthies <tmatthies@codeweavers.com>
+Date: Tue, 7 Jun 2022 10:30:07 +0200
+Subject: [PATCH] msvcp90: Fix segfault in bad_alloc exception default
+ constructor.
+
+Signed-off-by: Torge Matthies <tmatthies@codeweavers.com>
+Signed-off-by: Piotr Caban <piotr@codeweavers.com>
+Signed-off-by: Alexandre Julliard <julliard@winehq.org>
+---
+ dlls/msvcp90/exception.c | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/dlls/msvcp90/exception.c b/dlls/msvcp90/exception.c
+index 7f1dfd2188a..effe57063a1 100644
+--- a/dlls/msvcp90/exception.c
++++ b/dlls/msvcp90/exception.c
+@@ -36,7 +36,7 @@ int* __cdecl __processing_throw(void);
+ #if _MSVCP_VER >= 70 || defined(_MSVCIRT)
+ typedef const char **exception_name;
+ #define EXCEPTION_STR(name) (*name)
+-#define EXCEPTION_NAME(str) ((exception_name)&str)
++#define EXCEPTION_NAME(str) (&str)
+ #else
+ typedef const char *exception_name;
+ #define EXCEPTION_STR(name) (name)
+@@ -96,7 +96,7 @@ exception* __thiscall exception_copy_ctor(exception *this, const exception *rhs)
+         this->name = rhs->name;
+         this->do_free = FALSE;
+     } else
+-        MSVCP_exception_ctor(this, EXCEPTION_NAME(rhs->name));
++        MSVCP_exception_ctor(this, (exception_name)EXCEPTION_NAME(rhs->name));
+     TRACE("name = %s\n", this->name);
+     return this;
+ }
+@@ -214,7 +214,7 @@ bad_alloc* __thiscall MSVCP_bad_alloc_ctor(bad_alloc *this, exception_name name)
+ DEFINE_THISCALL_WRAPPER(MSVCP_bad_alloc_default_ctor, 4)
+ bad_alloc* __thiscall MSVCP_bad_alloc_default_ctor(bad_alloc *this)
+ {
+-    static const char name[] = "bad allocation";
++    static const char *name = "bad allocation";
+     return MSVCP_bad_alloc_ctor(this, EXCEPTION_NAME(name));
+ }
+ 
+-- 
+GitLab
+
+From 03fde5c002c7cb4a7a8aa26a5d64bf8516352542 Mon Sep 17 00:00:00 2001
+From: Nikolay Sivov <nsivov@codeweavers.com>
+Date: Fri, 3 Jun 2022 13:36:37 +0300
+Subject: [PATCH] kernelbase: Implement VirtualAlloc2FromApp().
+
+Signed-off-by: Nikolay Sivov <nsivov@codeweavers.com>
+---
+ dlls/kernelbase/kernelbase.spec |  1 +
+ dlls/kernelbase/memory.c        | 32 +++++++++++++++--
+ include/winbase.h               |  1 +
+ 4 files changed, 83 insertions(+), 14 deletions(-)
+
+diff --git a/dlls/kernelbase/kernelbase.spec b/dlls/kernelbase/kernelbase.spec
+index 7109628a678..d4b5b5d3eb8 100644
+--- a/dlls/kernelbase/kernelbase.spec
++++ b/dlls/kernelbase/kernelbase.spec
+@@ -1707,6 +1707,7 @@
+ # @ stub VerifyPackageRelativeApplicationId
+ # @ stub VerifyScripts
+ @ stdcall VirtualAlloc2(long ptr long long long ptr long)
++@ stdcall VirtualAlloc2FromApp(long ptr long long long ptr long)
+ @ stdcall VirtualAlloc(ptr long long long)
+ @ stdcall VirtualAllocEx(long ptr long long long)
+ @ stdcall VirtualAllocExNuma(long ptr long long long long)
+diff --git a/dlls/kernelbase/memory.c b/dlls/kernelbase/memory.c
+index cac456d01be..736d3642995 100644
+--- a/dlls/kernelbase/memory.c
++++ b/dlls/kernelbase/memory.c
+@@ -358,6 +358,35 @@ LPVOID WINAPI DECLSPEC_HOTPATCH VirtualAlloc2( HANDLE process, void *addr, SIZE_
+     return ret;
+ }
+ 
++static BOOL is_exec_prot( DWORD protect )
++{
++    return protect == PAGE_EXECUTE || protect == PAGE_EXECUTE_READ || protect == PAGE_EXECUTE_READWRITE
++            || protect == PAGE_EXECUTE_WRITECOPY;
++}
++
++/***********************************************************************
++ *             VirtualAlloc2FromApp   (kernelbase.@)
++ */
++LPVOID WINAPI DECLSPEC_HOTPATCH VirtualAlloc2FromApp( HANDLE process, void *addr, SIZE_T size,
++        DWORD type, DWORD protect, MEM_EXTENDED_PARAMETER *parameters, ULONG count )
++{
++    LPVOID ret = addr;
++
++    TRACE_(virtual)( "addr %p, size %p, type %#lx, protect %#lx, params %p, count %lu.\n", addr, (void *)size, type, protect,
++            parameters, count );
++
++    if (is_exec_prot( protect ))
++    {
++        SetLastError( ERROR_INVALID_PARAMETER );
++        return NULL;
++    }
++
++    if (!process) process = GetCurrentProcess();
++    if (!set_ntstatus( NtAllocateVirtualMemoryEx( process, &ret, &size, type, protect, parameters, count )))
++        return NULL;
++    return ret;
++}
++
+ 
+ /***********************************************************************
+  *             VirtualAllocFromApp   (kernelbase.@)
+@@ -369,8 +398,7 @@ LPVOID WINAPI DECLSPEC_HOTPATCH VirtualAllocFromApp( void *addr, SIZE_T size,
+ 
+     TRACE_(virtual)( "addr %p, size %p, type %#lx, protect %#lx.\n", addr, (void *)size, type, protect );
+ 
+-    if (protect == PAGE_EXECUTE || protect == PAGE_EXECUTE_READ || protect == PAGE_EXECUTE_READWRITE
+-            || protect == PAGE_EXECUTE_WRITECOPY)
++    if (is_exec_prot( protect ))
+     {
+         SetLastError( ERROR_INVALID_PARAMETER );
+         return NULL;
+diff --git a/include/winbase.h b/include/winbase.h
+index a400816c4d3..bf191153ddc 100644
+--- a/include/winbase.h
++++ b/include/winbase.h
+@@ -2756,6 +2756,7 @@ WINBASEAPI BOOL        WINAPI VerifyVersionInfoW(LPOSVERSIONINFOEXW,DWORD,DWORDL
+ #define                       VerifyVersionInfo WINELIB_NAME_AW(VerifyVersionInfo)
+ WINBASEAPI LPVOID      WINAPI VirtualAlloc(LPVOID,SIZE_T,DWORD,DWORD);
+ WINBASEAPI LPVOID      WINAPI VirtualAlloc2(HANDLE,LPVOID,SIZE_T,DWORD,DWORD,MEM_EXTENDED_PARAMETER*,ULONG);
++WINBASEAPI LPVOID      WINAPI VirtualAlloc2FromApp(HANDLE,LPVOID,SIZE_T,DWORD,DWORD,MEM_EXTENDED_PARAMETER*,ULONG);
+ WINBASEAPI LPVOID      WINAPI VirtualAllocEx(HANDLE,LPVOID,SIZE_T,DWORD,DWORD);
+ WINBASEAPI LPVOID      WINAPI VirtualAllocExNuma(HANDLE,void*,SIZE_T,DWORD,DWORD,DWORD);
+ WINBASEAPI LPVOID      WINAPI VirtualAllocFromApp(LPVOID,SIZE_T,DWORD,DWORD);
+-- 
+GitLab
+

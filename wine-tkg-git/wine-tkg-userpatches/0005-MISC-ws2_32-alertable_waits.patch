@@ -1,0 +1,251 @@
+From 3a13d9f669751c145051f9aa789d4a070dcec420 Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Tue, 24 May 2022 18:17:59 -0500
+Subject: [PATCH] ws2_32: Make wait in select() alertable.
+
+---
+ dlls/ws2_32/socket.c     | 10 +++++++++-
+ dlls/ws2_32/tests/sock.c | 16 ++++++++++++++++
+ 2 files changed, 25 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/ws2_32/socket.c b/dlls/ws2_32/socket.c
+index 88089fa8d74..6507f2e3c5b 100644
+--- a/dlls/ws2_32/socket.c
++++ b/dlls/ws2_32/socket.c
+@@ -551,6 +551,14 @@ static HANDLE get_sync_event(void)
+     return data->sync_event;
+ }
+ 
++static DWORD wait_event_alertable( HANDLE event )
++{
++    DWORD ret;
++
++    while ((ret = WaitForSingleObjectEx( event, INFINITE, TRUE )) == WAIT_IO_COMPLETION)
++        ;
++    return ret;
++}
+ 
+ BOOL WINAPI DllMain( HINSTANCE instance, DWORD reason, void *reserved )
+ {
+@@ -2601,7 +2609,7 @@ int WINAPI select( int count, fd_set *read_ptr, fd_set *write_ptr,
+                                     IOCTL_AFD_POLL, params, params_size, params, params_size );
+     if (status == STATUS_PENDING)
+     {
+-        if (WaitForSingleObject( sync_event, INFINITE ) == WAIT_FAILED)
++        if (wait_event_alertable( sync_event ) == WAIT_FAILED)
+         {
+             free( read_input );
+             free( params );
+diff --git a/dlls/ws2_32/tests/sock.c b/dlls/ws2_32/tests/sock.c
+index bdb683e6796..36672b22aef 100644
+--- a/dlls/ws2_32/tests/sock.c
++++ b/dlls/ws2_32/tests/sock.c
+@@ -3448,6 +3448,11 @@ static void test_listen(void)
+     ok (ret == 0, "closesocket failed unexpectedly: %d\n", ret);
+ }
+ 
++static void WINAPI apc_func(ULONG_PTR apc_called)
++{
++    *(BOOL *)apc_called = TRUE;
++}
++
+ #define FD_ZERO_ALL() { FD_ZERO(&readfds); FD_ZERO(&writefds); FD_ZERO(&exceptfds); }
+ #define FD_SET_ALL(s) { FD_SET(s, &readfds); FD_SET(s, &writefds); FD_SET(s, &exceptfds); }
+ static void test_select(void)
+@@ -3465,6 +3470,7 @@ static void test_select(void)
+     DWORD ticks, id, old_protect;
+     unsigned int maxfd, i;
+     char *page_pair;
++    BOOL apc_called;
+ 
+     fdRead = socket(AF_INET, SOCK_STREAM, 0);
+     ok( (fdRead != INVALID_SOCKET), "socket failed unexpectedly: %d\n", WSAGetLastError() );
+@@ -3566,14 +3572,24 @@ static void test_select(void)
+ 
+     FD_ZERO(&readfds);
+     FD_SET(fdRead, &readfds);
++    apc_called = FALSE;
++    ret = QueueUserAPC(apc_func, GetCurrentThread(), (ULONG_PTR)&apc_called);
++    ok(ret, "QueueUserAPC returned %d\n", ret);
+     ret = select(fdRead+1, &readfds, NULL, NULL, &select_timeout);
+     ok(!ret, "select returned %d\n", ret);
++    ok(apc_called, "APC was not called\n");
+ 
+     FD_ZERO(&writefds);
+     FD_SET(fdWrite, &writefds);
++    apc_called = FALSE;
++    ret = QueueUserAPC(apc_func, GetCurrentThread(), (ULONG_PTR)&apc_called);
++    ok(ret, "QueueUserAPC returned %d\n", ret);
+     ret = select(fdWrite+1, NULL, &writefds, NULL, &select_timeout);
+     ok(ret == 1, "select returned %d\n", ret);
+     ok(FD_ISSET(fdWrite, &writefds), "fdWrite socket is not in the set\n");
++    ok(!apc_called, "APC was called\n");
++    SleepEx(0, TRUE);
++    ok(apc_called, "APC was not called\n");
+ 
+     /* select the same socket twice */
+     writefds.fd_count = 2;
+-- 
+GitLab
+
+From 7d0fe73ee3c8555bf09ca14617f0fc21a9820e65 Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Tue, 24 May 2022 20:32:28 -0500
+Subject: [PATCH] ws2_32: Use allocated IO status block in select().
+
+---
+ dlls/ws2_32/socket.c | 61 +++++++++++++++++++++++++++++++++++++++++---
+ 1 file changed, 58 insertions(+), 3 deletions(-)
+
+diff --git a/dlls/ws2_32/socket.c b/dlls/ws2_32/socket.c
+index 6507f2e3c5b..009b4882564 100644
+--- a/dlls/ws2_32/socket.c
++++ b/dlls/ws2_32/socket.c
+@@ -157,6 +157,57 @@ DECLARE_CRITICAL_SECTION(cs_socket_list);
+ static SOCKET *socket_list;
+ static unsigned int socket_list_size;
+ 
++struct io_buf
++{
++    struct io_buf *next;
++    IO_STATUS_BLOCK io;
++};
++static struct io_buf *io_freelist;
++
++static IO_STATUS_BLOCK *alloc_io(void)
++{
++    struct io_buf *io, *ret, *next;
++
++    if (!(io = InterlockedExchangePointer( (void **)&io_freelist, NULL )))
++    {
++        if (!(io = malloc(sizeof(*io))))
++        {
++            ERR( "No memory.\n" );
++            return NULL;
++        }
++        return &io->io;
++    }
++
++    ret = io;
++    next = io->next;
++    if (next && InterlockedCompareExchangePointer( (void **)&io_freelist, next, NULL ))
++    {
++        while ((io = next))
++        {
++            next = io->next;
++            free( io );
++        }
++    }
++    return &ret->io;
++}
++
++static void free_io(IO_STATUS_BLOCK *io_data)
++{
++    struct io_buf *io, *next;
++
++    if (!io_data) return;
++
++    io = CONTAINING_RECORD(io_data, struct io_buf, io);
++
++    while (1)
++    {
++        next = io_freelist;
++        io->next = next;
++        if (InterlockedCompareExchangePointer( (void **)&io_freelist, io, next ) == next)
++            return;
++    }
++}
++
+ const char *debugstr_sockaddr( const struct sockaddr *a )
+ {
+     if (!a) return "(nil)";
+@@ -2529,7 +2580,7 @@ int WINAPI select( int count, fd_set *read_ptr, fd_set *write_ptr,
+     unsigned int poll_count = 0;
+     ULONG params_size, i, j;
+     SOCKET poll_socket = 0;
+-    IO_STATUS_BLOCK io;
++    IO_STATUS_BLOCK *io;
+     HANDLE sync_event;
+     int ret_count = 0;
+     NTSTATUS status;
+@@ -2605,7 +2656,8 @@ int WINAPI select( int count, fd_set *read_ptr, fd_set *write_ptr,
+ 
+     assert( params->count == poll_count );
+ 
+-    status = NtDeviceIoControlFile( (HANDLE)poll_socket, sync_event, NULL, NULL, &io,
++    io = alloc_io();
++    status = NtDeviceIoControlFile( (HANDLE)poll_socket, sync_event, NULL, NULL, io,
+                                     IOCTL_AFD_POLL, params, params_size, params, params_size );
+     if (status == STATUS_PENDING)
+     {
+@@ -2613,10 +2665,13 @@ int WINAPI select( int count, fd_set *read_ptr, fd_set *write_ptr,
+         {
+             free( read_input );
+             free( params );
++            free_io( io );
+             return -1;
+         }
+-        status = io.u.Status;
++        status = io->u.Status;
+     }
++    free_io( io );
++
+     if (status == STATUS_TIMEOUT) status = STATUS_SUCCESS;
+     if (!status)
+     {
+-- 
+GitLab
+
+From a587fe2ff31f8ce76670b11330c2e49692c8254d Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Thu, 26 May 2022 16:35:02 -0500
+Subject: [PATCH] ws2_32: Make wait in WS2_recv_base() alertable.
+
+CW-Bug-Id: #20717
+---
+ dlls/ws2_32/socket.c | 11 +++++++++--
+ 1 file changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/ws2_32/socket.c b/dlls/ws2_32/socket.c
+index 3563741aa0c..7c0ec872d9a 100644
+--- a/dlls/ws2_32/socket.c
++++ b/dlls/ws2_32/socket.c
+@@ -965,9 +965,9 @@ static int WS2_recv_base( SOCKET s, WSABUF *buffers, DWORD buffer_count, DWORD *
+                           struct sockaddr *addr, int *addr_len, OVERLAPPED *overlapped,
+                           LPWSAOVERLAPPED_COMPLETION_ROUTINE completion, WSABUF *control )
+ {
+-    IO_STATUS_BLOCK iosb, *piosb = &iosb;
+     struct afd_recvmsg_params params;
+     PIO_APC_ROUTINE apc = NULL;
++    IO_STATUS_BLOCK *piosb;
+     HANDLE event = NULL;
+     void *cvalue = NULL;
+     NTSTATUS status;
+@@ -984,6 +984,7 @@ static int WS2_recv_base( SOCKET s, WSABUF *buffers, DWORD buffer_count, DWORD *
+     }
+     else
+     {
++        piosb = alloc_io();
+         if (!(event = get_sync_event())) return -1;
+     }
+     piosb->u.Status = STATUS_PENDING;
+@@ -1007,11 +1008,17 @@ static int WS2_recv_base( SOCKET s, WSABUF *buffers, DWORD buffer_count, DWORD *
+                                     IOCTL_AFD_WINE_RECVMSG, &params, sizeof(params), NULL, 0 );
+     if (status == STATUS_PENDING && !overlapped)
+     {
+-        if (WaitForSingleObject( event, INFINITE ) == WAIT_FAILED)
++        if (wait_event_alertable( event ) == WAIT_FAILED)
++        {
++            if (piosb != (IO_STATUS_BLOCK *)overlapped)
++                free_io( piosb );
+             return -1;
++        }
+         status = piosb->u.Status;
+     }
+     if (!status && ret_size) *ret_size = piosb->Information;
++    if (piosb != (IO_STATUS_BLOCK *)overlapped)
++        free_io( piosb );
+     SetLastError( NtStatusToWSAError( status ) );
+     TRACE( "status %#lx.\n", status );
+     return status ? -1 : 0;
+
