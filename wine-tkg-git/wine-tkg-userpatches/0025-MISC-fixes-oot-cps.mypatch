@@ -2150,3 +2150,378 @@ index b393315e6fe..00ee607a671 100644
 -- 
 GitLab
 
+From e4264a5a266a5f9aa55336535ac7efbb985251a7 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Thu, 17 Mar 2022 11:49:07 +0100
+Subject: [PATCH] server: Reuse shared mapping's mmaped pointer and handle mmap
+ failures.
+
+Desktop and its shared mapping can be still alive and may be reused
+after desktop is unlinked via close_desktop_timeout() but before all
+references and handles are cleared.
+
+On the re-use path the mmap(PROT_WRITE) is called on a write-sealed fd
+which will fail returning MAP_FAILED. It would then be propagated up and
+dereferenced causing the server to crash.
+
+This fixes the crash + makes sure that we can recreate the desktop
+successfully if needed.
+
+This also correctly unmap the shared memory pointers whenever a mapping
+is destroyed, fixing memory leaks when many threads are created.
+
+Fixes: 653dab05664e ("server: Seal shared memory mappings against future writes.")
+Fixes: 61521e371ac4 ("HACK: server: Close desktop immediately when last user is removed.")
+CW-Bug-Id: #20266
+CW-Bug-Id: #20297
+---
+ server/mapping.c    | 15 ++++++++++++---
+ server/thread.c     |  4 ++--
+ server/winstation.c |  5 +++--
+ 3 files changed, 17 insertions(+), 7 deletions(-)
+
+diff --git a/server/mapping.c b/server/mapping.c
+index 4514a877177..4c90673a5c5 100644
+--- a/server/mapping.c
++++ b/server/mapping.c
+@@ -29,6 +29,7 @@
+ #include <sys/stat.h>
+ #include <sys/mman.h>
+ #include <unistd.h>
++#include <errno.h>
+ 
+ #include "ntstatus.h"
+ #define WIN32_NO_STATUS
+@@ -165,6 +166,7 @@ struct mapping
+     pe_image_info_t image;           /* image info (for PE image mapping) */
+     struct ranges  *committed;       /* list of committed ranges in this mapping */
+     struct shared_map *shared;       /* temp file for shared PE mapping */
++    void           *shared_ptr;      /* mmaped pointer for shared mappings */
+ };
+ 
+ static void mapping_dump( struct object *obj, int verbose );
+@@ -905,6 +907,7 @@ static struct mapping *create_mapping( struct object *root, const struct unicode
+     mapping->fd          = NULL;
+     mapping->shared      = NULL;
+     mapping->committed   = NULL;
++    mapping->shared_ptr  = MAP_FAILED;
+ 
+     if (!(mapping->flags = get_mapping_flags( handle, flags ))) goto error;
+ 
+@@ -1105,6 +1108,7 @@ static void mapping_destroy( struct object *obj )
+     if (mapping->fd) release_object( mapping->fd );
+     if (mapping->committed) release_object( mapping->committed );
+     if (mapping->shared) release_object( mapping->shared );
++    if (mapping->shared_ptr != MAP_FAILED) munmap( mapping->shared_ptr, mapping->size );
+ }
+ 
+ static enum server_fd_type mapping_get_fd_type( struct fd *fd )
+@@ -1148,16 +1152,21 @@ struct object *create_shared_mapping( struct object *root, const struct unicode_
+ 
+     if (!(mapping = create_mapping( root, name, OBJ_OPENIF, size, SEC_COMMIT, 0,
+                                     FILE_READ_DATA | FILE_WRITE_DATA, sd ))) return NULL;
+-    *ptr = mmap( NULL, mapping->size, PROT_WRITE, MAP_SHARED, get_unix_fd( mapping->fd ), 0 );
+ 
+-    fcntl( get_unix_fd( mapping->fd ), F_ADD_SEALS, seals );
++    if (mapping->shared_ptr == MAP_FAILED)
++        mapping->shared_ptr = mmap( NULL, mapping->size, PROT_WRITE, MAP_SHARED,
++                                    get_unix_fd( mapping->fd ), 0 );
+ 
+-    if (*ptr == MAP_FAILED)
++    if (mapping->shared_ptr == MAP_FAILED)
+     {
++        fprintf( stderr, "wine: Failed to map shared memory: %u %m\n", errno );
+         release_object( &mapping->obj );
+         return NULL;
+     }
+ 
++    fcntl( get_unix_fd( mapping->fd ), F_ADD_SEALS, seals );
++    *ptr = mapping->shared_ptr;
++
+     return &mapping->obj;
+ }
+ 
+diff --git a/server/thread.c b/server/thread.c
+index 5163d540531..4cbc8b20f0c 100644
+--- a/server/thread.c
++++ b/server/thread.c
+@@ -363,7 +363,7 @@ static volatile void *init_queue_mapping( struct thread *thread )
+     thread->queue_shared_mapping = create_shared_mapping( dir, &name, sizeof(struct queue_shared_memory),
+                                                           NULL, (void **)&thread->queue_shared );
+     release_object( dir );
+-    if (thread->queue_shared)
++    if (thread->queue_shared_mapping)
+     {
+         memset( (void *)thread->queue_shared, 0, sizeof(*thread->queue_shared) );
+         thread->queue_shared->input_tid = thread->id;
+@@ -389,7 +389,7 @@ static volatile void *init_input_mapping( struct thread *thread )
+     thread->input_shared_mapping = create_shared_mapping( dir, &name, sizeof(struct input_shared_memory),
+                                                           NULL, (void **)&thread->input_shared );
+     release_object( dir );
+-    if (thread->input_shared)
++    if (thread->input_shared_mapping)
+     {
+         memset( (void *)thread->input_shared, 0, sizeof(*thread->input_shared) );
+         thread->input_shared->tid = thread->id;
+diff --git a/server/winstation.c b/server/winstation.c
+index a9b161312dd..934c9bd0d89 100644
+--- a/server/winstation.c
++++ b/server/winstation.c
+@@ -232,7 +232,7 @@ static volatile void *init_desktop_mapping( struct desktop *desktop, const struc
+     desktop->shared_mapping = create_shared_mapping( dir, name, sizeof(struct desktop_shared_memory),
+                                                      NULL, (void **)&desktop->shared );
+     release_object( dir );
+-    if (desktop->shared) memset( (void *)desktop->shared, 0, sizeof(*desktop->shared) );
++    if (desktop->shared_mapping) memset( (void *)desktop->shared, 0, sizeof(*desktop->shared) );
+     return desktop->shared;
+ }
+ 
+@@ -318,7 +318,8 @@ static void desktop_destroy( struct object *obj )
+     if (desktop->msg_window) destroy_window( desktop->msg_window );
+     if (desktop->global_hooks) release_object( desktop->global_hooks );
+     list_remove( &desktop->entry );
+-    release_object( desktop->shared_mapping );
++    if (desktop->shared_mapping) release_object( desktop->shared_mapping );
++    desktop->shared_mapping = NULL;
+     release_object( desktop->winstation );
+ }
+ 
+From 05db2ac6ddf27ecc52ffd713aca59a264cc9fa72 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Tue, 22 Mar 2022 16:18:08 +0100
+Subject: [PATCH] server: Cleanup message queue on thread exit.
+
+When threads are killed they don't get a chance to close their message
+queue handle which is kept in user_thread_info->server_queue, and the
+message queues are kept alive on the server side.
+
+In this case, msg_queue_destroy and cleanup_results are never called,
+leaving message results referencing the stale queue in other thread
+message queues.
+
+Later, when the messages from the other threads are cleaned up this
+causes invalid shared memory access when we try to update the queue
+bits from the message results.
+
+This doesn't cause much trouble upstream because it only leaks queue
+objects, which are always valid in memory, but it breaks with Proton
+shared memory patches, and the recent unmap fixes, as the queue bits
+are now in unmapped memory.
+
+This is probably a hack because it should probably instead close the
+handle on behalf of the dying thread, but this doesn't play well with
+process handle caches we use for fsync / esync. The handle should be
+closed on process exit anyway.
+
+Fixes: 2f844caa49fd2efa ("server: Reuse shared mapping's mmaped pointer and handle mmap failures.")
+CW-Bug-Id: #20266
+CW-Bug-Id: #20297
+---
+ server/queue.c | 31 ++++++++++++++++++++-----------
+ 1 file changed, 20 insertions(+), 11 deletions(-)
+
+diff --git a/server/queue.c b/server/queue.c
+index 15c46aea3ab..b8ed9ee1a1d 100644
+--- a/server/queue.c
++++ b/server/queue.c
+@@ -122,6 +122,7 @@ struct msg_queue
+     int                    quit_message;    /* is there a pending quit message? */
+     int                    exit_code;       /* exit code of pending quit message */
+     int                    cursor_count;    /* per-queue cursor show count */
++    int                    destroyed;       /* queue has been cleaned up */
+     struct list            msg_list[NB_MSG_KINDS];  /* lists of messages */
+     struct list            send_result;     /* stack of sent messages waiting for result */
+     struct list            callback_result; /* list of callback messages waiting for result */
+@@ -357,6 +358,7 @@ static struct msg_queue *create_msg_queue( struct thread *thread, struct thread_
+         queue->hotkey_count    = 0;
+         queue->quit_message    = 0;
+         queue->cursor_count    = 0;
++        queue->destroyed       = 0;
+         queue->recv_result     = NULL;
+         queue->next_timer_id   = 0x7fff;
+         queue->timeout         = NULL;
+@@ -396,15 +398,6 @@ static struct msg_queue *create_msg_queue( struct thread *thread, struct thread_
+     return queue;
+ }
+ 
+-/* free the message queue of a thread at thread exit */
+-void free_msg_queue( struct thread *thread )
+-{
+-    remove_thread_hooks( thread );
+-    if (!thread->queue) return;
+-    release_object( thread->queue );
+-    thread->queue = NULL;
+-}
+-
+ /* synchronize thread input keystate with the desktop */
+ static void sync_input_keystate( struct thread_input *input )
+ {
+@@ -1184,9 +1177,8 @@ static void msg_queue_satisfied( struct object *obj, struct wait_queue_entry *en
+     SHARED_WRITE_END( &queue->shared->seq );
+ }
+ 
+-static void msg_queue_destroy( struct object *obj )
++static void cleanup_msg_queue( struct msg_queue *queue )
+ {
+-    struct msg_queue *queue = (struct msg_queue *)obj;
+     struct list *ptr;
+     struct hotkey *hotkey, *hotkey2;
+     int i;
+@@ -1213,6 +1205,23 @@ static void msg_queue_destroy( struct ob
+     release_object( queue->input );
+     if (queue->hooks) release_object( queue->hooks );
+     if (queue->fd) release_object( queue->fd );
++    queue->destroyed = 1;
++}
++
++static void msg_queue_destroy( struct object *obj )
++{
++    struct msg_queue *queue = (struct msg_queue *)obj;
++    if (!queue->destroyed) cleanup_msg_queue( queue );
++}
++
++/* free the message queue of a thread at thread exit */
++void free_msg_queue( struct thread *thread )
++{
++    remove_thread_hooks( thread );
++    if (!thread->queue) return;
++    cleanup_msg_queue( thread->queue );
++    release_object( thread->queue );
++    thread->queue = NULL;
+ }
+ 
+ static void msg_queue_poll_event( struct fd *fd, int event )
+
+From a81dbfb12686b28e1889c4cff7e271848b6b0fc4 Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Thu, 10 Mar 2022 17:58:41 +0300
+Subject: [PATCH] ntdll: HACK: Delay resuming thread after suspending self.
+
+CW-Bug-Id: #20270
+
+Fixes a random hang on exit in Little Nightmares 2.
+---
+ dlls/ntdll/unix/thread.c | 5 ++++-
+ server/thread.c          | 6 +++++-
+ 2 files changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/ntdll/unix/thread.c b/dlls/ntdll/unix/thread.c
+index b091408c67d..23f3a955f40 100644
+--- a/dlls/ntdll/unix/thread.c
++++ b/dlls/ntdll/unix/thread.c
+@@ -1581,6 +1581,7 @@ NTSTATUS WINAPI NtOpenThread( HANDLE *handle, ACCESS_MASK access,
+  */
+ NTSTATUS WINAPI NtSuspendThread( HANDLE handle, ULONG *count )
+ {
++    BOOL self = FALSE;
+     NTSTATUS ret;
+ 
+     SERVER_START_REQ( suspend_thread )
+@@ -1588,10 +1589,12 @@ NTSTATUS WINAPI NtSuspendThread( HANDLE handle, ULONG *count )
+         req->handle = wine_server_obj_handle( handle );
+         if (!(ret = wine_server_call( req )))
+         {
+-            if (count) *count = reply->count;
++            self = reply->count & 0x80000000;
++            if (count) *count = reply->count & 0x7fffffff;
+         }
+     }
+     SERVER_END_REQ;
++    if (self) usleep( 0 );
+     return ret;
+ }
+ 
+diff --git a/server/thread.c b/server/thread.c
+index 4cbc8b20f0c..ff3b805a2d6 100644
+--- a/server/thread.c
++++ b/server/thread.c
+@@ -924,7 +924,11 @@ int suspend_thread( struct thread *thread )
+     int old_count = thread->suspend;
+     if (thread->suspend < MAXIMUM_SUSPEND_COUNT)
+     {
+-        if (!(thread->process->suspend + thread->suspend++)) stop_thread( thread );
++        if (!(thread->process->suspend + thread->suspend++))
++        {
++            stop_thread( thread );
++            if (thread == current) return old_count | 0x80000000;
++        }
+     }
+     else set_error( STATUS_SUSPEND_COUNT_EXCEEDED );
+     return old_count;
+
+From 3390e52bb36310c6702843124a80509b5ee9e9ec Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Thu, 27 Jan 2022 18:26:41 +0100
+Subject: [PATCH] server: Drop pending internal messages in set_active_window.
+
+When changing the active window in the foreground thread.
+
+CW-Bug-Id: #19612
+
+ - ported to my wine-nspa tree .  function is moved.
+
+---
+ dlls/win32u/focus.c |  1 +
+ server/protocol.def |  1 +
+ server/queue.c      | 12 ++++++++++++
+ 3 files changed, 14 insertions(+)
+
+diff -pur a/dlls/win32u/input.c b/dlls/win32u/input.c'
+--- a/dlls/win32u/input.c	2022-06-26 19:17:03.596550994 -0500
++++ b/dlls/win32u/input.c	2022-06-26 19:16:54.028414809 -0500
+@@ -1180,6 +1180,7 @@ static BOOL set_active_window( HWND hwnd
+     SERVER_START_REQ( set_active_window )
+     {
+         req->handle = wine_server_user_handle( hwnd );
++        req->internal_msg = WM_WINE_SETACTIVEWINDOW;
+         if ((ret = !wine_server_call_err( req )))
+             previous = wine_server_ptr_handle( reply->previous );
+     }
+
+diff --git a/server/protocol.def b/server/protocol.def
+index 86a36be2a45..d4c0accc389 100644
+--- a/server/protocol.def
++++ b/server/protocol.def
+@@ -2837,6 +2837,7 @@ enum coords_relative
+ /* Set the current thread active window */
+ @REQ(set_active_window)
+     user_handle_t  handle;        /* handle to the active window */
++    unsigned int   internal_msg;  /* set active window internal message */
+ @REPLY
+     user_handle_t  previous;      /* handle to the previous active window */
+ @END
+diff --git a/server/queue.c b/server/queue.c
+index b8ed9ee1a1d..48c8f3aa38b 100644
+--- a/server/queue.c
++++ b/server/queue.c
+@@ -3512,7 +3512,11 @@ DECL_HANDLER(set_focus_window)
+ /* set the current thread active window */
+ DECL_HANDLER(set_active_window)
+ {
++    struct message *msg, *next;
+     struct msg_queue *queue = get_current_queue();
++    struct desktop *desktop;
++
++    if (!(desktop = get_thread_desktop( current, 0 ))) return;
+ 
+     reply->previous = 0;
+     if (queue && check_queue_input_window( queue, req->handle ))
+@@ -3523,9 +3527,17 @@ DECL_HANDLER(set_active_window)
+             SHARED_WRITE_BEGIN( &queue->input->shared->seq );
+             queue->input->shared->active = get_user_full_handle( req->handle );
+             SHARED_WRITE_END( &queue->input->shared->seq );
++
++            if (desktop->foreground_input == queue->input && req->handle != reply->previous)
++            {
++                LIST_FOR_EACH_ENTRY_SAFE( msg, next, &queue->msg_list[POST_MESSAGE], struct message, entry )
++                    if (msg->msg == req->internal_msg) remove_queue_message( queue, msg, POST_MESSAGE );
++            }
+         }
+         else set_error( STATUS_INVALID_HANDLE );
+     }
++
++    release_object( desktop );
+ }
+ 
+ 
+

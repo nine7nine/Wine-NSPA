@@ -1,0 +1,124 @@
+--- a/dlls/ntdll/unix/thread.c	2022-06-20 23:34:08.329088026 -0500
++++ b/dlls/ntdll/unix/thread.c	2022-06-20 23:33:43.814685640 -0500
+@@ -79,7 +79,8 @@ WINE_DECLARE_DEBUG_CHANNEL(seh);
+ #if NSPA_RT_SYNC
+ 
+ // We set the synchronization threads' RT priority from within Ntdll.
+-static int thread_apc_priority = -1;
++static int thread_kapc_priority = -1;
++static int thread_p_priority = -1;
+ 
+ /* gets the priority value from an environment variable */
+ static int get_priority( const char *variable, int min, int max )
+@@ -95,13 +96,27 @@ static int get_priority( const char *var
+     return -1;
+ }
+ 
++static int fget_priority( const char *variable, int min, int max )
++{
++    const char *env;
++    int val;
++
++    env = getenv( variable );
++    if (!env) return -1;
++
++    val = atoi( env );
++    if (val >= min && val <= max) return val;
++    return -1;
++}
++
+ static int priority;
++static int fpriority;
+ 
+ int ntdll_set_sync_realtime (pthread_t pthread_id, int ntdll_rt_policy, int priority)
+ {
+     // Get RT policy
+     const char *policyStr = getenv("NTDLL_RT_POLICY");
+-    int min, max, apc_priority;
++    int min, max, p_priority;
+     min = sched_get_priority_min( SCHED_FIFO );
+     max = sched_get_priority_max( SCHED_FIFO );
+ 
+@@ -114,15 +129,34 @@ int ntdll_set_sync_realtime (pthread_t p
+             ntdll_rt_policy = SCHED_OTHER;    
+     }
+    
+-    if ((apc_priority = get_priority( "NTDLL_RT_PRIO", min, max -1)) != -1)
++    if ((p_priority = get_priority( "NTDLL_RT_PRIO", min, max -1)) != -1)
+     {
+-        thread_apc_priority = apc_priority;
++        thread_p_priority = p_priority;
+     }
+ 	struct sched_param param;	
+-	param.sched_priority = thread_apc_priority;
++	param.sched_priority = thread_p_priority;
+ 
+ 	return pthread_setschedparam (pthread_id, ntdll_rt_policy, &param);
+ }
++
++int ntdll_set_fsync_realtime (pthread_t pthread_id, int fifo, int fpriority)
++{
++    // RT policy is SCHED_FIFO
++    int min, max, kapc_priority;
++    min = sched_get_priority_min( SCHED_FIFO );
++    max = sched_get_priority_max( SCHED_FIFO );
++    fifo = SCHED_FIFO;
++   
++    if ((kapc_priority = fget_priority( "WINE_RT_PRIO", min, max -1)) != -1)
++    {
++        thread_kapc_priority = kapc_priority -1;
++    }
++	struct sched_param param;	
++	param.sched_priority = thread_kapc_priority;
++
++	return pthread_setschedparam (pthread_id, fifo, &param);
++}
++
+ #endif
+ 
+ static int nb_threads = 1;
+@@ -1424,8 +1479,8 @@ done:
+     // which sets gets the tid via pthread_functions.init_current_teb
+     // 
+     // Catch all Synchronization Threads;
+-    pthread_t validIDXThread = (thread_data->fsync_apc_idx);
+     pthread_t validPIDThread = (thread_data->pthread_id);
++    pthread_t validIDXThread = (thread_data->fsync_apc_idx);
+                                 
+     if (validIDXThread || validPIDThread == 0) {
+         int i;
+@@ -1437,26 +1492,26 @@ done:
+                 usleep(300);
+         }
+     }
+-    if (validIDXThread != 0) {
++    if (validPIDThread != 0) {
+         // Fail on / filter out unsupported threads;
+-        if (handle == GetCurrentThread() && (validIDXThread != thread_data->fsync_apc_idx)) { 
++        if (handle == GetCurrentThread() && (validPIDThread != thread_data->pthread_id)) { 
+             return status;
+         }
+ 
+         // set RT for sync threads
+         pthread_attr_setinheritsched(&pthread_attr, PTHREAD_INHERIT_SCHED);
+-        ntdll_rt_policy = SCHED_FIFO;
+-        ntdll_set_sync_realtime(validIDXThread, ntdll_rt_policy|SCHED_RESET_ON_FORK, priority +2);
++        ntdll_set_sync_realtime(validPIDThread, ntdll_rt_policy|SCHED_RESET_ON_FORK, priority);
+     }
+-    else if (validPIDThread != 0) {
++    else if (validIDXThread != 0) {
+         // Fail on / filter out unsupported threads;
+-        if (handle == GetCurrentThread() && (validPIDThread != thread_data->pthread_id)) { 
++        if (handle == GetCurrentThread() && (validIDXThread != thread_data->fsync_apc_idx)) { 
+             return status;
+         }
+ 
+         // set RT for sync threads
+         pthread_attr_setinheritsched(&pthread_attr, PTHREAD_INHERIT_SCHED);
+-        ntdll_set_sync_realtime(validPIDThread, ntdll_rt_policy|SCHED_RESET_ON_FORK, priority);
++        // hardcoded to SCHED_FIFO
++        ntdll_set_fsync_realtime(validIDXThread, SCHED_FIFO|SCHED_RESET_ON_FORK, fpriority);
+     }
+ #endif
+     return STATUS_SUCCESS;
+
