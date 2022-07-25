@@ -1784,3 +1784,309 @@ index 8d305bdada6..47f0f9c56a9 100644
                                        ULONG in_size, void *out_buffer, ULONG out_size ) DECLSPEC_HIDDEN;
 -- 
 2.37.1
+
+From 7343d439af984688bddc7eaf025d147ef3396ce5 Mon Sep 17 00:00:00 2001
+From: Zebediah Figura <zfigura@codeweavers.com>
+Date: Fri, 15 Jul 2022 18:42:40 -0500
+Subject: [PATCH 1/4] ws2_32: Map AFD_POLL_RESET to the "read" set in select().
+
+---
+ dlls/ws2_32/socket.c | 17 ++++++++++-------
+ 1 file changed, 10 insertions(+), 7 deletions(-)
+
+diff --git a/dlls/ws2_32/socket.c b/dlls/ws2_32/socket.c
+index d3c93e15a47..b0f90cccbe3 100644
+--- a/dlls/ws2_32/socket.c
++++ b/dlls/ws2_32/socket.c
+@@ -2709,6 +2709,10 @@ static int add_fd_to_set( SOCKET fd, struct fd_set *set )
+ int WINAPI select( int count, fd_set *read_ptr, fd_set *write_ptr,
+                    fd_set *except_ptr, const struct timeval *timeout)
+ {
++    static const int read_flags = AFD_POLL_READ | AFD_POLL_ACCEPT | AFD_POLL_HUP | AFD_POLL_RESET;
++    static const int write_flags = AFD_POLL_WRITE;
++    static const int except_flags = AFD_POLL_OOB | AFD_POLL_CONNECT_ERR;
++
+     struct fd_set *read_input = NULL;
+     struct afd_poll_params *params;
+     unsigned int poll_count = 0;
+@@ -2760,7 +2764,7 @@ int WINAPI select( int count, fd_set *read_ptr, fd_set *write_ptr,
+         for (i = 0; i < read_ptr->fd_count; ++i)
+         {
+             params->sockets[params->count].socket = read_ptr->fd_array[i];
+-            params->sockets[params->count].flags = AFD_POLL_READ | AFD_POLL_ACCEPT | AFD_POLL_HUP;
++            params->sockets[params->count].flags = read_flags;
+             ++params->count;
+             poll_socket = read_ptr->fd_array[i];
+         }
+@@ -2771,7 +2775,7 @@ int WINAPI select( int count, fd_set *read_ptr, fd_set *write_ptr,
+         for (i = 0; i < write_ptr->fd_count; ++i)
+         {
+             params->sockets[params->count].socket = write_ptr->fd_array[i];
+-            params->sockets[params->count].flags = AFD_POLL_WRITE;
++            params->sockets[params->count].flags = write_flags;
+             ++params->count;
+             poll_socket = write_ptr->fd_array[i];
+         }
+@@ -2782,7 +2786,7 @@ int WINAPI select( int count, fd_set *read_ptr, fd_set *write_ptr,
+         for (i = 0; i < except_ptr->fd_count; ++i)
+         {
+             params->sockets[params->count].socket = except_ptr->fd_array[i];
+-            params->sockets[params->count].flags = AFD_POLL_OOB | AFD_POLL_CONNECT_ERR;
++            params->sockets[params->count].flags = except_flags;
+             ++params->count;
+             poll_socket = except_ptr->fd_array[i];
+         }
+@@ -2819,8 +2823,7 @@ int WINAPI select( int count, fd_set *read_ptr, fd_set *write_ptr,
+             {
+                 for (j = 0; j < read_input->fd_count; ++j)
+                 {
+-                    if (read_input->fd_array[j] == s
+-                            && (flags & (AFD_POLL_READ | AFD_POLL_ACCEPT | AFD_POLL_HUP | AFD_POLL_CLOSE)))
++                    if (read_input->fd_array[j] == s && (flags & (read_flags | AFD_POLL_CLOSE)))
+                     {
+                         ret_count += add_fd_to_set( s, read_ptr );
+                         flags &= ~AFD_POLL_CLOSE;
+@@ -2831,10 +2834,10 @@ int WINAPI select( int count, fd_set *read_ptr, fd_set *write_ptr,
+             if (flags & AFD_POLL_CLOSE)
+                 status = STATUS_INVALID_HANDLE;
+ 
+-            if (flags & AFD_POLL_WRITE)
++            if (flags & write_flags)
+                 ret_count += add_fd_to_set( s, write_ptr );
+ 
+-            if (flags & (AFD_POLL_OOB | AFD_POLL_CONNECT_ERR))
++            if (flags & except_flags)
+                 ret_count += add_fd_to_set( s, except_ptr );
+         }
+     }
+-- 
+GitLab
+
+
+From c81209895e0bb53f9513a061ecd5cd0c8190ab83 Mon Sep 17 00:00:00 2001
+From: Zebediah Figura <zfigura@codeweavers.com>
+Date: Fri, 15 Jul 2022 18:43:03 -0500
+Subject: [PATCH 2/4] ws2_32: Add a FIXME for unhandled flags in select().
+
+---
+ dlls/ws2_32/socket.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/dlls/ws2_32/socket.c b/dlls/ws2_32/socket.c
+index b0f90cccbe3..493ea3299a9 100644
+--- a/dlls/ws2_32/socket.c
++++ b/dlls/ws2_32/socket.c
+@@ -2839,6 +2839,9 @@ int WINAPI select( int count, fd_set *read_ptr, fd_set *write_ptr,
+ 
+             if (flags & except_flags)
+                 ret_count += add_fd_to_set( s, except_ptr );
++
++            if (flags & ~(read_flags | write_flags | except_flags | AFD_POLL_CLOSE))
++                FIXME( "not reporting AFD flags %#x\n", flags );
+         }
+     }
+ 
+-- 
+GitLab
+
+
+From 67e5399d0ae52041e42a6a517292d311e46525ca Mon Sep 17 00:00:00 2001
+From: Zebediah Figura <zfigura@codeweavers.com>
+Date: Fri, 15 Jul 2022 20:07:20 -0500
+Subject: [PATCH 3/4] ws2_32: Map AFD_POLL_RESET to both POLLHUP and POLLERR.
+
+---
+ dlls/ws2_32/socket.c     | 2 +-
+
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/ws2_32/socket.c b/dlls/ws2_32/socket.c
+index 493ea3299a9..9d51fef1adb 100644
+--- a/dlls/ws2_32/socket.c
++++ b/dlls/ws2_32/socket.c
+@@ -2974,7 +2974,7 @@ int WINAPI WSAPoll( WSAPOLLFD *fds, ULONG count, int timeout )
+                         revents |= POLLRDBAND;
+                     if (params->sockets[j].flags & AFD_POLL_WRITE)
+                         revents |= POLLWRNORM;
+-                    if (params->sockets[j].flags & AFD_POLL_HUP)
++                    if (params->sockets[j].flags & (AFD_POLL_RESET | AFD_POLL_HUP))
+                         revents |= POLLHUP;
+                     if (params->sockets[j].flags & (AFD_POLL_RESET | AFD_POLL_CONNECT_ERR))
+                         revents |= POLLERR;
+-- 
+GitLab
+
+
+From 1e01aa8e1ed3a9b692a620aca665d2ef4a410067 Mon Sep 17 00:00:00 2001
+From: Zebediah Figura <zfigura@codeweavers.com>
+Date: Fri, 15 Jul 2022 18:44:06 -0500
+Subject: [PATCH 4/4] server: Properly implement AFD_POLL_RESET.
+
+---
+ server/sock.c            | 34 +++++++++++++++++++++++++++++++---
+ 3 files changed, 40 insertions(+), 13 deletions(-)
+
+diff --git a/server/sock.c b/server/sock.c
+index 53553ab8ee7..7d7e470be28 100644
+--- a/server/sock.c
++++ b/server/sock.c
+@@ -232,6 +232,7 @@ struct sock
+     unsigned int        aborted : 1; /* did we get a POLLERR or irregular POLLHUP? */
+     unsigned int        nonblocking : 1; /* is the socket nonblocking? */
+     unsigned int        bound : 1;   /* is the socket bound? */
++    unsigned int        reset : 1;   /* did we get a TCP reset? */
+ };
+ 
+ static void sock_dump( struct object *obj, int verbose );
+@@ -667,7 +668,12 @@ static inline int sock_error( struct sock *sock )
+ 
+     case SOCK_CONNECTED:
+     case SOCK_CONNECTIONLESS:
+-        if (error)
++        if (error == ECONNRESET || error == EPIPE)
++        {
++            sock->reset = 1;
++            error = 0;
++        }
++        else if (error)
+             sock->errors[AFD_POLL_BIT_HUP] = error;
+         else
+             error = sock->errors[AFD_POLL_BIT_HUP];
+@@ -897,6 +903,8 @@ static int get_poll_flags( struct sock *sock, int event )
+         flags |= AFD_POLL_HUP;
+     if (event & POLLERR)
+         flags |= AFD_POLL_CONNECT_ERR;
++    if (sock->reset)
++        flags |= AFD_POLL_RESET;
+ 
+     return flags;
+ }
+@@ -1081,6 +1089,15 @@ static int sock_dispatch_asyncs( struct sock *sock, int event, int error )
+             async_terminate( sock->connect_req->async, status );
+     }
+ 
++    if (sock->reset)
++    {
++        async_wake_up( &sock->read_q, STATUS_CONNECTION_RESET );
++        async_wake_up( &sock->write_q, STATUS_CONNECTION_RESET );
++
++        if (sock->accept_recv_req && sock->accept_recv_req->iosb->status == STATUS_PENDING)
++            async_terminate( sock->accept_recv_req->async, STATUS_CONNECTION_RESET );
++    }
++
+     return event;
+ }
+ 
+@@ -1116,6 +1133,9 @@ static void sock_dispatch_events( struct sock *sock, enum connection_state prevs
+ 
+     case SOCK_CONNECTED:
+     case SOCK_CONNECTIONLESS:
++        if (sock->reset)
++            post_socket_event( sock, AFD_POLL_BIT_RESET );
++
+         if (event & POLLIN)
+             post_socket_event( sock, AFD_POLL_BIT_READ );
+ 
+@@ -1171,6 +1191,9 @@ static void sock_poll_event( struct fd *fd, int event )
+ 
+     case SOCK_CONNECTED:
+     case SOCK_CONNECTIONLESS:
++        if (sock->reset)
++            event &= ~(POLLIN | POLLERR | POLLHUP);
++
+         if (sock->type == WS_SOCK_STREAM && (event & POLLIN))
+         {
+             char dummy;
+@@ -1189,7 +1212,11 @@ static void sock_poll_event( struct fd *fd, int event )
+                 event &= ~POLLIN;
+                 /* EAGAIN can happen if an async recv() falls between the server's poll()
+                    call and the invocation of this routine */
+-                if ( errno != EAGAIN )
++                if (errno == ECONNRESET || errno == EPIPE)
++                {
++                    sock->reset = 1;
++                }
++                else if (errno != EAGAIN)
+                 {
+                     error = errno;
+                     event |= POLLERR;
+@@ -1312,7 +1339,7 @@ static int sock_get_poll_events( struct fd *fd )
+             return -1;
+         }
+ 
+-        if (sock->aborted)
++        if (sock->aborted || sock->reset)
+             return -1;
+ 
+         if (sock->accept_recv_req)
+@@ -1517,6 +1544,7 @@ static struct sock *create_socket(void)
+     sock->aborted = 0;
+     sock->nonblocking = 0;
+     sock->bound = 0;
++    sock->reset = 0;
+     sock->rcvbuf = 0;
+     sock->sndbuf = 0;
+     sock->rcvtimeo = 0;
+-- 
+GitLab
+
+From d191513167e69e0147130bfdca1d155d66d32ddf Mon Sep 17 00:00:00 2001
+From: Jinoh Kang <jinoh.kang.kr@gmail.com>
+Date: Fri, 22 Jul 2022 02:31:13 +0900
+Subject: [PATCH] server: Allow cancelling alerted asyncs.
+
+---
+ server/async.c | 17 ++++++++++++++++-
+ 1 file changed, 16 insertions(+), 1 deletion(-)
+
+diff --git a/server/async.c b/server/async.c
+index 4832d69b7bf..8b9afe3b5a0 100644
+--- a/server/async.c
++++ b/server/async.c
+@@ -44,6 +44,7 @@ struct async
+     struct fd           *fd;              /* fd associated with an unqueued async */
+     struct timeout_user *timeout;
+     unsigned int         timeout_status;  /* status to report upon timeout */
++    unsigned int         terminate_status;/* pending termination status, or STATUS_PENDING */
+     struct event        *event;
+     async_data_t         data;            /* data for async I/O call */
+     struct iosb         *iosb;            /* I/O status block */
+@@ -165,6 +166,11 @@ void async_terminate( struct async *async, unsigned int status )
+ {
+     struct iosb *iosb = async->iosb;
+ 
++    if (status != STATUS_ALERTED && async->terminate_status == STATUS_PENDING)
++    {
++        async->terminate_status = status;
++    }
++
+     if (async->terminated) return;
+ 
+     async->terminated = 1;
+@@ -268,6 +274,7 @@ struct async *create_async( struct fd *fd, struct thread *thread, const async_da
+     async->queue         = NULL;
+     async->fd            = (struct fd *)grab_object( fd );
+     async->initial_status = STATUS_PENDING;
++    async->terminate_status = STATUS_PENDING;
+     async->signaled      = 0;
+     async->pending       = 1;
+     async->wait_handle   = 0;
+@@ -497,7 +504,15 @@ void async_set_result( struct object *obj, unsigned int status, apc_param_t tota
+     {
+         async->terminated = 0;
+         async->alerted = 0;
+-        async_reselect( async );
++
++        if (async->terminate_status != STATUS_PENDING)
++        {
++            async_terminate( async, async->terminate_status );
++        }
++        else
++        {
++            async_reselect( async );
++        }
+     }
+     else
+     {
+-- 
+GitLab
