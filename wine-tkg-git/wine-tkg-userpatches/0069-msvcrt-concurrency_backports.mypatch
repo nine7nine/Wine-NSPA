@@ -1,0 +1,1965 @@
+From 2d2dba53740a3bf6407e19c33e530a84945aceff Mon Sep 17 00:00:00 2001
+From: Piotr Caban <piotr@codeweavers.com>
+Date: Sun, 3 Apr 2022 20:30:41 +0200
+Subject: [PATCH] msvcr100: Improve ThreadScheduler_ScheduleTask_loc stub.
+
+Wine-Bug: https://bugs.winehq.org/show_bug.cgi?id=45916
+Signed-off-by: Piotr Caban <piotr@codeweavers.com>
+Signed-off-by: Alexandre Julliard <julliard@winehq.org>
+---
+ dlls/msvcrt/concurrency.c | 35 +++++++++++++++++++++++++++++++++++
+ 1 file changed, 35 insertions(+)
+
+diff --git a/dlls/msvcrt/concurrency.c b/dlls/msvcrt/concurrency.c
+index 54b2c49db99..2ca6421b0e7 100644
+--- a/dlls/msvcrt/concurrency.c
++++ b/dlls/msvcrt/concurrency.c
+@@ -1220,11 +1220,45 @@ DEFINE_THISCALL_WRAPPER(ThreadScheduler_CreateScheduleGroup, 4)
+     return NULL;
+ }
+ 
++typedef struct
++{
++    void (__cdecl *proc)(void*);
++    void *data;
++} schedule_task_arg;
++
++static void WINAPI schedule_task_proc(PTP_CALLBACK_INSTANCE instance, void *context, PTP_WORK work)
++{
++    schedule_task_arg arg;
++
++    arg = *(schedule_task_arg*)context;
++    operator_delete(context);
++    arg.proc(arg.data);
++}
++
+ DEFINE_THISCALL_WRAPPER(ThreadScheduler_ScheduleTask_loc, 16)
+ void __thiscall ThreadScheduler_ScheduleTask_loc(ThreadScheduler *this,
+         void (__cdecl *proc)(void*), void* data, /*location*/void *placement)
+ {
++    schedule_task_arg *arg;
++    TP_WORK *work;
++
+     FIXME("(%p %p %p %p) stub\n", this, proc, data, placement);
++
++    arg = operator_new(sizeof(*arg));
++    arg->proc = proc;
++    arg->data = data;
++
++    work = CreateThreadpoolWork(schedule_task_proc, arg, NULL);
++    if(!work) {
++        scheduler_resource_allocation_error e;
++
++        operator_delete(arg);
++        scheduler_resource_allocation_error_ctor_name(&e, NULL,
++                HRESULT_FROM_WIN32(GetLastError()));
++        _CxxThrowException(&e, &scheduler_resource_allocation_error_exception_type);
++    }
++    SubmitThreadpoolWork(work);
++    CloseThreadpoolWork(work);
+ }
+ 
+ DEFINE_THISCALL_WRAPPER(ThreadScheduler_ScheduleTask, 12)
+@@ -1232,6 +1266,7 @@ void __thiscall ThreadScheduler_ScheduleTask(ThreadScheduler *this,
+         void (__cdecl *proc)(void*), void* data)
+ {
+     FIXME("(%p %p %p) stub\n", this, proc, data);
++    ThreadScheduler_ScheduleTask_loc(this, proc, data, NULL);
+ }
+ 
+ DEFINE_THISCALL_WRAPPER(ThreadScheduler_IsAvailableLocation, 8)
+ 
+ From 881879c658c6b1bfed41beb5da87b6cf1ee31936 Mon Sep 17 00:00:00 2001
+From: Torge Matthies <tmatthies@codeweavers.com>
+Date: Mon, 25 Apr 2022 19:35:02 +0200
+Subject: [PATCH] msvcr110: Add
+ _StructuredTaskCollection::_StructuredTaskCollection_ctor stub.
+
+Signed-off-by: Piotr Caban <piotr@codeweavers.com>
+Signed-off-by: Alexandre Julliard <julliard@winehq.org>
+---
+ dlls/concrt140/concrt140.spec       |  6 +++---
+ dlls/msvcr110/msvcr110.spec         |  6 +++---
+ dlls/msvcr120/msvcr120.spec         |  6 +++---
+ dlls/msvcr120_app/msvcr120_app.spec |  6 +++---
+ dlls/msvcrt/concurrency.c           | 19 +++++++++++++++++++
+ 5 files changed, 31 insertions(+), 12 deletions(-)
+
+diff --git a/dlls/concrt140/concrt140.spec b/dlls/concrt140/concrt140.spec
+index 50db9348327..3257d61bb37 100644
+--- a/dlls/concrt140/concrt140.spec
++++ b/dlls/concrt140/concrt140.spec
+@@ -63,9 +63,9 @@
+ @ stub -arch=arm ??0_SpinLock@details@Concurrency@@QAA@ACJ@Z
+ @ stub -arch=i386 ??0_SpinLock@details@Concurrency@@QAE@ACJ@Z
+ @ stub -arch=win64 ??0_SpinLock@details@Concurrency@@QEAA@AECJ@Z
+-@ stub -arch=arm ??0_StructuredTaskCollection@details@Concurrency@@QAA@PAV_CancellationTokenState@12@@Z
+-@ stub -arch=i386 ??0_StructuredTaskCollection@details@Concurrency@@QAE@PAV_CancellationTokenState@12@@Z
+-@ stub -arch=win64 ??0_StructuredTaskCollection@details@Concurrency@@QEAA@PEAV_CancellationTokenState@12@@Z
++@ cdecl -arch=arm ??0_StructuredTaskCollection@details@Concurrency@@QAA@PAV_CancellationTokenState@12@@Z(ptr ptr) _StructuredTaskCollection_ctor
++@ thiscall -arch=i386 ??0_StructuredTaskCollection@details@Concurrency@@QAE@PAV_CancellationTokenState@12@@Z(ptr ptr) _StructuredTaskCollection_ctor
++@ cdecl -arch=win64 ??0_StructuredTaskCollection@details@Concurrency@@QEAA@PEAV_CancellationTokenState@12@@Z(ptr ptr) _StructuredTaskCollection_ctor
+ @ stub -arch=arm ??0_TaskCollection@details@Concurrency@@QAA@PAV_CancellationTokenState@12@@Z
+ @ stub -arch=i386 ??0_TaskCollection@details@Concurrency@@QAE@PAV_CancellationTokenState@12@@Z
+ @ stub -arch=win64 ??0_TaskCollection@details@Concurrency@@QEAA@PEAV_CancellationTokenState@12@@Z
+diff --git a/dlls/msvcr110/msvcr110.spec b/dlls/msvcr110/msvcr110.spec
+index 23840f85eda..64b634b582e 100644
+--- a/dlls/msvcr110/msvcr110.spec
++++ b/dlls/msvcr110/msvcr110.spec
+@@ -62,9 +62,9 @@
+ @ stub -arch=arm ??0_SpinLock@details@Concurrency@@QAA@ACJ@Z
+ @ stub -arch=i386 ??0_SpinLock@details@Concurrency@@QAE@ACJ@Z
+ @ stub -arch=win64 ??0_SpinLock@details@Concurrency@@QEAA@AECJ@Z
+-@ stub -arch=arm ??0_StructuredTaskCollection@details@Concurrency@@QAA@PAV_CancellationTokenState@12@@Z
+-@ stub -arch=i386 ??0_StructuredTaskCollection@details@Concurrency@@QAE@PAV_CancellationTokenState@12@@Z
+-@ stub -arch=win64 ??0_StructuredTaskCollection@details@Concurrency@@QEAA@PEAV_CancellationTokenState@12@@Z
++@ cdecl -arch=arm ??0_StructuredTaskCollection@details@Concurrency@@QAA@PAV_CancellationTokenState@12@@Z(ptr ptr) _StructuredTaskCollection_ctor
++@ thiscall -arch=i386 ??0_StructuredTaskCollection@details@Concurrency@@QAE@PAV_CancellationTokenState@12@@Z(ptr ptr) _StructuredTaskCollection_ctor
++@ cdecl -arch=win64 ??0_StructuredTaskCollection@details@Concurrency@@QEAA@PEAV_CancellationTokenState@12@@Z(ptr ptr) _StructuredTaskCollection_ctor
+ @ stub -arch=arm ??0_TaskCollection@details@Concurrency@@QAA@PAV_CancellationTokenState@12@@Z
+ @ stub -arch=i386 ??0_TaskCollection@details@Concurrency@@QAE@PAV_CancellationTokenState@12@@Z
+ @ stub -arch=win64 ??0_TaskCollection@details@Concurrency@@QEAA@PEAV_CancellationTokenState@12@@Z
+diff --git a/dlls/msvcr120/msvcr120.spec b/dlls/msvcr120/msvcr120.spec
+index 64ddeed42f4..68855b90096 100644
+--- a/dlls/msvcr120/msvcr120.spec
++++ b/dlls/msvcr120/msvcr120.spec
+@@ -59,9 +59,9 @@
+ @ stub -arch=arm ??0_SpinLock@details@Concurrency@@QAA@ACJ@Z
+ @ stub -arch=i386 ??0_SpinLock@details@Concurrency@@QAE@ACJ@Z
+ @ stub -arch=win64 ??0_SpinLock@details@Concurrency@@QEAA@AECJ@Z
+-@ stub -arch=arm ??0_StructuredTaskCollection@details@Concurrency@@QAA@PAV_CancellationTokenState@12@@Z
+-@ stub -arch=i386 ??0_StructuredTaskCollection@details@Concurrency@@QAE@PAV_CancellationTokenState@12@@Z
+-@ stub -arch=win64 ??0_StructuredTaskCollection@details@Concurrency@@QEAA@PEAV_CancellationTokenState@12@@Z
++@ cdecl -arch=arm ??0_StructuredTaskCollection@details@Concurrency@@QAA@PAV_CancellationTokenState@12@@Z(ptr ptr) _StructuredTaskCollection_ctor
++@ thiscall -arch=i386 ??0_StructuredTaskCollection@details@Concurrency@@QAE@PAV_CancellationTokenState@12@@Z(ptr ptr) _StructuredTaskCollection_ctor
++@ cdecl -arch=win64 ??0_StructuredTaskCollection@details@Concurrency@@QEAA@PEAV_CancellationTokenState@12@@Z(ptr ptr) _StructuredTaskCollection_ctor
+ @ stub -arch=arm ??0_TaskCollection@details@Concurrency@@QAA@PAV_CancellationTokenState@12@@Z
+ @ stub -arch=i386 ??0_TaskCollection@details@Concurrency@@QAE@PAV_CancellationTokenState@12@@Z
+ @ stub -arch=win64 ??0_TaskCollection@details@Concurrency@@QEAA@PEAV_CancellationTokenState@12@@Z
+diff --git a/dlls/msvcr120_app/msvcr120_app.spec b/dlls/msvcr120_app/msvcr120_app.spec
+index 05f408d6884..eabb304dd6d 100644
+--- a/dlls/msvcr120_app/msvcr120_app.spec
++++ b/dlls/msvcr120_app/msvcr120_app.spec
+@@ -57,9 +57,9 @@
+ @ stub -arch=arm ??0_SpinLock@details@Concurrency@@QAA@ACJ@Z
+ @ stub -arch=i386 ??0_SpinLock@details@Concurrency@@QAE@ACJ@Z
+ @ stub -arch=win64 ??0_SpinLock@details@Concurrency@@QEAA@AECJ@Z
+-@ stub -arch=arm ??0_StructuredTaskCollection@details@Concurrency@@QAA@PAV_CancellationTokenState@12@@Z
+-@ stub -arch=i386 ??0_StructuredTaskCollection@details@Concurrency@@QAE@PAV_CancellationTokenState@12@@Z
+-@ stub -arch=win64 ??0_StructuredTaskCollection@details@Concurrency@@QEAA@PEAV_CancellationTokenState@12@@Z
++@ cdecl -arch=arm ??0_StructuredTaskCollection@details@Concurrency@@QAA@PAV_CancellationTokenState@12@@Z(ptr ptr) msvcr120.??0_StructuredTaskCollection@details@Concurrency@@QAA@PAV_CancellationTokenState@12@@Z
++@ thiscall -arch=i386 ??0_StructuredTaskCollection@details@Concurrency@@QAE@PAV_CancellationTokenState@12@@Z(ptr ptr) msvcr120.??0_StructuredTaskCollection@details@Concurrency@@QAE@PAV_CancellationTokenState@12@@Z
++@ cdecl -arch=win64 ??0_StructuredTaskCollection@details@Concurrency@@QEAA@PEAV_CancellationTokenState@12@@Z(ptr ptr) msvcr120.??0_StructuredTaskCollection@details@Concurrency@@QEAA@PEAV_CancellationTokenState@12@@Z
+ @ stub -arch=arm ??0_TaskCollection@details@Concurrency@@QAA@PAV_CancellationTokenState@12@@Z
+ @ stub -arch=i386 ??0_TaskCollection@details@Concurrency@@QAE@PAV_CancellationTokenState@12@@Z
+ @ stub -arch=win64 ??0_TaskCollection@details@Concurrency@@QEAA@PEAV_CancellationTokenState@12@@Z
+diff --git a/dlls/msvcrt/concurrency.c b/dlls/msvcrt/concurrency.c
+index 2ca6421b0e7..f9a7f489ceb 100644
+--- a/dlls/msvcrt/concurrency.c
++++ b/dlls/msvcrt/concurrency.c
+@@ -164,6 +164,11 @@ typedef struct
+     yield_func yield_func;
+ } SpinWait;
+ 
++typedef struct
++{
++    char dummy;
++} _StructuredTaskCollection;
++
+ /* keep in sync with msvcp90/msvcp90.h */
+ typedef struct cs_queue
+ {
+@@ -1741,6 +1746,20 @@ bool __thiscall SpinWait__SpinOnce(SpinWait *this)
+     }
+ }
+ 
++#if _MSVCR_VER >= 110
++
++/* ??0_StructuredTaskCollection@details@Concurrency@@QAE@PAV_CancellationTokenState@12@@Z */
++/* ??0_StructuredTaskCollection@details@Concurrency@@QEAA@PEAV_CancellationTokenState@12@@Z */
++DEFINE_THISCALL_WRAPPER(_StructuredTaskCollection_ctor, 8)
++_StructuredTaskCollection* __thiscall _StructuredTaskCollection_ctor(
++        _StructuredTaskCollection *this, /*_CancellationTokenState*/void *token)
++{
++    FIXME("(%p): stub\n", this);
++    return NULL;
++}
++
++#endif /* _MSVCR_VER >= 110 */
++
+ /* ??0critical_section@Concurrency@@QAE@XZ */
+ /* ??0critical_section@Concurrency@@QEAA@XZ */
+ DEFINE_THISCALL_WRAPPER(critical_section_ctor, 4)
+
+From ce4fdb15177e53b8e4ae959280bcbdb754576ca0 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Martin=20Storsj=C3=B6?= <martin@martin.st>
+Date: Sun, 15 May 2022 14:49:46 +0300
+Subject: [PATCH] msvcrt: Hook up __C_specific_handler and __jump_unwind for
+ arm.
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+This was set up for arm in ntdll and ucrtbase in
+3ef9a04f9181fb7d28832c60b5439337460005b6, but msvcrt was missed.
+
+Also hook them up similarly in msvcr110, msvcr120 and msvcr120_app.
+
+Signed-off-by: Martin Storsjö <martin@martin.st>
+Signed-off-by: Alexandre Julliard <julliard@winehq.org>
+---
+ dlls/msvcr110/msvcr110.spec         | 4 ++--
+ dlls/msvcr120/msvcr120.spec         | 4 ++--
+ dlls/msvcr120_app/msvcr120_app.spec | 4 ++--
+ dlls/msvcrt/msvcrt.spec             | 3 ++-
+ 4 files changed, 8 insertions(+), 7 deletions(-)
+
+diff --git a/dlls/msvcr110/msvcr110.spec b/dlls/msvcr110/msvcr110.spec
+index 64b634b582e..7bdae76cf68 100644
+--- a/dlls/msvcr110/msvcr110.spec
++++ b/dlls/msvcr110/msvcr110.spec
+@@ -872,7 +872,7 @@
+ @ cdecl __AdjustPointer(ptr ptr)
+ @ stub __BuildCatchObject
+ @ stub __BuildCatchObjectHelper
+-@ stdcall -arch=x86_64 __C_specific_handler(ptr long ptr ptr) ntdll.__C_specific_handler
++@ stdcall -arch=x86_64,arm __C_specific_handler(ptr long ptr ptr) ntdll.__C_specific_handler
+ @ cdecl -arch=i386,x86_64,arm,arm64 __CppXcptFilter(long ptr)
+ @ cdecl -arch=i386,x86_64,arm,arm64 __CxxDetectRethrow(ptr)
+ @ cdecl -arch=i386,x86_64,arm,arm64 __CxxExceptionFilter(ptr ptr long ptr)
+@@ -948,7 +948,7 @@
+ @ cdecl __iscsymf(long)
+ @ stub __iswcsym
+ @ stub __iswcsymf
+-@ stub -arch=arm __jump_unwind
++@ stdcall -arch=arm __jump_unwind(ptr ptr) ntdll.__jump_unwind
+ # extern __lconv
+ @ cdecl __lconv_init()
+ @ cdecl -arch=i386 -norelay __libm_sse2_acos()
+diff --git a/dlls/msvcr120/msvcr120.spec b/dlls/msvcr120/msvcr120.spec
+index 68855b90096..4cafd8ba247 100644
+--- a/dlls/msvcr120/msvcr120.spec
++++ b/dlls/msvcr120/msvcr120.spec
+@@ -856,7 +856,7 @@
+ @ cdecl __AdjustPointer(ptr ptr)
+ @ stub __BuildCatchObject
+ @ stub __BuildCatchObjectHelper
+-@ stdcall -arch=x86_64 __C_specific_handler(ptr long ptr ptr) ntdll.__C_specific_handler
++@ stdcall -arch=x86_64,arm __C_specific_handler(ptr long ptr ptr) ntdll.__C_specific_handler
+ @ cdecl -arch=i386,x86_64,arm,arm64 __CppXcptFilter(long ptr)
+ @ cdecl -arch=i386,x86_64,arm,arm64 __CxxDetectRethrow(ptr)
+ @ cdecl -arch=i386,x86_64,arm,arm64 __CxxExceptionFilter(ptr ptr long ptr)
+@@ -938,7 +938,7 @@
+ @ cdecl __iscsymf(long)
+ @ stub __iswcsym
+ @ stub __iswcsymf
+-@ stub -arch=arm __jump_unwind
++@ stdcall -arch=arm __jump_unwind(ptr ptr) ntdll.__jump_unwind
+ # extern __lconv
+ @ cdecl __lconv_init()
+ @ cdecl -arch=i386 -norelay __libm_sse2_acos()
+diff --git a/dlls/msvcr120_app/msvcr120_app.spec b/dlls/msvcr120_app/msvcr120_app.spec
+index eabb304dd6d..d964de1fb36 100644
+--- a/dlls/msvcr120_app/msvcr120_app.spec
++++ b/dlls/msvcr120_app/msvcr120_app.spec
+@@ -850,7 +850,7 @@
+ @ cdecl __AdjustPointer(ptr ptr) msvcr120.__AdjustPointer
+ @ stub __BuildCatchObject
+ @ stub __BuildCatchObjectHelper
+-@ stdcall -arch=x86_64 __C_specific_handler(ptr long ptr ptr) msvcr120.__C_specific_handler
++@ stdcall -arch=x86_64,arm __C_specific_handler(ptr long ptr ptr) msvcr120.__C_specific_handler
+ @ cdecl -arch=i386,x86_64,arm,arm64 __CppXcptFilter(long ptr) msvcr120.__CppXcptFilter
+ @ cdecl -arch=i386,x86_64,arm,arm64 __CxxDetectRethrow(ptr) msvcr120.__CxxDetectRethrow
+ @ cdecl -arch=i386,x86_64,arm,arm64 __CxxExceptionFilter(ptr ptr long ptr) msvcr120.__CxxExceptionFilter
+@@ -914,7 +914,7 @@
+ @ cdecl __iscsymf(long) msvcr120.__iscsymf
+ @ stub __iswcsym
+ @ stub __iswcsymf
+-@ stub -arch=arm __jump_unwind
++@ stdcall -arch=arm __jump_unwind(ptr ptr) msvcr120.__jump_unwind
+ # extern __lconv
+ @ cdecl __lconv_init() msvcr120.__lconv_init
+ @ cdecl -arch=i386 -norelay __libm_sse2_acos() msvcr120.__libm_sse2_acos
+diff --git a/dlls/msvcrt/msvcrt.spec b/dlls/msvcrt/msvcrt.spec
+index de7cf0116d8..3aab3600e1d 100644
+--- a/dlls/msvcrt/msvcrt.spec
++++ b/dlls/msvcrt/msvcrt.spec
+@@ -172,7 +172,7 @@
+ @ extern _HUGE MSVCRT__HUGE
+ @ cdecl _Strftime(ptr long str ptr ptr)
+ @ cdecl _XcptFilter(long ptr)
+-@ stdcall -arch=x86_64,arm64 __C_specific_handler(ptr long ptr ptr) ntdll.__C_specific_handler
++@ stdcall -arch=x86_64,arm,arm64 __C_specific_handler(ptr long ptr ptr) ntdll.__C_specific_handler
+ @ cdecl -arch=i386,x86_64,arm,arm64 __CppXcptFilter(long ptr)
+ # stub __CxxCallUnwindDelDtor
+ # stub __CxxCallUnwindDtor
+@@ -218,6 +218,7 @@
+ @ cdecl __isascii(long)
+ @ cdecl __iscsym(long)
+ @ cdecl __iscsymf(long)
++@ stdcall -arch=arm __jump_unwind(ptr ptr) ntdll.__jump_unwind
+ @ extern __lc_codepage MSVCRT___lc_codepage
+ @ stub __lc_collate
+ @ extern __lc_collate_cp MSVCRT___lc_collate_cp
+
+From f3576a0590260162cf6a03745f48d69d05ef428c Mon Sep 17 00:00:00 2001
+From: Piotr Caban <piotr@codeweavers.com>
+Date: Thu, 19 May 2022 16:54:46 +0200
+Subject: [PATCH] msvcr120: Add missing _StructuredTaskCollection destructor
+ spec file entry.
+
+Signed-off-by: Piotr Caban <piotr@codeweavers.com>
+Signed-off-by: Alexandre Julliard <julliard@winehq.org>
+---
+ dlls/msvcr120/msvcr120.spec | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/dlls/msvcr120/msvcr120.spec b/dlls/msvcr120/msvcr120.spec
+index 4cafd8ba247..aa00853d5cd 100644
+--- a/dlls/msvcr120/msvcr120.spec
++++ b/dlls/msvcr120/msvcr120.spec
+@@ -290,6 +290,7 @@
+ @ stub -arch=arm ??1_SpinLock@details@Concurrency@@QAA@XZ
+ @ stub -arch=i386 ??1_SpinLock@details@Concurrency@@QAE@XZ
+ @ stub -arch=win64 ??1_SpinLock@details@Concurrency@@QEAA@XZ
++@ stub -arch=arm ??1_StructuredTaskCollection@details@Concurrency@@QAA@XZ
+ @ stub -arch=i386 ??1_StructuredTaskCollection@details@Concurrency@@QAE@XZ
+ @ stub -arch=win64 ??1_StructuredTaskCollection@details@Concurrency@@QEAA@XZ
+ @ stub -arch=arm ??1_TaskCollection@details@Concurrency@@QAA@XZ
+
+From 7af93f497c3e71f69511743f42b86b2ef5e13b32 Mon Sep 17 00:00:00 2001
+From: Piotr Caban <piotr@codeweavers.com>
+Date: Mon, 25 Apr 2022 18:34:31 +0200
+Subject: [PATCH] msvcrt: Use TICKSPERMSEC define in concurrency functions.
+
+Signed-off-by: Piotr Caban <piotr@codeweavers.com>
+Signed-off-by: Alexandre Julliard <julliard@winehq.org>
+---
+ dlls/msvcrt/concurrency.c | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/dlls/msvcrt/concurrency.c b/dlls/msvcrt/concurrency.c
+index f9a7f489ceb..c26478f36cd 100644
+--- a/dlls/msvcrt/concurrency.c
++++ b/dlls/msvcrt/concurrency.c
+@@ -1880,8 +2247,8 @@ bool __thiscall critical_section_try_loc
+ 
+         last->next = q;
+         GetSystemTimeAsFileTime(&ft);
+-        to.QuadPart = ((LONGLONG)ft.dwHighDateTime<<32) +
+-            ft.dwLowDateTime + (LONGLONG)timeout*10000;
++        to.QuadPart = ((LONGLONG)ft.dwHighDateTime << 32) +
++            ft.dwLowDateTime + (LONGLONG)timeout * TICKSPERMSEC;
+         status = NtWaitForKeyedEvent(0, q, 0, &to);
+         if(status == STATUS_TIMEOUT) {
+             if(!InterlockedExchange(&q->free, TRUE))
+@@ -2128,7 +2128,7 @@ unsigned int __cdecl _GetConcurrency(void)
+ static inline PLARGE_INTEGER evt_timeout(PLARGE_INTEGER pTime, unsigned int timeout)
+ {
+     if(timeout == COOPERATIVE_TIMEOUT_INFINITE) return NULL;
+-    pTime->QuadPart = (ULONGLONG)timeout * -10000;
++    pTime->QuadPart = (ULONGLONG)timeout * -TICKSPERMSEC;
+     return pTime;
+ }
+ 
+@@ -2396,7 +2396,7 @@ bool __thiscall _Condition_variable_wait_for(_Condition_variable *this,
+ 
+     GetSystemTimeAsFileTime(&ft);
+     to.QuadPart = ((LONGLONG)ft.dwHighDateTime << 32) +
+-        ft.dwLowDateTime + (LONGLONG)timeout * 10000;
++        ft.dwLowDateTime + (LONGLONG)timeout * TICKSPERMSEC;
+     while (q->next != CV_WAKE) {
+         status = RtlWaitOnAddress(&q->next, &next, sizeof(next), &to);
+         if(status == STATUS_TIMEOUT) {
+
+
+From ccde147084d64e9a7a96d2b0b383d3b911abd527 Mon Sep 17 00:00:00 2001
+From: Torge Matthies <tmatthies@codeweavers.com>
+Date: Mon, 4 Jul 2022 20:28:53 +0200
+Subject: [PATCH] msvcr120: Add
+ _StructuredTaskCollection::_StructuredTaskCollection_dtor stub.
+
+Signed-off-by: Torge Matthies <tmatthies@codeweavers.com>
+Signed-off-by: Piotr Caban <piotr@codeweavers.com>
+Signed-off-by: Alexandre Julliard <julliard@winehq.org>
+---
+ dlls/concrt140/concrt140.spec       |  6 +++---
+ dlls/msvcr120/msvcr120.spec         |  6 +++---
+ dlls/msvcr120_app/msvcr120_app.spec |  4 +++-
+ dlls/msvcrt/concurrency.c           | 13 +++++++++++++
+ 4 files changed, 22 insertions(+), 7 deletions(-)
+
+diff --git a/dlls/concrt140/concrt140.spec b/dlls/concrt140/concrt140.spec
+index 3257d61bb37..ad6e90d725c 100644
+--- a/dlls/concrt140/concrt140.spec
++++ b/dlls/concrt140/concrt140.spec
+@@ -267,9 +267,9 @@
+ @ stub -arch=arm ??1_SpinLock@details@Concurrency@@QAA@XZ
+ @ stub -arch=i386 ??1_SpinLock@details@Concurrency@@QAE@XZ
+ @ stub -arch=win64 ??1_SpinLock@details@Concurrency@@QEAA@XZ
+-@ stub -arch=arm ??1_StructuredTaskCollection@details@Concurrency@@QAA@XZ
+-@ stub -arch=i386 ??1_StructuredTaskCollection@details@Concurrency@@QAE@XZ
+-@ stub -arch=win64 ??1_StructuredTaskCollection@details@Concurrency@@QEAA@XZ
++@ cdecl -arch=arm ??1_StructuredTaskCollection@details@Concurrency@@QAA@XZ(ptr) _StructuredTaskCollection_dtor
++@ thiscall -arch=i386 ??1_StructuredTaskCollection@details@Concurrency@@QAE@XZ(ptr) _StructuredTaskCollection_dtor
++@ cdecl -arch=win64 ??1_StructuredTaskCollection@details@Concurrency@@QEAA@XZ(ptr) _StructuredTaskCollection_dtor
+ @ stub -arch=arm ??1_TaskCollection@details@Concurrency@@QAA@XZ
+ @ stub -arch=i386 ??1_TaskCollection@details@Concurrency@@QAE@XZ
+ @ stub -arch=win64 ??1_TaskCollection@details@Concurrency@@QEAA@XZ
+diff --git a/dlls/msvcr120/msvcr120.spec b/dlls/msvcr120/msvcr120.spec
+index aa00853d5cd..8afab0cecae 100644
+--- a/dlls/msvcr120/msvcr120.spec
++++ b/dlls/msvcr120/msvcr120.spec
+@@ -290,9 +290,9 @@
+ @ stub -arch=arm ??1_SpinLock@details@Concurrency@@QAA@XZ
+ @ stub -arch=i386 ??1_SpinLock@details@Concurrency@@QAE@XZ
+ @ stub -arch=win64 ??1_SpinLock@details@Concurrency@@QEAA@XZ
+-@ stub -arch=arm ??1_StructuredTaskCollection@details@Concurrency@@QAA@XZ
+-@ stub -arch=i386 ??1_StructuredTaskCollection@details@Concurrency@@QAE@XZ
+-@ stub -arch=win64 ??1_StructuredTaskCollection@details@Concurrency@@QEAA@XZ
++@ cdecl -arch=arm ??1_StructuredTaskCollection@details@Concurrency@@QAA@XZ(ptr) _StructuredTaskCollection_dtor
++@ thiscall -arch=i386 ??1_StructuredTaskCollection@details@Concurrency@@QAE@XZ(ptr) _StructuredTaskCollection_dtor
++@ cdecl -arch=win64 ??1_StructuredTaskCollection@details@Concurrency@@QEAA@XZ(ptr) _StructuredTaskCollection_dtor
+ @ stub -arch=arm ??1_TaskCollection@details@Concurrency@@QAA@XZ
+ @ stub -arch=i386 ??1_TaskCollection@details@Concurrency@@QAE@XZ
+ @ stub -arch=win64 ??1_TaskCollection@details@Concurrency@@QEAA@XZ
+diff --git a/dlls/msvcr120_app/msvcr120_app.spec b/dlls/msvcr120_app/msvcr120_app.spec
+index d964de1fb36..c45965d8acd 100644
+--- a/dlls/msvcr120_app/msvcr120_app.spec
++++ b/dlls/msvcr120_app/msvcr120_app.spec
+@@ -288,7 +288,9 @@
+ @ stub -arch=arm ??1_SpinLock@details@Concurrency@@QAA@XZ
+ @ stub -arch=i386 ??1_SpinLock@details@Concurrency@@QAE@XZ
+ @ stub -arch=win64 ??1_SpinLock@details@Concurrency@@QEAA@XZ
+-@ stub -arch=i386 ??1_StructuredTaskCollection@details@Concurrency@@QAE@XZ
++@ cdecl -arch=arm ??1_StructuredTaskCollection@details@Concurrency@@QAA@XZ(ptr) msvcr120.??1_StructuredTaskCollection@details@Concurrency@@QAA@XZ
++@ thiscall -arch=i386 ??1_StructuredTaskCollection@details@Concurrency@@QAE@XZ(ptr) msvcr120.??1_StructuredTaskCollection@details@Concurrency@@QAE@XZ
++@ cdecl -arch=win64 ??1_StructuredTaskCollection@details@Concurrency@@QEAA@XZ(ptr) msvcr120.??1_StructuredTaskCollection@details@Concurrency@@QEAA@XZ
+ @ stub -arch=arm ??1_TaskCollection@details@Concurrency@@QAA@XZ
+ @ stub -arch=i386 ??1_TaskCollection@details@Concurrency@@QAE@XZ
+ @ stub -arch=win64 ??1_TaskCollection@details@Concurrency@@QEAA@XZ
+diff --git a/dlls/msvcrt/concurrency.c b/dlls/msvcrt/concurrency.c
+index c26478f36cd..05ed0ef876f 100644
+--- a/dlls/msvcrt/concurrency.c
++++ b/dlls/msvcrt/concurrency.c
+@@ -1760,6 +1760,19 @@ _StructuredTaskCollection* __thiscall _StructuredTaskCollection_ctor(
+ 
+ #endif /* _MSVCR_VER >= 110 */
+ 
++#if _MSVCR_VER >= 120
++
++/* ??1_StructuredTaskCollection@details@Concurrency@@QAA@XZ */
++/* ??1_StructuredTaskCollection@details@Concurrency@@QAE@XZ */
++/* ??1_StructuredTaskCollection@details@Concurrency@@QEAA@XZ */
++DEFINE_THISCALL_WRAPPER(_StructuredTaskCollection_dtor, 4)
++void __thiscall _StructuredTaskCollection_dtor(_StructuredTaskCollection *this)
++{
++    FIXME("(%p): stub!\n", this);
++}
++
++#endif /* _MSVCR_VER >= 120 */
++
+ /* ??0critical_section@Concurrency@@QAE@XZ */
+ /* ??0critical_section@Concurrency@@QEAA@XZ */
+ DEFINE_THISCALL_WRAPPER(critical_section_ctor, 4)
+
+From d31e54d61c16afc8af28b6fd960507f7fd2ac283 Mon Sep 17 00:00:00 2001
+From: Torge Matthies <tmatthies@codeweavers.com>
+Date: Mon, 4 Jul 2022 20:28:56 +0200
+Subject: [PATCH] msvcr100: Add _StructuredTaskCollection::_Schedule stub.
+
+Wine-Bug: https://bugs.winehq.org/show_bug.cgi?id=47375
+Signed-off-by: Torge Matthies <tmatthies@codeweavers.com>
+Signed-off-by: Piotr Caban <piotr@codeweavers.com>
+Signed-off-by: Alexandre Julliard <julliard@winehq.org>
+---
+ dlls/concrt140/concrt140.spec       |  6 +++---
+ dlls/msvcr100/msvcr100.spec         |  4 ++--
+ dlls/msvcr110/msvcr110.spec         |  6 +++---
+ dlls/msvcr120/msvcr120.spec         |  6 +++---
+ dlls/msvcr120_app/msvcr120_app.spec |  6 +++---
+ dlls/msvcrt/concurrency.c           | 15 +++++++++++++++
+ 6 files changed, 29 insertions(+), 14 deletions(-)
+
+diff --git a/dlls/concrt140/concrt140.spec b/dlls/concrt140/concrt140.spec
+index ad6e90d725c..8474bde4b54 100644
+--- a/dlls/concrt140/concrt140.spec
++++ b/dlls/concrt140/concrt140.spec
+@@ -594,9 +594,9 @@
+ @ stub -arch=arm ?_RunAndWait@_TaskCollection@details@Concurrency@@QAA?AW4_TaskCollectionStatus@23@PAV_UnrealizedChore@23@@Z
+ @ stub -arch=i386 ?_RunAndWait@_TaskCollection@details@Concurrency@@QAG?AW4_TaskCollectionStatus@23@PAV_UnrealizedChore@23@@Z
+ @ stub -arch=win64 ?_RunAndWait@_TaskCollection@details@Concurrency@@QEAA?AW4_TaskCollectionStatus@23@PEAV_UnrealizedChore@23@@Z
+-@ stub -arch=arm ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAAXPAV_UnrealizedChore@23@@Z
+-@ stub -arch=i386 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAEXPAV_UnrealizedChore@23@@Z
+-@ stub -arch=win64 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QEAAXPEAV_UnrealizedChore@23@@Z
++@ cdecl -arch=arm ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAAXPAV_UnrealizedChore@23@@Z(ptr ptr) _StructuredTaskCollection__Schedule
++@ thiscall -arch=i386 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAEXPAV_UnrealizedChore@23@@Z(ptr ptr) _StructuredTaskCollection__Schedule
++@ cdecl -arch=win64 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QEAAXPEAV_UnrealizedChore@23@@Z(ptr ptr) _StructuredTaskCollection__Schedule
+ @ stub -arch=arm ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAAXPAV_UnrealizedChore@23@PAVlocation@3@@Z
+ @ stub -arch=i386 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAEXPAV_UnrealizedChore@23@PAVlocation@3@@Z
+ @ stub -arch=win64 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QEAAXPEAV_UnrealizedChore@23@PEAVlocation@3@@Z
+diff --git a/dlls/msvcr100/msvcr100.spec b/dlls/msvcr100/msvcr100.spec
+index 19b4cbe96d7..32c1658ebe9 100644
+--- a/dlls/msvcr100/msvcr100.spec
++++ b/dlls/msvcr100/msvcr100.spec
+@@ -363,8 +363,8 @@
+ @ stub -arch=win64 ?_RunAndWait@_StructuredTaskCollection@details@Concurrency@@QEAA?AW4_TaskCollectionStatus@23@PEAV_UnrealizedChore@23@@Z
+ @ stub -arch=win32 ?_RunAndWait@_TaskCollection@details@Concurrency@@QAG?AW4_TaskCollectionStatus@23@PAV_UnrealizedChore@23@@Z
+ @ stub -arch=win64 ?_RunAndWait@_TaskCollection@details@Concurrency@@QEAA?AW4_TaskCollectionStatus@23@PEAV_UnrealizedChore@23@@Z
+-@ stub -arch=win32 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAEXPAV_UnrealizedChore@23@@Z
+-@ stub -arch=win64 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QEAAXPEAV_UnrealizedChore@23@@Z
++@ thiscall -arch=win32 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAEXPAV_UnrealizedChore@23@@Z(ptr ptr) _StructuredTaskCollection__Schedule
++@ cdecl -arch=win64 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QEAAXPEAV_UnrealizedChore@23@@Z(ptr ptr) _StructuredTaskCollection__Schedule
+ @ stub -arch=win32 ?_Schedule@_TaskCollection@details@Concurrency@@QAEXPAV_UnrealizedChore@23@@Z
+ @ stub -arch=win64 ?_Schedule@_TaskCollection@details@Concurrency@@QEAAXPEAV_UnrealizedChore@23@@Z
+ @ thiscall -arch=win32 ?_SetSpinCount@?$_SpinWait@$00@details@Concurrency@@QAEXI@Z(ptr long) SpinWait__SetSpinCount
+diff --git a/dlls/msvcr110/msvcr110.spec b/dlls/msvcr110/msvcr110.spec
+index 7bdae76cf68..b1e6ba548a4 100644
+--- a/dlls/msvcr110/msvcr110.spec
++++ b/dlls/msvcr110/msvcr110.spec
+@@ -614,9 +614,9 @@
+ @ stub -arch=arm ?_RunAndWait@_TaskCollection@details@Concurrency@@QAA?AW4_TaskCollectionStatus@23@PAV_UnrealizedChore@23@@Z
+ @ stub -arch=i386 ?_RunAndWait@_TaskCollection@details@Concurrency@@QAG?AW4_TaskCollectionStatus@23@PAV_UnrealizedChore@23@@Z
+ @ stub -arch=win64 ?_RunAndWait@_TaskCollection@details@Concurrency@@QEAA?AW4_TaskCollectionStatus@23@PEAV_UnrealizedChore@23@@Z
+-@ stub -arch=arm ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAAXPAV_UnrealizedChore@23@@Z
+-@ stub -arch=i386 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAEXPAV_UnrealizedChore@23@@Z
+-@ stub -arch=win64 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QEAAXPEAV_UnrealizedChore@23@@Z
++@ cdecl -arch=arm ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAAXPAV_UnrealizedChore@23@@Z(ptr ptr) _StructuredTaskCollection__Schedule
++@ thiscall -arch=i386 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAEXPAV_UnrealizedChore@23@@Z(ptr ptr) _StructuredTaskCollection__Schedule
++@ cdecl -arch=win64 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QEAAXPEAV_UnrealizedChore@23@@Z(ptr ptr) _StructuredTaskCollection__Schedule
+ @ stub -arch=arm ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAAXPAV_UnrealizedChore@23@PAVlocation@3@@Z
+ @ stub -arch=i386 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAEXPAV_UnrealizedChore@23@PAVlocation@3@@Z
+ @ stub -arch=win64 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QEAAXPEAV_UnrealizedChore@23@PEAVlocation@3@@Z
+diff --git a/dlls/msvcr120/msvcr120.spec b/dlls/msvcr120/msvcr120.spec
+index 8afab0cecae..9a35919a85b 100644
+--- a/dlls/msvcr120/msvcr120.spec
++++ b/dlls/msvcr120/msvcr120.spec
+@@ -597,9 +597,9 @@
+ @ stub -arch=arm ?_RunAndWait@_TaskCollection@details@Concurrency@@QAA?AW4_TaskCollectionStatus@23@PAV_UnrealizedChore@23@@Z
+ @ stub -arch=i386 ?_RunAndWait@_TaskCollection@details@Concurrency@@QAG?AW4_TaskCollectionStatus@23@PAV_UnrealizedChore@23@@Z
+ @ stub -arch=win64 ?_RunAndWait@_TaskCollection@details@Concurrency@@QEAA?AW4_TaskCollectionStatus@23@PEAV_UnrealizedChore@23@@Z
+-@ stub -arch=arm ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAAXPAV_UnrealizedChore@23@@Z
+-@ stub -arch=i386 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAEXPAV_UnrealizedChore@23@@Z
+-@ stub -arch=win64 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QEAAXPEAV_UnrealizedChore@23@@Z
++@ cdecl -arch=arm ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAAXPAV_UnrealizedChore@23@@Z(ptr ptr) _StructuredTaskCollection__Schedule
++@ thiscall -arch=i386 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAEXPAV_UnrealizedChore@23@@Z(ptr ptr) _StructuredTaskCollection__Schedule
++@ cdecl -arch=win64 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QEAAXPEAV_UnrealizedChore@23@@Z(ptr ptr) _StructuredTaskCollection__Schedule
+ @ stub -arch=arm ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAAXPAV_UnrealizedChore@23@PAVlocation@3@@Z
+ @ stub -arch=i386 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAEXPAV_UnrealizedChore@23@PAVlocation@3@@Z
+ @ stub -arch=win64 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QEAAXPEAV_UnrealizedChore@23@PEAVlocation@3@@Z
+diff --git a/dlls/msvcr120_app/msvcr120_app.spec b/dlls/msvcr120_app/msvcr120_app.spec
+index c45965d8acd..3419ca3cbe7 100644
+--- a/dlls/msvcr120_app/msvcr120_app.spec
++++ b/dlls/msvcr120_app/msvcr120_app.spec
+@@ -594,9 +594,9 @@
+ @ stub -arch=arm ?_RunAndWait@_TaskCollection@details@Concurrency@@QAA?AW4_TaskCollectionStatus@23@PAV_UnrealizedChore@23@@Z
+ @ stub -arch=i386 ?_RunAndWait@_TaskCollection@details@Concurrency@@QAG?AW4_TaskCollectionStatus@23@PAV_UnrealizedChore@23@@Z
+ @ stub -arch=win64 ?_RunAndWait@_TaskCollection@details@Concurrency@@QEAA?AW4_TaskCollectionStatus@23@PEAV_UnrealizedChore@23@@Z
+-@ stub -arch=arm ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAAXPAV_UnrealizedChore@23@@Z
+-@ stub -arch=i386 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAEXPAV_UnrealizedChore@23@@Z
+-@ stub -arch=win64 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QEAAXPEAV_UnrealizedChore@23@@Z
++@ cdecl -arch=arm ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAAXPAV_UnrealizedChore@23@@Z(ptr ptr) msvcr120.?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAAXPAV_UnrealizedChore@23@@Z
++@ thiscall -arch=i386 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAEXPAV_UnrealizedChore@23@@Z(ptr ptr) msvcr120.?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAEXPAV_UnrealizedChore@23@@Z
++@ cdecl -arch=win64 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QEAAXPEAV_UnrealizedChore@23@@Z(ptr ptr) msvcr120.?_Schedule@_StructuredTaskCollection@details@Concurrency@@QEAAXPEAV_UnrealizedChore@23@@Z
+ @ stub -arch=arm ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAAXPAV_UnrealizedChore@23@PAVlocation@3@@Z
+ @ stub -arch=i386 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAEXPAV_UnrealizedChore@23@PAVlocation@3@@Z
+ @ stub -arch=win64 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QEAAXPEAV_UnrealizedChore@23@PEAVlocation@3@@Z
+diff --git a/dlls/msvcrt/concurrency.c b/dlls/msvcrt/concurrency.c
+index 05ed0ef876f..b12362294db 100644
+--- a/dlls/msvcrt/concurrency.c
++++ b/dlls/msvcrt/concurrency.c
+@@ -164,6 +164,11 @@ typedef struct
+     yield_func yield_func;
+ } SpinWait;
+ 
++typedef struct
++{
++    char dummy;
++} _UnrealizedChore;
++
+ typedef struct
+ {
+     char dummy;
+@@ -1773,6 +1778,16 @@ void __thiscall _StructuredTaskCollection_dtor(_StructuredTaskCollection *this)
+ 
+ #endif /* _MSVCR_VER >= 120 */
+ 
++/* ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAAXPAV_UnrealizedChore@23@@Z */
++/* ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAEXPAV_UnrealizedChore@23@@Z */
++/* ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QEAAXPEAV_UnrealizedChore@23@@Z */
++DEFINE_THISCALL_WRAPPER(_StructuredTaskCollection__Schedule, 8)
++void __thiscall _StructuredTaskCollection__Schedule(
++        _StructuredTaskCollection *this, _UnrealizedChore *chore)
++{
++    FIXME("(%p %p): stub!\n", this, chore);
++}
++
+ /* ??0critical_section@Concurrency@@QAE@XZ */
+ /* ??0critical_section@Concurrency@@QEAA@XZ */
+ DEFINE_THISCALL_WRAPPER(critical_section_ctor, 4)
+
+From 09a6881ca2988463e9136b7912e11024e51ae411 Mon Sep 17 00:00:00 2001
+From: Torge Matthies <tmatthies@codeweavers.com>
+Date: Mon, 4 Jul 2022 20:28:58 +0200
+Subject: [PATCH] msvcr110: Add _StructuredTaskCollection::_Schedule_loc stub.
+
+Signed-off-by: Torge Matthies <tmatthies@codeweavers.com>
+Signed-off-by: Piotr Caban <piotr@codeweavers.com>
+Signed-off-by: Alexandre Julliard <julliard@winehq.org>
+---
+ dlls/concrt140/concrt140.spec       |  6 +++---
+ dlls/msvcr110/msvcr110.spec         |  6 +++---
+ dlls/msvcr120/msvcr120.spec         |  6 +++---
+ dlls/msvcr120_app/msvcr120_app.spec |  6 +++---
+ dlls/msvcrt/concurrency.c           | 15 +++++++++++++++
+ 5 files changed, 27 insertions(+), 12 deletions(-)
+
+diff --git a/dlls/concrt140/concrt140.spec b/dlls/concrt140/concrt140.spec
+index 8474bde4b54..5ba0477953f 100644
+--- a/dlls/concrt140/concrt140.spec
++++ b/dlls/concrt140/concrt140.spec
+@@ -597,9 +597,9 @@
+ @ cdecl -arch=arm ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAAXPAV_UnrealizedChore@23@@Z(ptr ptr) _StructuredTaskCollection__Schedule
+ @ thiscall -arch=i386 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAEXPAV_UnrealizedChore@23@@Z(ptr ptr) _StructuredTaskCollection__Schedule
+ @ cdecl -arch=win64 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QEAAXPEAV_UnrealizedChore@23@@Z(ptr ptr) _StructuredTaskCollection__Schedule
+-@ stub -arch=arm ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAAXPAV_UnrealizedChore@23@PAVlocation@3@@Z
+-@ stub -arch=i386 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAEXPAV_UnrealizedChore@23@PAVlocation@3@@Z
+-@ stub -arch=win64 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QEAAXPEAV_UnrealizedChore@23@PEAVlocation@3@@Z
++@ cdecl -arch=arm ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAAXPAV_UnrealizedChore@23@PAVlocation@3@@Z(ptr ptr ptr) _StructuredTaskCollection__Schedule_loc
++@ thiscall -arch=i386 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAEXPAV_UnrealizedChore@23@PAVlocation@3@@Z(ptr ptr ptr) _StructuredTaskCollection__Schedule_loc
++@ cdecl -arch=win64 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QEAAXPEAV_UnrealizedChore@23@PEAVlocation@3@@Z(ptr ptr ptr) _StructuredTaskCollection__Schedule_loc
+ @ stub -arch=arm ?_Schedule@_TaskCollection@details@Concurrency@@QAAXPAV_UnrealizedChore@23@@Z
+ @ stub -arch=i386 ?_Schedule@_TaskCollection@details@Concurrency@@QAEXPAV_UnrealizedChore@23@@Z
+ @ stub -arch=win64 ?_Schedule@_TaskCollection@details@Concurrency@@QEAAXPEAV_UnrealizedChore@23@@Z
+diff --git a/dlls/msvcr110/msvcr110.spec b/dlls/msvcr110/msvcr110.spec
+index b1e6ba548a4..51dc5329ad0 100644
+--- a/dlls/msvcr110/msvcr110.spec
++++ b/dlls/msvcr110/msvcr110.spec
+@@ -617,9 +617,9 @@
+ @ cdecl -arch=arm ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAAXPAV_UnrealizedChore@23@@Z(ptr ptr) _StructuredTaskCollection__Schedule
+ @ thiscall -arch=i386 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAEXPAV_UnrealizedChore@23@@Z(ptr ptr) _StructuredTaskCollection__Schedule
+ @ cdecl -arch=win64 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QEAAXPEAV_UnrealizedChore@23@@Z(ptr ptr) _StructuredTaskCollection__Schedule
+-@ stub -arch=arm ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAAXPAV_UnrealizedChore@23@PAVlocation@3@@Z
+-@ stub -arch=i386 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAEXPAV_UnrealizedChore@23@PAVlocation@3@@Z
+-@ stub -arch=win64 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QEAAXPEAV_UnrealizedChore@23@PEAVlocation@3@@Z
++@ cdecl -arch=arm ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAAXPAV_UnrealizedChore@23@PAVlocation@3@@Z(ptr ptr ptr) _StructuredTaskCollection__Schedule_loc
++@ thiscall -arch=i386 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAEXPAV_UnrealizedChore@23@PAVlocation@3@@Z(ptr ptr ptr) _StructuredTaskCollection__Schedule_loc
++@ cdecl -arch=win64 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QEAAXPEAV_UnrealizedChore@23@PEAVlocation@3@@Z(ptr ptr ptr) _StructuredTaskCollection__Schedule_loc
+ @ stub -arch=arm ?_Schedule@_TaskCollection@details@Concurrency@@QAAXPAV_UnrealizedChore@23@@Z
+ @ stub -arch=i386 ?_Schedule@_TaskCollection@details@Concurrency@@QAEXPAV_UnrealizedChore@23@@Z
+ @ stub -arch=win64 ?_Schedule@_TaskCollection@details@Concurrency@@QEAAXPEAV_UnrealizedChore@23@@Z
+diff --git a/dlls/msvcr120/msvcr120.spec b/dlls/msvcr120/msvcr120.spec
+index 9a35919a85b..6e946a72eed 100644
+--- a/dlls/msvcr120/msvcr120.spec
++++ b/dlls/msvcr120/msvcr120.spec
+@@ -600,9 +600,9 @@
+ @ cdecl -arch=arm ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAAXPAV_UnrealizedChore@23@@Z(ptr ptr) _StructuredTaskCollection__Schedule
+ @ thiscall -arch=i386 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAEXPAV_UnrealizedChore@23@@Z(ptr ptr) _StructuredTaskCollection__Schedule
+ @ cdecl -arch=win64 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QEAAXPEAV_UnrealizedChore@23@@Z(ptr ptr) _StructuredTaskCollection__Schedule
+-@ stub -arch=arm ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAAXPAV_UnrealizedChore@23@PAVlocation@3@@Z
+-@ stub -arch=i386 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAEXPAV_UnrealizedChore@23@PAVlocation@3@@Z
+-@ stub -arch=win64 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QEAAXPEAV_UnrealizedChore@23@PEAVlocation@3@@Z
++@ cdecl -arch=arm ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAAXPAV_UnrealizedChore@23@PAVlocation@3@@Z(ptr ptr ptr) _StructuredTaskCollection__Schedule_loc
++@ thiscall -arch=i386 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAEXPAV_UnrealizedChore@23@PAVlocation@3@@Z(ptr ptr ptr) _StructuredTaskCollection__Schedule_loc
++@ cdecl -arch=win64 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QEAAXPEAV_UnrealizedChore@23@PEAVlocation@3@@Z(ptr ptr ptr) _StructuredTaskCollection__Schedule_loc
+ @ stub -arch=arm ?_Schedule@_TaskCollection@details@Concurrency@@QAAXPAV_UnrealizedChore@23@@Z
+ @ stub -arch=i386 ?_Schedule@_TaskCollection@details@Concurrency@@QAEXPAV_UnrealizedChore@23@@Z
+ @ stub -arch=win64 ?_Schedule@_TaskCollection@details@Concurrency@@QEAAXPEAV_UnrealizedChore@23@@Z
+diff --git a/dlls/msvcr120_app/msvcr120_app.spec b/dlls/msvcr120_app/msvcr120_app.spec
+index 3419ca3cbe7..0f107ed5084 100644
+--- a/dlls/msvcr120_app/msvcr120_app.spec
++++ b/dlls/msvcr120_app/msvcr120_app.spec
+@@ -597,9 +597,9 @@
+ @ cdecl -arch=arm ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAAXPAV_UnrealizedChore@23@@Z(ptr ptr) msvcr120.?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAAXPAV_UnrealizedChore@23@@Z
+ @ thiscall -arch=i386 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAEXPAV_UnrealizedChore@23@@Z(ptr ptr) msvcr120.?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAEXPAV_UnrealizedChore@23@@Z
+ @ cdecl -arch=win64 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QEAAXPEAV_UnrealizedChore@23@@Z(ptr ptr) msvcr120.?_Schedule@_StructuredTaskCollection@details@Concurrency@@QEAAXPEAV_UnrealizedChore@23@@Z
+-@ stub -arch=arm ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAAXPAV_UnrealizedChore@23@PAVlocation@3@@Z
+-@ stub -arch=i386 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAEXPAV_UnrealizedChore@23@PAVlocation@3@@Z
+-@ stub -arch=win64 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QEAAXPEAV_UnrealizedChore@23@PEAVlocation@3@@Z
++@ cdecl -arch=arm ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAAXPAV_UnrealizedChore@23@PAVlocation@3@@Z(ptr ptr ptr) msvcr120.?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAAXPAV_UnrealizedChore@23@PAVlocation@3@@Z
++@ thiscall -arch=i386 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAEXPAV_UnrealizedChore@23@PAVlocation@3@@Z(ptr ptr ptr) msvcr120.?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAEXPAV_UnrealizedChore@23@PAVlocation@3@@Z
++@ cdecl -arch=win64 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QEAAXPEAV_UnrealizedChore@23@PEAVlocation@3@@Z(ptr ptr ptr) msvcr120.?_Schedule@_StructuredTaskCollection@details@Concurrency@@QEAAXPEAV_UnrealizedChore@23@PEAVlocation@3@@Z
+ @ stub -arch=arm ?_Schedule@_TaskCollection@details@Concurrency@@QAAXPAV_UnrealizedChore@23@@Z
+ @ stub -arch=i386 ?_Schedule@_TaskCollection@details@Concurrency@@QAEXPAV_UnrealizedChore@23@@Z
+ @ stub -arch=win64 ?_Schedule@_TaskCollection@details@Concurrency@@QEAAXPEAV_UnrealizedChore@23@@Z
+diff --git a/dlls/msvcrt/concurrency.c b/dlls/msvcrt/concurrency.c
+index b12362294db..5a00b9e8af1 100644
+--- a/dlls/msvcrt/concurrency.c
++++ b/dlls/msvcrt/concurrency.c
+@@ -1778,6 +1778,21 @@ void __thiscall _StructuredTaskCollection_dtor(_StructuredTaskCollection *this)
+ 
+ #endif /* _MSVCR_VER >= 120 */
+ 
++#if _MSVCR_VER >= 110
++
++/* ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAAXPAV_UnrealizedChore@23@PAVlocation@3@@Z */
++/* ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAEXPAV_UnrealizedChore@23@PAVlocation@3@@Z */
++/* ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QEAAXPEAV_UnrealizedChore@23@PEAVlocation@3@@Z */
++DEFINE_THISCALL_WRAPPER(_StructuredTaskCollection__Schedule_loc, 12)
++void __thiscall _StructuredTaskCollection__Schedule_loc(
++        _StructuredTaskCollection *this, _UnrealizedChore *chore,
++        /*location*/void *placement)
++{
++    FIXME("(%p %p %p): stub!\n", this, chore, placement);
++}
++
++#endif /* _MSVCR_VER >= 110 */
++
+ /* ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAAXPAV_UnrealizedChore@23@@Z */
+ /* ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAEXPAV_UnrealizedChore@23@@Z */
+ /* ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QEAAXPEAV_UnrealizedChore@23@@Z */
+
+From 4b5c486aaef3950a5fedb8c57ac5be47db0788b6 Mon Sep 17 00:00:00 2001
+From: Torge Matthies <tmatthies@codeweavers.com>
+Date: Mon, 4 Jul 2022 20:29:03 +0200
+Subject: [PATCH] msvcr100: Add _StructuredTaskCollection::_RunAndWait stub.
+
+Signed-off-by: Torge Matthies <tmatthies@codeweavers.com>
+Signed-off-by: Piotr Caban <piotr@codeweavers.com>
+Signed-off-by: Alexandre Julliard <julliard@winehq.org>
+---
+ dlls/concrt140/concrt140.spec       |  6 +++---
+ dlls/msvcr100/msvcr100.spec         |  4 ++--
+ dlls/msvcr110/msvcr110.spec         |  6 +++---
+ dlls/msvcr120/msvcr120.spec         |  6 +++---
+ dlls/msvcr120_app/msvcr120_app.spec |  6 +++---
+ dlls/msvcrt/concurrency.c           | 11 +++++++++++
+ 6 files changed, 25 insertions(+), 14 deletions(-)
+
+diff --git a/dlls/concrt140/concrt140.spec b/dlls/concrt140/concrt140.spec
+index 5ba0477953f..2f26a39a5fa 100644
+--- a/dlls/concrt140/concrt140.spec
++++ b/dlls/concrt140/concrt140.spec
+@@ -588,9 +588,9 @@
+ @ cdecl -arch=arm ?_Reset@?$_SpinWait@$0A@@details@Concurrency@@IAAXXZ(ptr) SpinWait__Reset
+ @ thiscall -arch=i386 ?_Reset@?$_SpinWait@$0A@@details@Concurrency@@IAEXXZ(ptr) SpinWait__Reset
+ @ cdecl -arch=win64 ?_Reset@?$_SpinWait@$0A@@details@Concurrency@@IEAAXXZ(ptr) SpinWait__Reset
+-@ stub -arch=arm ?_RunAndWait@_StructuredTaskCollection@details@Concurrency@@QAA?AW4_TaskCollectionStatus@23@PAV_UnrealizedChore@23@@Z
+-@ stub -arch=i386 ?_RunAndWait@_StructuredTaskCollection@details@Concurrency@@QAG?AW4_TaskCollectionStatus@23@PAV_UnrealizedChore@23@@Z
+-@ stub -arch=win64 ?_RunAndWait@_StructuredTaskCollection@details@Concurrency@@QEAA?AW4_TaskCollectionStatus@23@PEAV_UnrealizedChore@23@@Z
++@ stdcall -arch=arm ?_RunAndWait@_StructuredTaskCollection@details@Concurrency@@QAA?AW4_TaskCollectionStatus@23@PAV_UnrealizedChore@23@@Z(ptr ptr) _StructuredTaskCollection__RunAndWait
++@ stdcall -arch=i386 ?_RunAndWait@_StructuredTaskCollection@details@Concurrency@@QAG?AW4_TaskCollectionStatus@23@PAV_UnrealizedChore@23@@Z(ptr ptr) _StructuredTaskCollection__RunAndWait
++@ stdcall -arch=win64 ?_RunAndWait@_StructuredTaskCollection@details@Concurrency@@QEAA?AW4_TaskCollectionStatus@23@PEAV_UnrealizedChore@23@@Z(ptr ptr) _StructuredTaskCollection__RunAndWait
+ @ stub -arch=arm ?_RunAndWait@_TaskCollection@details@Concurrency@@QAA?AW4_TaskCollectionStatus@23@PAV_UnrealizedChore@23@@Z
+ @ stub -arch=i386 ?_RunAndWait@_TaskCollection@details@Concurrency@@QAG?AW4_TaskCollectionStatus@23@PAV_UnrealizedChore@23@@Z
+ @ stub -arch=win64 ?_RunAndWait@_TaskCollection@details@Concurrency@@QEAA?AW4_TaskCollectionStatus@23@PEAV_UnrealizedChore@23@@Z
+diff --git a/dlls/msvcr100/msvcr100.spec b/dlls/msvcr100/msvcr100.spec
+index 32c1658ebe9..d77aca6a2c2 100644
+--- a/dlls/msvcr100/msvcr100.spec
++++ b/dlls/msvcr100/msvcr100.spec
+@@ -359,8 +359,8 @@
+ @ cdecl -arch=win64 ?_Reset@?$_SpinWait@$00@details@Concurrency@@IEAAXXZ(ptr) SpinWait__Reset
+ @ thiscall -arch=win32 ?_Reset@?$_SpinWait@$0A@@details@Concurrency@@IAEXXZ(ptr) SpinWait__Reset
+ @ cdecl -arch=win64 ?_Reset@?$_SpinWait@$0A@@details@Concurrency@@IEAAXXZ(ptr) SpinWait__Reset
+-@ stub -arch=win32 ?_RunAndWait@_StructuredTaskCollection@details@Concurrency@@QAG?AW4_TaskCollectionStatus@23@PAV_UnrealizedChore@23@@Z
+-@ stub -arch=win64 ?_RunAndWait@_StructuredTaskCollection@details@Concurrency@@QEAA?AW4_TaskCollectionStatus@23@PEAV_UnrealizedChore@23@@Z
++@ stdcall -arch=win32 ?_RunAndWait@_StructuredTaskCollection@details@Concurrency@@QAG?AW4_TaskCollectionStatus@23@PAV_UnrealizedChore@23@@Z(ptr ptr) _StructuredTaskCollection__RunAndWait
++@ stdcall -arch=win64 ?_RunAndWait@_StructuredTaskCollection@details@Concurrency@@QEAA?AW4_TaskCollectionStatus@23@PEAV_UnrealizedChore@23@@Z(ptr ptr) _StructuredTaskCollection__RunAndWait
+ @ stub -arch=win32 ?_RunAndWait@_TaskCollection@details@Concurrency@@QAG?AW4_TaskCollectionStatus@23@PAV_UnrealizedChore@23@@Z
+ @ stub -arch=win64 ?_RunAndWait@_TaskCollection@details@Concurrency@@QEAA?AW4_TaskCollectionStatus@23@PEAV_UnrealizedChore@23@@Z
+ @ thiscall -arch=win32 ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAEXPAV_UnrealizedChore@23@@Z(ptr ptr) _StructuredTaskCollection__Schedule
+diff --git a/dlls/msvcr110/msvcr110.spec b/dlls/msvcr110/msvcr110.spec
+index 51dc5329ad0..70c857a73da 100644
+--- a/dlls/msvcr110/msvcr110.spec
++++ b/dlls/msvcr110/msvcr110.spec
+@@ -608,9 +608,9 @@
+ @ cdecl -arch=arm ?_Reset@?$_SpinWait@$0A@@details@Concurrency@@IAAXXZ(ptr) SpinWait__Reset
+ @ thiscall -arch=i386 ?_Reset@?$_SpinWait@$0A@@details@Concurrency@@IAEXXZ(ptr) SpinWait__Reset
+ @ cdecl -arch=win64 ?_Reset@?$_SpinWait@$0A@@details@Concurrency@@IEAAXXZ(ptr) SpinWait__Reset
+-@ stub -arch=arm ?_RunAndWait@_StructuredTaskCollection@details@Concurrency@@QAA?AW4_TaskCollectionStatus@23@PAV_UnrealizedChore@23@@Z
+-@ stub -arch=i386 ?_RunAndWait@_StructuredTaskCollection@details@Concurrency@@QAG?AW4_TaskCollectionStatus@23@PAV_UnrealizedChore@23@@Z
+-@ stub -arch=win64 ?_RunAndWait@_StructuredTaskCollection@details@Concurrency@@QEAA?AW4_TaskCollectionStatus@23@PEAV_UnrealizedChore@23@@Z
++@ stdcall -arch=arm ?_RunAndWait@_StructuredTaskCollection@details@Concurrency@@QAA?AW4_TaskCollectionStatus@23@PAV_UnrealizedChore@23@@Z(ptr ptr) _StructuredTaskCollection__RunAndWait
++@ stdcall -arch=i386 ?_RunAndWait@_StructuredTaskCollection@details@Concurrency@@QAG?AW4_TaskCollectionStatus@23@PAV_UnrealizedChore@23@@Z(ptr ptr) _StructuredTaskCollection__RunAndWait
++@ stdcall -arch=win64 ?_RunAndWait@_StructuredTaskCollection@details@Concurrency@@QEAA?AW4_TaskCollectionStatus@23@PEAV_UnrealizedChore@23@@Z(ptr ptr) _StructuredTaskCollection__RunAndWait
+ @ stub -arch=arm ?_RunAndWait@_TaskCollection@details@Concurrency@@QAA?AW4_TaskCollectionStatus@23@PAV_UnrealizedChore@23@@Z
+ @ stub -arch=i386 ?_RunAndWait@_TaskCollection@details@Concurrency@@QAG?AW4_TaskCollectionStatus@23@PAV_UnrealizedChore@23@@Z
+ @ stub -arch=win64 ?_RunAndWait@_TaskCollection@details@Concurrency@@QEAA?AW4_TaskCollectionStatus@23@PEAV_UnrealizedChore@23@@Z
+diff --git a/dlls/msvcr120/msvcr120.spec b/dlls/msvcr120/msvcr120.spec
+index 6e946a72eed..c573dfac713 100644
+--- a/dlls/msvcr120/msvcr120.spec
++++ b/dlls/msvcr120/msvcr120.spec
+@@ -591,9 +591,9 @@
+ @ cdecl -arch=arm ?_Reset@?$_SpinWait@$0A@@details@Concurrency@@IAAXXZ(ptr) SpinWait__Reset
+ @ thiscall -arch=i386 ?_Reset@?$_SpinWait@$0A@@details@Concurrency@@IAEXXZ(ptr) SpinWait__Reset
+ @ cdecl -arch=win64 ?_Reset@?$_SpinWait@$0A@@details@Concurrency@@IEAAXXZ(ptr) SpinWait__Reset
+-@ stub -arch=arm ?_RunAndWait@_StructuredTaskCollection@details@Concurrency@@QAA?AW4_TaskCollectionStatus@23@PAV_UnrealizedChore@23@@Z
+-@ stub -arch=i386 ?_RunAndWait@_StructuredTaskCollection@details@Concurrency@@QAG?AW4_TaskCollectionStatus@23@PAV_UnrealizedChore@23@@Z
+-@ stub -arch=win64 ?_RunAndWait@_StructuredTaskCollection@details@Concurrency@@QEAA?AW4_TaskCollectionStatus@23@PEAV_UnrealizedChore@23@@Z
++@ stdcall -arch=arm ?_RunAndWait@_StructuredTaskCollection@details@Concurrency@@QAA?AW4_TaskCollectionStatus@23@PAV_UnrealizedChore@23@@Z(ptr ptr) _StructuredTaskCollection__RunAndWait
++@ stdcall -arch=i386 ?_RunAndWait@_StructuredTaskCollection@details@Concurrency@@QAG?AW4_TaskCollectionStatus@23@PAV_UnrealizedChore@23@@Z(ptr ptr) _StructuredTaskCollection__RunAndWait
++@ stdcall -arch=win64 ?_RunAndWait@_StructuredTaskCollection@details@Concurrency@@QEAA?AW4_TaskCollectionStatus@23@PEAV_UnrealizedChore@23@@Z(ptr ptr) _StructuredTaskCollection__RunAndWait
+ @ stub -arch=arm ?_RunAndWait@_TaskCollection@details@Concurrency@@QAA?AW4_TaskCollectionStatus@23@PAV_UnrealizedChore@23@@Z
+ @ stub -arch=i386 ?_RunAndWait@_TaskCollection@details@Concurrency@@QAG?AW4_TaskCollectionStatus@23@PAV_UnrealizedChore@23@@Z
+ @ stub -arch=win64 ?_RunAndWait@_TaskCollection@details@Concurrency@@QEAA?AW4_TaskCollectionStatus@23@PEAV_UnrealizedChore@23@@Z
+diff --git a/dlls/msvcr120_app/msvcr120_app.spec b/dlls/msvcr120_app/msvcr120_app.spec
+index 0f107ed5084..94e51d9d056 100644
+--- a/dlls/msvcr120_app/msvcr120_app.spec
++++ b/dlls/msvcr120_app/msvcr120_app.spec
+@@ -588,9 +588,9 @@
+ @ cdecl -arch=arm ?_Reset@?$_SpinWait@$0A@@details@Concurrency@@IAAXXZ(ptr) msvcr120.?_Reset@?$_SpinWait@$0A@@details@Concurrency@@IAAXXZ
+ @ thiscall -arch=i386 ?_Reset@?$_SpinWait@$0A@@details@Concurrency@@IAEXXZ(ptr) msvcr120.?_Reset@?$_SpinWait@$0A@@details@Concurrency@@IAEXXZ
+ @ cdecl -arch=win64 ?_Reset@?$_SpinWait@$0A@@details@Concurrency@@IEAAXXZ(ptr) msvcr120.?_Reset@?$_SpinWait@$0A@@details@Concurrency@@IEAAXXZ
+-@ stub -arch=arm ?_RunAndWait@_StructuredTaskCollection@details@Concurrency@@QAA?AW4_TaskCollectionStatus@23@PAV_UnrealizedChore@23@@Z
+-@ stub -arch=i386 ?_RunAndWait@_StructuredTaskCollection@details@Concurrency@@QAG?AW4_TaskCollectionStatus@23@PAV_UnrealizedChore@23@@Z
+-@ stub -arch=win64 ?_RunAndWait@_StructuredTaskCollection@details@Concurrency@@QEAA?AW4_TaskCollectionStatus@23@PEAV_UnrealizedChore@23@@Z
++@ stdcall -arch=arm ?_RunAndWait@_StructuredTaskCollection@details@Concurrency@@QAA?AW4_TaskCollectionStatus@23@PAV_UnrealizedChore@23@@Z(ptr ptr) msvcr120.?_RunAndWait@_StructuredTaskCollection@details@Concurrency@@QAA?AW4_TaskCollectionStatus@23@PAV_UnrealizedChore@23@@Z
++@ stdcall -arch=i386 ?_RunAndWait@_StructuredTaskCollection@details@Concurrency@@QAG?AW4_TaskCollectionStatus@23@PAV_UnrealizedChore@23@@Z(ptr ptr) msvcr120.?_RunAndWait@_StructuredTaskCollection@details@Concurrency@@QAG?AW4_TaskCollectionStatus@23@PAV_UnrealizedChore@23@@Z
++@ stdcall -arch=win64 ?_RunAndWait@_StructuredTaskCollection@details@Concurrency@@QEAA?AW4_TaskCollectionStatus@23@PEAV_UnrealizedChore@23@@Z(ptr ptr) msvcr120.?_RunAndWait@_StructuredTaskCollection@details@Concurrency@@QEAA?AW4_TaskCollectionStatus@23@PEAV_UnrealizedChore@23@@Z
+ @ stub -arch=arm ?_RunAndWait@_TaskCollection@details@Concurrency@@QAA?AW4_TaskCollectionStatus@23@PAV_UnrealizedChore@23@@Z
+ @ stub -arch=i386 ?_RunAndWait@_TaskCollection@details@Concurrency@@QAG?AW4_TaskCollectionStatus@23@PAV_UnrealizedChore@23@@Z
+ @ stub -arch=win64 ?_RunAndWait@_TaskCollection@details@Concurrency@@QEAA?AW4_TaskCollectionStatus@23@PEAV_UnrealizedChore@23@@Z
+diff --git a/dlls/msvcrt/concurrency.c b/dlls/msvcrt/concurrency.c
+index 5a00b9e8af1..e19b0286b48 100644
+--- a/dlls/msvcrt/concurrency.c
++++ b/dlls/msvcrt/concurrency.c
+@@ -1803,6 +1803,17 @@ void __thiscall _StructuredTaskCollection__Schedule(
+     FIXME("(%p %p): stub!\n", this, chore);
+ }
+ 
++/* ?_RunAndWait@_StructuredTaskCollection@details@Concurrency@@QAA?AW4_TaskCollectionStatus@23@PAV_UnrealizedChore@23@@Z */
++/* ?_RunAndWait@_StructuredTaskCollection@details@Concurrency@@QAG?AW4_TaskCollectionStatus@23@PAV_UnrealizedChore@23@@Z */
++/* ?_RunAndWait@_StructuredTaskCollection@details@Concurrency@@QEAA?AW4_TaskCollectionStatus@23@PEAV_UnrealizedChore@23@@Z */
++/*enum Concurrency::details::_TaskCollectionStatus*/int __stdcall
++_StructuredTaskCollection__RunAndWait(
++        _StructuredTaskCollection *this, _UnrealizedChore *chore)
++{
++    FIXME("(%p %p): stub!\n", this, chore);
++    return 1;
++}
++
+ /* ??0critical_section@Concurrency@@QAE@XZ */
+ /* ??0critical_section@Concurrency@@QEAA@XZ */
+ DEFINE_THISCALL_WRAPPER(critical_section_ctor, 4)
+
+From 3b1df19cdbe8115bfa38c8aaee5b7d34e442b609 Mon Sep 17 00:00:00 2001
+From: Torge Matthies <tmatthies@codeweavers.com>
+Date: Mon, 4 Jul 2022 20:29:09 +0200
+Subject: [PATCH] msvcr100: Add _StructuredTaskCollection::_Cancel stub.
+
+Signed-off-by: Torge Matthies <tmatthies@codeweavers.com>
+Signed-off-by: Piotr Caban <piotr@codeweavers.com>
+Signed-off-by: Alexandre Julliard <julliard@winehq.org>
+---
+ dlls/concrt140/concrt140.spec       |  6 +++---
+ dlls/msvcr100/msvcr100.spec         |  4 ++--
+ dlls/msvcr110/msvcr110.spec         |  6 +++---
+ dlls/msvcr120/msvcr120.spec         |  6 +++---
+ dlls/msvcr120_app/msvcr120_app.spec |  6 +++---
+ dlls/msvcrt/concurrency.c           | 10 ++++++++++
+ 6 files changed, 24 insertions(+), 14 deletions(-)
+
+diff --git a/dlls/concrt140/concrt140.spec b/dlls/concrt140/concrt140.spec
+index 2f26a39a5fa..77092cfb65d 100644
+--- a/dlls/concrt140/concrt140.spec
++++ b/dlls/concrt140/concrt140.spec
+@@ -434,9 +434,9 @@
+ @ stub -arch=i386 ?_Assign@_Concurrent_queue_iterator_base_v4@details@Concurrency@@IAEXABV123@@Z
+ @ stub -arch=win64 ?_Assign@_Concurrent_queue_iterator_base_v4@details@Concurrency@@IEAAXAEBV123@@Z
+ @ extern ?_Byte_reverse_table@details@Concurrency@@3QBEB byte_reverse_table
+-@ stub -arch=arm ?_Cancel@_StructuredTaskCollection@details@Concurrency@@QAAXXZ
+-@ stub -arch=i386 ?_Cancel@_StructuredTaskCollection@details@Concurrency@@QAEXXZ
+-@ stub -arch=win64 ?_Cancel@_StructuredTaskCollection@details@Concurrency@@QEAAXXZ
++@ cdecl -arch=arm ?_Cancel@_StructuredTaskCollection@details@Concurrency@@QAAXXZ(ptr) _StructuredTaskCollection__Cancel
++@ thiscall -arch=i386 ?_Cancel@_StructuredTaskCollection@details@Concurrency@@QAEXXZ(ptr) _StructuredTaskCollection__Cancel
++@ cdecl -arch=win64 ?_Cancel@_StructuredTaskCollection@details@Concurrency@@QEAAXXZ(ptr) _StructuredTaskCollection__Cancel
+ @ stub -arch=arm ?_Cancel@_TaskCollection@details@Concurrency@@QAAXXZ
+ @ stub -arch=i386 ?_Cancel@_TaskCollection@details@Concurrency@@QAEXXZ
+ @ stub -arch=win64 ?_Cancel@_TaskCollection@details@Concurrency@@QEAAXXZ
+diff --git a/dlls/msvcr100/msvcr100.spec b/dlls/msvcr100/msvcr100.spec
+index d77aca6a2c2..29a5d4910e1 100644
+--- a/dlls/msvcr100/msvcr100.spec
++++ b/dlls/msvcr100/msvcr100.spec
+@@ -309,8 +309,8 @@
+ @ stub -arch=win64 ?_AcquireRead@_ReaderWriterLock@details@Concurrency@@QEAAXXZ
+ @ stub -arch=win32 ?_AcquireWrite@_ReaderWriterLock@details@Concurrency@@QAEXXZ
+ @ stub -arch=win64 ?_AcquireWrite@_ReaderWriterLock@details@Concurrency@@QEAAXXZ
+-@ stub -arch=win32 ?_Cancel@_StructuredTaskCollection@details@Concurrency@@QAEXXZ
+-@ stub -arch=win64 ?_Cancel@_StructuredTaskCollection@details@Concurrency@@QEAAXXZ
++@ thiscall -arch=win32 ?_Cancel@_StructuredTaskCollection@details@Concurrency@@QAEXXZ(ptr) _StructuredTaskCollection__Cancel
++@ cdecl -arch=win64 ?_Cancel@_StructuredTaskCollection@details@Concurrency@@QEAAXXZ(ptr) _StructuredTaskCollection__Cancel
+ @ stub -arch=win32 ?_Cancel@_TaskCollection@details@Concurrency@@QAEXXZ
+ @ stub -arch=win64 ?_Cancel@_TaskCollection@details@Concurrency@@QEAAXXZ
+ @ stub -arch=win32 ?_CheckTaskCollection@_UnrealizedChore@details@Concurrency@@IAEXXZ
+diff --git a/dlls/msvcr110/msvcr110.spec b/dlls/msvcr110/msvcr110.spec
+index 70c857a73da..7e06ab8693f 100644
+--- a/dlls/msvcr110/msvcr110.spec
++++ b/dlls/msvcr110/msvcr110.spec
+@@ -487,9 +487,9 @@
+ @ stub -arch=arm ?_Cancel@_CancellationTokenState@details@Concurrency@@QAAXXZ
+ @ stub -arch=i386 ?_Cancel@_CancellationTokenState@details@Concurrency@@QAEXXZ
+ @ stub -arch=win64 ?_Cancel@_CancellationTokenState@details@Concurrency@@QEAAXXZ
+-@ stub -arch=arm ?_Cancel@_StructuredTaskCollection@details@Concurrency@@QAAXXZ
+-@ stub -arch=i386 ?_Cancel@_StructuredTaskCollection@details@Concurrency@@QAEXXZ
+-@ stub -arch=win64 ?_Cancel@_StructuredTaskCollection@details@Concurrency@@QEAAXXZ
++@ cdecl -arch=arm ?_Cancel@_StructuredTaskCollection@details@Concurrency@@QAAXXZ(ptr) _StructuredTaskCollection__Cancel
++@ thiscall -arch=i386 ?_Cancel@_StructuredTaskCollection@details@Concurrency@@QAEXXZ(ptr) _StructuredTaskCollection__Cancel
++@ cdecl -arch=win64 ?_Cancel@_StructuredTaskCollection@details@Concurrency@@QEAAXXZ(ptr) _StructuredTaskCollection__Cancel
+ @ stub -arch=arm ?_Cancel@_TaskCollection@details@Concurrency@@QAAXXZ
+ @ stub -arch=i386 ?_Cancel@_TaskCollection@details@Concurrency@@QAEXXZ
+ @ stub -arch=win64 ?_Cancel@_TaskCollection@details@Concurrency@@QEAAXXZ
+diff --git a/dlls/msvcr120/msvcr120.spec b/dlls/msvcr120/msvcr120.spec
+index c573dfac713..45641c1fb00 100644
+--- a/dlls/msvcr120/msvcr120.spec
++++ b/dlls/msvcr120/msvcr120.spec
+@@ -484,9 +484,9 @@
+ @ stub -arch=arm ?_AcquireWrite@_ReaderWriterLock@details@Concurrency@@QAAXXZ
+ @ stub -arch=i386 ?_AcquireWrite@_ReaderWriterLock@details@Concurrency@@QAEXXZ
+ @ stub -arch=win64 ?_AcquireWrite@_ReaderWriterLock@details@Concurrency@@QEAAXXZ
+-@ stub -arch=arm ?_Cancel@_StructuredTaskCollection@details@Concurrency@@QAAXXZ
+-@ stub -arch=i386 ?_Cancel@_StructuredTaskCollection@details@Concurrency@@QAEXXZ
+-@ stub -arch=win64 ?_Cancel@_StructuredTaskCollection@details@Concurrency@@QEAAXXZ
++@ cdecl -arch=arm ?_Cancel@_StructuredTaskCollection@details@Concurrency@@QAAXXZ(ptr) _StructuredTaskCollection__Cancel
++@ thiscall -arch=i386 ?_Cancel@_StructuredTaskCollection@details@Concurrency@@QAEXXZ(ptr) _StructuredTaskCollection__Cancel
++@ cdecl -arch=win64 ?_Cancel@_StructuredTaskCollection@details@Concurrency@@QEAAXXZ(ptr) _StructuredTaskCollection__Cancel
+ @ stub -arch=arm ?_Cancel@_TaskCollection@details@Concurrency@@QAAXXZ
+ @ stub -arch=i386 ?_Cancel@_TaskCollection@details@Concurrency@@QAEXXZ
+ @ stub -arch=win64 ?_Cancel@_TaskCollection@details@Concurrency@@QEAAXXZ
+diff --git a/dlls/msvcr120_app/msvcr120_app.spec b/dlls/msvcr120_app/msvcr120_app.spec
+index 94e51d9d056..7adb0462565 100644
+--- a/dlls/msvcr120_app/msvcr120_app.spec
++++ b/dlls/msvcr120_app/msvcr120_app.spec
+@@ -481,9 +481,9 @@
+ @ stub -arch=arm ?_AcquireWrite@_ReaderWriterLock@details@Concurrency@@QAAXXZ
+ @ stub -arch=i386 ?_AcquireWrite@_ReaderWriterLock@details@Concurrency@@QAEXXZ
+ @ stub -arch=win64 ?_AcquireWrite@_ReaderWriterLock@details@Concurrency@@QEAAXXZ
+-@ stub -arch=arm ?_Cancel@_StructuredTaskCollection@details@Concurrency@@QAAXXZ
+-@ stub -arch=i386 ?_Cancel@_StructuredTaskCollection@details@Concurrency@@QAEXXZ
+-@ stub -arch=win64 ?_Cancel@_StructuredTaskCollection@details@Concurrency@@QEAAXXZ
++@ cdecl -arch=arm ?_Cancel@_StructuredTaskCollection@details@Concurrency@@QAAXXZ(ptr) msvcr120.?_Cancel@_StructuredTaskCollection@details@Concurrency@@QAAXXZ
++@ thiscall -arch=i386 ?_Cancel@_StructuredTaskCollection@details@Concurrency@@QAEXXZ(ptr) msvcr120.?_Cancel@_StructuredTaskCollection@details@Concurrency@@QAEXXZ
++@ cdecl -arch=win64 ?_Cancel@_StructuredTaskCollection@details@Concurrency@@QEAAXXZ(ptr) msvcr120.?_Cancel@_StructuredTaskCollection@details@Concurrency@@QEAAXXZ
+ @ stub -arch=arm ?_Cancel@_TaskCollection@details@Concurrency@@QAAXXZ
+ @ stub -arch=i386 ?_Cancel@_TaskCollection@details@Concurrency@@QAEXXZ
+ @ stub -arch=win64 ?_Cancel@_TaskCollection@details@Concurrency@@QEAAXXZ
+diff --git a/dlls/msvcrt/concurrency.c b/dlls/msvcrt/concurrency.c
+index e19b0286b48..80351993a58 100644
+--- a/dlls/msvcrt/concurrency.c
++++ b/dlls/msvcrt/concurrency.c
+@@ -1814,6 +1814,16 @@ _StructuredTaskCollection__RunAndWait(
+     return 1;
+ }
+ 
++/* ?_Cancel@_StructuredTaskCollection@details@Concurrency@@QAAXXZ */
++/* ?_Cancel@_StructuredTaskCollection@details@Concurrency@@QAEXXZ */
++/* ?_Cancel@_StructuredTaskCollection@details@Concurrency@@QEAAXXZ */
++DEFINE_THISCALL_WRAPPER(_StructuredTaskCollection__Cancel, 4)
++void __thiscall _StructuredTaskCollection__Cancel(
++        _StructuredTaskCollection *this)
++{
++    FIXME("(%p): stub!\n", this);
++}
++
+ /* ??0critical_section@Concurrency@@QAE@XZ */
+ /* ??0critical_section@Concurrency@@QEAA@XZ */
+ DEFINE_THISCALL_WRAPPER(critical_section_ctor, 4)
+
+From 3a25d00108966aee2888a94d867c35296b2f00fe Mon Sep 17 00:00:00 2001
+From: Torge Matthies <tmatthies@codeweavers.com>
+Date: Mon, 4 Jul 2022 20:29:14 +0200
+Subject: [PATCH] msvcr100: Add _StructuredTaskCollection::_IsCanceling stub.
+
+Signed-off-by: Torge Matthies <tmatthies@codeweavers.com>
+Signed-off-by: Piotr Caban <piotr@codeweavers.com>
+Signed-off-by: Alexandre Julliard <julliard@winehq.org>
+---
+ dlls/concrt140/concrt140.spec       |  6 +++---
+ dlls/msvcr100/msvcr100.spec         |  4 ++--
+ dlls/msvcr110/msvcr110.spec         |  6 +++---
+ dlls/msvcr120/msvcr120.spec         |  6 +++---
+ dlls/msvcr120_app/msvcr120_app.spec |  6 +++---
+ dlls/msvcrt/concurrency.c           | 11 +++++++++++
+ 6 files changed, 25 insertions(+), 14 deletions(-)
+
+diff --git a/dlls/concrt140/concrt140.spec b/dlls/concrt140/concrt140.spec
+index 77092cfb65d..9370566bb2c 100644
+--- a/dlls/concrt140/concrt140.spec
++++ b/dlls/concrt140/concrt140.spec
+@@ -537,9 +537,9 @@
+ @ stub -arch=arm ?_Internal_throw_exception@_Concurrent_vector_base_v4@details@Concurrency@@IBAXI@Z
+ @ thiscall -arch=i386 ?_Internal_throw_exception@_Concurrent_vector_base_v4@details@Concurrency@@IBEXI@Z(ptr long) _vector_base_v4__Internal_throw_exception
+ @ cdecl -arch=win64 ?_Internal_throw_exception@_Concurrent_vector_base_v4@details@Concurrency@@IEBAX_K@Z(ptr long) _vector_base_v4__Internal_throw_exception
+-@ stub -arch=arm ?_IsCanceling@_StructuredTaskCollection@details@Concurrency@@QAA_NXZ
+-@ stub -arch=i386 ?_IsCanceling@_StructuredTaskCollection@details@Concurrency@@QAE_NXZ
+-@ stub -arch=win64 ?_IsCanceling@_StructuredTaskCollection@details@Concurrency@@QEAA_NXZ
++@ cdecl -arch=arm ?_IsCanceling@_StructuredTaskCollection@details@Concurrency@@QAA_NXZ(ptr) _StructuredTaskCollection__IsCanceling
++@ thiscall -arch=i386 ?_IsCanceling@_StructuredTaskCollection@details@Concurrency@@QAE_NXZ(ptr) _StructuredTaskCollection__IsCanceling
++@ cdecl -arch=win64 ?_IsCanceling@_StructuredTaskCollection@details@Concurrency@@QEAA_NXZ(ptr) _StructuredTaskCollection__IsCanceling
+ @ stub -arch=arm ?_IsCanceling@_TaskCollection@details@Concurrency@@QAA_NXZ
+ @ stub -arch=i386 ?_IsCanceling@_TaskCollection@details@Concurrency@@QAE_NXZ
+ @ stub -arch=win64 ?_IsCanceling@_TaskCollection@details@Concurrency@@QEAA_NXZ
+diff --git a/dlls/msvcr100/msvcr100.spec b/dlls/msvcr100/msvcr100.spec
+index 29a5d4910e1..0d38005c13a 100644
+--- a/dlls/msvcr100/msvcr100.spec
++++ b/dlls/msvcr100/msvcr100.spec
+@@ -329,8 +329,8 @@
+ @ cdecl -arch=win64 ?_DoYield@?$_SpinWait@$00@details@Concurrency@@IEAAXXZ(ptr) SpinWait__DoYield
+ @ thiscall -arch=win32 ?_DoYield@?$_SpinWait@$0A@@details@Concurrency@@IAEXXZ(ptr) SpinWait__DoYield
+ @ cdecl -arch=win64 ?_DoYield@?$_SpinWait@$0A@@details@Concurrency@@IEAAXXZ(ptr) SpinWait__DoYield
+-@ stub -arch=win32 ?_IsCanceling@_StructuredTaskCollection@details@Concurrency@@QAE_NXZ
+-@ stub -arch=win64 ?_IsCanceling@_StructuredTaskCollection@details@Concurrency@@QEAA_NXZ
++@ thiscall -arch=win32 ?_IsCanceling@_StructuredTaskCollection@details@Concurrency@@QAE_NXZ(ptr) _StructuredTaskCollection__IsCanceling
++@ cdecl -arch=win64 ?_IsCanceling@_StructuredTaskCollection@details@Concurrency@@QEAA_NXZ(ptr) _StructuredTaskCollection__IsCanceling
+ @ stub -arch=win32 ?_IsCanceling@_TaskCollection@details@Concurrency@@QAE_NXZ
+ @ stub -arch=win64 ?_IsCanceling@_TaskCollection@details@Concurrency@@QEAA_NXZ
+ @ stub -arch=win32 ?_Name_base@type_info@@CAPBDPBV1@PAU__type_info_node@@@Z
+diff --git a/dlls/msvcr110/msvcr110.spec b/dlls/msvcr110/msvcr110.spec
+index 7e06ab8693f..24e7630194c 100644
+--- a/dlls/msvcr110/msvcr110.spec
++++ b/dlls/msvcr110/msvcr110.spec
+@@ -544,9 +544,9 @@
+ @ stub -arch=arm ?_Invoke@_CancellationTokenRegistration@details@Concurrency@@AAAXXZ
+ @ stub -arch=i386 ?_Invoke@_CancellationTokenRegistration@details@Concurrency@@AAEXXZ
+ @ stub -arch=win64 ?_Invoke@_CancellationTokenRegistration@details@Concurrency@@AEAAXXZ
+-@ stub -arch=arm ?_IsCanceling@_StructuredTaskCollection@details@Concurrency@@QAA_NXZ
+-@ stub -arch=i386 ?_IsCanceling@_StructuredTaskCollection@details@Concurrency@@QAE_NXZ
+-@ stub -arch=win64 ?_IsCanceling@_StructuredTaskCollection@details@Concurrency@@QEAA_NXZ
++@ cdecl -arch=arm ?_IsCanceling@_StructuredTaskCollection@details@Concurrency@@QAA_NXZ(ptr) _StructuredTaskCollection__IsCanceling
++@ thiscall -arch=i386 ?_IsCanceling@_StructuredTaskCollection@details@Concurrency@@QAE_NXZ(ptr) _StructuredTaskCollection__IsCanceling
++@ cdecl -arch=win64 ?_IsCanceling@_StructuredTaskCollection@details@Concurrency@@QEAA_NXZ(ptr) _StructuredTaskCollection__IsCanceling
+ @ stub -arch=arm ?_IsCanceling@_TaskCollection@details@Concurrency@@QAA_NXZ
+ @ stub -arch=i386 ?_IsCanceling@_TaskCollection@details@Concurrency@@QAE_NXZ
+ @ stub -arch=win64 ?_IsCanceling@_TaskCollection@details@Concurrency@@QEAA_NXZ
+diff --git a/dlls/msvcr120/msvcr120.spec b/dlls/msvcr120/msvcr120.spec
+index 45641c1fb00..b1258dad5de 100644
+--- a/dlls/msvcr120/msvcr120.spec
++++ b/dlls/msvcr120/msvcr120.spec
+@@ -535,9 +535,9 @@
+ @ thiscall -arch=i386 ?_GetScheduler@_Scheduler@details@Concurrency@@QAEPAVScheduler@3@XZ(ptr) _Scheduler__GetScheduler
+ @ cdecl -arch=win64 ?_GetScheduler@_Scheduler@details@Concurrency@@QEAAPEAVScheduler@3@XZ(ptr) _Scheduler__GetScheduler
+ @ cdecl ?_Id@_CurrentScheduler@details@Concurrency@@SAIXZ() _CurrentScheduler__Id
+-@ stub -arch=arm ?_IsCanceling@_StructuredTaskCollection@details@Concurrency@@QAA_NXZ
+-@ stub -arch=i386 ?_IsCanceling@_StructuredTaskCollection@details@Concurrency@@QAE_NXZ
+-@ stub -arch=win64 ?_IsCanceling@_StructuredTaskCollection@details@Concurrency@@QEAA_NXZ
++@ cdecl -arch=arm ?_IsCanceling@_StructuredTaskCollection@details@Concurrency@@QAA_NXZ(ptr) _StructuredTaskCollection__IsCanceling
++@ thiscall -arch=i386 ?_IsCanceling@_StructuredTaskCollection@details@Concurrency@@QAE_NXZ(ptr) _StructuredTaskCollection__IsCanceling
++@ cdecl -arch=win64 ?_IsCanceling@_StructuredTaskCollection@details@Concurrency@@QEAA_NXZ(ptr) _StructuredTaskCollection__IsCanceling
+ @ stub -arch=arm ?_IsCanceling@_TaskCollection@details@Concurrency@@QAA_NXZ
+ @ stub -arch=i386 ?_IsCanceling@_TaskCollection@details@Concurrency@@QAE_NXZ
+ @ stub -arch=win64 ?_IsCanceling@_TaskCollection@details@Concurrency@@QEAA_NXZ
+diff --git a/dlls/msvcr120_app/msvcr120_app.spec b/dlls/msvcr120_app/msvcr120_app.spec
+index 7adb0462565..93ce779ea69 100644
+--- a/dlls/msvcr120_app/msvcr120_app.spec
++++ b/dlls/msvcr120_app/msvcr120_app.spec
+@@ -532,9 +532,9 @@
+ @ thiscall -arch=i386 ?_GetScheduler@_Scheduler@details@Concurrency@@QAEPAVScheduler@3@XZ(ptr) msvcr120.?_GetScheduler@_Scheduler@details@Concurrency@@QAEPAVScheduler@3@XZ
+ @ cdecl -arch=win64 ?_GetScheduler@_Scheduler@details@Concurrency@@QEAAPEAVScheduler@3@XZ(ptr) msvcr120.?_GetScheduler@_Scheduler@details@Concurrency@@QEAAPEAVScheduler@3@XZ
+ @ cdecl ?_Id@_CurrentScheduler@details@Concurrency@@SAIXZ() msvcr120.?_Id@_CurrentScheduler@details@Concurrency@@SAIXZ
+-@ stub -arch=arm ?_IsCanceling@_StructuredTaskCollection@details@Concurrency@@QAA_NXZ
+-@ stub -arch=i386 ?_IsCanceling@_StructuredTaskCollection@details@Concurrency@@QAE_NXZ
+-@ stub -arch=win64 ?_IsCanceling@_StructuredTaskCollection@details@Concurrency@@QEAA_NXZ
++@ cdecl -arch=arm ?_IsCanceling@_StructuredTaskCollection@details@Concurrency@@QAA_NXZ(ptr) msvcr120.?_IsCanceling@_StructuredTaskCollection@details@Concurrency@@QAA_NXZ
++@ thiscall -arch=i386 ?_IsCanceling@_StructuredTaskCollection@details@Concurrency@@QAE_NXZ(ptr) msvcr120.?_IsCanceling@_StructuredTaskCollection@details@Concurrency@@QAE_NXZ
++@ cdecl -arch=win64 ?_IsCanceling@_StructuredTaskCollection@details@Concurrency@@QEAA_NXZ(ptr) msvcr120.?_IsCanceling@_StructuredTaskCollection@details@Concurrency@@QEAA_NXZ
+ @ stub -arch=arm ?_IsCanceling@_TaskCollection@details@Concurrency@@QAA_NXZ
+ @ stub -arch=i386 ?_IsCanceling@_TaskCollection@details@Concurrency@@QAE_NXZ
+ @ stub -arch=win64 ?_IsCanceling@_TaskCollection@details@Concurrency@@QEAA_NXZ
+diff --git a/dlls/msvcrt/concurrency.c b/dlls/msvcrt/concurrency.c
+index 80351993a58..c982e367749 100644
+--- a/dlls/msvcrt/concurrency.c
++++ b/dlls/msvcrt/concurrency.c
+@@ -1824,6 +1824,17 @@ void __thiscall _StructuredTaskCollection__Cancel(
+     FIXME("(%p): stub!\n", this);
+ }
+ 
++/* ?_IsCanceling@_StructuredTaskCollection@details@Concurrency@@QAA_NXZ */
++/* ?_IsCanceling@_StructuredTaskCollection@details@Concurrency@@QAE_NXZ */
++/* ?_IsCanceling@_StructuredTaskCollection@details@Concurrency@@QEAA_NXZ */
++DEFINE_THISCALL_WRAPPER(_StructuredTaskCollection__IsCanceling, 4)
++bool __thiscall _StructuredTaskCollection__IsCanceling(
++        _StructuredTaskCollection *this)
++{
++    FIXME("(%p): stub!\n", this);
++    return FALSE;
++}
++
+ /* ??0critical_section@Concurrency@@QAE@XZ */
+ /* ??0critical_section@Concurrency@@QEAA@XZ */
+ DEFINE_THISCALL_WRAPPER(critical_section_ctor, 4)
+
+From 35a2206d079baad519352d49ae4d8115bdd94982 Mon Sep 17 00:00:00 2001
+From: Torge Matthies <tmatthies@codeweavers.com>
+Date: Fri, 15 Jul 2022 21:52:00 +0200
+Subject: [PATCH] msvcr100: Make all exception ctors with a string parameter
+ trace the string.
+
+Signed-off-by: Torge Matthies <tmatthies@codeweavers.com>
+---
+ dlls/msvcrt/concurrency.c | 12 ++++++------
+ 1 file changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/dlls/msvcrt/concurrency.c b/dlls/msvcrt/concurrency.c
+index c982e367749..e57aef34d2b 100644
+--- a/dlls/msvcrt/concurrency.c
++++ b/dlls/msvcrt/concurrency.c
+@@ -378,7 +378,7 @@ static void create_default_scheduler(void);
+ DEFINE_THISCALL_WRAPPER(improper_lock_ctor_str, 8)
+ improper_lock* __thiscall improper_lock_ctor_str(improper_lock *this, const char *str)
+ {
+-    TRACE("(%p %p)\n", this, str);
++    TRACE("(%p %s)\n", this, str);
+     return __exception_ctor(this, str, &improper_lock_vtable);
+ }
+ 
+@@ -403,7 +403,7 @@ DEFINE_THISCALL_WRAPPER(improper_scheduler_attach_ctor_str, 8)
+ improper_scheduler_attach* __thiscall improper_scheduler_attach_ctor_str(
+         improper_scheduler_attach *this, const char *str)
+ {
+-    TRACE("(%p %p)\n", this, str);
++    TRACE("(%p %s)\n", this, str);
+     return __exception_ctor(this, str, &improper_scheduler_attach_vtable);
+ }
+ 
+@@ -430,7 +430,7 @@ DEFINE_THISCALL_WRAPPER(improper_scheduler_detach_ctor_str, 8)
+ improper_scheduler_detach* __thiscall improper_scheduler_detach_ctor_str(
+         improper_scheduler_detach *this, const char *str)
+ {
+-    TRACE("(%p %p)\n", this, str);
++    TRACE("(%p %s)\n", this, str);
+     return __exception_ctor(this, str, &improper_scheduler_detach_vtable);
+ }
+ 
+@@ -457,7 +457,7 @@ DEFINE_THISCALL_WRAPPER(invalid_scheduler_policy_key_ctor_str, 8)
+ invalid_scheduler_policy_key* __thiscall invalid_scheduler_policy_key_ctor_str(
+         invalid_scheduler_policy_key *this, const char *str)
+ {
+-    TRACE("(%p %p)\n", this, str);
++    TRACE("(%p %s)\n", this, str);
+     return __exception_ctor(this, str, &invalid_scheduler_policy_key_vtable);
+ }
+ 
+@@ -484,7 +484,7 @@ DEFINE_THISCALL_WRAPPER(invalid_scheduler_policy_thread_specification_ctor_str,
+ invalid_scheduler_policy_thread_specification* __thiscall invalid_scheduler_policy_thread_specification_ctor_str(
+         invalid_scheduler_policy_thread_specification *this, const char *str)
+ {
+-    TRACE("(%p %p)\n", this, str);
++    TRACE("(%p %s)\n", this, str);
+     return __exception_ctor(this, str, &invalid_scheduler_policy_thread_specification_vtable);
+ }
+ 
+@@ -511,7 +511,7 @@ DEFINE_THISCALL_WRAPPER(invalid_scheduler_policy_value_ctor_str, 8)
+ invalid_scheduler_policy_value* __thiscall invalid_scheduler_policy_value_ctor_str(
+         invalid_scheduler_policy_value *this, const char *str)
+ {
+-    TRACE("(%p %p)\n", this, str);
++    TRACE("(%p %s)\n", this, str);
+     return __exception_ctor(this, str, &invalid_scheduler_policy_value_vtable);
+ }
+ 
+From 013ba6aaa130e1135b58970764df44fc4f4f47ae Mon Sep 17 00:00:00 2001
+From: Torge Matthies <tmatthies@codeweavers.com>
+Date: Fri, 15 Jul 2022 21:52:01 +0200
+Subject: [PATCH] msvcr100: Implement invalid_multiple_scheduling exception.
+
+Signed-off-by: Torge Matthies <tmatthies@codeweavers.com>
+---
+ dlls/concrt140/concrt140.spec       | 12 ++++-----
+ dlls/msvcr100/msvcr100.spec         |  8 +++---
+ dlls/msvcr110/msvcr110.spec         | 12 ++++-----
+ dlls/msvcr120/msvcr120.spec         | 12 ++++-----
+ dlls/msvcr120_app/msvcr120_app.spec | 12 ++++-----
+ dlls/msvcrt/concurrency.c           | 38 +++++++++++++++++++++++++++++
+ 6 files changed, 66 insertions(+), 28 deletions(-)
+
+diff --git a/dlls/concrt140/concrt140.spec b/dlls/concrt140/concrt140.spec
+index 9370566bb2c..64da684f415 100644
+--- a/dlls/concrt140/concrt140.spec
++++ b/dlls/concrt140/concrt140.spec
+@@ -144,12 +144,12 @@
+ @ stub -arch=arm ??0invalid_link_target@Concurrency@@QAA@XZ
+ @ stub -arch=i386 ??0invalid_link_target@Concurrency@@QAE@XZ
+ @ stub -arch=win64 ??0invalid_link_target@Concurrency@@QEAA@XZ
+-@ stub -arch=arm ??0invalid_multiple_scheduling@Concurrency@@QAA@PBD@Z
+-@ stub -arch=i386 ??0invalid_multiple_scheduling@Concurrency@@QAE@PBD@Z
+-@ stub -arch=win64 ??0invalid_multiple_scheduling@Concurrency@@QEAA@PEBD@Z
+-@ stub -arch=arm ??0invalid_multiple_scheduling@Concurrency@@QAA@XZ
+-@ stub -arch=i386 ??0invalid_multiple_scheduling@Concurrency@@QAE@XZ
+-@ stub -arch=win64 ??0invalid_multiple_scheduling@Concurrency@@QEAA@XZ
++@ cdecl -arch=arm ??0invalid_multiple_scheduling@Concurrency@@QAA@PBD@Z(ptr ptr) invalid_multiple_scheduling_ctor_str
++@ thiscall -arch=i386 ??0invalid_multiple_scheduling@Concurrency@@QAE@PBD@Z(ptr ptr) invalid_multiple_scheduling_ctor_str
++@ cdecl -arch=win64 ??0invalid_multiple_scheduling@Concurrency@@QEAA@PEBD@Z(ptr ptr) invalid_multiple_scheduling_ctor_str
++@ cdecl -arch=arm ??0invalid_multiple_scheduling@Concurrency@@QAA@XZ(ptr) invalid_multiple_scheduling_ctor
++@ thiscall -arch=i386 ??0invalid_multiple_scheduling@Concurrency@@QAE@XZ(ptr) invalid_multiple_scheduling_ctor
++@ cdecl -arch=win64 ??0invalid_multiple_scheduling@Concurrency@@QEAA@XZ(ptr) invalid_multiple_scheduling_ctor
+ @ stub -arch=arm ??0invalid_oversubscribe_operation@Concurrency@@QAA@PBD@Z
+ @ stub -arch=i386 ??0invalid_oversubscribe_operation@Concurrency@@QAE@PBD@Z
+ @ stub -arch=win64 ??0invalid_oversubscribe_operation@Concurrency@@QEAA@PEBD@Z
+diff --git a/dlls/msvcr100/msvcr100.spec b/dlls/msvcr100/msvcr100.spec
+index 0d38005c13a..c0bbbc5b86d 100644
+--- a/dlls/msvcr100/msvcr100.spec
++++ b/dlls/msvcr100/msvcr100.spec
+@@ -94,10 +94,10 @@
+ @ stub -arch=win64 ??0invalid_link_target@Concurrency@@QEAA@PEBD@Z
+ @ stub -arch=win32 ??0invalid_link_target@Concurrency@@QAE@XZ
+ @ stub -arch=win64 ??0invalid_link_target@Concurrency@@QEAA@XZ
+-@ stub -arch=win32 ??0invalid_multiple_scheduling@Concurrency@@QAE@PBD@Z
+-@ stub -arch=win64 ??0invalid_multiple_scheduling@Concurrency@@QEAA@PEBD@Z
+-@ stub -arch=win32 ??0invalid_multiple_scheduling@Concurrency@@QAE@XZ
+-@ stub -arch=win64 ??0invalid_multiple_scheduling@Concurrency@@QEAA@XZ
++@ thiscall -arch=win32 ??0invalid_multiple_scheduling@Concurrency@@QAE@PBD@Z(ptr ptr) invalid_multiple_scheduling_ctor_str
++@ cdecl -arch=win64 ??0invalid_multiple_scheduling@Concurrency@@QEAA@PEBD@Z(ptr ptr) invalid_multiple_scheduling_ctor_str
++@ thiscall -arch=win32 ??0invalid_multiple_scheduling@Concurrency@@QAE@XZ(ptr) invalid_multiple_scheduling_ctor
++@ cdecl -arch=win64 ??0invalid_multiple_scheduling@Concurrency@@QEAA@XZ(ptr) invalid_multiple_scheduling_ctor
+ @ stub -arch=win32 ??0invalid_operation@Concurrency@@QAE@PBD@Z
+ @ stub -arch=win64 ??0invalid_operation@Concurrency@@QEAA@PEBD@Z
+ @ stub -arch=win32 ??0invalid_operation@Concurrency@@QAE@XZ
+diff --git a/dlls/msvcr110/msvcr110.spec b/dlls/msvcr110/msvcr110.spec
+index 24e7630194c..a272ae98a1c 100644
+--- a/dlls/msvcr110/msvcr110.spec
++++ b/dlls/msvcr110/msvcr110.spec
+@@ -167,12 +167,12 @@
+ @ stub -arch=arm ??0invalid_link_target@Concurrency@@QAA@XZ
+ @ stub -arch=i386 ??0invalid_link_target@Concurrency@@QAE@XZ
+ @ stub -arch=win64 ??0invalid_link_target@Concurrency@@QEAA@XZ
+-@ stub -arch=arm ??0invalid_multiple_scheduling@Concurrency@@QAA@PBD@Z
+-@ stub -arch=i386 ??0invalid_multiple_scheduling@Concurrency@@QAE@PBD@Z
+-@ stub -arch=win64 ??0invalid_multiple_scheduling@Concurrency@@QEAA@PEBD@Z
+-@ stub -arch=arm ??0invalid_multiple_scheduling@Concurrency@@QAA@XZ
+-@ stub -arch=i386 ??0invalid_multiple_scheduling@Concurrency@@QAE@XZ
+-@ stub -arch=win64 ??0invalid_multiple_scheduling@Concurrency@@QEAA@XZ
++@ cdecl -arch=arm ??0invalid_multiple_scheduling@Concurrency@@QAA@PBD@Z(ptr ptr) invalid_multiple_scheduling_ctor_str
++@ thiscall -arch=i386 ??0invalid_multiple_scheduling@Concurrency@@QAE@PBD@Z(ptr ptr) invalid_multiple_scheduling_ctor_str
++@ cdecl -arch=win64 ??0invalid_multiple_scheduling@Concurrency@@QEAA@PEBD@Z(ptr ptr) invalid_multiple_scheduling_ctor_str
++@ cdecl -arch=arm ??0invalid_multiple_scheduling@Concurrency@@QAA@XZ(ptr) invalid_multiple_scheduling_ctor
++@ thiscall -arch=i386 ??0invalid_multiple_scheduling@Concurrency@@QAE@XZ(ptr) invalid_multiple_scheduling_ctor
++@ cdecl -arch=win64 ??0invalid_multiple_scheduling@Concurrency@@QEAA@XZ(ptr) invalid_multiple_scheduling_ctor
+ @ stub -arch=arm ??0invalid_operation@Concurrency@@QAA@PBD@Z
+ @ stub -arch=i386 ??0invalid_operation@Concurrency@@QAE@PBD@Z
+ @ stub -arch=win64 ??0invalid_operation@Concurrency@@QEAA@PEBD@Z
+diff --git a/dlls/msvcr120/msvcr120.spec b/dlls/msvcr120/msvcr120.spec
+index b1258dad5de..d16316e7e05 100644
+--- a/dlls/msvcr120/msvcr120.spec
++++ b/dlls/msvcr120/msvcr120.spec
+@@ -164,12 +164,12 @@
+ @ stub -arch=arm ??0invalid_link_target@Concurrency@@QAA@XZ
+ @ stub -arch=i386 ??0invalid_link_target@Concurrency@@QAE@XZ
+ @ stub -arch=win64 ??0invalid_link_target@Concurrency@@QEAA@XZ
+-@ stub -arch=arm ??0invalid_multiple_scheduling@Concurrency@@QAA@PBD@Z
+-@ stub -arch=i386 ??0invalid_multiple_scheduling@Concurrency@@QAE@PBD@Z
+-@ stub -arch=win64 ??0invalid_multiple_scheduling@Concurrency@@QEAA@PEBD@Z
+-@ stub -arch=arm ??0invalid_multiple_scheduling@Concurrency@@QAA@XZ
+-@ stub -arch=i386 ??0invalid_multiple_scheduling@Concurrency@@QAE@XZ
+-@ stub -arch=win64 ??0invalid_multiple_scheduling@Concurrency@@QEAA@XZ
++@ cdecl -arch=arm ??0invalid_multiple_scheduling@Concurrency@@QAA@PBD@Z(ptr ptr) invalid_multiple_scheduling_ctor_str
++@ thiscall -arch=i386 ??0invalid_multiple_scheduling@Concurrency@@QAE@PBD@Z(ptr ptr) invalid_multiple_scheduling_ctor_str
++@ cdecl -arch=win64 ??0invalid_multiple_scheduling@Concurrency@@QEAA@PEBD@Z(ptr ptr) invalid_multiple_scheduling_ctor_str
++@ cdecl -arch=arm ??0invalid_multiple_scheduling@Concurrency@@QAA@XZ(ptr) invalid_multiple_scheduling_ctor
++@ thiscall -arch=i386 ??0invalid_multiple_scheduling@Concurrency@@QAE@XZ(ptr) invalid_multiple_scheduling_ctor
++@ cdecl -arch=win64 ??0invalid_multiple_scheduling@Concurrency@@QEAA@XZ(ptr) invalid_multiple_scheduling_ctor
+ @ stub -arch=arm ??0invalid_operation@Concurrency@@QAA@PBD@Z
+ @ stub -arch=i386 ??0invalid_operation@Concurrency@@QAE@PBD@Z
+ @ stub -arch=win64 ??0invalid_operation@Concurrency@@QEAA@PEBD@Z
+diff --git a/dlls/msvcr120_app/msvcr120_app.spec b/dlls/msvcr120_app/msvcr120_app.spec
+index 93ce779ea69..aa5d8ccf968 100644
+--- a/dlls/msvcr120_app/msvcr120_app.spec
++++ b/dlls/msvcr120_app/msvcr120_app.spec
+@@ -162,12 +162,12 @@
+ @ stub -arch=arm ??0invalid_link_target@Concurrency@@QAA@XZ
+ @ stub -arch=i386 ??0invalid_link_target@Concurrency@@QAE@XZ
+ @ stub -arch=win64 ??0invalid_link_target@Concurrency@@QEAA@XZ
+-@ stub -arch=arm ??0invalid_multiple_scheduling@Concurrency@@QAA@PBD@Z
+-@ stub -arch=i386 ??0invalid_multiple_scheduling@Concurrency@@QAE@PBD@Z
+-@ stub -arch=win64 ??0invalid_multiple_scheduling@Concurrency@@QEAA@PEBD@Z
+-@ stub -arch=arm ??0invalid_multiple_scheduling@Concurrency@@QAA@XZ
+-@ stub -arch=i386 ??0invalid_multiple_scheduling@Concurrency@@QAE@XZ
+-@ stub -arch=win64 ??0invalid_multiple_scheduling@Concurrency@@QEAA@XZ
++@ cdecl -arch=arm ??0invalid_multiple_scheduling@Concurrency@@QAA@PBD@Z(ptr ptr) msvcr120.??0invalid_multiple_scheduling@Concurrency@@QAA@PBD@Z
++@ thiscall -arch=i386 ??0invalid_multiple_scheduling@Concurrency@@QAE@PBD@Z(ptr ptr) msvcr120.??0invalid_multiple_scheduling@Concurrency@@QAE@PBD@Z
++@ cdecl -arch=win64 ??0invalid_multiple_scheduling@Concurrency@@QEAA@PEBD@Z(ptr ptr) msvcr120.??0invalid_multiple_scheduling@Concurrency@@QEAA@PEBD@Z
++@ cdecl -arch=arm ??0invalid_multiple_scheduling@Concurrency@@QAA@XZ(ptr) msvcr120.??0invalid_multiple_scheduling@Concurrency@@QAA@XZ
++@ thiscall -arch=i386 ??0invalid_multiple_scheduling@Concurrency@@QAE@XZ(ptr) msvcr120.??0invalid_multiple_scheduling@Concurrency@@QAE@XZ
++@ cdecl -arch=win64 ??0invalid_multiple_scheduling@Concurrency@@QEAA@XZ(ptr) msvcr120.??0invalid_multiple_scheduling@Concurrency@@QEAA@XZ
+ @ stub -arch=arm ??0invalid_operation@Concurrency@@QAA@PBD@Z
+ @ stub -arch=i386 ??0invalid_operation@Concurrency@@QAE@PBD@Z
+ @ stub -arch=win64 ??0invalid_operation@Concurrency@@QEAA@PEBD@Z
+diff --git a/dlls/msvcrt/concurrency.c b/dlls/msvcrt/concurrency.c
+index e57aef34d2b..d0c9924c631 100644
+--- a/dlls/msvcrt/concurrency.c
++++ b/dlls/msvcrt/concurrency.c
+@@ -329,6 +329,9 @@ extern const vtable_ptr improper_scheduler_attach_vtable;
+ typedef exception improper_scheduler_detach;
+ extern const vtable_ptr improper_scheduler_detach_vtable;
+ 
++typedef exception invalid_multiple_scheduling;
++extern const vtable_ptr invalid_multiple_scheduling_vtable;
++
+ typedef exception invalid_scheduler_policy_key;
+ extern const vtable_ptr invalid_scheduler_policy_key_vtable;
+ 
+@@ -451,6 +454,35 @@ improper_scheduler_detach * __thiscall improper_scheduler_detach_copy_ctor(
+     return __exception_copy_ctor(_this, rhs, &improper_scheduler_detach_vtable);
+ }
+ 
++/* ??0invalid_multiple_scheduling@Concurrency@@QAA@PBD@Z */
++/* ??0invalid_multiple_scheduling@Concurrency@@QAE@PBD@Z */
++/* ??0invalid_multiple_scheduling@Concurrency@@QEAA@PEBD@Z */
++DEFINE_THISCALL_WRAPPER(invalid_multiple_scheduling_ctor_str, 8)
++invalid_multiple_scheduling* __thiscall invalid_multiple_scheduling_ctor_str(
++        invalid_multiple_scheduling *this, const char *str)
++{
++    TRACE("(%p %s)\n", this, str);
++    return __exception_ctor(this, str, &invalid_multiple_scheduling_vtable);
++}
++
++/* ??0invalid_multiple_scheduling@Concurrency@@QAA@XZ */
++/* ??0invalid_multiple_scheduling@Concurrency@@QAE@XZ */
++/* ??0invalid_multiple_scheduling@Concurrency@@QEAA@XZ */
++DEFINE_THISCALL_WRAPPER(invalid_multiple_scheduling_ctor, 4)
++invalid_multiple_scheduling* __thiscall invalid_multiple_scheduling_ctor(
++        invalid_multiple_scheduling *this)
++{
++    return invalid_multiple_scheduling_ctor_str(this, NULL);
++}
++
++DEFINE_THISCALL_WRAPPER(invalid_multiple_scheduling_copy_ctor,8)
++invalid_multiple_scheduling * __thiscall invalid_multiple_scheduling_copy_ctor(
++        invalid_multiple_scheduling * _this, const invalid_multiple_scheduling * rhs)
++{
++    TRACE("(%p %p)\n", _this, rhs);
++    return __exception_copy_ctor(_this, rhs, &invalid_multiple_scheduling_vtable);
++}
++
+ /* ??0invalid_scheduler_policy_key@Concurrency@@QAE@PBD@Z */
+ /* ??0invalid_scheduler_policy_key@Concurrency@@QEAA@PEBD@Z */
+ DEFINE_THISCALL_WRAPPER(invalid_scheduler_policy_key_ctor_str, 8)
+@@ -583,6 +615,8 @@ DEFINE_RTTI_DATA1(improper_scheduler_attach, 0, &cexception_rtti_base_descriptor
+         ".?AVimproper_scheduler_attach@Concurrency@@")
+ DEFINE_RTTI_DATA1(improper_scheduler_detach, 0, &cexception_rtti_base_descriptor,
+         ".?AVimproper_scheduler_detach@Concurrency@@")
++DEFINE_RTTI_DATA1(invalid_multiple_scheduling, 0, &cexception_rtti_base_descriptor,
++        ".?AVinvalid_multiple_scheduling@Concurrency@@")
+ DEFINE_RTTI_DATA1(invalid_scheduler_policy_key, 0, &cexception_rtti_base_descriptor,
+         ".?AVinvalid_scheduler_policy_key@Concurrency@@")
+ DEFINE_RTTI_DATA1(invalid_scheduler_policy_thread_specification, 0, &cexception_rtti_base_descriptor,
+@@ -610,6 +644,9 @@ __ASM_BLOCK_BEGIN(concurrency_exception_vtables)
+     __ASM_VTABLE(improper_scheduler_detach,
+             VTABLE_ADD_FUNC(cexception_vector_dtor)
+             VTABLE_ADD_FUNC(cexception_what));
++    __ASM_VTABLE(invalid_multiple_scheduling,
++            VTABLE_ADD_FUNC(cexception_vector_dtor)
++            VTABLE_ADD_FUNC(cexception_what));
+     __ASM_VTABLE(invalid_scheduler_policy_key,
+             VTABLE_ADD_FUNC(cexception_vector_dtor)
+             VTABLE_ADD_FUNC(cexception_what));
+@@ -3042,6 +3079,7 @@ void msvcrt_init_concurrency(void *base)
+     init_improper_lock_rtti(base);
+     init_improper_scheduler_attach_rtti(base);
+     init_improper_scheduler_detach_rtti(base);
++    init_invalid_multiple_scheduling_rtti(base);
+     init_invalid_scheduler_policy_key_rtti(base);
+     init_invalid_scheduler_policy_thread_specification_rtti(base);
+     init_invalid_scheduler_policy_value_rtti(base);
+
+
+From e704c445429391ab2d0874ff6cfe8f708a69f8fd Mon Sep 17 00:00:00 2001
+From: Torge Matthies <tmatthies@codeweavers.com>
+Date: Wed, 17 Aug 2022 15:19:10 +0200
+Subject: [PATCH 1/2] msvcr100: Factor out the mapping of a context to a
+ scheduler.
+
+Signed-off-by: Torge Matthies <tmatthies@codeweavers.com>
+---
+ dlls/msvcrt/concurrency.c | 29 +++++++++++++++++++----------
+ 1 file changed, 19 insertions(+), 10 deletions(-)
+
+diff --git a/dlls/msvcrt/concurrency.c b/dlls/msvcrt/concurrency.c
+index d0c9924c631..f8abdff9f5d 100644
+--- a/dlls/msvcrt/concurrency.c
++++ b/dlls/msvcrt/concurrency.c
+@@ -697,29 +697,38 @@ static Context* get_current_context(void)
+     return ret;
+ }
+ 
++static Scheduler* get_scheduler_from_context(Context *ctx)
++{
++    ExternalContextBase *context = (ExternalContextBase*)ctx;
++
++    if (context->context.vtable != &ExternalContextBase_vtable)
++        return NULL;
++    return context->scheduler.scheduler;
++}
++
+ static Scheduler* try_get_current_scheduler(void)
+ {
+-    ExternalContextBase *context = (ExternalContextBase*)try_get_current_context();
++    Context *context = try_get_current_context();
++    Scheduler *ret;
+ 
+     if (!context)
+         return NULL;
+ 
+-    if (context->context.vtable != &ExternalContextBase_vtable) {
++    ret = get_scheduler_from_context(context);
++    if (!ret)
+         ERR("unknown context set\n");
+-        return NULL;
+-    }
+-    return context->scheduler.scheduler;
++    return ret;
+ }
+ 
+ static Scheduler* get_current_scheduler(void)
+ {
+-    ExternalContextBase *context = (ExternalContextBase*)get_current_context();
++    Context *context = get_current_context();
++    Scheduler *ret;
+ 
+-    if (context->context.vtable != &ExternalContextBase_vtable) {
++    ret = get_scheduler_from_context(context);
++    if (!ret)
+         ERR("unknown context set\n");
+-        return NULL;
+-    }
+-    return context->scheduler.scheduler;
++    return ret;
+ }
+ 
+ /* ?CurrentContext@Context@Concurrency@@SAPAV12@XZ */
+-- 
+GitLab
+
+
+From 581a35d1bf739ccd0ac9379d80acd77eb166fcd8 Mon Sep 17 00:00:00 2001
+From: Torge Matthies <tmatthies@codeweavers.com>
+Date: Wed, 17 Aug 2022 15:19:10 +0200
+Subject: [PATCH 2/2] msvcr100: Implement _StructuredTaskCollection::_Schedule
+ and _Schedule_loc.
+
+Signed-off-by: Torge Matthies <tmatthies@codeweavers.com>
+---
+ dlls/msvcrt/concurrency.c | 190 ++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 183 insertions(+), 7 deletions(-)
+
+diff --git a/dlls/msvcrt/concurrency.c b/dlls/msvcrt/concurrency.c
+index f8abdff9f5d..013219ab5bd 100644
+--- a/dlls/msvcrt/concurrency.c
++++ b/dlls/msvcrt/concurrency.c
+@@ -24,6 +24,8 @@
+ #include "windef.h"
+ #include "winternl.h"
+ #include "wine/debug.h"
++#include "wine/exception.h"
++#include "wine/list.h"
+ #include "msvcrt.h"
+ #include "cxx.h"
+ 
+@@ -135,6 +137,7 @@ typedef struct {
+     int shutdown_size;
+     HANDLE *shutdown_events;
+     CRITICAL_SECTION cs;
++    struct list scheduled_chores;
+ } ThreadScheduler;
+ extern const vtable_ptr ThreadScheduler_vtable;
+ 
+@@ -164,15 +167,32 @@ typedef struct
+     yield_func yield_func;
+ } SpinWait;
+ 
++#define FINISHED_INITIAL 0x80000000
+ typedef struct
+ {
+-    char dummy;
+-} _UnrealizedChore;
++    void *unk1;
++    unsigned int unk2;
++    void *unk3;
++    Context *context;
++    volatile LONG count;
++    volatile LONG finished;
++    void *exception;
++    void *event;
++} _StructuredTaskCollection;
+ 
+-typedef struct
++typedef struct _UnrealizedChore
+ {
+-    char dummy;
+-} _StructuredTaskCollection;
++    const vtable_ptr *vtable;
++    void (__cdecl *chore_proc)(struct _UnrealizedChore*);
++    _StructuredTaskCollection *task_collection;
++    void (__cdecl *chore_wrapper)(struct _UnrealizedChore*);
++    void *unk[6];
++} _UnrealizedChore;
++
++struct scheduled_chore {
++    struct list entry;
++    _UnrealizedChore *chore;
++};
+ 
+ /* keep in sync with msvcp90/msvcp90.h */
+ typedef struct cs_queue
+@@ -629,6 +649,7 @@ DEFINE_RTTI_DATA1(scheduler_resource_allocation_error, 0, &cexception_rtti_base_
+ DEFINE_CXX_DATA1(improper_lock, &cexception_cxx_type_info, cexception_dtor)
+ DEFINE_CXX_DATA1(improper_scheduler_attach, &cexception_cxx_type_info, cexception_dtor)
+ DEFINE_CXX_DATA1(improper_scheduler_detach, &cexception_cxx_type_info, cexception_dtor)
++DEFINE_CXX_DATA1(invalid_multiple_scheduling, &cexception_cxx_type_info, cexception_dtor)
+ DEFINE_CXX_DATA1(invalid_scheduler_policy_key, &cexception_cxx_type_info, cexception_dtor)
+ DEFINE_CXX_DATA1(invalid_scheduler_policy_thread_specification, &cexception_cxx_type_info, cexception_dtor)
+ DEFINE_CXX_DATA1(invalid_scheduler_policy_value, &cexception_cxx_type_info, cexception_dtor)
+@@ -839,6 +860,25 @@ bool __thiscall ExternalContextBase_IsSynchronouslyBlocked(const ExternalContext
+     return FALSE;
+ }
+ 
++static void remove_scheduled_chores(Scheduler *scheduler, const ExternalContextBase *context)
++{
++    ThreadScheduler *tscheduler = (ThreadScheduler*)scheduler;
++    struct scheduled_chore *sc, *next;
++
++    if (tscheduler->scheduler.vtable != &ThreadScheduler_vtable)
++        return;
++
++    EnterCriticalSection(&tscheduler->cs);
++    LIST_FOR_EACH_ENTRY_SAFE(sc, next, &tscheduler->scheduled_chores,
++                             struct scheduled_chore, entry) {
++        if (sc->chore->task_collection->context == &context->context) {
++            list_remove(&sc->entry);
++            operator_delete(sc);
++        }
++    }
++    LeaveCriticalSection(&tscheduler->cs);
++}
++
+ static void ExternalContextBase_dtor(ExternalContextBase *this)
+ {
+     struct scheduler_list *scheduler_cur, *scheduler_next;
+@@ -854,10 +894,12 @@ static void ExternalContextBase_dtor(ExternalContextBase *this)
+     }
+ 
+     if (this->scheduler.scheduler) {
++        remove_scheduled_chores(this->scheduler.scheduler, this);
+         call_Scheduler_Release(this->scheduler.scheduler);
+ 
+         for(scheduler_cur=this->scheduler.next; scheduler_cur; scheduler_cur=scheduler_next) {
+             scheduler_next = scheduler_cur->next;
++            remove_scheduled_chores(scheduler_cur->scheduler, this);
+             call_Scheduler_Release(scheduler_cur->scheduler);
+             operator_delete(scheduler_cur);
+         }
+@@ -1157,6 +1199,7 @@ void __thiscall SchedulerPolicy_dtor(SchedulerPolicy *this)
+ static void ThreadScheduler_dtor(ThreadScheduler *this)
+ {
+     int i;
++    struct scheduled_chore *sc, *next;
+ 
+     if(this->ref != 0) WARN("ref = %ld\n", this->ref);
+     SchedulerPolicy_dtor(&this->policy);
+@@ -1167,6 +1210,12 @@ static void ThreadScheduler_dtor(ThreadScheduler *this)
+ 
+     this->cs.DebugInfo->Spare[0] = 0;
+     DeleteCriticalSection(&this->cs);
++
++    if (!list_empty(&this->scheduled_chores))
++        ERR("scheduled chore list is not empty\n");
++    LIST_FOR_EACH_ENTRY_SAFE(sc, next, &this->scheduled_chores,
++            struct scheduled_chore, entry)
++        operator_delete(sc);
+ }
+ 
+ DEFINE_THISCALL_WRAPPER(ThreadScheduler_Id, 4)
+@@ -1375,6 +1424,8 @@ static ThreadScheduler* ThreadScheduler_ctor(ThreadScheduler *this,
+ 
+     InitializeCriticalSection(&this->cs);
+     this->cs.DebugInfo->Spare[0] = (DWORD_PTR)(__FILE__ ": ThreadScheduler");
++
++    list_init(&this->scheduled_chores);
+     return this;
+ }
+ 
+@@ -1824,6 +1875,114 @@ void __thiscall _StructuredTaskCollection_dtor(_StructuredTaskCollection *this)
+ 
+ #endif /* _MSVCR_VER >= 120 */
+ 
++static ThreadScheduler *get_thread_scheduler_from_context(Context *context)
++{
++    Scheduler *scheduler = get_scheduler_from_context(context);
++    if (scheduler && scheduler->vtable == &ThreadScheduler_vtable)
++        return (ThreadScheduler*)scheduler;
++    return NULL;
++}
++
++static void CALLBACK chore_wrapper_finally(BOOL normal, void *data)
++{
++    _UnrealizedChore *chore = data;
++    LONG prev_finished, new_finished;
++    volatile LONG *ptr;
++
++    TRACE("(%u %p)\n", normal, data);
++
++    if (!chore->task_collection)
++        return;
++    ptr = &chore->task_collection->finished;
++    chore->task_collection = NULL;
++
++    do {
++        prev_finished = *ptr;
++        if (prev_finished == FINISHED_INITIAL)
++            new_finished = 1;
++        else
++            new_finished = prev_finished + 1;
++    } while (InterlockedCompareExchange(ptr, new_finished, prev_finished)
++             != prev_finished);
++}
++
++static void __cdecl chore_wrapper(_UnrealizedChore *chore)
++{
++    TRACE("(%p)\n", chore);
++
++    __TRY
++    {
++        if (chore->chore_proc)
++            chore->chore_proc(chore);
++    }
++    __FINALLY_CTX(chore_wrapper_finally, chore)
++}
++
++static void __cdecl _StructuredTaskCollection_scheduler_cb(void *data)
++{
++    ThreadScheduler *scheduler = (ThreadScheduler*)get_current_scheduler();
++    struct list *entry;
++    struct scheduled_chore *sc;
++    _UnrealizedChore *chore;
++
++    TRACE("(%p)\n", scheduler);
++
++    if (scheduler->scheduler.vtable != &ThreadScheduler_vtable)
++    {
++        ERR("unknown scheduler set\n");
++        return;
++    }
++
++    EnterCriticalSection(&scheduler->cs);
++    entry = list_head(&scheduler->scheduled_chores);
++    if (entry)
++        list_remove(entry);
++    LeaveCriticalSection(&scheduler->cs);
++    if (!entry)
++        return;
++
++    sc = LIST_ENTRY(entry, struct scheduled_chore, entry);
++    chore = sc->chore;
++    operator_delete(sc);
++
++    chore->chore_wrapper(chore);
++}
++
++static bool schedule_chore(_StructuredTaskCollection *this,
++        _UnrealizedChore *chore, Scheduler **pscheduler)
++{
++    struct scheduled_chore *sc;
++    ThreadScheduler *scheduler;
++
++    if (chore->task_collection) {
++        invalid_multiple_scheduling e;
++        invalid_multiple_scheduling_ctor_str(&e, "Chore scheduled multiple times");
++        _CxxThrowException(&e, &invalid_multiple_scheduling_exception_type);
++        return FALSE;
++    }
++
++    if (!this->context)
++        this->context = get_current_context();
++    scheduler = get_thread_scheduler_from_context(this->context);
++    if (!scheduler) {
++        ERR("unknown context or scheduler set\n");
++        return FALSE;
++    }
++
++    sc = operator_new(sizeof(*sc));
++    sc->chore = chore;
++
++    chore->task_collection = this;
++    chore->chore_wrapper = chore_wrapper;
++    InterlockedIncrement(&this->count);
++
++    EnterCriticalSection(&scheduler->cs);
++    list_add_head(&scheduler->scheduled_chores, &sc->entry);
++    LeaveCriticalSection(&scheduler->cs);
++    *pscheduler = &scheduler->scheduler;
++    return TRUE;
++}
++
+ #if _MSVCR_VER >= 110
+ 
+ /* ?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAAXPAV_UnrealizedChore@23@PAVlocation@3@@Z */
+@@ -1834,7 +1993,15 @@ void __thiscall _StructuredTaskCollection__Schedule_loc(
+         _StructuredTaskCollection *this, _UnrealizedChore *chore,
+         /*location*/void *placement)
+ {
+-    FIXME("(%p %p %p): stub!\n", this, chore, placement);
++    Scheduler *scheduler;
++
++    TRACE("(%p %p %p)\n", this, chore, placement);
++
++    if (schedule_chore(this, chore, &scheduler))
++    {
++        call_Scheduler_ScheduleTask_loc(scheduler,
++                _StructuredTaskCollection_scheduler_cb, NULL, placement);
++    }
+ }
+ 
+ #endif /* _MSVCR_VER >= 110 */
+@@ -1846,7 +2013,15 @@ DEFINE_THISCALL_WRAPPER(_StructuredTaskCollection__Schedule, 8)
+ void __thiscall _StructuredTaskCollection__Schedule(
+         _StructuredTaskCollection *this, _UnrealizedChore *chore)
+ {
+-    FIXME("(%p %p): stub!\n", this, chore);
++    Scheduler *scheduler;
++
++    TRACE("(%p %p)\n", this, chore);
++
++    if (schedule_chore(this, chore, &scheduler))
++    {
++        call_Scheduler_ScheduleTask(scheduler,
++                _StructuredTaskCollection_scheduler_cb, NULL);
++    }
+ }
+ 
+ /* ?_RunAndWait@_StructuredTaskCollection@details@Concurrency@@QAA?AW4_TaskCollectionStatus@23@PAV_UnrealizedChore@23@@Z */
+@@ -3105,6 +3280,7 @@ void msvcrt_init_concurrency(void *base)
+     init_improper_lock_cxx(base);
+     init_improper_scheduler_attach_cxx(base);
+     init_improper_scheduler_detach_cxx(base);
++    init_invalid_multiple_scheduling_cxx(base);
+     init_invalid_scheduler_policy_key_cxx(base);
+     init_invalid_scheduler_policy_thread_specification_cxx(base);
+     init_invalid_scheduler_policy_value_cxx(base);
+-- 
+GitLab
+
+From 78f1dd89676b72b217e69e131602aa4b1897e4ae Mon Sep 17 00:00:00 2001
+From: Jinoh Kang <jinoh.kang.kr@gmail.com>
+Date: Tue, 9 Aug 2022 22:21:02 +0900
+Subject: [PATCH 1/3] server: Use POLLIN instead of POLLPRI if the socket is in
+ oobinline mode.
+
+---
+ server/sock.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/server/sock.c b/server/sock.c
+index 7d7e470be28..caa3724eb59 100644
+--- a/server/sock.c
++++ b/server/sock.c
+@@ -3470,7 +3470,7 @@ DECL_HANDLER(recv_socket)
+          */
+         struct pollfd pollfd;
+         pollfd.fd = get_unix_fd( sock->fd );
+-        pollfd.events = req->oob ? POLLPRI : POLLIN;
++        pollfd.events = req->oob && !is_oobinline( sock ) ? POLLPRI : POLLIN;
+         pollfd.revents = 0;
+         if (poll(&pollfd, 1, 0) >= 0 && pollfd.revents)
+         {
+-- 
+GitLab
+
+
+From 13fb500cbbbeae06503d1d1598030ead0cf49a9b Mon Sep 17 00:00:00 2001
+From: Jinoh Kang <jinoh.kang.kr@gmail.com>
+Date: Tue, 9 Aug 2022 22:24:44 +0900
+Subject: [PATCH 2/3] server: Use check_fd_events() instead of calling poll()
+ directly.
+
+---
+ server/sock.c | 12 ++----------
+ 1 file changed, 2 insertions(+), 10 deletions(-)
+
+diff --git a/server/sock.c b/server/sock.c
+index caa3724eb59..7b5bb187aa0 100644
+--- a/server/sock.c
++++ b/server/sock.c
+@@ -3468,11 +3468,7 @@ DECL_HANDLER(recv_socket)
+          * asyncs will not consume all available data; if there's no data
+          * available, the current request won't be immediately satiable.
+          */
+-        struct pollfd pollfd;
+-        pollfd.fd = get_unix_fd( sock->fd );
+-        pollfd.events = req->oob && !is_oobinline( sock ) ? POLLPRI : POLLIN;
+-        pollfd.revents = 0;
+-        if (poll(&pollfd, 1, 0) >= 0 && pollfd.revents)
++        if (check_fd_events( sock->fd, req->oob && !is_oobinline( sock ) ? POLLPRI : POLLIN ))
+         {
+             /* Give the client opportunity to complete synchronously.
+              * If it turns out that the I/O request is not actually immediately satiable,
+@@ -3568,11 +3564,7 @@ DECL_HANDLER(send_socket)
+          * asyncs will not consume all available space; if there's no space
+          * available, the current request won't be immediately satiable.
+          */
+-        struct pollfd pollfd;
+-        pollfd.fd = get_unix_fd( sock->fd );
+-        pollfd.events = POLLOUT;
+-        pollfd.revents = 0;
+-        if (poll(&pollfd, 1, 0) >= 0 && pollfd.revents)
++        if (check_fd_events( sock->fd, POLLOUT ))
+         {
+             /* Give the client opportunity to complete synchronously.
+              * If it turns out that the I/O request is not actually immediately satiable,
+-- 
+GitLab
+
+
+From a115feab9ca8af9689a4ee13cd88ee6e93f902bd Mon Sep 17 00:00:00 2001
+From: Jinoh Kang <jinoh.kang.kr@gmail.com>
+Date: Tue, 9 Aug 2022 23:07:56 +0900
+Subject: [PATCH 3/3] server: Always prefer synchronous I/O in nonblocking
+ mode.
+
+foobar2000.exe's UPnP Media Renderer component (foo_out_upnp.dll)
+expects that, if a select() call completes successfully with a non-empty
+writefds set, any immediately following send() call on a socket in the
+writefds set never fails with WSAEWOULDBLOCK.
+
+On Wine, the Winsock select() and send() implementations both call the
+Unix poll(2) under the hood to test if I/O is possible on the socket.
+As it turns out, it's entirely possible that Linux poll() may yield
+POLLOUT on the first call (by select) but *not* the second (by send),
+even if no send() call has been made in the meanwhile.
+
+On Linux (as of v5.19), a connected (ESTABLISHED) TCP socket that has
+not been shut down indicates (E)POLLOUT only if the ratio of
+sk_wmem_queued (the amount of bytes queued in the send buffer) to
+sk_sndbuf (the size of send buffer size itself, which can be retrieved
+via SO_SNDBUF) is below a certain threshold.  Therefore, a falling edge
+in POLLOUT can be triggered due to a number of reasons:
+
+1. TCP fragmentation.  Once a TCP packet is split out from a larger
+   sk_buff, it incurs extra bookkeeping overhead (e.g. sk_buff header)
+   that is counted in sk_wmem_queued alongside application data.
+   See also: tcp_fragment(), tso_fragment() (Linux 5.19).
+
+2. Control packets (e.g. MTU probing).  Such packets share the same
+   buffer with application-initiated packets, and thus counted in
+   sk_wmem_queued.
+   See also: sk_wmem_queued_add() callers (Linux 5.19).
+
+3. Memory pressure.  This causes sk_sndbuf to shrink.
+   See also: sk_stream_moderate_sndbuf() callers (Linux 5.19).
+
+Fix this by always attempting synchronous I/O first if req->force_async
+is unset and the nonblocking flag is set.
+
+Wine-Bug: https://bugs.winehq.org/show_bug.cgi?id=53486
+---
+ server/sock.c | 32 ++++++++++++++++++++++++++++----
+ 1 file changed, 28 insertions(+), 4 deletions(-)
+
+diff --git a/server/sock.c b/server/sock.c
+index 7b5bb187aa0..4e57d6774a6 100644
+--- a/server/sock.c
++++ b/server/sock.c
+@@ -3468,11 +3468,19 @@ DECL_HANDLER(recv_socket)
+          * asyncs will not consume all available data; if there's no data
+          * available, the current request won't be immediately satiable.
+          */
+-        if (check_fd_events( sock->fd, req->oob && !is_oobinline( sock ) ? POLLPRI : POLLIN ))
++        if ((!req->force_async && sock->nonblocking) ||
++            check_fd_events( sock->fd, req->oob && !is_oobinline( sock ) ? POLLPRI : POLLIN ))
+         {
+             /* Give the client opportunity to complete synchronously.
+              * If it turns out that the I/O request is not actually immediately satiable,
+-             * the client may then choose to re-queue the async (with STATUS_PENDING). */
++             * the client may then choose to re-queue the async (with STATUS_PENDING).
++             *
++             * Note: If the nonblocking flag is set, we don't poll the socket
++             * here and always opt for synchronous completion first.  This is
++             * because the application has probably seen POLLIN already from a
++             * preceding select()/poll() call before it requested to receive
++             * data.
++             */
+             status = STATUS_ALERTED;
+         }
+     }
+@@ -3564,11 +3572,27 @@ DECL_HANDLER(send_socket)
+          * asyncs will not consume all available space; if there's no space
+          * available, the current request won't be immediately satiable.
+          */
+-        if (check_fd_events( sock->fd, POLLOUT ))
++        if ((!req->force_async && sock->nonblocking) || check_fd_events( sock->fd, POLLOUT ))
+         {
+             /* Give the client opportunity to complete synchronously.
+              * If it turns out that the I/O request is not actually immediately satiable,
+-             * the client may then choose to re-queue the async (with STATUS_PENDING). */
++             * the client may then choose to re-queue the async (with STATUS_PENDING).
++             *
++             * Note: If the nonblocking flag is set, we don't poll the socket
++             * here and always opt for synchronous completion first.  This is
++             * because the application has probably seen POLLOUT already from a
++             * preceding select()/poll() call before it requested to send data.
++             *
++             * Furthermore, some applications expect that any send() call on a
++             * socket that has indicated POLLOUT beforehand never fails with
++             * WSAEWOULDBLOCK.  It's possible that Linux poll() may yield
++             * POLLOUT on the first call but not the second, even if no send()
++             * call has been made in the meanwhile.  This can happen for a
++             * number of reasons; for example, TCP fragmentation may consume
++             * extra buffer space for each packet that has been split out, or
++             * the TCP/IP networking stack may decide to shrink the send buffer
++             * due to memory pressure.
++             */
+             status = STATUS_ALERTED;
+         }
+     }
+-- 
+GitLab
+
+From d22275a1dc02de2e12d1a55570bd5df80ea05e0c Mon Sep 17 00:00:00 2001
+From: Piotr Caban <piotr@codeweavers.com>
+Date: Wed, 24 Aug 2022 17:15:46 +0200
+Subject: [PATCH] msvcr100: Set scheduler in tasks created with ScheduleTask
+ function.
+
+---
+ dlls/msvcrt/concurrency.c | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+diff --git a/dlls/msvcrt/concurrency.c b/dlls/msvcrt/concurrency.c
+index 013219ab5bd..a1c5c635602 100644
+--- a/dlls/msvcrt/concurrency.c
++++ b/dlls/msvcrt/concurrency.c
+@@ -1329,15 +1329,29 @@ typedef struct
+ {
+     void (__cdecl *proc)(void*);
+     void *data;
++    ThreadScheduler *scheduler;
+ } schedule_task_arg;
+ 
++void __cdecl CurrentScheduler_Detach(void);
++
+ static void WINAPI schedule_task_proc(PTP_CALLBACK_INSTANCE instance, void *context, PTP_WORK work)
+ {
+     schedule_task_arg arg;
++    BOOL detach = FALSE;
+ 
+     arg = *(schedule_task_arg*)context;
+     operator_delete(context);
++
++    if(&arg.scheduler->scheduler != try_get_current_scheduler()) {
++        ThreadScheduler_Attach(arg.scheduler);
++        detach = TRUE;
++    }
++    ThreadScheduler_Release(arg.scheduler);
++
+     arg.proc(arg.data);
++
++    if(detach)
++        CurrentScheduler_Detach();
+ }
+ 
+ DEFINE_THISCALL_WRAPPER(ThreadScheduler_ScheduleTask_loc, 16)
+@@ -1352,11 +1366,14 @@ void __thiscall ThreadScheduler_ScheduleTask_loc(ThreadScheduler *this,
+     arg = operator_new(sizeof(*arg));
+     arg->proc = proc;
+     arg->data = data;
++    arg->scheduler = this;
++    ThreadScheduler_Reference(this);
+ 
+     work = CreateThreadpoolWork(schedule_task_proc, arg, NULL);
+     if(!work) {
+         scheduler_resource_allocation_error e;
+ 
++        ThreadScheduler_Release(this);
+         operator_delete(arg);
+         scheduler_resource_allocation_error_ctor_name(&e, NULL,
+                 HRESULT_FROM_WIN32(GetLastError()));
+-- 
+GitLab
+

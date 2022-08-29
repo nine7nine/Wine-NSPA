@@ -1,0 +1,187 @@
+From: "Rémi Bernon" <rbernon@codeweavers.com>
+Subject: [PATCH] commctrl: Use rbtree to keep private data instead of PropW.
+Message-Id: <20200910165638.1098961-1-rbernon@codeweavers.com>
+Date: Thu, 10 Sep 2020 18:56:37 +0200
+
+Wine's wordpad.exe takes minutes to start because of the wineserver
+roundtrip Get/Set/RemovePropW induce. It's just used to track if the
+window procedure has already been hooked and the cross-process support
+doesn't seem to be useful here.
+
+Signed-off-by: Rémi Bernon <rbernon@codeweavers.com>
+---
+
+I'm exagerating a bit but wordpad.exe takes about 40s to start on latest
+HEAD. It may be doing something very wrong and maybe this isn't the
+right fix, but at least it makes it start in a few seconds instead.
+
+ dlls/comctl32/comctl32.h |  4 +++
+ dlls/comctl32/commctrl.c | 63 ++++++++++++++++++++++++++++++++++------
+ 2 files changed, 58 insertions(+), 9 deletions(-)
+
+diff --git a/dlls/comctl32/comctl32.h b/dlls/comctl32/comctl32.h
+index 11111111111..11111111111 100644
+--- a/dlls/comctl32/comctl32.h
++++ b/dlls/comctl32/comctl32.h
+@@ -35,6 +35,8 @@
+ #include "winnls.h"
+ #include "commctrl.h"
+ 
++#include "wine/rbtree.h"
++
+ extern HMODULE COMCTL32_hModule DECLSPEC_HIDDEN;
+ extern HBRUSH  COMCTL32_hPattern55AABrush DECLSPEC_HIDDEN;
+ 
+@@ -210,6 +212,8 @@ typedef struct
+    SUBCLASSPROCS *stackpos;
+    WNDPROC origproc;
+    int running;
++   struct wine_rb_entry entry;
++   HWND hwnd;
+ } SUBCLASS_INFO, *LPSUBCLASS_INFO;
+ 
+ /* undocumented functions */
+diff --git a/dlls/comctl32/commctrl.c b/dlls/comctl32/commctrl.c
+index 11111111111..11111111111 100644
+--- a/dlls/comctl32/commctrl.c
++++ b/dlls/comctl32/commctrl.c
+@@ -74,9 +74,54 @@
+ #include "comctl32.h"
+ #include "uxtheme.h"
+ #include "wine/debug.h"
++#include "wine/rbtree.h"
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(commctrl);
+ 
++static CRITICAL_SECTION commctrl_cs;
++static CRITICAL_SECTION_DEBUG commctrl_cs_debug =
++{
++    0, 0, &commctrl_cs,
++    { &commctrl_cs_debug.ProcessLocksList, &commctrl_cs_debug.ProcessLocksList },
++      0, 0, { (DWORD_PTR)(__FILE__ ": commctrl_cs") }
++};
++static CRITICAL_SECTION commctrl_cs = { &commctrl_cs_debug, -1, 0, 0, 0, 0 };
++
++static int commctrl_stack_compare (const void *key, const struct wine_rb_entry *entry)
++{
++    SUBCLASS_INFO *stack = WINE_RB_ENTRY_VALUE (entry, SUBCLASS_INFO, entry);
++    return (HWND)key - stack->hwnd;
++}
++
++static struct wine_rb_tree commctrl_stack_tree = { commctrl_stack_compare };
++
++static SUBCLASS_INFO *commctrl_get_stack (HWND hwnd)
++{
++    struct wine_rb_entry *entry;
++    SUBCLASS_INFO *stack = NULL;
++
++    EnterCriticalSection (&commctrl_cs);
++    if ((entry = wine_rb_get (&commctrl_stack_tree, hwnd)))
++        stack = WINE_RB_ENTRY_VALUE (entry, SUBCLASS_INFO, entry);
++    LeaveCriticalSection (&commctrl_cs);
++
++    return stack;
++}
++
++static void commctrl_set_stack (HWND hwnd, SUBCLASS_INFO *stack)
++{
++    EnterCriticalSection (&commctrl_cs);
++    stack->hwnd = hwnd;
++    wine_rb_put (&commctrl_stack_tree, hwnd, &stack->entry);
++    LeaveCriticalSection (&commctrl_cs);
++}
++
++static void commctrl_remove_stack (SUBCLASS_INFO *stack)
++{
++    EnterCriticalSection (&commctrl_cs);
++    wine_rb_remove (&commctrl_stack_tree, &stack->entry);
++    LeaveCriticalSection (&commctrl_cs);
++}
+ 
+ static LRESULT WINAPI COMCTL32_SubclassProc (HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+ 
+@@ -1092,7 +1137,7 @@ BOOL WINAPI SetWindowSubclass (HWND hWnd, SUBCLASSPROC pfnSubclass,
+     * from there. */
+ 
+    /* See if we have been called for this window */
+-   stack = GetPropW (hWnd, COMCTL32_wSubclass);
++   stack = commctrl_get_stack (hWnd);
+    if (!stack) {
+       /* allocate stack */
+       stack = Alloc (sizeof(SUBCLASS_INFO));
+@@ -1100,7 +1145,7 @@ BOOL WINAPI SetWindowSubclass (HWND hWnd, SUBCLASSPROC pfnSubclass,
+          ERR ("Failed to allocate our Subclassing stack\n");
+          return FALSE;
+       }
+-      SetPropW (hWnd, COMCTL32_wSubclass, stack);
++      commctrl_set_stack (hWnd, stack);
+ 
+       /* set window procedure to our own and save the current one */
+       if (IsWindowUnicode (hWnd))
+@@ -1131,8 +1176,8 @@ BOOL WINAPI SetWindowSubclass (HWND hWnd, SUBCLASSPROC pfnSubclass,
+          SetWindowLongPtrW (hWnd, GWLP_WNDPROC, (DWORD_PTR)stack->origproc);
+       else
+          SetWindowLongPtrA (hWnd, GWLP_WNDPROC, (DWORD_PTR)stack->origproc);
++      commctrl_remove_stack (stack);
+       Free (stack);
+-      RemovePropW( hWnd, COMCTL32_wSubclass );
+       return FALSE;
+    }
+    
+@@ -1171,7 +1216,7 @@ BOOL WINAPI GetWindowSubclass (HWND hWnd, SUBCLASSPROC pfnSubclass,
+    TRACE("%p, %p, %Ix, %p\n", hWnd, pfnSubclass, uID, pdwRef);
+ 
+    /* See if we have been called for this window */
+-   stack = GetPropW (hWnd, COMCTL32_wSubclass);
++   stack = commctrl_get_stack (hWnd);
+    if (!stack)
+       return FALSE;
+ 
+@@ -1214,7 +1259,7 @@ BOOL WINAPI RemoveWindowSubclass(HWND hWnd, SUBCLASSPROC pfnSubclass, UINT_PTR u
+    TRACE("%p, %p, %Ix.\n", hWnd, pfnSubclass, uID);
+ 
+    /* Find the Subclass to remove */
+-   stack = GetPropW (hWnd, COMCTL32_wSubclass);
++   stack = commctrl_get_stack (hWnd);
+    if (!stack)
+       return FALSE;
+ 
+@@ -1246,8 +1291,8 @@ BOOL WINAPI RemoveWindowSubclass(HWND hWnd, SUBCLASSPROC pfnSubclass, UINT_PTR u
+          SetWindowLongPtrW (hWnd, GWLP_WNDPROC, (DWORD_PTR)stack->origproc);
+       else
+          SetWindowLongPtrA (hWnd, GWLP_WNDPROC, (DWORD_PTR)stack->origproc);
++      commctrl_remove_stack (stack);
+       Free (stack);
+-      RemovePropW( hWnd, COMCTL32_wSubclass );
+    }
+    
+    return ret;
+@@ -1267,7 +1312,7 @@ static LRESULT WINAPI COMCTL32_SubclassProc (HWND hWnd, UINT uMsg, WPARAM wParam
+ 
+    TRACE("%p, %#x, %#Ix, %#Ix\n", hWnd, uMsg, wParam, lParam);
+ 
+-   stack = GetPropW (hWnd, COMCTL32_wSubclass);
++   stack = commctrl_get_stack (hWnd);
+    if (!stack) {
+       ERR ("Our sub classing stack got erased for %p!! Nothing we can do\n", hWnd);
+       return 0;
+@@ -1288,8 +1333,8 @@ static LRESULT WINAPI COMCTL32_SubclassProc (HWND hWnd, UINT uMsg, WPARAM wParam
+          SetWindowLongPtrW (hWnd, GWLP_WNDPROC, (DWORD_PTR)stack->origproc);
+       else
+          SetWindowLongPtrA (hWnd, GWLP_WNDPROC, (DWORD_PTR)stack->origproc);
++      commctrl_remove_stack (stack);
+       Free (stack);
+-      RemovePropW( hWnd, COMCTL32_wSubclass );
+    }
+    return ret;
+ }
+@@ -1318,7 +1363,7 @@ LRESULT WINAPI DefSubclassProc (HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
+    TRACE("%p, %#x, %#Ix, %#Ix\n", hWnd, uMsg, wParam, lParam);
+ 
+    /* retrieve our little stack from the Properties */
+-   stack = GetPropW (hWnd, COMCTL32_wSubclass);
++   stack = commctrl_get_stack (hWnd);
+    if (!stack) {
+       ERR ("Our sub classing stack got erased for %p!! Nothing we can do\n", hWnd);
+       return 0;
+
