@@ -17,19 +17,19 @@ _________________________
 
 ### Feature-sets (non-exhaustive)
 
-* NSPA-Specific Wine-RT Implementation - Almost all wine threads use real-time scheduling (both Round-Robin and FIFO)
-* Wineserver Shared Memory support - based on the 7.5 patchset with minor changes to rebase on NSPA
-* Esync / Fsync - based on the Proton implementation (Wine-TKG/staging is way behind on Fsync support / patchwork)
-* Wine Low Fragmentation Heap Patchwork - Based on the 7.5 patchset with some changes / additional patches
-* Winserver + Ntdll backports - in some cases, sync'd with upstream.
-* MSVCRT backports - sync'd to upstream, includes task scheduler changes
-* Keyed Events Linux Futexes Implementation - includes MSVCRT concurrency modifications
-* Performance optimizations of various componenets in Wine. (eg: memcmp, memove avx, etc)
-* Significant backports and Bugfixes from Wine-Git, Wine's bug tracker, OpenGLFreak's wine patchwork and Proton
-* Hacks to improve Wine for NSPA usage (eg: killing update window, killing dragndrop spam for NI plugins, etc)
-* Loader/vDSO performance optimizations (backported)
-* Proton's CPU Topology Overrides (latest implementation)
-* Various Locking improvements
+* **NSPA-Specific Wine-RT Implementation**: Almost all wine threads are real-time (RR and FIFO)
+* **Wineserver Shared Memory support**: based on the 7.5 patchset with minor changes
+* **Esync / Fsync**: based on the Proton implementation (Wine-TKG/staging is way behind on Fsync code)
+* **Wine Low Fragmentation Heap Patchwork**: Based on the 7.5 patchset with additional patches
+* **Winserver + Ntdll backports**: in some cases, sync'd with upstream.
+* **MSVCRT backports**: sync'd to upstream, includes task scheduler changes
+* **Keyed Events Linux Futexes Implementation**: (includes MSVCRT concurrency modifications)
+* **Performance optimizations of various componenets in Wine**: (eg: memcmp, memove avx, etc)
+* **Significant backports and Bugfixes**: from Wine-Git, OpenGLFreak's wine patchwork and Proton
+* **Hacks to improve Wine for NSPA usage**: (eg: killing update window, no DND-spam for NI plugins, etc)
+* **Loader/vDSO performance optimizations**: (backported)
+* **Proton's CPU Topology Overrides**: (latest implementation)
+* **Various Locking improvements**
 _________________________
 
 ### Linux-NSPA:
