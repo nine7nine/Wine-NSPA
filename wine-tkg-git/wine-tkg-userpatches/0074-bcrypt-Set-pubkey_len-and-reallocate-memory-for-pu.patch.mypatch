@@ -1,0 +1,106 @@
+From: Santino Mazza <mazzasantino1206@gmail.com>
+Subject: [PATCH] bcrypt: Set pubkey_len and reallocate memory for pubkey.
+Message-Id: <20220317012450.535149-1-mazzasantino1206@gmail.com>
+Date: Wed, 16 Mar 2022 22:24:50 -0300
+
+This is needed because BCryptFinalizeKey doesn't change the
+pubkey_len member based on the keylen member. Also it doesn't
+reallocate the pubkey buffer. If we don't do this programs get
+an error when trying to generate a key by setting the length
+using BCryptSetProperty.
+
+Signed-off-by: Santino Mazza <mazzasantino1206@gmail.com>
+---
+ dlls/bcrypt/bcrypt_main.c  | 19 ++++++++++++++++++-
+ dlls/bcrypt/tests/bcrypt.c | 29 +++++++++++++++++++++++++++++
+ 2 files changed, 47 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/bcrypt/bcrypt_main.c b/dlls/bcrypt/bcrypt_main.c
+index 11111111111..11111111111 100644
+--- a/dlls/bcrypt/bcrypt_main.c
++++ b/dlls/bcrypt/bcrypt_main.c
+@@ -707,7 +707,24 @@ static NTSTATUS set_key_property( struct key *key, const WCHAR *prop, UCHAR *val
+     else if (!wcscmp( prop, BCRYPT_KEY_LENGTH ))
+     {
+         if (size < sizeof(DWORD)) return STATUS_INVALID_PARAMETER;
+-        key->u.a.bitlen = *(DWORD*)value;
++        if (key->u.a.bitlen == *(DWORD *)value) return STATUS_SUCCESS;
++
++        key->u.a.bitlen = *(DWORD *)value;
++        switch (key->alg_id)
++        {
++        case ALG_ID_RSA:
++        case ALG_ID_RSA_SIGN:
++            key->u.a.pubkey_len = sizeof(BCRYPT_RSAKEY_BLOB) + 2 * key->u.a.bitlen / 8;
++            break;
++        case ALG_ID_DSA:
++            key->u.a.pubkey_len = sizeof(BCRYPT_DSA_KEY_BLOB) + 3 * key->u.a.bitlen / 8;
++            break;
++        default:
++            FIXME( "algorithm %u not supported\n", key->alg_id );
++            return STATUS_NOT_SUPPORTED;
++        }
++
++        key->u.a.pubkey = realloc( key->u.a.pubkey, key->u.a.pubkey_len );
+         return STATUS_SUCCESS;
+     }
+ 
+diff --git a/dlls/bcrypt/tests/bcrypt.c b/dlls/bcrypt/tests/bcrypt.c
+index 11111111111..11111111111 100644
+--- a/dlls/bcrypt/tests/bcrypt.c
++++ b/dlls/bcrypt/tests/bcrypt.c
+@@ -2182,6 +2182,19 @@ static void test_RSA(void)
+     HeapFree(GetProcessHeap(), 0, buf);
+     BCryptDestroyKey(key);
+ 
++    /* generate rsa keys setting the key len by using properties */
++    key = NULL;
++    ret = BCryptGenerateKeyPair(alg, &key, 1024, 0);
++    ok(ret == STATUS_SUCCESS, "got %#lx\n", ret);
++    ok(key != NULL, "got null handle\n");
++
++    keylen = 2048;
++    BCryptSetProperty(key, BCRYPT_KEY_LENGTH, (UCHAR *)&keylen, sizeof(keylen), 0);
++
++    ret = BCryptFinalizeKeyPair(key, 0);
++    ok(ret == STATUS_SUCCESS, "got %#lx\n", ret);
++    if(key) BCryptDestroyKey(key);
++
+     ret = BCryptCloseAlgorithmProvider(alg, 0);
+     ok(!ret, "got %#lx\n", ret);
+ }
+@@ -2877,6 +2890,7 @@ static void test_DSA(void)
+     BCRYPT_DSA_KEY_BLOB *dsablob;
+     UCHAR sig[40], schemes;
+     ULONG len, size;
++    DWORD keylen;
+     NTSTATUS ret;
+     BYTE *buf;
+ 
+@@ -2955,6 +2969,21 @@ static void test_DSA(void)
+     ret = BCryptDestroyKey(key);
+     ok(!ret, "got %#lx\n", ret);
+ 
++    /* generate dsa key by setting the key length */
++    key = NULL;
++    ret = BCryptGenerateKeyPair(alg, &key, 512, 0);
++    ok(ret == STATUS_SUCCESS, "got %#lx\n", ret);
++
++    keylen = 1024;
++    ret = BCryptSetProperty(key, BCRYPT_KEY_LENGTH, (UCHAR *)&keylen, sizeof(keylen), 0);
++    ok(ret == STATUS_SUCCESS, "got %#lx\n", ret);
++
++    ret = BCryptFinalizeKeyPair(key, 0);
++    ok(ret == STATUS_SUCCESS, "got %#lx\n", ret);
++
++    ret = BCryptDestroyKey(key);
++    ok(ret == STATUS_SUCCESS, "got %#lx\n", ret);
++
+     ret = BCryptCloseAlgorithmProvider(alg, 0);
+     ok(!ret, "got %#lx\n", ret);
+ }
+
+-- 
+2.36.1
+
+

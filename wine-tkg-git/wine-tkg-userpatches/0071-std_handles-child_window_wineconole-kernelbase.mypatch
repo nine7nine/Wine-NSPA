@@ -1,0 +1,348 @@
+From: Eric Pouech <eric.pouech@gmail.com>
+Subject: [PATCH 1/4] programs/wineconsole: select console type and/or std handles for child process
+Message-Id: <165002690441.110302.506422384697543704.stgit@euterpe>
+Date: Fri, 15 Apr 2022 14:48:24 +0200
+In-Reply-To: <165002597087.110302.4051917761389773812.stgit@euterpe>
+References: <165002597087.110302.4051917761389773812.stgit@euterpe>
+
+Signed-off-by: Eric Pouech <eric.pouech@gmail.com>
+
+---
+ programs/wineconsole/wineconsole.c      | 192 ++++++++++++++++++++----
+ programs/wineconsole/wineconsole.man.in |  40 ++++-
+ programs/wineconsole/wineconsole.rc     |  12 ++
+ programs/wineconsole/wineconsole_res.h  |   2 +
+ 4 files changed, 212 insertions(+), 34 deletions(-)
+
+diff --git a/programs/wineconsole/wineconsole.c b/programs/wineconsole/wineconsole.c
+index 11111111111..11111111111 100644
+--- a/programs/wineconsole/wineconsole.c
++++ b/programs/wineconsole/wineconsole.c
+@@ -32,50 +32,180 @@
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(console);
+ 
+-int WINAPI wWinMain( HINSTANCE inst, HINSTANCE prev, WCHAR *cmdline, INT show )
++static const unsigned int EC_INTERNAL = 255; /* value of exit_code for internal errors */
++
++static void usage(LPCWSTR option)
+ {
+-    STARTUPINFOW startup = { sizeof(startup) };
+-    PROCESS_INFORMATION info;
+-    WCHAR *cmd = cmdline;
+-    DWORD exit_code;
++    WCHAR tmp[1024];
++
++    if (option)
++    {
++        LoadStringW( GetModuleHandleW( NULL ), IDS_CMD_UNKNOWN_OPTION, tmp, ARRAY_SIZE(tmp) );
++        fwprintf(stderr, tmp, option);
++    }
++    LoadStringW( GetModuleHandleW( NULL ), IDS_CMD_USAGE, tmp, ARRAY_SIZE(tmp) );
++    fprintf(stderr, "%ls\n", tmp);
++    exit( EC_INTERNAL );
++}
++
++/***********************************************************************
++ *           build_command_line
++ *
++ * Build the command line of a process from the argv array.
++ * (copied from dlls/ntdll/unix/env.c)
++ *
++ * We must quote and escape characters so that the argv array can be rebuilt
++ * from the command line:
++ * - spaces and tabs must be quoted
++ *   'a b'   -> '"a b"'
++ * - quotes must be escaped
++ *   '"'     -> '\"'
++ * - if '\'s are followed by a '"', they must be doubled and followed by '\"',
++ *   resulting in an odd number of '\' followed by a '"'
++ *   '\"'    -> '\\\"'
++ *   '\\"'   -> '\\\\\"'
++ * - '\'s are followed by the closing '"' must be doubled,
++ *   resulting in an even number of '\' followed by a '"'
++ *   ' \'    -> '" \\"'
++ *   ' \\'    -> '" \\\\"'
++ * - '\'s that are not followed by a '"' can be left as is
++ *   'a\b'   == 'a\b'
++ *   'a\\b'  == 'a\\b'
++ */
++static WCHAR *build_command_line( WCHAR **wargv )
++{
++    int len;
++    WCHAR **arg, *ret;
++    LPWSTR p;
++
++    len = 1;
++    for (arg = wargv; *arg; arg++) len += 3 + 2 * wcslen( *arg );
++    if (!(ret = malloc( len * sizeof(WCHAR) ))) return NULL;
++
++    p = ret;
++    for (arg = wargv; *arg; arg++)
++    {
++        BOOL has_space, has_quote;
++        int i, bcount;
++        WCHAR *a;
+ 
+-    static WCHAR default_cmd[] = L"cmd";
++        /* check for quotes and spaces in this argument (first arg is always quoted) */
++        has_space = (arg == wargv) || !**arg || wcschr( *arg, ' ' ) || wcschr( *arg, '\t' );
++        has_quote = wcschr( *arg, '"' ) != NULL;
+ 
+-    FreeConsole(); /* make sure we're not connected to inherited console */
+-    if (!AllocConsole())
++        /* now transfer it to the command line */
++        if (has_space) *p++ = '"';
++        if (has_quote || has_space)
++        {
++            bcount = 0;
++            for (a = *arg; *a; a++)
++            {
++                if (*a == '\\') bcount++;
++                else
++                {
++                    if (*a == '"') /* double all the '\\' preceding this '"', plus one */
++                        for (i = 0; i <= bcount; i++) *p++ = '\\';
++                    bcount = 0;
++                }
++                *p++ = *a;
++            }
++        }
++        else
++        {
++            wcscpy( p, *arg );
++            p += wcslen( p );
++        }
++        if (has_space)
++        {
++            /* Double all the '\' preceding the closing quote */
++            for (i = 0; i < bcount; i++) *p++ = '\\';
++            *p++ = '"';
++        }
++        *p++ = ' ';
++    }
++    if (p > ret) p--;  /* remove last space */
++    *p = 0;
++    if (p - ret >= 32767)
+     {
+-        ERR( "failed to allocate console: %lu\n", GetLastError() );
+-        return 1;
++        ERR( "command line too long (%Iu)\n", p - ret );
++        exit( EC_INTERNAL );
+     }
++    return ret;
++}
++
++static int report_failure( STARTUPINFOW *si, LPCWSTR cmd )
++{
++    WCHAR format[256], *buf;
++    DWORD len;
+ 
+-    if (!*cmd) cmd = default_cmd;
++    WARN( "CreateProcess failed: %lu\n", GetLastError() );
++    LoadStringW( GetModuleHandleW( NULL ), IDS_CMD_LAUNCH_FAILED, format, ARRAY_SIZE(format) );
++    len = wcslen( format ) + wcslen( cmd );
++    if ((buf = malloc( len * sizeof(WCHAR) )))
++    {
++        swprintf( buf, len, format, cmd );
++        if (si)
++        {
++            INPUT_RECORD ir;
++            WriteConsoleW( si->hStdOutput, buf, wcslen(buf), &len, NULL);
++            while (ReadConsoleInputW( si->hStdInput, &ir, 1, &len ) && ir.EventType == MOUSE_EVENT);
++        }
++        else fprintf(stderr, "%ls\n", buf);
++    }
++    return EC_INTERNAL;
++}
+ 
+-    startup.dwFlags    = STARTF_USESTDHANDLES;
+-    startup.hStdInput  = CreateFileW( L"CONIN$",  GENERIC_READ | GENERIC_WRITE, 0, NULL,
+-                                      OPEN_EXISTING, 0, 0 );
+-    startup.hStdOutput = CreateFileW( L"CONOUT$", GENERIC_READ | GENERIC_WRITE, 0, NULL,
+-                                      OPEN_EXISTING, 0, 0 );
+-    startup.hStdError  = startup.hStdOutput;
++int wmain( int argc, WCHAR *argv[] )
++{
++    STARTUPINFOW startup = { sizeof(startup) };
++    PROCESS_INFORMATION info;
++    DWORD cpflags = 0;
++    BOOL inherit = FALSE;
++    DWORD exit_code;
++    WCHAR *cmdline;
++    int i;
+ 
+-    if (!CreateProcessW( NULL, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &startup, &info ))
++    for (i = 1; i < argc; i++)
+     {
+-        WCHAR format[256], *buf;
+-        INPUT_RECORD ir;
+-        DWORD len;
+-        exit_code = GetLastError();
+-        WARN( "CreateProcess failed: %lu\n", exit_code );
+-        LoadStringW( GetModuleHandleW( NULL ), IDS_CMD_LAUNCH_FAILED, format, ARRAY_SIZE(format) );
+-        len = wcslen( format ) + wcslen( cmd );
+-        if ((buf = malloc( len * sizeof(WCHAR) )))
++        if (argv[i][0] != '-' || argv[i][1] != '-')     break;
++        if (!argv[i][2])                                {i++; break;}
++        if (     !wcscmp(argv[i], L"--mode=detached"))  cpflags = DETACHED_PROCESS;
++        else if (!wcscmp(argv[i], L"--mode=console"))   cpflags = CREATE_NEW_CONSOLE;
++        else if (!wcscmp(argv[i], L"--mode=headless"))  cpflags = CREATE_NO_WINDOW;
++        else if (!wcscmp(argv[i], L"--console-std"))    inherit = FALSE;
++        else if (!wcscmp(argv[i], L"--inherit-std"))    inherit = TRUE;
++        else usage(argv[i]);
++    }
++    cmdline = i < argc ? build_command_line(&argv[i]) : wcsdup(L"cmd.exe");
++    /* if at least one option is passed, don't use old mode */
++    if (i > 1 && !cpflags) cpflags = CREATE_NEW_CONSOLE;
++    if (!cpflags) /* keep old behavior in place */
++    {
++        FreeConsole();
++        if (!AllocConsole())
+         {
+-            swprintf( buf, len, format, cmd );
+-            WriteConsoleW( startup.hStdOutput, buf, wcslen(buf), &len, NULL);
+-            while (ReadConsoleInputW( startup.hStdInput, &ir, 1, &len ) && ir.EventType == MOUSE_EVENT);
++            ERR( "failed to allocate console: %lu\n", GetLastError() );
++            return EC_INTERNAL;
+         }
+-        return exit_code;
++
++        startup.dwFlags    |= STARTF_USESTDHANDLES;
++        startup.hStdInput  = CreateFileW( L"CONIN$",  GENERIC_READ | GENERIC_WRITE, 0, NULL,
++                                          OPEN_EXISTING, 0, 0 );
++        startup.hStdOutput = CreateFileW( L"CONOUT$", GENERIC_READ | GENERIC_WRITE, 0, NULL,
++                                          OPEN_EXISTING, 0, 0 );
++        startup.hStdError  = startup.hStdOutput;
++    }
++    else if (inherit)
++    {
++        startup.dwFlags   |= STARTF_USESTDHANDLES;
++        startup.hStdInput  = GetStdHandle( STD_INPUT_HANDLE );
++        startup.hStdOutput = GetStdHandle( STD_OUTPUT_HANDLE );
++        startup.hStdError  = GetStdHandle( STD_ERROR_HANDLE );
+     }
++    if (!CreateProcessW( NULL, cmdline, NULL, NULL, FALSE, cpflags, NULL, NULL, &startup, &info ))
++        return report_failure( cpflags ? NULL : &startup, cmdline );
+ 
+     CloseHandle( info.hThread );
+     WaitForSingleObject( info.hProcess, INFINITE );
+-    return GetExitCodeProcess( info.hProcess, &exit_code ) ? exit_code : GetLastError();
++    return GetExitCodeProcess( info.hProcess, &exit_code ) ? exit_code : EC_INTERNAL;
+ }
+diff --git a/programs/wineconsole/wineconsole.man.in b/programs/wineconsole/wineconsole.man.in
+index 11111111111..11111111111 100644
+--- a/programs/wineconsole/wineconsole.man.in
++++ b/programs/wineconsole/wineconsole.man.in
+@@ -3,11 +3,45 @@
+ wineconsole \- The Wine console
+ .SH SYNOPSIS
+ .B wineconsole
+-.RI [ command "] "
++.RI "[ " options " ] [ " command " ] "
+ .SH DESCRIPTION
+ .B wineconsole
+-is the Wine console manager, used to run console commands and applications. It allows running the
+-console in a newly made window.
++is the Wine console manager, used to run console commands and applications.
++
++It allows to have fine grain management over console and standard I/O streams used when running an application.
++.SH OPTIONS
++
++.IP \fB--mode=console\fR
++\fBwineconsole\fR will execute the command in a newly created window.
++
++This is the default when none of the \fB--mode=\fR options is provided.
++.IP \fB--mode=detached\fR
++\fBwineconsole\fR will execute the \fIcommand\fR without being attached to any console.
++.IP \fB--mode=headless\fR
++\fBwineconsole\fR will execute the \fIcommand\fR attached to an invisible console.
++.IP \fB--console-std\fR
++The \fIcommand\fR's standard I/O streams will be mapped to the console designed by \fB--mode=\fR option.
++
++This is the default when neither \fB--console-std\fR nor \fB--inherit-std\fR is provided.
++.IP \fB--inherit-std\fR
++The \fIcommand\fR's standard I/O streams will be mapped to the standard Unix streams of \fBwineconsole\fR.
++
++.IP \fIcommand\fR
++The name of the executable to run, potentially followed by its arguments, with same meaning and syntax than using \fBwine\fR.
++
++If this part is omitted, than \fBcmd.exe\fR is run without arguments.
++
++\fBwineconsole\fR waits for the \fIcommand\fR to terminate before exiting.
++
++The exit status of the \fBwineconsole\fR is the exit status for the \fIcommand\fR, except when an error internal to \fBwineconsole\fR occurs, and 255 is returned.
++
++.SH NOTES
++Consoles are only of interest when the \fIcommand\fR executable belongs to the CUI subsystem.
++
++Using \fBwineconsole\fR overrides default Wine console creation when invoked from regular shell or script.
++
++This default console acts as a real console from the Windows environment, while inhering standard input streams.
++
+ .SH BUGS
+ Bugs can be reported on the
+ .UR https://bugs.winehq.org
+diff --git a/programs/wineconsole/wineconsole.rc b/programs/wineconsole/wineconsole.rc
+index 11111111111..11111111111 100644
+--- a/programs/wineconsole/wineconsole.rc
++++ b/programs/wineconsole/wineconsole.rc
+@@ -25,6 +25,18 @@ LANGUAGE LANG_ENGLISH, SUBLANG_DEFAULT
+ STRINGTABLE
+ BEGIN
+ 
++IDS_CMD_UNKNOWN_OPTION  "Unknown option %s\n"
++IDS_CMD_USAGE           "Usage: wineconsole [options] [command]\n\
++\n\
++options:\n\
++  --mode=detached       start [command] not being attached to any console\n\
++  --mode=console        start [command] being attached to a newly created console (this is the default)\n\
++  --mode=headless       start [command] being attached to a newly created yet not visible console\n\
++\n\
++  --console-std         ensures standard I/O streams of command are mapped to the console (this is the default)\n\
++  --inherit-std         ensures standard I/O streams of command are mapped to the ones which wineconsole is run with\n\
++\n\
++  [command]:            executable (and optional arguments) to run\n"
+ IDS_CMD_LAUNCH_FAILED      "wineconsole: Starting program %s failed.\nThe command is invalid.\n"
+ 
+ END
+diff --git a/programs/wineconsole/wineconsole_res.h b/programs/wineconsole/wineconsole_res.h
+index 11111111111..11111111111 100644
+--- a/programs/wineconsole/wineconsole_res.h
++++ b/programs/wineconsole/wineconsole_res.h
+@@ -22,4 +22,6 @@
+ #include <winuser.h>
+ #include <commctrl.h>
+ 
++#define IDS_CMD_UNKNOWN_OPTION     0x302
++#define IDS_CMD_USAGE              0x303
+ #define IDS_CMD_LAUNCH_FAILED      0x304
+
+
+
+From: Eric Pouech <eric.pouech@gmail.com>
+Subject: [PATCH 2/4] dlls/kernelbase: fix CreateProcess with CREATE_NO_WINDOW when no std handles are inherited
+Message-Id: <165002691036.110302.18093521933405244830.stgit@euterpe>
+Date: Fri, 15 Apr 2022 14:48:30 +0200
+In-Reply-To: <165002597087.110302.4051917761389773812.stgit@euterpe>
+References: <165002597087.110302.4051917761389773812.stgit@euterpe>
+
+Signed-off-by: Eric Pouech <eric.pouech@gmail.com>
+
+---
+ dlls/kernelbase/process.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/dlls/kernelbase/process.c b/dlls/kernelbase/process.c
+index 11111111111..11111111111 100644
+--- a/dlls/kernelbase/process.c
++++ b/dlls/kernelbase/process.c
+@@ -209,7 +209,7 @@ static RTL_USER_PROCESS_PARAMETERS *create_process_params( const WCHAR *filename
+         params->hStdOutput = startup->hStdOutput;
+         params->hStdError  = startup->hStdError;
+     }
+-    else if (flags & (DETACHED_PROCESS | CREATE_NEW_CONSOLE))
++    else if (flags & (DETACHED_PROCESS | CREATE_NEW_CONSOLE | CREATE_NO_WINDOW))
+     {
+         params->hStdInput  = INVALID_HANDLE_VALUE;
+         params->hStdOutput = INVALID_HANDLE_VALUE;
