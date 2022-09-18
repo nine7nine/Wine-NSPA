@@ -1785,6 +1785,645 @@ index 8d305bdada6..47f0f9c56a9 100644
 -- 
 2.37.1
 
+From 1e35966eb57db7060d0c459bc7aaac2f6cad7442 Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Mon, 4 Jul 2022 21:15:38 -0500
+Subject: [PATCH] ntdll: Support SOCK_RAW / IPPROTO_ICMP fallback over
+ SOCK_DGRAM.
+
+Signed-off-by: Paul Gofman <pgofman@codeweavers.com>
+---
+ dlls/ntdll/unix/socket.c | 109 ++++++++++++++++++++++++++++++++++++++-
+ server/sock.c            |  17 ++++++
+ 2 files changed, 125 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/ntdll/unix/socket.c b/dlls/ntdll/unix/socket.c
+index ef3c8494c3df..53b4ac9dc485 100644
+--- a/dlls/ntdll/unix/socket.c
++++ b/dlls/ntdll/unix/socket.c
+@@ -115,6 +115,7 @@ struct async_recv_ioctl
+     DWORD *ret_flags;
+     int unix_flags;
+     unsigned int count;
++    BOOL icmp_over_dgram;
+     struct iovec iov[1];
+ };
+ 
+@@ -566,6 +567,89 @@ static int wow64_translate_control( const WSABUF *control64, struct afd_wsabuf_3
+     return 1;
+ }
+ 
++struct ip_hdr
++{
++    BYTE v_hl; /* version << 4 | hdr_len */
++    BYTE tos;
++    UINT16 tot_len;
++    UINT16 id;
++    UINT16 frag_off;
++    BYTE ttl;
++    BYTE protocol;
++    UINT16 checksum;
++    ULONG saddr;
++    ULONG daddr;
++};
++
++static ssize_t fixup_icmp_over_dgram( struct msghdr *hdr, union unix_sockaddr *unix_addr,
++                                      ssize_t recv_len, NTSTATUS *status )
++{
++    unsigned int tot_len = sizeof(struct ip_hdr) + recv_len;
++    struct cmsghdr *cmsg;
++    struct ip_hdr ip_h;
++    size_t buf_len;
++    char *buf;
++
++    if (hdr->msg_iovlen != 1)
++    {
++        FIXME( "Buffer count %zu is not supported for ICMP fixup.\n", (size_t)hdr->msg_iovlen );
++        return recv_len;
++    }
++
++    buf = hdr->msg_iov[0].iov_base;
++    buf_len = hdr->msg_iov[0].iov_len;
++
++    if (recv_len + sizeof(ip_h) > buf_len)
++        *status = STATUS_BUFFER_OVERFLOW;
++
++    if (buf_len < sizeof(ip_h))
++    {
++        recv_len = buf_len;
++    }
++    else
++    {
++        recv_len = min( recv_len, buf_len - sizeof(ip_h) );
++        memmove( buf + sizeof(ip_h), buf, recv_len );
++        recv_len += sizeof(ip_h);
++    }
++    memset( &ip_h, 0, sizeof(ip_h) );
++    ip_h.v_hl = (4 << 4) | (sizeof(ip_h) >> 2);
++    ip_h.tot_len = htons( tot_len );
++    ip_h.protocol = 1;
++    ip_h.saddr = unix_addr->in.sin_addr.s_addr;
++
++    for (cmsg = CMSG_FIRSTHDR( hdr ); cmsg; cmsg = CMSG_NXTHDR( hdr, cmsg ))
++    {
++        if (cmsg->cmsg_level != IPPROTO_IP) continue;
++        switch (cmsg->cmsg_type)
++        {
++#if defined(IP_TTL)
++            case IP_TTL:
++                ip_h.ttl = *(BYTE *)CMSG_DATA( cmsg );
++                break;
++#endif
++#if defined(IP_TOS)
++            case IP_TOS:
++                ip_h.tos = *(BYTE *)CMSG_DATA( cmsg );
++                break;
++#endif
++#if defined(IP_PKTINFO)
++            case IP_PKTINFO:
++            {
++                struct in_pktinfo *info;
++
++                info = (struct in_pktinfo *)CMSG_DATA( cmsg );
++                ip_h.daddr = info->ipi_addr.s_addr;
++                break;
++            }
++#endif
++        }
++    }
++    memcpy( buf, &ip_h, min( sizeof(ip_h), buf_len ));
++
++    return recv_len;
++}
++
+ static NTSTATUS try_recv( int fd, struct async_recv_ioctl *async, ULONG_PTR *size )
+ {
+ #ifndef HAVE_STRUCT_MSGHDR_MSG_ACCRIGHTS
+@@ -577,7 +661,7 @@ static NTSTATUS try_recv( int fd, struct async_recv_ioctl *async, ULONG_PTR *siz
+     ssize_t ret;
+ 
+     memset( &hdr, 0, sizeof(hdr) );
+-    if (async->addr)
++    if (async->addr || async->icmp_over_dgram)
+     {
+         hdr.msg_name = &unix_addr.addr;
+         hdr.msg_namelen = sizeof(unix_addr);
+@@ -602,9 +686,14 @@ static NTSTATUS try_recv( int fd, struct async_recv_ioctl *async, ULONG_PTR *siz
+     }
+ 
+     status = (hdr.msg_flags & MSG_TRUNC) ? STATUS_BUFFER_OVERFLOW : STATUS_SUCCESS;
++    if (async->icmp_over_dgram)
++        ret = fixup_icmp_over_dgram( &hdr, &unix_addr, ret, &status );
+ 
+     if (async->control)
+     {
++        if (async->icmp_over_dgram)
++            FIXME( "May return extra control headers.\n" );
++
+         if (in_wow64_call())
+         {
+             char control_buffer64[512];
+@@ -675,6 +764,23 @@ static BOOL async_recv_proc( void *user, ULONG_PTR *info, NTSTATUS *status )
+     return TRUE;
+ }
+ 
++static BOOL is_icmp_over_dgram( int fd )
++{
++#ifdef linux
++    socklen_t len;
++    int val;
++
++    len = sizeof(val);
++    if (getsockopt( fd, SOL_SOCKET, SO_PROTOCOL, (char *)&val, &len ) || val != IPPROTO_ICMP)
++        return FALSE;
++
++    len = sizeof(val);
++    return !getsockopt( fd, SOL_SOCKET, SO_TYPE, (char *)&val, &len ) && val == SOCK_DGRAM;
++#else
++    return FALSE;
++#endif
++}
++
+ static NTSTATUS sock_recv( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, void *apc_user, IO_STATUS_BLOCK *io,
+                            int fd, struct async_recv_ioctl *async, int force_async )
+ {
+@@ -777,6 +883,7 @@ static NTSTATUS sock_ioctl_recv( HANDLE handle, HANDLE event, PIO_APC_ROUTINE ap
+     async->addr = addr;
+     async->addr_len = addr_len;
+     async->ret_flags = ret_flags;
++    async->icmp_over_dgram = is_icmp_over_dgram( fd );
+ 
+     return sock_recv( handle, event, apc, apc_user, io, fd, async, force_async );
+ }
+diff --git a/server/sock.c b/server/sock.c
+index fed8e3b3093d..dbb6d231a463 100644
+--- a/server/sock.c
++++ b/server/sock.c
+@@ -1618,6 +1618,23 @@ static int init_socket( struct sock *sock, int family, int type, int protocol )
+     }
+ 
+     sockfd = socket( unix_family, unix_type, unix_protocol );
++
++#ifdef linux
++    if (sockfd == -1 && errno == EPERM && unix_family == AF_INET
++        && unix_type == SOCK_RAW && unix_protocol == IPPROTO_ICMP)
++    {
++        sockfd = socket( unix_family, SOCK_DGRAM, unix_protocol );
++        if (sockfd != -1)
++        {
++            const int val = 1;
++
++            setsockopt( sockfd, IPPROTO_IP, IP_RECVTTL, (const char *)&val, sizeof(val) );
++            setsockopt( sockfd, IPPROTO_IP, IP_RECVTOS, (const char *)&val, sizeof(val) );
++            setsockopt( sockfd, IPPROTO_IP, IP_PKTINFO, (const char *)&val, sizeof(val) );
++        }
++    }
++#endif
++
+     if (sockfd == -1)
+     {
+         if (errno == EINVAL) set_win32_error( WSAESOCKTNOSUPPORT );
+
+From 0f337f3d8e165764214c08239cf92aa65e4f5a57 Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Tue, 5 Jul 2022 14:07:29 -0500
+Subject: [PATCH] ntdll: Fixup ICMP packet id if SOCK_DGRAM fallback is used.
+
+Signed-off-by: Paul Gofman <pgofman@codeweavers.com>
+---
+ dlls/ntdll/unix/socket.c       | 98 +++++++++++++++++++++++++++++++++-
+ dlls/ws2_32/tests/sock.c       |  2 +-
+ include/wine/server_protocol.h | 39 +++++++++++++-
+ server/protocol.def            | 18 +++++++
+ server/request.h               | 14 +++++
+ server/sock.c                  | 54 +++++++++++++++++++
+ server/trace.c                 | 24 +++++++++
+ 7 files changed, 245 insertions(+), 4 deletions(-)
+
+diff --git a/dlls/ntdll/unix/socket.c b/dlls/ntdll/unix/socket.c
+index 53b4ac9dc485..e938eb9b6278 100644
+--- a/dlls/ntdll/unix/socket.c
++++ b/dlls/ntdll/unix/socket.c
+@@ -581,10 +581,55 @@ struct ip_hdr
+     ULONG daddr;
+ };
+ 
++struct icmp_hdr
++{
++    BYTE type;
++    BYTE code;
++    UINT16 checksum;
++    union
++    {
++        struct
++        {
++            UINT16 id;
++            UINT16 sequence;
++        } echo;
++    } un;
++};
++
++/* rfc 1071 checksum */
++static unsigned short chksum(BYTE *data, unsigned int count)
++{
++    unsigned int sum = 0, carry = 0;
++    unsigned short check, s;
++
++    while (count > 1)
++    {
++        s = *(unsigned short *)data;
++        data += 2;
++        sum += carry;
++        sum += s;
++        carry = s > sum;
++        count -= 2;
++    }
++    sum += carry; /* This won't produce another carry */
++    sum = (sum & 0xffff) + (sum >> 16);
++
++    if (count) sum += *data; /* LE-only */
++
++    sum = (sum & 0xffff) + (sum >> 16);
++    /* fold in any carry */
++    sum = (sum & 0xffff) + (sum >> 16);
++
++    check = ~sum;
++    return check;
++}
++
+ static ssize_t fixup_icmp_over_dgram( struct msghdr *hdr, union unix_sockaddr *unix_addr,
+-                                      ssize_t recv_len, NTSTATUS *status )
++                                      HANDLE handle, ssize_t recv_len, NTSTATUS *status )
+ {
+     unsigned int tot_len = sizeof(struct ip_hdr) + recv_len;
++    struct icmp_hdr *icmp_h = NULL;
++    NTSTATUS fixup_status;
+     struct cmsghdr *cmsg;
+     struct ip_hdr ip_h;
+     size_t buf_len;
+@@ -610,6 +655,8 @@ static ssize_t fixup_icmp_over_dgram( struct msghdr *hdr, union unix_sockaddr *u
+     {
+         recv_len = min( recv_len, buf_len - sizeof(ip_h) );
+         memmove( buf + sizeof(ip_h), buf, recv_len );
++        if (recv_len >= sizeof(struct icmp_hdr))
++            icmp_h = (struct icmp_hdr *)(buf + sizeof(ip_h));
+         recv_len += sizeof(ip_h);
+     }
+     memset( &ip_h, 0, sizeof(ip_h) );
+@@ -645,6 +692,25 @@ static ssize_t fixup_icmp_over_dgram( struct msghdr *hdr, union unix_sockaddr *u
+ #endif
+         }
+     }
++    if (icmp_h)
++    {
++        SERVER_START_REQ( socket_get_icmp_id )
++        {
++            req->handle = wine_server_obj_handle( handle );
++            req->icmp_seq = icmp_h->un.echo.sequence;
++            if (!(fixup_status = wine_server_call( req )))
++                icmp_h->un.echo.id = reply->icmp_id;
++            else
++                WARN( "socket_get_fixup_data returned %#x.\n", fixup_status );
++        }
++        SERVER_END_REQ;
++
++        if (!fixup_status)
++        {
++            icmp_h->checksum = 0;
++            icmp_h->checksum = chksum( (BYTE *)icmp_h, recv_len - sizeof(ip_h) );
++        }
++    }
+     memcpy( buf, &ip_h, min( sizeof(ip_h), buf_len ));
+ 
+     return recv_len;
+@@ -687,7 +753,7 @@ static NTSTATUS try_recv( int fd, struct async_recv_ioctl *async, ULONG_PTR *siz
+ 
+     status = (hdr.msg_flags & MSG_TRUNC) ? STATUS_BUFFER_OVERFLOW : STATUS_SUCCESS;
+     if (async->icmp_over_dgram)
+-        ret = fixup_icmp_over_dgram( &hdr, &unix_addr, ret, &status );
++        ret = fixup_icmp_over_dgram( &hdr, &unix_addr, async->io.handle, ret, &status );
+ 
+     if (async->control)
+     {
+@@ -1001,6 +1067,31 @@ static BOOL async_send_proc( void *user, ULONG_PTR *info, NTSTATUS *status )
+     return TRUE;
+ }
+ 
++static void sock_save_icmp_id( struct async_send_ioctl *async )
++{
++    unsigned short id, seq;
++    struct icmp_hdr *h;
++
++    if (async->count != 1 || async->iov[0].iov_len < sizeof(*h))
++    {
++        FIXME( "ICMP over DGRAM fixup is not supported for count %u, len %zu.\n", async->count, async->iov[0].iov_len );
++        return;
++    }
++
++    h = async->iov[0].iov_base;
++    id = h->un.echo.id;
++    seq = h->un.echo.sequence;
++    SERVER_START_REQ( socket_send_icmp_id )
++    {
++        req->handle = wine_server_obj_handle( async->io.handle );
++        req->icmp_id = id;
++        req->icmp_seq = seq;
++        if (wine_server_call( req ))
++            WARN( "socket_fixup_send_data failed.\n" );
++    }
++    SERVER_END_REQ;
++}
++
+ static NTSTATUS sock_send( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, void *apc_user,
+                            IO_STATUS_BLOCK *io, int fd, struct async_send_ioctl *async, int force_async )
+ {
+@@ -1021,6 +1112,9 @@ static NTSTATUS sock_send( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, voi
+     }
+     SERVER_END_REQ;
+ 
++    if (!NT_ERROR(status) && is_icmp_over_dgram( fd ))
++        sock_save_icmp_id( async );
++
+     alerted = status == STATUS_ALERTED;
+     if (alerted)
+     {
+diff --git a/include/wine/server_protocol.h b/include/wine/server_protocol.h
+index 0f39333919ba..c80b2790b956 100644
+--- a/include/wine/server_protocol.h
++++ b/include/wine/server_protocol.h
+@@ -1797,6 +1797,37 @@ struct send_socket_reply
+ 
+ 
+ 
++struct socket_send_icmp_id_request
++{
++    struct request_header __header;
++    obj_handle_t   handle;
++    unsigned short icmp_id;
++    unsigned short icmp_seq;
++    char __pad_20[4];
++};
++struct socket_send_icmp_id_reply
++{
++    struct reply_header __header;
++};
++
++
++
++struct socket_get_icmp_id_request
++{
++    struct request_header __header;
++    obj_handle_t   handle;
++    unsigned short icmp_seq;
++    char __pad_18[6];
++};
++struct socket_get_icmp_id_reply
++{
++    struct reply_header __header;
++    unsigned short icmp_id;
++    char __pad_10[6];
++};
++
++
++
+ struct get_next_console_request_request
+ {
+     struct request_header __header;
+@@ -5516,6 +5547,8 @@ enum request
+     REQ_unlock_file,
+     REQ_recv_socket,
+     REQ_send_socket,
++    REQ_socket_send_icmp_id,
++    REQ_socket_get_icmp_id,
+     REQ_get_next_console_request,
+     REQ_read_directory_changes,
+     REQ_read_change,
+@@ -5799,6 +5832,8 @@ union generic_request
+     struct unlock_file_request unlock_file_request;
+     struct recv_socket_request recv_socket_request;
+     struct send_socket_request send_socket_request;
++    struct socket_send_icmp_id_request socket_send_icmp_id_request;
++    struct socket_get_icmp_id_request socket_get_icmp_id_request;
+     struct get_next_console_request_request get_next_console_request_request;
+     struct read_directory_changes_request read_directory_changes_request;
+     struct read_change_request read_change_request;
+@@ -6080,6 +6115,8 @@ union generic_reply
+     struct unlock_file_reply unlock_file_reply;
+     struct recv_socket_reply recv_socket_reply;
+     struct send_socket_reply send_socket_reply;
++    struct socket_send_icmp_id_reply socket_send_icmp_id_reply;
++    struct socket_get_icmp_id_reply socket_get_icmp_id_reply;
+     struct get_next_console_request_reply get_next_console_request_reply;
+     struct read_directory_changes_reply read_directory_changes_reply;
+     struct read_change_reply read_change_reply;
+diff --git a/server/protocol.def b/server/protocol.def
+index 6cb6275f2f28..a8044582ef83 100644
+--- a/server/protocol.def
++++ b/server/protocol.def
+@@ -1470,6 +1470,24 @@ enum server_fd_type
+ @END
+ 
+ 
++/* Store ICMP id for ICMP over datagram fixup */
++@REQ(socket_send_icmp_id)
++    obj_handle_t   handle;        /* socket handle */
++    unsigned short icmp_id;       /* ICMP packet id */
++    unsigned short icmp_seq;      /* ICMP packed sequence */
++@REPLY
++@END
++
++
++/* Get ICMP id for ICMP over datagram fixup */
++@REQ(socket_get_icmp_id)
++    obj_handle_t   handle;        /* socket handle */
++    unsigned short icmp_seq;      /* ICMP packed sequence */
++@REPLY
++    unsigned short icmp_id;       /* ICMP packet id */
++@END
++
++
+ /* Retrieve the next pending console ioctl request */
+ @REQ(get_next_console_request)
+     obj_handle_t handle;        /* console server handle */
+diff --git a/server/request.h b/server/request.h
+index dc9c4e820291..236c2e25abb7 100644
+--- a/server/request.h
++++ b/server/request.h
+@@ -175,6 +175,8 @@ DECL_HANDLER(lock_file);
+ DECL_HANDLER(unlock_file);
+ DECL_HANDLER(recv_socket);
+ DECL_HANDLER(send_socket);
++DECL_HANDLER(socket_send_icmp_id);
++DECL_HANDLER(socket_get_icmp_id);
+ DECL_HANDLER(get_next_console_request);
+ DECL_HANDLER(read_directory_changes);
+ DECL_HANDLER(read_change);
+@@ -457,6 +459,8 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
+     (req_handler)req_unlock_file,
+     (req_handler)req_recv_socket,
+     (req_handler)req_send_socket,
++    (req_handler)req_socket_send_icmp_id,
++    (req_handler)req_socket_get_icmp_id,
+     (req_handler)req_get_next_console_request,
+     (req_handler)req_read_directory_changes,
+     (req_handler)req_read_change,
+@@ -1059,6 +1063,16 @@ C_ASSERT( FIELD_OFFSET(struct send_socket_reply, wait) == 8 );
+ C_ASSERT( FIELD_OFFSET(struct send_socket_reply, options) == 12 );
+ C_ASSERT( FIELD_OFFSET(struct send_socket_reply, nonblocking) == 16 );
+ C_ASSERT( sizeof(struct send_socket_reply) == 24 );
++C_ASSERT( FIELD_OFFSET(struct socket_send_icmp_id_request, handle) == 12 );
++C_ASSERT( FIELD_OFFSET(struct socket_send_icmp_id_request, icmp_id) == 16 );
++C_ASSERT( FIELD_OFFSET(struct socket_send_icmp_id_request, icmp_seq) == 18 );
++C_ASSERT( sizeof(struct socket_send_icmp_id_request) == 24 );
++C_ASSERT( sizeof(struct socket_send_icmp_id_reply) == 8 );
++C_ASSERT( FIELD_OFFSET(struct socket_get_icmp_id_request, handle) == 12 );
++C_ASSERT( FIELD_OFFSET(struct socket_get_icmp_id_request, icmp_seq) == 16 );
++C_ASSERT( sizeof(struct socket_get_icmp_id_request) == 24 );
++C_ASSERT( FIELD_OFFSET(struct socket_get_icmp_id_reply, icmp_id) == 8 );
++C_ASSERT( sizeof(struct socket_get_icmp_id_reply) == 16 );
+ C_ASSERT( FIELD_OFFSET(struct get_next_console_request_request, handle) == 12 );
+ C_ASSERT( FIELD_OFFSET(struct get_next_console_request_request, signal) == 16 );
+ C_ASSERT( FIELD_OFFSET(struct get_next_console_request_request, read) == 20 );
+diff --git a/server/sock.c b/server/sock.c
+index dbb6d231a463..2bf560456125 100644
+--- a/server/sock.c
++++ b/server/sock.c
+@@ -168,6 +168,8 @@ enum connection_state
+     SOCK_CONNECTIONLESS,
+ };
+ 
++#define MAX_ICMP_HISTORY_LENGTH 8
++
+ struct sock
+ {
+     struct object       obj;         /* object header */
+@@ -215,6 +217,13 @@ struct sock
+     unsigned int        sndbuf;      /* advisory send buffer size */
+     unsigned int        rcvtimeo;    /* receive timeout in ms */
+     unsigned int        sndtimeo;    /* send timeout in ms */
++    struct
++    {
++        unsigned short icmp_id;
++        unsigned short icmp_seq;
++    }
++    icmp_fixup_data[MAX_ICMP_HISTORY_LENGTH]; /* Sent ICMP packets history used to fixup reply id. */
++    unsigned int        icmp_fixup_data_len;  /* Sent ICMP packets history length. */
+     unsigned int        rd_shutdown : 1; /* is the read end shut down? */
+     unsigned int        wr_shutdown : 1; /* is the write end shut down? */
+     unsigned int        wr_shutdown_pending : 1; /* is a write shutdown pending? */
+@@ -1502,6 +1511,7 @@ static struct sock *create_socket(void)
+     sock->sndbuf = 0;
+     sock->rcvtimeo = 0;
+     sock->sndtimeo = 0;
++    sock->icmp_fixup_data_len = 0;
+     init_async_queue( &sock->read_q );
+     init_async_queue( &sock->write_q );
+     init_async_queue( &sock->ifchange_q );
+@@ -3589,3 +3599,47 @@ DECL_HANDLER(send_socket)
+     }
+     release_object( sock );
+ }
++
++DECL_HANDLER(socket_send_icmp_id)
++{
++    struct sock *sock = (struct sock *)get_handle_obj( current->process, req->handle, 0, &sock_ops );
++
++    if (!sock) return;
++
++    if (sock->icmp_fixup_data_len == MAX_ICMP_HISTORY_LENGTH)
++    {
++        memmove( sock->icmp_fixup_data, sock->icmp_fixup_data + 1,
++                 sizeof(*sock->icmp_fixup_data) * (MAX_ICMP_HISTORY_LENGTH - 1) );
++        --sock->icmp_fixup_data_len;
++    }
++
++    sock->icmp_fixup_data[sock->icmp_fixup_data_len].icmp_id = req->icmp_id;
++    sock->icmp_fixup_data[sock->icmp_fixup_data_len].icmp_seq = req->icmp_seq;
++    ++sock->icmp_fixup_data_len;
++
++    release_object( sock );
++}
++
++DECL_HANDLER(socket_get_icmp_id)
++{
++    struct sock *sock = (struct sock *)get_handle_obj( current->process, req->handle, 0, &sock_ops );
++    unsigned int i;
++
++    if (!sock) return;
++
++    for (i = 0; i < sock->icmp_fixup_data_len; ++i)
++    {
++        if (sock->icmp_fixup_data[i].icmp_seq == req->icmp_seq)
++        {
++            reply->icmp_id = sock->icmp_fixup_data[i].icmp_id;
++            --sock->icmp_fixup_data_len;
++            memmove( &sock->icmp_fixup_data[i], &sock->icmp_fixup_data[i + 1],
++                     (sock->icmp_fixup_data_len - i) * sizeof(*sock->icmp_fixup_data) );
++            release_object( sock );
++            return;
++        }
++    }
++
++    set_error( STATUS_NOT_FOUND );
++    release_object( sock );
++}
+diff --git a/server/trace.c b/server/trace.c
+index c3dd1199f06d..4eb07fefc03d 100644
+--- a/server/trace.c
++++ b/server/trace.c
+@@ -2055,6 +2055,24 @@ static void dump_send_socket_reply( const struct send_socket_reply *req )
+     fprintf( stderr, ", nonblocking=%d", req->nonblocking );
+ }
+ 
++static void dump_socket_send_icmp_id_request( const struct socket_send_icmp_id_request *req )
++{
++    fprintf( stderr, " handle=%04x", req->handle );
++    fprintf( stderr, ", icmp_id=%04x", req->icmp_id );
++    fprintf( stderr, ", icmp_seq=%04x", req->icmp_seq );
++}
++
++static void dump_socket_get_icmp_id_request( const struct socket_get_icmp_id_request *req )
++{
++    fprintf( stderr, " handle=%04x", req->handle );
++    fprintf( stderr, ", icmp_seq=%04x", req->icmp_seq );
++}
++
++static void dump_socket_get_icmp_id_reply( const struct socket_get_icmp_id_reply *req )
++{
++    fprintf( stderr, " icmp_id=%04x", req->icmp_id );
++}
++
+ static void dump_get_next_console_request_request( const struct get_next_console_request_request *req )
+ {
+     fprintf( stderr, " handle=%04x", req->handle );
+@@ -4548,6 +4566,8 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] = {
+     (dump_func)dump_unlock_file_request,
+     (dump_func)dump_recv_socket_request,
+     (dump_func)dump_send_socket_request,
++    (dump_func)dump_socket_send_icmp_id_request,
++    (dump_func)dump_socket_get_icmp_id_request,
+     (dump_func)dump_get_next_console_request_request,
+     (dump_func)dump_read_directory_changes_request,
+     (dump_func)dump_read_change_request,
+@@ -4827,6 +4847,8 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] = {
+     NULL,
+     (dump_func)dump_recv_socket_reply,
+     (dump_func)dump_send_socket_reply,
++    NULL,
++    (dump_func)dump_socket_get_icmp_id_reply,
+     (dump_func)dump_get_next_console_request_reply,
+     NULL,
+     (dump_func)dump_read_change_reply,
+@@ -5106,6 +5128,8 @@ static const char * const req_names[REQ_NB_REQUESTS] = {
+     "unlock_file",
+     "recv_socket",
+     "send_socket",
++    "socket_send_icmp_id",
++    "socket_get_icmp_id",
+     "get_next_console_request",
+     "read_directory_changes",
+     "read_change",
+
 From 7343d439af984688bddc7eaf025d147ef3396ce5 Mon Sep 17 00:00:00 2001
 From: Zebediah Figura <zfigura@codeweavers.com>
 Date: Fri, 15 Jul 2022 18:42:40 -0500
