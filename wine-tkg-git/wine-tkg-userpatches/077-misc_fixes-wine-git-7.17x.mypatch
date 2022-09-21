@@ -423,3 +423,220 @@ index 767b20b2334..8df9cbe563f 100644
 -- 
 GitLab
 
+From 40d0e55d4c03be43a7b5a5906496a588f61ca00c Mon Sep 17 00:00:00 2001
+From: Nikolay Sivov <nsivov@codeweavers.com>
+Date: Sun, 18 Sep 2022 15:50:47 +0300
+Subject: [PATCH 1/3] kernelbase: Add OpenFileMappingFromApp().
+
+Signed-off-by: Nikolay Sivov <nsivov@codeweavers.com>
+---
+ dlls/kernelbase/kernelbase.spec |  2 +-
+ dlls/kernelbase/sync.c          | 18 ++++++++++++++++++
+ include/winbase.h               |  1 +
+ 4 files changed, 47 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/kernelbase/kernelbase.spec b/dlls/kernelbase/kernelbase.spec
+index feb1fce8f7a..961c2bf45ee 100644
+--- a/dlls/kernelbase/kernelbase.spec
++++ b/dlls/kernelbase/kernelbase.spec
+@@ -1015,7 +1015,7 @@
+ @ stdcall OpenEventA(long long str)
+ @ stdcall OpenEventW(long long wstr)
+ @ stdcall OpenFileById(long ptr long long ptr long)
+-# @ stub OpenFileMappingFromApp
++@ stdcall OpenFileMappingFromApp(long long wstr)
+ @ stdcall OpenFileMappingW(long long wstr)
+ # @ stub OpenGlobalizationUserSettingsKey
+ @ stdcall OpenMutexW(long long wstr)
+diff --git a/dlls/kernelbase/sync.c b/dlls/kernelbase/sync.c
+index 5c4fb76536f..1526db25f33 100644
+--- a/dlls/kernelbase/sync.c
++++ b/dlls/kernelbase/sync.c
+@@ -971,6 +971,24 @@ HANDLE WINAPI DECLSPEC_HOTPATCH OpenFileMappingW( DWORD access, BOOL inherit, LP
+ }
+ 
+ 
++/***********************************************************************
++ *             OpenFileMappingFromApp   (kernelbase.@)
++ */
++HANDLE WINAPI DECLSPEC_HOTPATCH OpenFileMappingFromApp( ULONG access, BOOL inherit, LPCWSTR name )
++{
++    OBJECT_ATTRIBUTES attr;
++    UNICODE_STRING nameW;
++    HANDLE ret;
++
++    if (!get_open_object_attributes( &attr, &nameW, inherit, name )) return 0;
++
++    if (access == FILE_MAP_COPY) access = SECTION_MAP_READ;
++
++    if (!set_ntstatus( NtOpenSection( &ret, access, &attr ))) return 0;
++    return ret;
++}
++
++
+ /***********************************************************************
+  * Condition variables
+  ***********************************************************************/
+diff --git a/include/winbase.h b/include/winbase.h
+index 0a8409c10e1..83282ec8af5 100644
+--- a/include/winbase.h
++++ b/include/winbase.h
+@@ -2537,6 +2537,7 @@ WINBASEAPI HFILE       WINAPI OpenFile(LPCSTR,OFSTRUCT*,UINT);
+ WINBASEAPI HANDLE      WINAPI OpenFileMappingA(DWORD,BOOL,LPCSTR);
+ WINBASEAPI HANDLE      WINAPI OpenFileMappingW(DWORD,BOOL,LPCWSTR);
+ #define                       OpenFileMapping WINELIB_NAME_AW(OpenFileMapping)
++WINBASEAPI HANDLE      WINAPI OpenFileMappingFromApp(ULONG,BOOL,LPCWSTR);
+ WINBASEAPI HANDLE      WINAPI OpenJobObjectA(DWORD,BOOL,LPCSTR);
+ WINBASEAPI HANDLE      WINAPI OpenJobObjectW(DWORD,BOOL,LPCWSTR);
+ #define                       OpenJobObject WINELIB_NAME_AW(OpenJobObject)
+-- 
+GitLab
+
+
+From 3ede82e2a8dedcd90f4a2098581e2b74d8d84093 Mon Sep 17 00:00:00 2001
+From: Nikolay Sivov <nsivov@codeweavers.com>
+Date: Sun, 18 Sep 2022 17:26:32 +0300
+Subject: [PATCH 2/3] kernelbase: Add CreateFileMappingFromApp().
+
+Signed-off-by: Nikolay Sivov <nsivov@codeweavers.com>
+---
+ dlls/kernelbase/kernelbase.spec |  2 +-
+ dlls/kernelbase/sync.c          | 10 +++++++-
+ include/winbase.h               |  1 +
+ 4 files changed, 54 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/kernelbase/kernelbase.spec b/dlls/kernelbase/kernelbase.spec
+index 961c2bf45ee..0e9f0d7febd 100644
+--- a/dlls/kernelbase/kernelbase.spec
++++ b/dlls/kernelbase/kernelbase.spec
+@@ -190,7 +190,7 @@
+ @ stdcall CreateFiberEx(long long long ptr ptr)
+ @ stdcall CreateFile2(wstr long long long ptr)
+ @ stdcall CreateFileA(str long long ptr long long long)
+-# @ stub CreateFileMappingFromApp
++@ stdcall CreateFileMappingFromApp(long ptr long int64 wstr)
+ @ stdcall CreateFileMappingNumaW(long ptr long long long wstr long)
+ @ stdcall CreateFileMappingW(long ptr long long long wstr)
+ @ stdcall CreateFileW(wstr long long ptr long long long)
+diff --git a/dlls/kernelbase/sync.c b/dlls/kernelbase/sync.c
+index 1526db25f33..60b33af99c3 100644
+--- a/dlls/kernelbase/sync.c
++++ b/dlls/kernelbase/sync.c
+@@ -879,7 +879,6 @@ BOOL WINAPI DECLSPEC_HOTPATCH InitializeCriticalSectionEx( CRITICAL_SECTION *cri
+  * File mappings
+  ***********************************************************************/
+ 
+-
+ /***********************************************************************
+  *             CreateFileMappingW   (kernelbase.@)
+  */
+@@ -947,6 +946,15 @@ HANDLE WINAPI DECLSPEC_HOTPATCH CreateFileMappingW( HANDLE file, LPSECURITY_ATTR
+ }
+ 
+ 
++/***********************************************************************
++ *             CreateFileMappingFromApp   (kernelbase.@)
++ */
++HANDLE WINAPI DECLSPEC_HOTPATCH CreateFileMappingFromApp( HANDLE file, LPSECURITY_ATTRIBUTES sa, ULONG protect,
++        ULONG64 size, LPCWSTR name )
++{
++    return CreateFileMappingW( file, sa, protect, size << 32, size, name );
++}
++
+ /***********************************************************************
+  *             OpenFileMappingW   (kernelbase.@)
+  */
+diff --git a/include/winbase.h b/include/winbase.h
+index 83282ec8af5..ff96fc1072f 100644
+--- a/include/winbase.h
++++ b/include/winbase.h
+@@ -1876,6 +1876,7 @@ WINBASEAPI HANDLE      WINAPI CreateFileW(LPCWSTR,DWORD,DWORD,LPSECURITY_ATTRIBU
+ WINBASEAPI HANDLE      WINAPI CreateFileMappingA(HANDLE,LPSECURITY_ATTRIBUTES,DWORD,DWORD,DWORD,LPCSTR);
+ WINBASEAPI HANDLE      WINAPI CreateFileMappingW(HANDLE,LPSECURITY_ATTRIBUTES,DWORD,DWORD,DWORD,LPCWSTR);
+ #define                       CreateFileMapping WINELIB_NAME_AW(CreateFileMapping)
++WINBASEAPI HANDLE      WINAPI CreateFileMappingFromApp(HANDLE,PSECURITY_ATTRIBUTES,ULONG,ULONG64,PCWSTR);
+ WINBASEAPI HANDLE      WINAPI CreateIoCompletionPort(HANDLE,HANDLE,ULONG_PTR,DWORD);
+ WINBASEAPI HANDLE      WINAPI CreateJobObjectA(LPSECURITY_ATTRIBUTES,LPCSTR);
+ WINBASEAPI HANDLE      WINAPI CreateJobObjectW(LPSECURITY_ATTRIBUTES,LPCWSTR);
+-- 
+GitLab
+
+
+From 1ceba3533e498d070aedba812b6605d41bc20782 Mon Sep 17 00:00:00 2001
+From: Nikolay Sivov <nsivov@codeweavers.com>
+Date: Sun, 18 Sep 2022 18:15:37 +0300
+Subject: [PATCH 3/3] kernelbase: Add MapViewOfFileFromApp().
+
+Signed-off-by: Nikolay Sivov <nsivov@codeweavers.com>
+---
+ dlls/kernelbase/kernelbase.spec |  2 +-
+ dlls/kernelbase/memory.c        |  9 ++++++++
+ include/winbase.h               |  1 +
+ 4 files changed, 48 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/kernelbase/kernelbase.spec b/dlls/kernelbase/kernelbase.spec
+index 0e9f0d7febd..c9b8649c800 100644
+--- a/dlls/kernelbase/kernelbase.spec
++++ b/dlls/kernelbase/kernelbase.spec
+@@ -984,7 +984,7 @@
+ @ stdcall MapViewOfFile3(long long ptr int64 long long long ptr long)
+ @ stdcall MapViewOfFileEx(long long long long long ptr)
+ @ stdcall MapViewOfFileExNuma(long long long long long ptr long)
+-# @ stub MapViewOfFileFromApp
++@ stdcall MapViewOfFileFromApp(long long int64 long)
+ @ stdcall MoveFileExW(wstr wstr long)
+ # @ stub MoveFileWithProgressTransactedW
+ @ stdcall MoveFileWithProgressW(wstr wstr ptr ptr long)
+diff --git a/dlls/kernelbase/memory.c b/dlls/kernelbase/memory.c
+index 14d8c4817a5..412d80f5cfd 100644
+--- a/dlls/kernelbase/memory.c
++++ b/dlls/kernelbase/memory.c
+@@ -237,6 +237,15 @@ LPVOID WINAPI DECLSPEC_HOTPATCH MapViewOfFileEx( HANDLE handle, DWORD access, DW
+     return addr;
+ }
+ 
++
++/***********************************************************************
++ *             MapViewOfFileFromApp   (kernelbase.@)
++ */
++LPVOID WINAPI DECLSPEC_HOTPATCH MapViewOfFileFromApp( HANDLE handle, ULONG access, ULONG64 offset, SIZE_T size )
++{
++    return MapViewOfFile( handle, access, offset << 32, offset, size );
++}
++
+ /***********************************************************************
+  *             MapViewOfFile3   (kernelbase.@)
+  */
+-- 
+GitLab
+
+From 6914a3d67703cbdc10b06bf3527a8707d08bd468 Mon Sep 17 00:00:00 2001
+From: Zebediah Figura <zfigura@codeweavers.com>
+Date: Mon, 19 Sep 2022 23:31:43 -0500
+Subject: [PATCH] ntdll: Add a fast path for
+ NtDeviceIoControlFile(INVALID_HANDLE_VALUE).
+
+Wine-Bug: https://bugs.winehq.org/show_bug.cgi?id=53706
+---
+ dlls/ntdll/unix/file.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/dlls/ntdll/unix/file.c b/dlls/ntdll/unix/file.c
+index b31ce4fbb3d..7eb8dbe7ad4 100644
+--- a/dlls/ntdll/unix/file.c
++++ b/dlls/ntdll/unix/file.c
+@@ -5760,6 +5760,11 @@ NTSTATUS WINAPI NtDeviceIoControlFile( HANDLE handle, HANDLE event, PIO_APC_ROUT
+     TRACE( "(%p,%p,%p,%p,%p,0x%08x,%p,0x%08x,%p,0x%08x)\n",
+            handle, event, apc, apc_context, io, code, in_buffer, in_size, out_buffer, out_size );
+ 
++    /* some broken applications call this frequently with INVALID_HANDLE_VALUE,
++     * and run slowly if we make a server call every time */
++    if (HandleToLong( handle ) == ~0)
++        return STATUS_INVALID_HANDLE;
++
+     switch (device)
+     {
+     case FILE_DEVICE_BEEP:
+-- 
+GitLab
+

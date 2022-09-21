@@ -1,0 +1,416 @@
+From dce43869b794bb4817a6866a6e0d1a280b73462f Mon Sep 17 00:00:00 2001
+From: Etaash Mathamsetty <etaash.mathamsetty@gmail.com>
+Date: Sun, 11 Sep 2022 21:18:15 -0400
+Subject: [PATCH] ntoskrnl: MmAllocateContiguousMemorySpecifyCache semi-stub
+
+---
+ dlls/ntoskrnl.exe/ntoskrnl.c | 18 ++++++++++++++++--
+ 1 file changed, 16 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl.c b/dlls/ntoskrnl.exe/ntoskrnl.c
+index 031e9900544..69b91961700 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl.c
++++ b/dlls/ntoskrnl.exe/ntoskrnl.c
+@@ -2777,8 +2777,22 @@ PVOID WINAPI MmAllocateContiguousMemorySpecifyCache( SIZE_T size,
+                                                      PHYSICAL_ADDRESS BoundaryAddressMultiple,
+                                                      MEMORY_CACHING_TYPE CacheType )
+ {
+-    FIXME(": stub\n");
+-    return NULL;
++    DWORD protect = PAGE_READWRITE;
++    FIXME( ": ( %Iu %s %s %s %x ) semi-stub\n", size, wine_dbgstr_longlong(lowest_valid_address.QuadPart),
++                                            wine_dbgstr_longlong(highest_valid_address.QuadPart),
++                                            wine_dbgstr_longlong(BoundaryAddressMultiple.QuadPart), CacheType );
++    switch (CacheType)
++    {
++        case MmNonCached:
++            protect |= PAGE_NOCACHE;
++            break;
++        case MmWriteCombined:
++            protect |= PAGE_WRITECOMBINE;
++            break;
++        default:
++            break;
++    }
++    return VirtualAlloc( NULL, size, MEM_RESERVE|MEM_COMMIT, protect );
+ }
+ 
+ /***********************************************************************
+-- 
+GitLab
+
+From c6b5307c047ea9b798b0934292c13906073c7175 Mon Sep 17 00:00:00 2001
+From: Etaash Mathamsetty <etaash.mathamsetty@gmail.com>
+Date: Fri, 16 Sep 2022 15:54:40 -0400
+Subject: [PATCH] ntoskrnl: KeInsertQueueDpc stub
+
+---
+ dlls/ntoskrnl.exe/ntoskrnl.c        | 9 +++++++++
+ dlls/ntoskrnl.exe/ntoskrnl.exe.spec | 2 +-
+ 2 files changed, 10 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl.c b/dlls/ntoskrnl.exe/ntoskrnl.c
+index 031e9900544..52af1bff820 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl.c
++++ b/dlls/ntoskrnl.exe/ntoskrnl.c
+@@ -2569,6 +2569,15 @@ LONG WINAPI KeInsertQueue(PRKQUEUE Queue, PLIST_ENTRY Entry)
+     return 0;
+ }
+ 
++/***********************************************************************
++ *           KeInsertQueueDpc   (NTOSKRNL.EXE.@)
++ */
++BOOLEAN KeInsertQueueDpc(PRKDPC Dpc, PVOID SystemArgument1, PVOID SystemArgument2)
++{
++    FIXME( "stub: (%p %p %p)\n", Dpc, SystemArgument1, SystemArgument2 );
++    return TRUE;
++}
++
+ /**********************************************************************
+  *           KeQueryActiveProcessors   (NTOSKRNL.EXE.@)
+  *
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl.exe.spec b/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
+index e3898b06f89..010ce726285 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
++++ b/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
+@@ -586,7 +586,7 @@
+ @ stub KeInsertHeadQueue
+ @ stdcall KeInsertQueue(ptr ptr)
+ @ stub KeInsertQueueApc
+-@ stub KeInsertQueueDpc
++@ stdcall KeInsertQueueDpc(ptr ptr ptr)
+ @ stub KeIsAttachedProcess
+ @ stub KeIsExecutingDpc
+ @ stdcall KeLeaveCriticalRegion()
+-- 
+GitLab
+
+From d6e46d2b24530186735919042cf1cffa503ca216 Mon Sep 17 00:00:00 2001
+From: Etaash Mathamsetty <etaash.mathamsetty@gmail.com>
+Date: Sun, 11 Sep 2022 14:35:22 -0400
+Subject: [PATCH] ntoskrnl: Implement KeGetCurrentProcessorNumberEx
+
+Fix Review Feedback
+
+use a var to store NtGetCurrentProcessorNumber value
+
+fix compile error
+---
+ dlls/ntoskrnl.exe/ntoskrnl.c        | 20 ++++++++++++++++++++
+ dlls/ntoskrnl.exe/ntoskrnl.exe.spec |  1 +
+ 2 files changed, 21 insertions(+)
+
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl.c b/dlls/ntoskrnl.exe/ntoskrnl.c
+index 031e9900544..4fcad09c5e5 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl.c
++++ b/dlls/ntoskrnl.exe/ntoskrnl.c
+@@ -3379,6 +3379,26 @@ VOID WINAPI KeSetTargetProcessorDpc(PRKDPC dpc, CCHAR number)
+     FIXME("%p, %d stub\n", dpc, number);
+ }
+ 
++/***********************************************************************
++ *          KeGetCurrentProcessorNumberEx   (NTOSKRNL.EXE.@)
++ */
++ULONG WINAPI KeGetCurrentProcessorNumberEx(PPROCESSOR_NUMBER process_number)
++{
++    ULONG cur_number;
++    FIXME("%p semi-stub\n", process_number);
++
++    cur_number = NtGetCurrentProcessorNumber();
++
++    if (process_number)
++    {
++        process_number->Group = 0;
++        process_number->Reserved = 0;
++        process_number->Number = cur_number;
++    }
++
++    return cur_number;
++}
++
+ /***********************************************************************
+  *           READ_REGISTER_BUFFER_UCHAR   (NTOSKRNL.EXE.@)
+  */
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl.exe.spec b/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
+index e3898b06f89..2377311f9c5 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
++++ b/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
+@@ -555,6 +555,7 @@
+ @ stub KeFlushEntireTb
+ @ stdcall KeFlushQueuedDpcs()
+ @ stdcall KeGetCurrentProcessorNumber() NtGetCurrentProcessorNumber
++@ stdcall KeGetCurrentProcessorNumberEx(ptr)
+ @ stdcall KeGetCurrentThread()
+ @ stub KeGetPreviousMode
+ @ stub KeGetRecommendedSharedDataAlignment
+-- 
+GitLab
+
+From 0113f6efd5f5d196dfa63eb48385306535e4195c Mon Sep 17 00:00:00 2001
+From: Etaash Mathamsetty <etaash.mathamsetty@gmail.com>
+Date: Tue, 13 Sep 2022 13:19:05 -0400
+Subject: [PATCH] ntoskrnl: Use LoadLibraryW for MmGetSystemRoutineAddress
+
+MmGetSystemRoutineAddress wasn't finding some functions in ntoskrnl and hal.dll, this patch fixes it
+required by mrac anti cheat
+---
+ dlls/ntoskrnl.exe/ntoskrnl.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl.c b/dlls/ntoskrnl.exe/ntoskrnl.c
+index 8bdb769cb6d..4b68785e89b 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl.c
++++ b/dlls/ntoskrnl.exe/ntoskrnl.c
+@@ -3306,11 +3306,11 @@ PVOID WINAPI MmGetSystemRoutineAddress(PUNICODE_STRING SystemRoutineName)
+     if (RtlUnicodeStringToAnsiString( &routineNameA, SystemRoutineName, TRUE ) == STATUS_SUCCESS)
+     {
+         /* We only support functions exported from ntoskrnl.exe or hal.dll */
+-        hMod = GetModuleHandleW( ntoskrnlW );
++        hMod = LoadLibraryW( ntoskrnlW );
+         pFunc = GetProcAddress( hMod, routineNameA.Buffer );
+         if (!pFunc)
+         {
+-           hMod = GetModuleHandleW( halW );
++           hMod = LoadLibraryW( halW );
+ 
+            if (hMod) pFunc = GetProcAddress( hMod, routineNameA.Buffer );
+         }
+-- 
+GitLab
+
+From d1e23696dff2826d3750914614b58e0900a384e4 Mon Sep 17 00:00:00 2001
+From: Etaash Mathamsetty <etaash.mathamsetty@gmail.com>
+Date: Tue, 13 Sep 2022 13:24:30 -0400
+Subject: [PATCH] ntoskrnl: KeSetTargetProcessorDpcEx stub.
+
+Required by mrac anti cheat.
+---
+ dlls/ntoskrnl.exe/ntoskrnl.c        | 8 ++++++++
+ dlls/ntoskrnl.exe/ntoskrnl.exe.spec | 1 +
+ 2 files changed, 9 insertions(+)
+
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl.c b/dlls/ntoskrnl.exe/ntoskrnl.c
+index 031e9900544..8bdb769cb6d 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl.c
++++ b/dlls/ntoskrnl.exe/ntoskrnl.c
+@@ -3371,6 +3371,14 @@ VOID WINAPI KeSetImportanceDpc(PRKDPC dpc, KDPC_IMPORTANCE importance)
+     FIXME("%p, %d stub\n", dpc, importance);
+ }
+ 
++/***********************************************************************
++ *          KeSetTargetProcessorDpcEx   (NTOSKRNL.EXE.@)
++ */
++VOID WINAPI KeSetTargetProcessorDpcEx(PRKDPC dpc, PPROCESSOR_NUMBER process_number)
++{
++    FIXME("%p, %p stub\n", dpc, process_number);
++}
++
+ /***********************************************************************
+  *          KeSetTargetProcessorDpc   (NTOSKRNL.EXE.@)
+  */
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl.exe.spec b/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
+index e3898b06f89..9085bd55e4c 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
++++ b/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
+@@ -647,6 +647,7 @@
+ @ stdcall KeSetSystemAffinityThread(long)
+ @ stdcall KeSetSystemAffinityThreadEx(long)
+ @ stdcall KeSetTargetProcessorDpc(ptr long)
++@ stdcall KeSetTargetProcessorDpcEx(ptr ptr)
+ @ stub KeSetTimeIncrement
+ @ stdcall KeSetTimer(ptr int64 ptr)
+ @ stdcall KeSetTimerEx(ptr int64 long ptr)
+-- 
+GitLab
+
+From 27e8abde529d30e611eb36362313c2514d6ed2cc Mon Sep 17 00:00:00 2001
+From: Etaash Mathamsetty <etaash.mathamsetty@gmail.com>
+Date: Tue, 13 Sep 2022 15:15:01 -0400
+Subject: [PATCH 1/2] ntoskrnl: KeRegisterProcessorChangeCallback stub
+
+---
+ dlls/ntoskrnl.exe/ntoskrnl.c        |  9 +++++++++
+ dlls/ntoskrnl.exe/ntoskrnl.exe.spec |  1 +
+ include/ddk/wdm.h                   | 21 +++++++++++++++++++++
+ 3 files changed, 31 insertions(+)
+
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl.c b/dlls/ntoskrnl.exe/ntoskrnl.c
+index 031e9900544..1a083ffabe0 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl.c
++++ b/dlls/ntoskrnl.exe/ntoskrnl.c
+@@ -3592,6 +3592,15 @@ NTSTATUS WINAPI CmUnRegisterCallback(LARGE_INTEGER cookie)
+     return STATUS_NOT_IMPLEMENTED;
+ }
+ 
++/***********************************************************************
++ *           KeRegisterProcessorChangeCallback  (NTOSKRNL.EXE.@)
++ */
++PVOID WINAPI KeRegisterProcessorChangeCallback(PPROCESSOR_CALLBACK_FUNCTION function, PVOID context, ULONG flags)
++{
++    FIXME("(%p %p %ld) stub\n", function, context, flags);
++    return (PVOID)0xDEADBEEF;
++}
++
+ /***********************************************************************
+  *           IoAttachDevice  (NTOSKRNL.EXE.@)
+  */
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl.exe.spec b/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
+index e3898b06f89..864798dd700 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
++++ b/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
+@@ -613,6 +613,7 @@
+ @ stub KeReadStateTimer
+ @ stub KeRegisterBugCheckCallback
+ @ stub KeRegisterBugCheckReasonCallback
++@ stdcall KeRegisterProcessorChangeCallback(ptr ptr long)
+ @ stub KeReleaseInterruptSpinLock
+ @ stub KeReleaseMutant
+ @ stdcall KeReleaseMutex(ptr long)
+diff --git a/include/ddk/wdm.h b/include/ddk/wdm.h
+index 0aad83ade8c..ced5b71aa75 100644
+--- a/include/ddk/wdm.h
++++ b/include/ddk/wdm.h
+@@ -29,6 +29,11 @@
+ #define POINTER_ALIGNMENT
+ #endif
+ 
++#ifndef WINE_PNTSTATUS_DECLARED
++#define WINE_PNTSTATUS_DECLARED
++typedef NTSTATUS *PNTSTATUS;
++#endif
++
+ /* FIXME: We suppose that page size is 4096 */
+ #undef PAGE_SIZE
+ #undef PAGE_SHIFT
+@@ -1582,6 +1587,22 @@ typedef enum _WORK_QUEUE_TYPE {
+ 
+ typedef void (WINAPI *PIO_WORKITEM_ROUTINE)(PDEVICE_OBJECT,void*);
+ 
++typedef enum _KE_PROCESSOR_CHANGE_NOTIFY_STATE {
++  KeProcessorAddStartNotify = 0,
++  KeProcessorAddCompleteNotify,
++  KeProcessorAddFailureNotify
++} KE_PROCESSOR_CHANGE_NOTIFY_STATE;
++
++typedef struct _KE_PROCESSOR_CHANGE_NOTIFY_CONTEXT {
++  KE_PROCESSOR_CHANGE_NOTIFY_STATE State;
++  ULONG                            NtNumber;
++  NTSTATUS                         Status;
++  PROCESSOR_NUMBER                 ProcNumber;
++} KE_PROCESSOR_CHANGE_NOTIFY_CONTEXT, *PKE_PROCESSOR_CHANGE_NOTIFY_CONTEXT;
++
++typedef void (WINAPI PROCESSOR_CALLBACK_FUNCTION)(PVOID,PKE_PROCESSOR_CHANGE_NOTIFY_CONTEXT,PNTSTATUS);
++typedef PROCESSOR_CALLBACK_FUNCTION *PPROCESSOR_CALLBACK_FUNCTION;
++
+ NTSTATUS WINAPI ObCloseHandle(IN HANDLE handle);
+ 
+ #ifdef NONAMELESSUNION
+-- 
+GitLab
+
+
+From 54a158eaab6d68873c76c63219ac805316a0b71a Mon Sep 17 00:00:00 2001
+From: Etaash Mathamsetty <etaash.mathamsetty@gmail.com>
+Date: Tue, 13 Sep 2022 17:47:55 -0400
+Subject: [PATCH 2/2] ntoskrnl: KeDeregisterProcessorChangeCallback stub
+
+---
+ dlls/ntoskrnl.exe/ntoskrnl.c        | 8 ++++++++
+ dlls/ntoskrnl.exe/ntoskrnl.exe.spec | 1 +
+ 2 files changed, 9 insertions(+)
+
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl.c b/dlls/ntoskrnl.exe/ntoskrnl.c
+index 1a083ffabe0..1613ea42544 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl.c
++++ b/dlls/ntoskrnl.exe/ntoskrnl.c
+@@ -3601,6 +3601,14 @@ PVOID WINAPI KeRegisterProcessorChangeCallback(PPROCESSOR_CALLBACK_FUNCTION func
+     return (PVOID)0xDEADBEEF;
+ }
+ 
++/***********************************************************************
++ *           KeDeregisterProcessorChangeCallback  (NTOSKRNL.EXE.@)
++ */
++VOID WINAPI KeDeregisterProcessorChangeCallback(PVOID handle)
++{
++    FIXME("%p stub\n", handle);
++}
++
+ /***********************************************************************
+  *           IoAttachDevice  (NTOSKRNL.EXE.@)
+  */
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl.exe.spec b/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
+index 864798dd700..e0a8a976022 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
++++ b/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
+@@ -614,6 +614,7 @@
+ @ stub KeRegisterBugCheckCallback
+ @ stub KeRegisterBugCheckReasonCallback
+ @ stdcall KeRegisterProcessorChangeCallback(ptr ptr long)
++@ stdcall KeDeregisterProcessorChangeCallback(ptr)
+ @ stub KeReleaseInterruptSpinLock
+ @ stub KeReleaseMutant
+ @ stdcall KeReleaseMutex(ptr long)
+-- 
+GitLab
+
+From 7baff3906eaf3b1783ea82d503e4bdd08e36135c Mon Sep 17 00:00:00 2001
+From: Etaash Mathamsetty <etaash.mathamsetty@gmail.com>
+Date: Wed, 14 Sep 2022 17:02:18 -0400
+Subject: [PATCH] ntoskrnl: KeIpiGenericCall semi-stub
+
+cast ULONG_PTR to PVOID
+---
+ dlls/ntoskrnl.exe/ntoskrnl.c        | 9 +++++++++
+ dlls/ntoskrnl.exe/ntoskrnl.exe.spec | 1 +
+ include/ddk/wdm.h                   | 3 +++
+ 3 files changed, 13 insertions(+)
+
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl.c b/dlls/ntoskrnl.exe/ntoskrnl.c
+index 031e9900544..688067a83a1 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl.c
++++ b/dlls/ntoskrnl.exe/ntoskrnl.c
+@@ -2569,6 +2569,15 @@ LONG WINAPI KeInsertQueue(PRKQUEUE Queue, PLIST_ENTRY Entry)
+     return 0;
+ }
+ 
++/***********************************************************************
++ *           KeIpiGenericCall   (NTOSKRNL.EXE.@)
++ */
++ULONG_PTR WINAPI KeIpiGenericCall(PKIPI_BROADCAST_WORKER function, ULONG_PTR context)
++{
++    FIXME("(%p %p) semi-stub\n", function, (PVOID) context);
++    return function(context);
++}
++
+ /**********************************************************************
+  *           KeQueryActiveProcessors   (NTOSKRNL.EXE.@)
+  *
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl.exe.spec b/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
+index e3898b06f89..15168bcfece 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
++++ b/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
+@@ -585,6 +585,7 @@
+ @ stdcall KeInsertDeviceQueue(ptr ptr)
+ @ stub KeInsertHeadQueue
+ @ stdcall KeInsertQueue(ptr ptr)
++@ stdcall KeIpiGenericCall(ptr ptr)
+ @ stub KeInsertQueueApc
+ @ stub KeInsertQueueDpc
+ @ stub KeIsAttachedProcess
+diff --git a/include/ddk/wdm.h b/include/ddk/wdm.h
+index 0aad83ade8c..a7bd975b76c 100644
+--- a/include/ddk/wdm.h
++++ b/include/ddk/wdm.h
+@@ -1582,6 +1582,9 @@ typedef enum _WORK_QUEUE_TYPE {
+ 
+ typedef void (WINAPI *PIO_WORKITEM_ROUTINE)(PDEVICE_OBJECT,void*);
+ 
++typedef ULONG_PTR (WINAPI KIPI_BROADCAST_WORKER)(ULONG_PTR);
++typedef KIPI_BROADCAST_WORKER *PKIPI_BROADCAST_WORKER;
++
+ NTSTATUS WINAPI ObCloseHandle(IN HANDLE handle);
+ 
+ #ifdef NONAMELESSUNION
+-- 
+GitLab
+
