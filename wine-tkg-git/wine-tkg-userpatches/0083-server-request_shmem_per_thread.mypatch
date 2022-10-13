@@ -1,0 +1,1308 @@
+From 0ad5a65f071a1e759b852eb82da66ec1e18cc72b Mon Sep 17 00:00:00 2001
+From: Torge Matthies <openglfreak@googlemail.com>
+Date: Sun, 31 Jul 2022 15:09:23 +0200
+Subject: [PATCH 1/4] server,ntdll: Create shared memory for every thread.
+
+---
+ dlls/ntdll/unix/server.c       | 65 +++++++++++++++++++++++++++++++++-
+ dlls/ntdll/unix/unix_private.h | 17 +++++++++
+ dlls/ntdll/unix/virtual.c      |  4 +++
+ server/file.h                  |  4 +++
+ server/mapping.c               | 16 +++++++++
+ server/protocol.def            |  4 +++
+ server/thread.c                | 27 ++++++++++++++
+ server/thread.h                | 17 +++++++++
+ 8 files changed, 153 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/ntdll/unix/server.c b/dlls/ntdll/unix/server.c
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/unix/server.c
++++ b/dlls/ntdll/unix/server.c
+@@ -1523,6 +1523,13 @@ size_t server_init_process(void)
+     struct sigaction sig_act;
+     size_t info_size;
+     DWORD pid, tid;
++    sigset_t sigset;
++#ifdef __linux__
++    int has_request_shm = 0;
++    obj_handle_t fd_handle;
++    int request_shm_fd = -1;
++    void *request_shm = MAP_FAILED;
++#endif
+ 
+     server_pid = -1;
+     if (env_socket)
+@@ -1585,6 +1592,7 @@ size_t server_init_process(void)
+ 
+     reply_pipe = init_thread_pipe();
+ 
++    server_enter_uninterrupted_section( &fd_cache_mutex, &sigset );
+     SERVER_START_REQ( init_first_thread )
+     {
+         req->unix_pid    = getpid();
+@@ -1599,9 +1607,18 @@ size_t server_init_process(void)
+         peb->SessionId    = reply->session_id;
+         info_size         = reply->info_size;
+         server_start_time = reply->server_start;
++#ifdef __linux__
++        has_request_shm   = reply->has_request_shm;
++        if (has_request_shm)
++        {
++            request_shm_fd = receive_fd( &fd_handle );
++            assert( fd_handle == tid );
++        }
++#endif
+         supported_machines_count = wine_server_reply_size( reply ) / sizeof(*supported_machines);
+     }
+     SERVER_END_REQ;
++    server_leave_uninterrupted_section( &fd_cache_mutex, &sigset );
+     close( reply_pipe );
+ 
+     if (ret) server_protocol_error( "init_first_thread failed with status %x\n", ret );
+@@ -1633,9 +1650,25 @@ size_t server_init_process(void)
+     set_thread_id( NtCurrentTeb(), pid, tid );
+ 
+     for (i = 0; i < supported_machines_count; i++)
+-        if (supported_machines[i] == current_machine) return info_size;
++        if (supported_machines[i] == current_machine)
++            goto map_request_shm;
+ 
+     fatal_error( "wineserver doesn't support the %04x architecture\n", current_machine );
++
++map_request_shm:
++#ifdef __linux__
++    if (!has_request_shm) return info_size;
++
++    request_shm = mmap( NULL, REQUEST_SHM_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, request_shm_fd, 0 );
++    if (request_shm != MAP_FAILED)
++    {
++        ntdll_get_thread_data()->request_shm_fd = request_shm_fd;
++        ntdll_get_thread_data()->request_shm = request_shm;
++    }
++    else
++        close( request_shm_fd );
++#endif
++    return info_size;
+ }
+ 
+ 
+@@ -1698,10 +1731,18 @@ void server_init_thread( void *entry_point, BOOL *suspend )
+ {
+     void *teb;
+     int reply_pipe = init_thread_pipe();
++    sigset_t sigset;
++#ifdef __linux__
++    int has_request_shm = 0;
++    obj_handle_t fd_handle;
++    int request_shm_fd = -1;
++    void *request_shm;
++#endif
+ 
+     /* always send the native TEB */
+     if (!(teb = NtCurrentTeb64())) teb = NtCurrentTeb();
+ 
++    server_enter_uninterrupted_section( &fd_cache_mutex, &sigset );
+     SERVER_START_REQ( init_thread )
+     {
+         req->unix_tid  = get_unix_tid();
+@@ -1711,9 +1752,31 @@ void server_init_thread( void *entry_point, BOOL *suspend )
+         req->wait_fd   = ntdll_get_thread_data()->wait_fd[1];
+         wine_server_call( req );
+         *suspend = reply->suspend;
++#ifdef __linux__
++        has_request_shm = reply->has_request_shm;
++        if (has_request_shm)
++        {
++            request_shm_fd = receive_fd( &fd_handle );
++            assert( fd_handle == GetCurrentThreadId() );
++        }
++#endif
+     }
+     SERVER_END_REQ;
++    server_leave_uninterrupted_section( &fd_cache_mutex, &sigset );
+     close( reply_pipe );
++
++#ifdef __linux__
++    if (!has_request_shm) return;
++
++    request_shm = mmap( NULL, REQUEST_SHM_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, request_shm_fd, 0 );
++    if (request_shm != MAP_FAILED)
++    {
++        ntdll_get_thread_data()->request_shm_fd = request_shm_fd;
++        ntdll_get_thread_data()->request_shm = request_shm;
++    }
++    else
++        close( request_shm_fd );
++#endif
+ }
+ 
+ 
+diff --git a/dlls/ntdll/unix/unix_private.h b/dlls/ntdll/unix/unix_private.h
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/unix/unix_private.h
++++ b/dlls/ntdll/unix/unix_private.h
+@@ -48,6 +48,19 @@ static inline BOOL is_machine_64bit( WORD machine )
+     return (machine == IMAGE_FILE_MACHINE_AMD64 || machine == IMAGE_FILE_MACHINE_ARM64);
+ }
+ 
++#ifdef __linux__
++struct request_shm
++{
++    int futex; /* signaling futex */
++    int pad;
++    union
++    {
++        union generic_request req;    /* request structure */
++        union generic_reply   reply;  /* reply structure */
++    } u;
++};
++#endif
++
+ /* thread private data, stored in NtCurrentTeb()->GdiTebBatch */
+ struct ntdll_thread_data
+ {
+@@ -58,6 +71,10 @@ struct ntdll_thread_data
+     int                request_fd;    /* fd for sending server requests */
+     int                reply_fd;      /* fd for receiving server replies */
+     int                wait_fd[2];    /* fd for sleeping server requests */
++#ifdef __linux__
++    int                request_shm_fd; /* request shared memory fd */
++    volatile struct request_shm *request_shm; /* shared memory for sending and receiving server requests/replies */
++#endif
+     pthread_t          pthread_id;    /* pthread thread id */
+     struct list        entry;         /* entry in TEB list */
+     PRTL_THREAD_START_ROUTINE start;  /* thread entry point */
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -3056,6 +3056,10 @@ static TEB *init_teb( void *ptr, BOOL is_wow )
+     thread_data->reply_fd   = -1;
+     thread_data->wait_fd[0] = -1;
+     thread_data->wait_fd[1] = -1;
++#ifdef __linux__
++    thread_data->request_shm_fd = -1;
++    thread_data->request_shm = NULL;
++#endif
+     list_add_head( &teb_list, &thread_data->entry );
+     return teb;
+ }
+diff --git a/server/file.h b/server/file.h
+index 11111111111..11111111111 100644
+--- a/server/file.h
++++ b/server/file.h
+@@ -30,6 +30,7 @@ struct fd;
+ struct mapping;
+ struct async_queue;
+ struct completion;
++struct request_shm;
+ 
+ /* server-side representation of I/O status block */
+ struct iosb
+@@ -210,6 +211,9 @@ extern struct object *create_hypervisor_data_mapping( struct object *root, const
+                                                       unsigned int attr, const struct security_descriptor *sd );
+ extern struct object *create_shared_mapping( struct object *root, const struct unicode_str *name,
+                                              mem_size_t size, const struct security_descriptor *sd, void **ptr );
++#ifdef __linux__
++extern int create_request_shm( int *fd, struct request_shm **ptr );
++#endif
+ 
+ /* device functions */
+ 
+diff --git a/server/mapping.c b/server/mapping.c
+index 11111111111..11111111111 100644
+--- a/server/mapping.c
++++ b/server/mapping.c
+@@ -1197,6 +1197,22 @@ struct object *create_shared_mapping( struct object *root, const struct unicode_
+     return &mapping->obj;
+ }
+ 
++#ifdef __linux__
++int create_request_shm( int *fd, struct request_shm **ptr )
++{
++    if ((*fd = create_temp_file( REQUEST_SHM_SIZE )) == -1) return 0;
++
++    *ptr = mmap( NULL, REQUEST_SHM_SIZE, PROT_WRITE, MAP_SHARED, *fd, 0 );
++    if (*ptr == MAP_FAILED)
++    {
++        *ptr = NULL;
++        set_error( STATUS_NO_MEMORY );
++        return 0;
++    }
++    return 1;
++}
++#endif
++
+ /* create a file mapping */
+ DECL_HANDLER(create_mapping)
+ {
+diff --git a/server/protocol.def b/server/protocol.def
+index 11111111111..11111111111 100644
+--- a/server/protocol.def
++++ b/server/protocol.def
+@@ -46,6 +46,8 @@ typedef unsigned __int64 client_ptr_t;
+ typedef unsigned __int64 affinity_t;
+ typedef client_ptr_t mod_handle_t;
+ 
++#define REQUEST_SHM_SIZE (1 * 1024 * 1024)
++
+ struct request_header
+ {
+     int          req;          /* request code */
+@@ -998,6 +1000,7 @@ struct directory_entry
+     timeout_t    server_start; /* server start time */
+     unsigned int session_id;   /* process session id */
+     data_size_t  info_size;    /* total size of startup info */
++    int          has_request_shm; /* is request shared memory supported? */
+     VARARG(machines,ushorts);  /* array of supported machines */
+ @END
+ 
+@@ -1011,6 +1014,7 @@ struct directory_entry
+     client_ptr_t entry;        /* entry point (in thread address space) */
+ @REPLY
+     int          suspend;      /* is thread suspended? */
++    int          has_request_shm; /* is request shared memory supported? */
+ @END
+ 
+ 
+diff --git a/server/thread.c b/server/thread.c
+index 11111111111..11111111111 100644
+--- a/server/thread.c
++++ b/server/thread.c
+@@ -29,6 +29,7 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include <sys/types.h>
++#include <sys/mman.h>
+ #include <unistd.h>
+ #include <time.h>
+ #include <poll.h>
+@@ -339,6 +340,10 @@ static inline void init_thread_structure( struct thread *thread )
+     thread->request_fd      = NULL;
+     thread->reply_fd        = NULL;
+     thread->wait_fd         = NULL;
++#ifdef __linux__
++    thread->request_shm_fd  = -1;
++    thread->request_shm     = NULL;
++#endif
+     thread->state           = RUNNING;
+     thread->exit_code       = 0;
+     thread->priority        = 0;
+@@ -535,6 +540,14 @@ struct thread *create_thread( int fd, struct process *process, const struct secu
+         }
+     }
+ 
++#ifdef __linux__
++    if (!create_request_shm( &thread->request_shm_fd, (struct request_shm**)&thread->request_shm ))
++    {
++        release_object( thread );
++        return NULL;
++    }
++#endif
++
+     if (do_fsync())
+     {
+         thread->fsync_idx = fsync_alloc_shm( 0, 0 );
+@@ -612,6 +625,10 @@ static void cleanup_thread( struct thread *thread )
+     if (thread->request_fd) release_object( thread->request_fd );
+     if (thread->reply_fd) release_object( thread->reply_fd );
+     if (thread->wait_fd) release_object( thread->wait_fd );
++#ifdef __linux__
++    if (thread->request_shm_fd != -1) close( thread->request_shm_fd );
++    if (thread->request_shm) munmap( (void*)thread->request_shm, REQUEST_SHM_SIZE );
++#endif
+     cleanup_clipboard_thread(thread);
+     destroy_thread_windows( thread );
+     free_msg_queue( thread );
+@@ -635,6 +652,10 @@ static void cleanup_thread( struct thread *thread )
+     thread->request_fd = NULL;
+     thread->reply_fd = NULL;
+     thread->wait_fd = NULL;
++#ifdef __linux__
++    thread->request_shm_fd = -1;
++    thread->request_shm = NULL;
++#endif
+     thread->desktop = 0;
+     thread->desc = NULL;
+     thread->desc_len = 0;
+@@ -1906,8 +1927,11 @@ DECL_HANDLER(init_first_thread)
+     reply->session_id   = process->session_id;
+     reply->info_size    = get_process_startup_info_size( process );
+     reply->server_start = server_start_time;
++    reply->has_request_shm = current->request_shm_fd != -1;
+     set_reply_data( supported_machines,
+                     min( supported_machines_count * sizeof(unsigned short), get_reply_max_size() ));
++    if (reply->has_request_shm)
++        send_client_fd( current->process, current->request_shm_fd, reply->tid );
+ }
+ 
+ /* initialize a new thread */
+@@ -1934,6 +1958,9 @@ DECL_HANDLER(init_thread)
+         set_thread_affinity( current, current->affinity );
+ 
+     reply->suspend = (current->suspend || current->process->suspend || current->context != NULL);
++    reply->has_request_shm = current->request_shm_fd != -1;
++    if (reply->has_request_shm)
++        send_client_fd( current->process, current->request_shm_fd, get_thread_id( current ) );
+ }
+ 
+ /* terminate a thread */
+diff --git a/server/thread.h b/server/thread.h
+index 11111111111..11111111111 100644
+--- a/server/thread.h
++++ b/server/thread.h
+@@ -46,6 +46,19 @@ struct inflight_fd
+ };
+ #define MAX_INFLIGHT_FDS 16  /* max number of fds in flight per thread */
+ 
++#ifdef __linux__
++struct request_shm
++{
++    int futex; /* signaling futex */
++    int pad;
++    union
++    {
++        union generic_request req;    /* request structure */
++        union generic_reply   reply;  /* reply structure */
++    } u;
++};
++#endif
++
+ struct thread
+ {
+     struct object          obj;           /* object header */
+@@ -77,6 +90,10 @@ struct thread
+     struct fd             *request_fd;    /* fd for receiving client requests */
+     struct fd             *reply_fd;      /* fd to send a reply to a client */
+     struct fd             *wait_fd;       /* fd to use to wake a sleeping client */
++#ifdef __linux__
++    int                    request_shm_fd; /* request shared memory fd */
++    volatile struct request_shm *request_shm; /* shared memory for receiving and sending client requests/replies */
++#endif
+     enum run_state         state;         /* running state */
+     int                    exit_code;     /* thread exit code */
+     int                    unix_pid;      /* Unix pid of client */
+-- 
+2.37.2
+
+From bdb5a922391cb54fc7db0b7ef5aad9f25c3f714b Mon Sep 17 00:00:00 2001
+From: Torge Matthies <openglfreak@googlemail.com>
+Date: Sun, 7 Aug 2022 21:19:26 +0200
+Subject: [PATCH 2/4] server,ntdll: Send and receive server requests through
+ shared memory.
+
+---
+ dlls/ntdll/unix/server.c |  92 ++++++++++++++++++++++++++++++++
+ server/Makefile.in       |   2 +-
+ server/fd.c              |  81 ++++++++++++++++++++++++++++
+ server/file.h            |   5 ++
+ server/request.c         |  98 ++++++++++++++++++++++++++++++++++
+ server/request.h         |   1 +
+ server/thread.c          | 111 ++++++++++++++++++++++++++++++++++++++-
+ server/thread.h          |   1 +
+ 8 files changed, 388 insertions(+), 3 deletions(-)
+
+diff --git a/dlls/ntdll/unix/server.c b/dlls/ntdll/unix/server.c
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/unix/server.c
++++ b/dlls/ntdll/unix/server.c
+@@ -202,6 +202,78 @@ static DECLSPEC_NORETURN void server_protocol_perror( const char *err )
+ }
+ 
+ 
++#ifdef __linux__
++
++#define FUTEX_WAIT 0
++#define FUTEX_WAKE 1
++
++/***********************************************************************
++ *           send_request_shm
++ *
++ * Send a request to the server using shared memory.
++ */
++static unsigned int send_request_shm( const struct __server_request_info *req )
++{
++    volatile struct request_shm *request_shm = ntdll_get_thread_data()->request_shm;
++    unsigned int i;
++
++    memcpy( (void*)&request_shm->u.req, &req->u.req, sizeof(req->u.req) );
++    if (req->u.req.request_header.request_size)
++    {
++        char *ptr = (char*)(request_shm + 1);
++        for (i = 0; i < req->data_count; i++)
++        {
++            memcpy( ptr, req->data[i].ptr, req->data[i].size );
++            ptr += req->data[i].size;
++        }
++    }
++
++    while (InterlockedCompareExchange( (void*)&request_shm->futex, 1, 0 ) != 0)
++        YieldProcessor();
++    syscall( __NR_futex, &request_shm->futex, FUTEX_WAKE, 1, NULL, NULL, 0 );
++    return STATUS_SUCCESS;
++}
++
++
++static void read_reply_data( void *buffer, size_t size );
++
++/***********************************************************************
++ *           wait_reply_shm
++ *
++ * Wait for a reply from the server using shared memory.
++ */
++static inline unsigned int wait_reply_shm( struct __server_request_info *req )
++{
++    volatile struct request_shm *request_shm = ntdll_get_thread_data()->request_shm;
++    char *data_ptr = (char*)(request_shm + 1) + req->u.req.request_header.request_size;
++    unsigned int copy_limit = (char*)request_shm + REQUEST_SHM_SIZE - data_ptr;
++    int val;
++
++    while ((val = request_shm->futex) != 0)
++    {
++        if (val == -1)
++            abort_thread(0);
++        syscall( __NR_futex, &request_shm->futex, FUTEX_WAIT, val, NULL, NULL, 0 );
++    }
++
++    memcpy( &req->u.reply, (void*)&request_shm->u.reply, sizeof(req->u.reply) );
++    if (req->u.reply.reply_header.reply_size)
++    {
++        if (req->u.reply.reply_header.reply_size > copy_limit)
++        {
++            memcpy( req->reply_data, data_ptr, copy_limit );
++            read_reply_data( (char*)req->reply_data + copy_limit,
++                             req->u.reply.reply_header.reply_size - copy_limit );
++        }
++        else
++            memcpy( req->reply_data, data_ptr, req->u.reply.reply_header.reply_size );
++    }
++    return req->u.reply.reply_header.error;
++}
++
++#endif /* defined(__linux__) */
++
++
+ /***********************************************************************
+  *           send_request
+  *
+@@ -308,6 +380,20 @@ static inline unsigned int wait_reply( struct __server_request_info *req )
+ }
+ 
+ 
++#ifdef __linux__
++
++unsigned int server_call_unlocked_shm( void *req_ptr )
++{
++    struct __server_request_info * const req = req_ptr;
++    unsigned int ret;
++
++    if ((ret = send_request_shm( req ))) return ret;
++    return wait_reply_shm( req );
++}
++
++#endif
++
++
+ /***********************************************************************
+  *           server_call_unlocked
+  */
+@@ -316,6 +402,12 @@ unsigned int server_call_unlocked( void *req_ptr )
+     struct __server_request_info * const req = req_ptr;
+     unsigned int ret;
+ 
++#ifdef __linux__
++    if (ntdll_get_thread_data()->request_shm &&
++        sizeof(req->u.req) + req->u.req.request_header.request_size < REQUEST_SHM_SIZE)
++        return server_call_unlocked_shm( req_ptr );
++#endif
++
+     if ((ret = send_request( req ))) return ret;
+     return wait_reply( req );
+ }
+diff --git a/server/fd.c b/server/fd.c
+index 11111111111..11111111111 100644
+--- a/server/fd.c
++++ b/server/fd.c
+@@ -26,6 +26,7 @@
+ #include <errno.h>
+ #include <fcntl.h>
+ #include <limits.h>
++#include <pthread.h>
+ #include <signal.h>
+ #include <stdarg.h>
+ #include <stdio.h>
+@@ -198,6 +199,7 @@ struct fd
+     unsigned int         signaled :1; /* is the fd signaled? */
+     unsigned int         fs_locks :1; /* can we use filesystem locks for this fd? */
+     int                  poll_index;  /* index of fd in poll array */
++    int                  poll_generation; /* generation that this fd was added to the poll array in */
+     struct async_queue   read_q;      /* async readers of this fd */
+     struct async_queue   write_q;     /* async writers of this fd */
+     struct async_queue   wait_q;      /* other async waiters of this fd */
+@@ -513,6 +515,10 @@ static void set_user_shared_data_time(void)
+         user_shared_data->QpcBias = qpc_bias;
+ }
+ 
++pthread_mutex_t global_lock = PTHREAD_MUTEX_INITIALIZER;
++int poll_exit_pipe[2];
++struct fd *poll_exit_fd;
++
+ void set_current_time(void)
+ {
+     static const timeout_t ticks_1601_to_1970 = (timeout_t)86400 * (369 * 365 + 89) * TICKS_PER_SEC;
+@@ -608,6 +614,7 @@ static int nb_users;                        /* count of array entries actually i
+ static int active_users;                    /* current number of active users */
+ static int allocated_users;                 /* count of allocated entries in the array */
+ static struct fd **freelist;                /* list of free entries in the array */
++unsigned long poll_generation;       /* current poll array generation */
+ 
+ static int get_next_timeout(void);
+ 
+@@ -686,20 +693,27 @@ static inline void main_loop_epoll(void)
+ 
+     if (epoll_fd == -1) return;
+ 
++    pthread_mutex_lock( &global_lock );
+     while (active_users)
+     {
++        unsigned long generation;
++
+         timeout = get_next_timeout();
+ 
+         if (!active_users) break;  /* last user removed by a timeout */
+         if (epoll_fd == -1) break;  /* an error occurred with epoll */
+ 
++        generation = poll_generation;
++        pthread_mutex_unlock( &global_lock );
+         ret = epoll_wait( epoll_fd, events, ARRAY_SIZE( events ), timeout );
++        pthread_mutex_lock( &global_lock );
+         set_current_time();
+ 
+         /* put the events into the pollfd array first, like poll does */
+         for (i = 0; i < ret; i++)
+         {
+             int user = events[i].data.u32;
++            if (user >= nb_users || pollfd[user].fd == -1 || poll_users[user]->poll_generation > generation) continue;
+             pollfd[user].revents = events[i].events;
+         }
+ 
+@@ -707,9 +721,11 @@ static inline void main_loop_epoll(void)
+         for (i = 0; i < ret; i++)
+         {
+             int user = events[i].data.u32;
++            if (user >= nb_users || pollfd[user].fd == -1 || poll_users[user]->poll_generation > generation) continue;
+             if (pollfd[user].revents) fd_poll_event( poll_users[user], pollfd[user].revents );
+         }
+     }
++    pthread_mutex_unlock( &global_lock );
+ }
+ 
+ #elif defined(HAVE_KQUEUE)
+@@ -780,13 +796,18 @@ static inline void main_loop_epoll(void)
+ 
+     if (kqueue_fd == -1) return;
+ 
++    pthread_mutex_lock( &global_lock );
+     while (active_users)
+     {
++        unsigned long generation;
++
+         timeout = get_next_timeout();
+ 
+         if (!active_users) break;  /* last user removed by a timeout */
+         if (kqueue_fd == -1) break;  /* an error occurred with kqueue */
+ 
++        generation = poll_generation;
++        pthread_mutex_unlock( &global_lock );
+         if (timeout != -1)
+         {
+             struct timespec ts;
+@@ -796,6 +817,7 @@ static inline void main_loop_epoll(void)
+             ret = kevent( kqueue_fd, NULL, 0, events, ARRAY_SIZE( events ), &ts );
+         }
+         else ret = kevent( kqueue_fd, NULL, 0, events, ARRAY_SIZE( events ), NULL );
++        pthread_mutex_lock( &global_lock );
+ 
+         set_current_time();
+ 
+@@ -803,11 +825,13 @@ static inline void main_loop_epoll(void)
+         for (i = 0; i < ret; i++)
+         {
+             long user = (long)events[i].udata;
++            if (user >= nb_users || pollfd[user].fd == -1 || poll_users[user]->poll_generation > generation) continue;
+             pollfd[user].revents = 0;
+         }
+         for (i = 0; i < ret; i++)
+         {
+             long user = (long)events[i].udata;
++            if (user >= nb_users || pollfd[user].fd == -1 || poll_users[user]->poll_generation > generation) continue;
+             if (events[i].filter == EVFILT_READ) pollfd[user].revents |= POLLIN;
+             else if (events[i].filter == EVFILT_WRITE) pollfd[user].revents |= POLLOUT;
+             if (events[i].flags & EV_EOF) pollfd[user].revents |= POLLHUP;
+@@ -818,10 +842,12 @@ static inline void main_loop_epoll(void)
+         for (i = 0; i < ret; i++)
+         {
+             long user = (long)events[i].udata;
++            if (user >= nb_users || pollfd[user].fd == -1 || poll_users[user]->poll_generation > generation) continue;
+             if (pollfd[user].revents) fd_poll_event( poll_users[user], pollfd[user].revents );
+             pollfd[user].revents = 0;
+         }
+     }
++    pthread_mutex_unlock( &global_lock );
+ }
+ 
+ #elif defined(USE_EVENT_PORTS)
+@@ -882,14 +908,19 @@ static inline void main_loop_epoll(void)
+ 
+     if (port_fd == -1) return;
+ 
++    pthread_mutex_lock( &global_lock );
+     while (active_users)
+     {
++        unsigned long generation;
++
+         timeout = get_next_timeout();
+         nget = 1;
+ 
+         if (!active_users) break;  /* last user removed by a timeout */
+         if (port_fd == -1) break;  /* an error occurred with event completion */
+ 
++        generation = poll_generation;
++        pthread_mutex_unlock( &global_lock );
+         if (timeout != -1)
+         {
+             struct timespec ts;
+@@ -899,6 +930,7 @@ static inline void main_loop_epoll(void)
+             ret = port_getn( port_fd, events, ARRAY_SIZE( events ), &nget, &ts );
+         }
+         else ret = port_getn( port_fd, events, ARRAY_SIZE( events ), &nget, NULL );
++        pthread_mutex_lock( &global_lock );
+ 
+ 	if (ret == -1) break;  /* an error occurred with event completion */
+ 
+@@ -908,6 +940,7 @@ static inline void main_loop_epoll(void)
+         for (i = 0; i < nget; i++)
+         {
+             long user = (long)events[i].portev_user;
++            if (user >= nb_users || pollfd[user].fd == -1 || poll_users[user]->poll_generation > generation) continue;
+             pollfd[user].revents = events[i].portev_events;
+         }
+ 
+@@ -915,6 +948,7 @@ static inline void main_loop_epoll(void)
+         for (i = 0; i < nget; i++)
+         {
+             long user = (long)events[i].portev_user;
++            if (user >= nb_users || pollfd[user].fd == -1 || poll_users[user]->poll_generation > generation) continue;
+             if (pollfd[user].revents) fd_poll_event( poll_users[user], pollfd[user].revents );
+             /* if we are still interested, reassociate the fd */
+             if (pollfd[user].fd != -1) {
+@@ -922,6 +956,7 @@ static inline void main_loop_epoll(void)
+             }
+         }
+     }
++    pthread_mutex_unlock( &global_lock );
+ }
+ 
+ #else /* HAVE_KQUEUE */
+@@ -970,6 +1005,7 @@ static int add_poll_user( struct fd *fd )
+     pollfd[ret].events = 0;
+     pollfd[ret].revents = 0;
+     poll_users[ret] = fd;
++    fd->poll_generation = ++poll_generation;
+     active_users++;
+     return ret;
+ }
+@@ -1055,30 +1091,65 @@ static int get_next_timeout(void)
+     return ret;
+ }
+ 
++static void poll_exit_poll_event( struct fd *fd, int event )
++{
++    char dummy;
++    read( fd->unix_fd, &dummy, sizeof(dummy) );
++}
++
++static const struct fd_ops poll_exit_fd_ops =
++{
++    NULL,                        /* get_poll_events */
++    poll_exit_poll_event,        /* poll_event */
++    NULL,                        /* flush */
++    NULL,                        /* get_fd_type */
++    NULL,                        /* ioctl */
++    NULL,                        /* queue_async */
++    NULL                         /* reselect_async */
++};
++
++static int create_poll_exit_fd( void )
++{
++    if (pipe( poll_exit_pipe )) return 0;
++    poll_exit_fd = create_anonymous_fd( &poll_exit_fd_ops, poll_exit_pipe[0], NULL, 0 );
++    if (!poll_exit_fd) return 0;
++    set_fd_events( poll_exit_fd, POLLIN );
++    return 1;
++}
++
+ /* server main poll() loop */
+ void main_loop(void)
+ {
+     int i, ret, timeout;
+ 
++    if (!create_poll_exit_fd()) return;
++
+     set_current_time();
+     server_start_time = current_time;
+ 
+     main_loop_epoll();
+     /* fall through to normal poll loop */
+ 
++    pthread_mutex_lock( &global_lock );
+     while (active_users)
+     {
++        unsigned long generation;
++
+         timeout = get_next_timeout();
+ 
+         if (!active_users) break;  /* last user removed by a timeout */
+ 
++        generation = poll_generation;
++        pthread_mutex_unlock( &global_lock );
+         ret = poll( pollfd, nb_users, timeout );
++        pthread_mutex_lock( &global_lock );
+         set_current_time();
+ 
+         if (ret > 0)
+         {
+             for (i = 0; i < nb_users; i++)
+             {
++                if (pollfd[i].fd == -1 || poll_users[i]->poll_generation > generation) continue;
+                 if (pollfd[i].revents)
+                 {
+                     fd_poll_event( poll_users[i], pollfd[i].revents );
+@@ -1086,9 +1157,17 @@ void main_loop(void)
+                 }
+             }
+         }
++        pthread_mutex_unlock( &global_lock );
+     }
+ }
+ 
++/* global lock must be held */
++void force_exit_poll( void )
++{
++    static char zero;
++    write( poll_exit_pipe[1], &zero, sizeof(zero) );
++}
++
+ 
+ /****************************************************************/
+ /* device functions */
+@@ -1724,6 +1803,8 @@ void set_fd_events( struct fd *fd, int events )
+     int user = fd->poll_index;
+     assert( poll_users[user] == fd );
+ 
++    fd->poll_generation = ++poll_generation;
++
+     set_fd_epoll_events( fd, user, events );
+ 
+     if (events == -1)  /* stop waiting on this fd completely */
+diff --git a/server/file.h b/server/file.h
+index 11111111111..11111111111 100644
+--- a/server/file.h
++++ b/server/file.h
+@@ -21,6 +21,7 @@
+ #ifndef __WINE_SERVER_FILE_H
+ #define __WINE_SERVER_FILE_H
+ 
++#include <pthread.h>
+ #include <sys/types.h>
+ #include <sys/stat.h>
+ 
+@@ -80,6 +81,9 @@ struct fd_ops
+ 
+ /* file descriptor functions */
+ 
++extern pthread_mutex_t global_lock;
++extern unsigned long poll_generation;
++
+ extern struct fd *alloc_pseudo_fd( const struct fd_ops *fd_user_ops, struct object *user,
+                                    unsigned int options );
+ extern struct fd *open_fd( struct fd *root, const char *name, struct unicode_str nt_name,
+@@ -131,6 +135,7 @@ extern void no_fd_queue_async( struct fd *fd, struct async *async, int type, int
+ extern void default_fd_queue_async( struct fd *fd, struct async *async, int type, int count );
+ extern void default_fd_reselect_async( struct fd *fd, struct async_queue *queue );
+ extern void main_loop(void);
++extern void force_exit_poll(void);
+ extern void remove_process_locks( struct process *process );
+ 
+ static inline struct fd *get_obj_fd( struct object *obj ) { return obj->ops->get_fd( obj ); }
+diff --git a/server/request.c b/server/request.c
+index 11111111111..11111111111 100644
+--- a/server/request.c
++++ b/server/request.c
+@@ -261,6 +261,104 @@ void write_reply( struct thread *thread )
+         fatal_protocol_error( thread, "reply write: %s\n", strerror( errno ));
+ }
+ 
++/* send a reply to the current thread */
++void send_reply_shm( union generic_reply *reply, struct request_shm *request_shm, data_size_t req_data_size )
++{
++    char *data_ptr = (char*)(request_shm + 1) + req_data_size;
++    unsigned int copy_limit = (char*)request_shm + REQUEST_SHM_SIZE - data_ptr;
++    int ret;
++
++    /* fixed data is already written */
++    if (!current->reply_size)
++        return;
++
++    if (current->reply_size <= copy_limit)
++    {
++        memcpy( data_ptr, current->reply_data, current->reply_size );
++        if (current->reply_data != current->rep_data) free( current->reply_data );
++        current->reply_data = NULL;
++        return;
++    }
++
++    memcpy( data_ptr, current->reply_data, copy_limit );
++    current->reply_towrite = current->reply_size - copy_limit;
++
++    if ((ret = write( get_unix_fd( current->reply_fd ),
++                      (char *)current->reply_data + current->reply_size - current->reply_towrite,
++                      current->reply_towrite )) >= 0)
++    {
++        if (!(current->reply_towrite -= ret))
++        {
++            if (current->reply_data != current->rep_data) free( current->reply_data );
++            current->reply_data = NULL;
++        }
++        else
++        {
++            /* couldn't write it all, wait for POLLOUT */
++            set_fd_events( current->reply_fd, POLLOUT );
++            set_fd_events( current->request_fd, 0 );
++        }
++        return;
++    }
++    if (errno == EPIPE)
++        kill_thread( current, 0 );  /* normal death */
++    else if (errno != EWOULDBLOCK && (EWOULDBLOCK == EAGAIN || errno != EAGAIN))
++        fatal_protocol_error( current, "reply write: %s\n", strerror( errno ));
++}
++
++/* call a request handler using shared memory */
++static void call_req_handler_shm( struct thread *thread, struct request_shm *request_shm )
++{
++    enum request req = thread->req.request_header.req;
++    data_size_t data_size = thread->req.request_header.request_size;
++
++    current = thread;
++    current->reply_size = 0;
++    clear_error();
++    memset( &request_shm->u.reply, 0, sizeof(request_shm->u.reply) );
++
++    if (debug_level) trace_request();
++
++    if (req < REQ_NB_REQUESTS)
++        req_handlers[req]( &current->req, &request_shm->u.reply );
++    else
++        set_error( STATUS_NOT_IMPLEMENTED );
++
++    if (current)
++    {
++        if (current->reply_fd)
++        {
++            request_shm->u.reply.reply_header.error = current->error;
++            request_shm->u.reply.reply_header.reply_size = current->reply_size;
++            if (debug_level) trace_reply( req, &request_shm->u.reply );
++            send_reply_shm( &request_shm->u.reply, request_shm, data_size );
++        }
++        else
++        {
++            current->exit_code = 1;
++            kill_thread( current, 1 );  /* no way to continue without reply fd */
++        }
++    }
++    current = NULL;
++}
++
++/* read a request from a thread using shared memory */
++void read_request_shm( struct thread *thread, struct request_shm *request_shm )
++{
++    void *orig_req_data = thread->req_data;
++    data_size_t data_size;
++
++    memcpy( &thread->req, &request_shm->u.req, sizeof(thread->req) );
++    data_size = thread->req.request_header.request_size;
++    if (data_size)
++        thread->req_data = request_shm + 1;
++
++    call_req_handler_shm( thread, request_shm );
++
++    if (data_size)
++        thread->req_data = orig_req_data;
++}
++
+ /* send a reply to the current thread */
+ void send_reply( union generic_reply *reply )
+ {
+diff --git a/server/request.h b/server/request.h
+index 11111111111..11111111111 100644
+--- a/server/request.h
++++ b/server/request.h
+@@ -52,6 +52,7 @@ extern const struct object_attributes *get_req_object_attributes( const struct s
+ extern const void *get_req_data_after_objattr( const struct object_attributes *attr, data_size_t *len );
+ extern int receive_fd( struct process *process );
+ extern int send_client_fd( struct process *process, int fd, obj_handle_t handle );
++extern void read_request_shm( struct thread *thread, struct request_shm *request_shm );
+ extern void read_request( struct thread *thread );
+ extern void write_reply( struct thread *thread );
+ extern timeout_t monotonic_counter(void);
+diff --git a/server/thread.c b/server/thread.c
+index 11111111111..11111111111 100644
+--- a/server/thread.c
++++ b/server/thread.c
+@@ -23,6 +23,7 @@
+ #include <assert.h>
+ #include <errno.h>
+ #include <fcntl.h>
++#include <pthread.h>
+ #include <signal.h>
+ #include <stdarg.h>
+ #include <stdio.h>
+@@ -44,6 +45,9 @@
+ #ifdef HAVE_SYS_RESOURCE_H
+ #include <sys/resource.h>
+ #endif
++#ifdef HAVE_SYS_SYSCALL_H
++#include <sys/syscall.h>
++#endif
+ 
+ #include "ntstatus.h"
+ #define WIN32_NO_STATUS
+@@ -343,6 +347,7 @@ static inline void init_thread_structure( struct thread *thread )
+ #ifdef __linux__
+     thread->request_shm_fd  = -1;
+     thread->request_shm     = NULL;
++    thread->request_shm_thread_running = 0;
+ #endif
+     thread->state           = RUNNING;
+     thread->exit_code       = 0;
+@@ -411,6 +416,86 @@ static struct context *create_thread_context( struct thread *thread )
+ }
+ 
+ 
++#ifdef __linux__
++
++static void handle_shm_request( struct thread *thread, struct request_shm *request_shm )
++{
++    set_current_time();
++    read_request_shm( thread, request_shm );
++}
++
++
++#define FUTEX_WAIT 0
++#define FUTEX_WAKE 1
++
++static void *request_shm_thread(void *param)
++{
++    struct thread *thread = param;
++    int request_shm_fd;
++    volatile struct request_shm *request_shm;
++    unsigned long generation = 0;
++
++    pthread_mutex_lock( &global_lock );
++    request_shm_fd = thread->request_shm_fd;
++    request_shm = thread->request_shm;
++    pthread_mutex_unlock( &global_lock );
++
++    for (;;)
++    {
++        int val;
++
++        while ((val = request_shm->futex) != 1)
++        {
++            if (val == -1)
++                goto done;
++            else if (val != 0)
++                fatal_protocol_error( thread, "unknown futex state %d\n", val );
++            syscall( __NR_futex, &request_shm->futex, FUTEX_WAIT, val, NULL, NULL, 0 );
++        }
++
++        pthread_mutex_lock( &global_lock );
++        generation = poll_generation;
++
++        val = request_shm->futex;
++        if (val != 1)
++        {
++            if (val != -1)
++                fatal_protocol_error( thread, "unknown futex state %d\n", val );
++            goto done_locked;
++        }
++
++        __asm__ __volatile__ ("" ::: "memory");
++        handle_shm_request( thread, (struct request_shm *)request_shm );
++        __asm__ __volatile__ ("" ::: "memory");
++
++        request_shm_fd = thread->request_shm_fd;
++        request_shm = thread->request_shm;
++        if (!request_shm_fd || !request_shm)
++            goto done_locked;
++        val = __sync_val_compare_and_swap( &request_shm->futex, 1, 0 );
++        if (val != 1 && val != -1)
++            fatal_protocol_error( thread, "unknown futex state %d\n", val );
++        pthread_mutex_unlock( &global_lock );
++        syscall( __NR_futex, &request_shm->futex, FUTEX_WAKE, 1, NULL, NULL, 0 );
++        if (poll_generation != generation)
++            force_exit_poll();
++    }
++
++done:
++    pthread_mutex_lock( &global_lock );
++done_locked:
++    if (request_shm_fd != -1) close( request_shm_fd );
++    if (request_shm) munmap( (void*)request_shm, REQUEST_SHM_SIZE );
++    release_object( thread );
++    pthread_mutex_unlock( &global_lock );
++    if (poll_generation != generation)
++        force_exit_poll();
++    return NULL;
++}
++
++#endif /* defined(__linux__) */
++
++
+ static volatile void *init_queue_mapping( struct thread *thread )
+ {
+     struct unicode_str name;
+@@ -469,6 +554,9 @@ struct thread *create_thread( int fd, struct process *process, const struct secu
+     struct desktop *desktop;
+     struct thread *thread;
+     int request_pipe[2];
++#ifdef __linux__
++    pthread_t pthread;
++#endif
+ 
+     if (fd == -1)
+     {
+@@ -546,6 +634,16 @@ struct thread *create_thread( int fd, struct process *process, const struct secu
+         release_object( thread );
+         return NULL;
+     }
++
++    grab_object( thread );
++    if (pthread_create( &pthread, NULL, request_shm_thread, thread ))
++    {
++        release_object( thread );
++        release_object( thread );
++        return NULL;
++    }
++    pthread_detach( pthread );
++    thread->request_shm_thread_running = 1;
+ #endif
+ 
+     if (do_fsync())
+@@ -626,8 +724,16 @@ static void cleanup_thread( struct thread *thread )
+     if (thread->reply_fd) release_object( thread->reply_fd );
+     if (thread->wait_fd) release_object( thread->wait_fd );
+ #ifdef __linux__
+-    if (thread->request_shm_fd != -1) close( thread->request_shm_fd );
+-    if (thread->request_shm) munmap( (void*)thread->request_shm, REQUEST_SHM_SIZE );
++    if (thread->request_shm)
++    {
++        __atomic_exchange_n( &thread->request_shm->futex, -1, __ATOMIC_SEQ_CST );
++        syscall( __NR_futex, &thread->request_shm->futex, FUTEX_WAKE, 1, NULL, NULL, 0 );
++    }
++    if (!thread->request_shm_thread_running)
++    {
++        if (thread->request_shm_fd != -1) close( thread->request_shm_fd );
++        if (thread->request_shm) munmap( (void*)thread->request_shm, REQUEST_SHM_SIZE );
++    }
+ #endif
+     cleanup_clipboard_thread(thread);
+     destroy_thread_windows( thread );
+@@ -655,6 +761,7 @@ static void cleanup_thread( struct thread *thread )
+ #ifdef __linux__
+     thread->request_shm_fd = -1;
+     thread->request_shm = NULL;
++    thread->request_shm_thread_running = 0;
+ #endif
+     thread->desktop = 0;
+     thread->desc = NULL;
+diff --git a/server/thread.h b/server/thread.h
+index 11111111111..11111111111 100644
+--- a/server/thread.h
++++ b/server/thread.h
+@@ -93,6 +93,7 @@ struct thread
+ #ifdef __linux__
+     int                    request_shm_fd; /* request shared memory fd */
+     volatile struct request_shm *request_shm; /* shared memory for receiving and sending client requests/replies */
++    int                    request_shm_thread_running;
+ #endif
+     enum run_state         state;         /* running state */
+     int                    exit_code;     /* thread exit code */
+-- 
+2.37.2
+
+From 50a1e01f2af43c2e8600bd0b16406b19a1e38909 Mon Sep 17 00:00:00 2001
+From: Torge Matthies <openglfreak@googlemail.com>
+Date: Sat, 6 Aug 2022 20:29:00 +0200
+Subject: [PATCH 3/4] server: Write reply data directly to shared memory if
+ possible.
+
+---
+ server/request.c | 35 ++++++++++++++++++++++++-----------
+ server/thread.c  | 28 ++++++++++++++++++++++++++--
+ server/thread.h  |  1 +
+ 3 files changed, 51 insertions(+), 13 deletions(-)
+
+diff --git a/server/request.c b/server/request.c
+index 11111111111..11111111111 100644
+--- a/server/request.c
++++ b/server/request.c
+@@ -162,10 +162,23 @@ void fatal_error( const char *err, ... )
+     exit(1);
+ }
+ 
++int reply_in_shm;
++
+ /* allocate the reply data */
+ void *set_reply_data_size( data_size_t size )
+ {
+     assert( size <= get_reply_max_size() );
++    if (current->request_shm && reply_in_shm)
++    {
++        char *data_ptr = (char*)(current->request_shm + 1) + current->req.request_header.request_size;
++        unsigned int size_limit = (char*)current->request_shm + REQUEST_SHM_SIZE - data_ptr;
++        if (size_limit >= size)
++        {
++            current->reply_data = data_ptr;
++            current->reply_size = size;
++            return current->reply_data;
++        }
++    }
+     if (size > current->rep_data_size)
+     {
+         if (current->rep_data) free(current->rep_data);
+@@ -247,8 +260,7 @@ void write_reply( struct thread *thread )
+     {
+         if (!(thread->reply_towrite -= ret))
+         {
+-            if (thread->reply_data != thread->rep_data) free( thread->reply_data );
+-            thread->reply_data = NULL;
++            cleanup_thread_reply_data( thread );
+             /* sent everything, can go back to waiting for requests */
+             set_fd_events( thread->request_fd, POLLIN );
+             set_fd_events( thread->reply_fd, 0 );
+@@ -272,11 +284,14 @@ void send_reply_shm( union generic_reply *reply, struct request_shm *request_shm
+     if (!current->reply_size)
+         return;
+ 
++    if ((char*)current->reply_data >= (char*)request_shm &&
++        (char*)current->reply_data < (char*)request_shm + REQUEST_SHM_SIZE)
++        return;
++
+     if (current->reply_size <= copy_limit)
+     {
+         memcpy( data_ptr, current->reply_data, current->reply_size );
+-        if (current->reply_data != current->rep_data) free( current->reply_data );
+-        current->reply_data = NULL;
++        cleanup_thread_reply_data( current );
+         return;
+     }
+ 
+@@ -288,10 +303,7 @@ void send_reply_shm( union generic_reply *reply, struct request_shm *request_shm
+                       current->reply_towrite )) >= 0)
+     {
+         if (!(current->reply_towrite -= ret))
+-        {
+-            if (current->reply_data != current->rep_data) free( current->reply_data );
+-            current->reply_data = NULL;
+-        }
++            cleanup_thread_reply_data( current );
+         else
+         {
+             /* couldn't write it all, wait for POLLOUT */
+@@ -352,10 +364,12 @@ void read_request_shm( struct thread *thread, struct request_shm *request_shm )
+     data_size = thread->req.request_header.request_size;
+     if (data_size)
+         thread->req_data = request_shm + 1;
++    reply_in_shm = 1;
+ 
+     call_req_handler_shm( thread, request_shm );
+ 
+-    if (data_size)
++    reply_in_shm = 0;
++    if (data_size && thread->req_data == request_shm + 1)
+         thread->req_data = orig_req_data;
+ }
+ 
+@@ -382,8 +396,7 @@ void send_reply( union generic_reply *reply )
+         return;
+     }
+ 
+-    if (current->reply_data != current->rep_data) free( current->reply_data );
+-    current->reply_data = NULL;
++    cleanup_thread_reply_data( current );
+     return;
+ 
+  error:
+diff --git a/server/thread.c b/server/thread.c
+index 11111111111..11111111111 100644
+--- a/server/thread.c
++++ b/server/thread.c
+@@ -702,6 +702,30 @@ static struct fast_sync *thread_get_fast_sync( struct object *obj )
+     return thread->fast_sync;
+ }
+ 
++void cleanup_thread_reply_data( struct thread *thread )
++{
++    if (thread->reply_data == thread->rep_data)
++        return;
++
++    if (thread->request_shm &&
++        (char*)thread->reply_data >= (char*)thread->request_shm &&
++        (char*)thread->reply_data < (char*)thread->request_shm + REQUEST_SHM_SIZE)
++        return;
++
++    free( thread->reply_data );
++    thread->reply_data = NULL;
++}
++
++void cleanup_thread_req_data( struct thread *thread )
++{
++    if (thread->request_shm &&
++        (char*)thread->req_data >= (char*)thread->request_shm &&
++        (char*)thread->req_data < (char*)thread->request_shm + REQUEST_SHM_SIZE)
++        return;
++
++    free( thread->req_data );
++}
++
+ /* cleanup everything that is no longer needed by a dead thread */
+ /* used by destroy_thread and kill_thread */
+ static void cleanup_thread( struct thread *thread )
+@@ -717,9 +741,9 @@ static void cleanup_thread( struct thread *thread )
+     }
+     clear_apc_queue( &thread->system_apc );
+     clear_apc_queue( &thread->user_apc );
+-    free( thread->req_data );
++    cleanup_thread_req_data( thread );
+     free( thread->rep_data );
+-    if (thread->reply_data != thread->rep_data) free( thread->reply_data );
++    cleanup_thread_reply_data( thread );
+     if (thread->request_fd) release_object( thread->request_fd );
+     if (thread->reply_fd) release_object( thread->reply_fd );
+     if (thread->wait_fd) release_object( thread->wait_fd );
+diff --git a/server/thread.h b/server/thread.h
+index 11111111111..11111111111 100644
+--- a/server/thread.h
++++ b/server/thread.h
+@@ -131,6 +131,7 @@ extern struct thread *current;
+ 
+ extern struct thread *create_thread( int fd, struct process *process,
+                                      const struct security_descriptor *sd );
++extern void cleanup_thread_reply_data( struct thread *thread );
+ extern struct thread *get_thread_from_id( thread_id_t id );
+ extern struct thread *get_thread_from_handle( obj_handle_t handle, unsigned int access );
+ extern struct thread *get_thread_from_tid( int tid );
+-- 
+2.37.2
