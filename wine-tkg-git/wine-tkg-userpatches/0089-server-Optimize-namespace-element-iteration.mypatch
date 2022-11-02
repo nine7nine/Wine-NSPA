@@ -1,0 +1,160 @@
+From 4b90b87e9a1a3c83fc510ae0b9835df514fa050a Mon Sep 17 00:00:00 2001
+From: Torge Matthies <openglfreak@googlemail.com>
+Date: Fri, 29 Jul 2022 08:39:45 +0200
+Subject: [PATCH] server: Optimize namespace element iteration.
+
+---
+ server/directory.c | 13 +++++++++++--
+ server/object.c    | 37 ++++++++++++++++++++++++++-----------
+ server/object.h    |  9 ++++++++-
+ 3 files changed, 45 insertions(+), 14 deletions(-)
+
+diff --git a/server/directory.c b/server/directory.c
+index 11111111111..11111111111 100644
+--- a/server/directory.c
++++ b/server/directory.c
+@@ -580,6 +580,7 @@ DECL_HANDLER(get_directory_entries)
+                                                                 DIRECTORY_QUERY, &directory_ops );
+     if (dir)
+     {
++        struct namespace_iterator iter;
+         struct directory_entry *entry;
+         struct object *obj;
+         data_size_t size;
+@@ -588,6 +589,10 @@ DECL_HANDLER(get_directory_entries)
+ 
+         reply->total_len = 0;
+ 
++        namespace_iterator_init( dir->entries, &iter );
++        for (i = 0; i < req->index; ++i)
++            if (!(obj = namespace_iterator_next( dir->entries, &iter )))
++                break;
+         size = 0;
+         for (i = 0; i < req->max_count; ++i)
+         {
+@@ -595,7 +600,7 @@ DECL_HANDLER(get_directory_entries)
+             data_size_t name_len;
+             size_t entry_size;
+ 
+-            if (!(obj = find_object_index( dir->entries, req->index + i )))
++            if (!(obj = namespace_iterator_next( dir->entries, &iter )))
+                 break;
+             type_name = &obj->ops->type->name;
+             get_object_name( obj, &name_len );
+@@ -618,6 +623,10 @@ DECL_HANDLER(get_directory_entries)
+             return;
+         }
+ 
++        namespace_iterator_init( dir->entries, &iter );
++        for (i = 0; i < req->index; ++i)
++            if (!(obj = namespace_iterator_next( dir->entries, &iter )))
++                break;
+         size = 0;
+         for (i = 0; i < reply->count; ++i)
+         {
+@@ -625,7 +634,7 @@ DECL_HANDLER(get_directory_entries)
+             data_size_t name_len;
+             const WCHAR *name;
+ 
+-            obj = find_object_index( dir->entries, req->index + i );
++            obj = namespace_iterator_next( dir->entries, &iter );
+             assert( obj );
+             type_name = &obj->ops->type->name;
+             name = get_object_name( obj, &name_len );
+diff --git a/server/object.c b/server/object.c
+index 11111111111..11111111111 100644
+--- a/server/object.c
++++ b/server/object.c
+@@ -49,6 +49,12 @@ struct namespace
+     struct list         names[1];        /* array of hash entry lists */
+ };
+ 
++struct namespace_iterator_impl
++{
++    const struct list *bucket;
++    const struct list *entry;
++};
++
+ 
+ struct type_descr no_type =
+ {
+@@ -485,21 +491,30 @@ struct object *find_object( const struct namespace *namespace, const struct unic
+     return NULL;
+ }
+ 
+-/* find an object by its index; the refcount is incremented */
+-struct object *find_object_index( const struct namespace *namespace, unsigned int index )
++void namespace_iterator_init( const struct namespace *namespace, struct namespace_iterator *iter )
+ {
+-    unsigned int i;
++    struct namespace_iterator_impl *impl = (void*)iter;
+ 
+-    /* FIXME: not efficient at all */
+-    for (i = 0; i < namespace->hash_size; i++)
++    impl->bucket = &namespace->names[-1];
++    impl->entry = NULL;
++}
++
++struct object *namespace_iterator_next( const struct namespace *namespace, struct namespace_iterator *iter )
++{
++    struct namespace_iterator_impl *impl = (void*)iter;
++    struct object *ret;
++
++    while (impl->entry == NULL || impl->entry == impl->bucket)
+     {
+-        const struct object_name *ptr;
+-        LIST_FOR_EACH_ENTRY( ptr, &namespace->names[i], const struct object_name, entry )
+-        {
+-            if (!index--) return grab_object( ptr->obj );
+-        }
++        if (impl->bucket + 1 < &namespace->names[0] || impl->bucket + 1 >= &namespace->names[namespace->hash_size])
++            return NULL;
++        impl->bucket += 1;
++        impl->entry = impl->bucket->next;
+     }
+-    return NULL;
++
++    ret = LIST_ENTRY( impl->entry, const struct object_name, entry )->obj;
++    impl->entry = impl->entry->next;
++    return grab_object( ret );
+ }
+ 
+ /* allocate a namespace */
+diff --git a/server/object.h b/server/object.h
+index 11111111111..11111111111 100644
+--- a/server/object.h
++++ b/server/object.h
+@@ -148,6 +148,12 @@ struct wait_queue_entry
+     struct thread_wait *wait;
+ };
+ 
++struct namespace_iterator
++{
++    void *bucket;
++    void *entry;
++};
++
+ extern void *mem_alloc( size_t size );  /* malloc wrapper */
+ extern void *memdup( const void *data, size_t len );
+ extern void *alloc_object( const struct object_ops *ops );
+@@ -164,6 +170,8 @@ extern void *create_named_object( struct object *parent, const struct object_ops
+ extern void *open_named_object( struct object *parent, const struct object_ops *ops,
+                                 const struct unicode_str *name, unsigned int attributes );
+ extern void unlink_named_object( struct object *obj );
++extern void namespace_iterator_init( const struct namespace *namespace, struct namespace_iterator *iter );
++extern struct object *namespace_iterator_next( const struct namespace *namespace, struct namespace_iterator *iter );
+ extern struct namespace *create_namespace( unsigned int hash_size );
+ extern void free_kernel_objects( struct object *obj );
+ /* grab/release_object can take any pointer, but you better make sure */
+@@ -172,7 +180,6 @@ extern struct object *grab_object( void *obj );
+ extern void release_object( void *obj );
+ extern struct object *find_object( const struct namespace *namespace, const struct unicode_str *name,
+                                    unsigned int attributes );
+-extern struct object *find_object_index( const struct namespace *namespace, unsigned int index );
+ extern int no_add_queue( struct object *obj, struct wait_queue_entry *entry );
+ extern void no_satisfied( struct object *obj, struct wait_queue_entry *entry );
+ extern int no_signal( struct object *obj, unsigned int access );
+-- 
+2.37.2
+
+
