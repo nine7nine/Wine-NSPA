@@ -277,26 +277,6 @@ _package_nomakepkg() {
 		_generate_debian_package "$_prefix"
 	fi
 
-	if [ "$_use_esync" = "true" ] || [ "$_staging_esync" = "true" ]; then
-	  msg2 '##########################################################################################################################'
-	  msg2 ''
-	  msg2 'To enable esync, export WINEESYNC=1 and increase file descriptors limits in /etc/security/limits.conf to use ESYNC goodness ;)'
-	  msg2 ''
-	  msg2 'https://raw.githubusercontent.com/zfigura/wine/esync/README.esync'
-	  msg2 ''
-	  msg2 '##########################################################################################################################'
-	  if [ "$_use_fsync" = "true" ]; then
-	    msg2 '##########################################################################################################################'
-	    msg2 ''
-	    msg2 'To enable fsync, export WINEFSYNC=1 and use a Fsync patched kernel (such as linux52-tkg or newer). If no compatible kernel'
-	    msg2 'is found and Esync is enabled, it will fallback to it. You can enable both to get a dynamic "failsafe" mechanism.'
-	    msg2 ''
-	    msg2 'https://steamcommunity.com/app/221410/discussions/0/3158631000006906163/'
-	    msg2 ''
-	    msg2 '##########################################################################################################################'
-	  fi
-	fi
-
 	# External install
 	if [ "$_EXTERNAL_INSTALL" = "true" ]; then
 	  msg2 "### This wine will be installed to: $_prefix"
@@ -385,26 +365,6 @@ _package_makepkg() {
 
 	if [ "$_GENERATE_DEBIAN_PACKAGE" = "true" ] && [ "$_EXTERNAL_INSTALL" != "proton" ]; then
 		_generate_debian_package "$_prefix"
-	fi
-
-	if [ "$_use_esync" = "true" ] || [ "$_staging_esync" = "true" ]; then
-	  msg2 '##########################################################################################################################'
-	  msg2 ''
-	  msg2 'To enable esync, export WINEESYNC=1 and increase file descriptors limits in /etc/security/limits.conf to use ESYNC goodness ;)'
-	  msg2 ''
-	  msg2 'https://raw.githubusercontent.com/zfigura/wine/esync/README.esync'
-	  msg2 ''
-	  msg2 '##########################################################################################################################'
-	  if [ "$_use_fsync" = "true" ]; then
-	    msg2 '##########################################################################################################################'
-	    msg2 ''
-	    msg2 'To enable fsync, export WINEFSYNC=1 and use a Fsync patched kernel (such as linux52-tkg or newer). If no compatible kernel'
-	    msg2 'is found and Esync is enabled, it will fallback to it. You can enable both to get a dynamic "failsafe" mechanism.'
-	    msg2 ''
-	    msg2 'https://steamcommunity.com/app/221410/discussions/0/3158631000006906163/'
-	    msg2 ''
-	    msg2 '##########################################################################################################################'
-	  fi
 	fi
 
 	# External install
