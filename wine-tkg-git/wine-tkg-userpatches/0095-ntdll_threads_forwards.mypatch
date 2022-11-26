@@ -1,0 +1,224 @@
+From 421b3867e011dca1eef605c05e8a3d20ce0bfa39 Mon Sep 17 00:00:00 2001
+From: Nikolay Sivov <nsivov@codeweavers.com>
+Date: Sun, 20 Nov 2022 22:31:23 +0300
+Subject: [PATCH] kernelbase: Forward SetThreadIdealProcessor() to ntdll.
+
+Signed-off-by: Nikolay Sivov <nsivov@codeweavers.com>
+---
+ dlls/kernelbase/thread.c | 14 +++++++-------
+ dlls/ntdll/tests/info.c  | 22 ++++++++++++++++++++++
+ dlls/ntdll/unix/thread.c | 13 +++++++++++--
+ dlls/wow64/process.c     |  1 +
+ 4 files changed, 41 insertions(+), 9 deletions(-)
+
+diff --git a/dlls/kernelbase/thread.c b/dlls/kernelbase/thread.c
+index f11d17748fe..a817609a385 100644
+--- a/dlls/kernelbase/thread.c
++++ b/dlls/kernelbase/thread.c
+@@ -512,13 +512,13 @@ BOOL WINAPI DECLSPEC_HOTPATCH SetThreadGroupAffinity( HANDLE thread, const GROUP
+  */
+ DWORD WINAPI DECLSPEC_HOTPATCH SetThreadIdealProcessor( HANDLE thread, DWORD proc )
+ {
+-    FIXME( "(%p %lu): stub\n", thread, proc );
+-    if (proc > MAXIMUM_PROCESSORS)
+-    {
+-        SetLastError( ERROR_INVALID_PARAMETER );
+-        return ~0u;
+-    }
+-    return 0;
++    NTSTATUS status;
++
++    status = NtSetInformationThread( thread, ThreadIdealProcessor, &proc, sizeof(proc) );
++    if (NT_SUCCESS(status)) return status;
++
++    SetLastError( RtlNtStatusToDosError( status ));
++    return ~0u;
+ }
+ 
+ 
+diff --git a/dlls/ntdll/unix/thread.c b/dlls/ntdll/unix/thread.c
+index 27f6f916220..05c575cfdaa 100644
+--- a/dlls/ntdll/unix/thread.c
++++ b/dlls/ntdll/unix/thread.c
+@@ -2177,6 +2177,7 @@ NTSTATUS WINAPI NtQueryInformationThread( HANDLE handle, THREADINFOCLASS class,
+         if (ret_len) *ret_len = sizeof(BOOLEAN);
+         return STATUS_SUCCESS;
+ 
++    case ThreadIdealProcessor:
+     case ThreadEnableAlignmentFaultFixup:
+         return STATUS_INVALID_INFO_CLASS;
+ 
+@@ -2186,7 +2187,6 @@ NTSTATUS WINAPI NtQueryInformationThread( HANDLE handle, THREADINFOCLASS class,
+     case ThreadEventPair_Reusable:
+     case ThreadZeroTlsCell:
+     case ThreadPerformanceCount:
+-    case ThreadIdealProcessor:
+     case ThreadPriorityBoost:
+     case ThreadSetTlsArrayAddress:
+     default:
+@@ -2379,6 +2379,16 @@ NTSTATUS WINAPI NtSetInformationThread( HANDLE handle, THREADINFOCLASS class,
+         FIXME( "ThreadPowerThrottling stub!\n" );
+         return STATUS_SUCCESS;
+ 
++    case ThreadIdealProcessor:
++    {
++        const ULONG *number = data;
++
++        if (length != sizeof(*number)) return STATUS_INFO_LENGTH_MISMATCH;
++        if (*number > MAXIMUM_PROCESSORS) return STATUS_INVALID_PARAMETER;
++        FIXME( "ThreadIdealProcessor stub!\n" );
++        return STATUS_SUCCESS;
++    }
++
+     case ThreadBasicInformation:
+     case ThreadTimes:
+     case ThreadPriority:
+@@ -2386,7 +2396,6 @@ NTSTATUS WINAPI NtSetInformationThread( HANDLE handle, THREADINFOCLASS class,
+     case ThreadEventPair_Reusable:
+     case ThreadPerformanceCount:
+     case ThreadAmILastThread:
+-    case ThreadIdealProcessor:
+     case ThreadPriorityBoost:
+     case ThreadSetTlsArrayAddress:
+     case ThreadIsIoPending:
+-- 
+GitLab
+
+From cf6705a8caba2cf7fc21d35b7593b291c26b1fd9 Mon Sep 17 00:00:00 2001
+From: Nikolay Sivov <nsivov@codeweavers.com>
+Date: Mon, 21 Nov 2022 07:19:24 +0300
+Subject: [PATCH] kernelbase: Forward thread priority boost functions to ntdll.
+
+Signed-off-by: Nikolay Sivov <nsivov@codeweavers.com>
+---
+ dlls/kernelbase/thread.c |  5 ++---
+ dlls/ntdll/unix/thread.c | 16 ++++++++++++++--
+ dlls/wow64/process.c     |  2 ++
+ 3 files changed, 18 insertions(+), 5 deletions(-)
+
+diff --git a/dlls/kernelbase/thread.c b/dlls/kernelbase/thread.c
+index a817609a385..be3d38c04ff 100644
+--- a/dlls/kernelbase/thread.c
++++ b/dlls/kernelbase/thread.c
+@@ -286,8 +286,7 @@ INT WINAPI DECLSPEC_HOTPATCH GetThreadPriority( HANDLE thread )
+  */
+ BOOL WINAPI DECLSPEC_HOTPATCH GetThreadPriorityBoost( HANDLE thread, BOOL *state )
+ {
+-    if (state) *state = FALSE;
+-    return TRUE;
++    return set_ntstatus( NtQueryInformationThread( thread, ThreadPriorityBoost, state, sizeof(*state), NULL ));
+ }
+ 
+ 
+@@ -568,7 +567,7 @@ BOOL WINAPI DECLSPEC_HOTPATCH SetThreadPriority( HANDLE thread, INT priority )
+  */
+ BOOL WINAPI DECLSPEC_HOTPATCH SetThreadPriorityBoost( HANDLE thread, BOOL disable )
+ {
+-    return TRUE;
++    return set_ntstatus( NtSetInformationThread( thread, ThreadPriorityBoost, &disable, sizeof(disable) ));
+ }
+ 
+ 
+diff --git a/dlls/ntdll/unix/thread.c b/dlls/ntdll/unix/thread.c
+index 05c575cfdaa..d56962e1721 100644
+--- a/dlls/ntdll/unix/thread.c
++++ b/dlls/ntdll/unix/thread.c
+@@ -2177,6 +2177,16 @@ NTSTATUS WINAPI NtQueryInformationThread( HANDLE handle, THREADINFOCLASS class,
+         if (ret_len) *ret_len = sizeof(BOOLEAN);
+         return STATUS_SUCCESS;
+ 
++    case ThreadPriorityBoost:
++    {
++        DWORD *value = data;
++
++        if (length != sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
++        if (ret_len) *ret_len = sizeof(ULONG);
++        *value = 0;
++        return STATUS_SUCCESS;
++    }
++
+     case ThreadIdealProcessor:
+     case ThreadEnableAlignmentFaultFixup:
+         return STATUS_INVALID_INFO_CLASS;
+@@ -2187,7 +2197,6 @@ NTSTATUS WINAPI NtQueryInformationThread( HANDLE handle, THREADINFOCLASS class,
+     case ThreadEventPair_Reusable:
+     case ThreadZeroTlsCell:
+     case ThreadPerformanceCount:
+-    case ThreadPriorityBoost:
+     case ThreadSetTlsArrayAddress:
+     default:
+         FIXME( "info class %d not supported yet\n", class );
+@@ -2389,6 +2398,10 @@ NTSTATUS WINAPI NtSetInformationThread( HANDLE handle, THREADINFOCLASS class,
+         return STATUS_SUCCESS;
+     }
+ 
++    case ThreadPriorityBoost:
++        WARN("Unimplemented class ThreadPriorityBoost.\n");
++        return STATUS_SUCCESS;
++
+     case ThreadBasicInformation:
+     case ThreadTimes:
+     case ThreadPriority:
+@@ -2396,7 +2409,6 @@ NTSTATUS WINAPI NtSetInformationThread( HANDLE handle, THREADINFOCLASS class,
+     case ThreadEventPair_Reusable:
+     case ThreadPerformanceCount:
+     case ThreadAmILastThread:
+-    case ThreadPriorityBoost:
+     case ThreadSetTlsArrayAddress:
+     case ThreadIsIoPending:
+     default:
+diff --git a/dlls/wow64/process.c b/dlls/wow64/process.c
+index 61ecc68724c..97dbfdef761 100644
+--- a/dlls/wow64/process.c
++++ b/dlls/wow64/process.c
+@@ -899,6 +899,7 @@ NTSTATUS WINAPI wow64_NtQueryInformationThread( UINT *args )
+     case ThreadIsIoPending:  /* ULONG */
+     case ThreadHideFromDebugger:  /* BOOLEAN */
+     case ThreadSuspendCount:  /* ULONG */
++    case ThreadPriorityBoost:   /* ULONG */
+         /* FIXME: check buffer alignment */
+         return NtQueryInformationThread( handle, class, ptr, len, retlen );
+ 
+@@ -1158,6 +1159,8 @@ NTSTATUS WINAPI wow64_NtSetInformationTh
+     case ThreadBasePriority:   /* ULONG */
+     case ThreadHideFromDebugger:   /* void */
+     case ThreadEnableAlignmentFaultFixup:   /* BOOLEAN */
++    case ThreadIdealProcessor:   /* ULONG */
++    case ThreadPriorityBoost:   /* ULONG */
+         return NtSetInformationThread( handle, class, ptr, len );
+ 
+     case ThreadImpersonationToken:   /* HANDLE */
+
+-- 
+GitLab
+
+From b544bf188cb5c3c78c87a7e22b5a6eec4960c8c2 Mon Sep 17 00:00:00 2001
+From: Nikolay Sivov <nsivov@codeweavers.com>
+Date: Mon, 21 Nov 2022 12:47:21 +0300
+Subject: [PATCH] kernelbase: Forward GetThreadIdealProcessorEx() to ntdll.
+
+Signed-off-by: Nikolay Sivov <nsivov@codeweavers.com>
+---
+ dlls/kernelbase/thread.c | 6 ++----
+ 1 file changed, 2 insertions(+), 4 deletions(-)
+
+diff --git a/dlls/kernelbase/thread.c b/dlls/kernelbase/thread.c
+index be3d38c04ff..235624811f5 100644
+--- a/dlls/kernelbase/thread.c
++++ b/dlls/kernelbase/thread.c
+@@ -248,11 +248,9 @@ DWORD WINAPI DECLSPEC_HOTPATCH GetThreadId( HANDLE thread )
+ /***********************************************************************
+  *           GetThreadIdealProcessorEx   (kernelbase.@)
+  */
+-BOOL WINAPI /* DECLSPEC_HOTPATCH */ GetThreadIdealProcessorEx( HANDLE thread, PROCESSOR_NUMBER *ideal )
++BOOL WINAPI DECLSPEC_HOTPATCH GetThreadIdealProcessorEx( HANDLE thread, PROCESSOR_NUMBER *ideal )
+ {
+-    FIXME( "(%p %p): stub\n", thread, ideal );
+-    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
+-    return FALSE;
++    return set_ntstatus( NtQueryInformationThread( thread, ThreadIdealProcessorEx, ideal, sizeof(*ideal), NULL));
+ }
+ 
+ 
+-- 
+GitLab

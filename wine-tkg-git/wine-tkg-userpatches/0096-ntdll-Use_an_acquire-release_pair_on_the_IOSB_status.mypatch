@@ -1,0 +1,114 @@
+From 282120a9c510bdb9aa3976e203437ebc2e28c08b Mon Sep 17 00:00:00 2001
+From: Jinoh Kang <jinoh.kang.kr@gmail.com>
+Date: Sat, 12 Nov 2022 19:33:58 -0600
+Subject: [PATCH] ntdll: Use an acquire/release pair on the IOSB status.
+
+---
+ dlls/kernelbase/file.c         |  6 +++++-
+ dlls/ntdll/unix/unix_private.h | 26 ++++++++++++++++++++++----
+ dlls/ws2_32/socket.c           |  6 +++++-
+ 3 files changed, 32 insertions(+), 6 deletions(-)
+
+diff --git a/dlls/kernelbase/file.c b/dlls/kernelbase/file.c
+index 661bc0c2778..ac04388acde 100644
+--- a/dlls/kernelbase/file.c
++++ b/dlls/kernelbase/file.c
+@@ -3156,7 +3156,9 @@ BOOL WINAPI DECLSPEC_HOTPATCH GetOverlappedResultEx( HANDLE file, OVERLAPPED *ov
+ 
+     TRACE( "(%p %p %p %lu %d)\n", file, overlapped, result, timeout, alertable );
+ 
+-    status = overlapped->Internal;
++    /* Paired with the write-release in set_async_iosb() in ntdll; see the
++     * latter for details. */
++    status = ReadAcquire( (LONG *)&overlapped->Internal );
+     if (status == STATUS_PENDING)
+     {
+         if (!timeout)
+@@ -3173,6 +3175,8 @@ BOOL WINAPI DECLSPEC_HOTPATCH GetOverlappedResultEx( HANDLE file, OVERLAPPED *ov
+             return FALSE;
+         }
+ 
++        /* We don't need to give this load acquire semantics; the wait above
++         * already guarantees that the IOSB and output buffer are filled. */
+         status = overlapped->Internal;
+         if (status == STATUS_PENDING) status = STATUS_SUCCESS;
+     }
+diff --git a/dlls/ntdll/unix/unix_private.h b/dlls/ntdll/unix/unix_private.h
+index b94a27aca68..9cf8989fb0d 100644
+--- a/dlls/ntdll/unix/unix_private.h
++++ b/dlls/ntdll/unix/unix_private.h
+@@ -367,6 +367,24 @@ static inline void set_async_iosb( client_ptr_t iosb, NTSTATUS status, ULONG_PTR
+ {
+     if (!iosb) return;
+ 
++    /* GetOverlappedResult() and WSAGetOverlappedResult() expect that if the
++     * status is written, that the information (and buffer, which was written
++     * earlier from the async callback) will be available. Hence we need to
++     * store the status last, with release semantics to ensure that those
++     * writes are visible. This release is paired with a read-acquire in
++     * GetOverlappedResult() and WSAGetOverlappedResult():
++     *
++     * CPU 0 (set_async_iosb)            CPU 1 (GetOverlappedResultEx)
++     * ===========================       ===========================
++     * write buffer
++     * write Information
++     * WriteRelease(Status) <--------.
++     *                               |
++     *                               |
++     *                (paired with)  `-> ReadAcquire(Status)
++     *                                   read Information
++     */
++
+     if (in_wow64_call())
+     {
+         struct iosb32
+@@ -374,18 +392,18 @@ static inline void set_async_iosb( client_ptr_t iosb, NTSTATUS status, ULONG_PTR
+             NTSTATUS Status;
+             ULONG    Information;
+         } *io = wine_server_get_ptr( iosb );
+-        io->Status = status;
+         io->Information = info;
++        WriteRelease( &io->Status, status );
+     }
+     else
+     {
+         IO_STATUS_BLOCK *io = wine_server_get_ptr( iosb );
++        io->Information = info;
+ #ifdef NONAMELESSUNION
+-        io->u.Status = status;
++        WriteRelease( &io->u.Status, status );
+ #else
+-        io->Status = status;
++        WriteRelease( &io->Status, status );
+ #endif
+-        io->Information = info;
+     }
+ }
+ 
+diff --git a/dlls/ws2_32/socket.c b/dlls/ws2_32/socket.c
+index 9e447f29d8c..09684f25b25 100644
+--- a/dlls/ws2_32/socket.c
++++ b/dlls/ws2_32/socket.c
+@@ -3710,7 +3710,9 @@ BOOL WINAPI WSAGetOverlappedResult( SOCKET s, LPWSAOVERLAPPED lpOverlapped,
+         return FALSE;
+     }
+ 
+-    status = lpOverlapped->Internal;
++    /* Paired with the write-release in set_async_iosb() in ntdll; see the
++     * latter for details. */
++    status = ReadAcquire( (LONG *)&lpOverlapped->Internal );
+     if (status == STATUS_PENDING)
+     {
+         if (!fWait)
+@@ -3722,6 +3724,8 @@ BOOL WINAPI WSAGetOverlappedResult( SOCKET s, LPWSAOVERLAPPED lpOverlapped,
+         if (WaitForSingleObject( lpOverlapped->hEvent ? lpOverlapped->hEvent : SOCKET2HANDLE(s),
+                                  INFINITE ) == WAIT_FAILED)
+             return FALSE;
++        /* We don't need to give this load acquire semantics; the wait above
++         * already guarantees that the IOSB and output buffer are filled. */
+         status = lpOverlapped->Internal;
+     }
+ 
+-- 
+GitLab
+

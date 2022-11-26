@@ -1884,3 +1884,52 @@ index a35d0877891..9800a1b66b1 100644
      MSVCRT__wenviron = msvcrt_SnapshotOfEnvironmentW(MSVCRT__wenviron);
 -- 
 GitLab
+
+From 0d21e1cbcf705bb2cba3d59571bb8b730ba2feac Mon Sep 17 00:00:00 2001
+From: Brendan Shanks <bshanks@codeweavers.com>
+Date: Tue, 15 Feb 2022 12:09:25 -0800
+Subject: [PATCH] server: Only require THREAD_SET_LIMITED_INFORMATION access to
+ set thread description.
+
+---
+ dlls/kernel32/tests/thread.c | 2 --
+ server/thread.c              | 4 +++-
+ 2 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/dlls/kernel32/tests/thread.c b/dlls/kernel32/tests/thread.c
+index 0274cb6e266..25e5a0dc1da 100644
+--- a/dlls/kernel32/tests/thread.c
++++ b/dlls/kernel32/tests/thread.c
+@@ -2538,13 +2538,11 @@ static void test_thread_description(void)
+     thread = OpenThread(THREAD_SET_LIMITED_INFORMATION, FALSE, GetCurrentThreadId());
+ 
+     hr = pSetThreadDescription(thread, desc);
+-    todo_wine
+     ok(hr == HRESULT_FROM_NT(STATUS_SUCCESS), "Failed to set thread description, hr %#lx.\n", hr);
+ 
+     ptr = NULL;
+     hr = pGetThreadDescription(GetCurrentThread(), &ptr);
+     ok(hr == HRESULT_FROM_NT(STATUS_SUCCESS), "Failed to get thread description, hr %#lx.\n", hr);
+-    todo_wine
+     ok(!lstrcmpW(ptr, desc), "Unexpected description %s.\n", wine_dbgstr_w(ptr));
+     LocalFree(ptr);
+ 
+diff --git a/server/thread.c b/server/thread.c
+index f49fbf40b78..c0fb0eef637 100644
+--- a/server/thread.c
++++ b/server/thread.c
+@@ -1534,8 +1534,10 @@ DECL_HANDLER(get_thread_times)
+ DECL_HANDLER(set_thread_info)
+ {
+     struct thread *thread;
++    unsigned int access = (req->mask == SET_THREAD_INFO_DESCRIPTION) ? THREAD_SET_LIMITED_INFORMATION
++                                                                     : THREAD_SET_INFORMATION;
+ 
+-    if ((thread = get_thread_from_handle( req->handle, THREAD_SET_INFORMATION )))
++    if ((thread = get_thread_from_handle( req->handle, access )))
+     {
+         set_thread_info( thread, req );
+         release_object( thread );
+-- 
+GitLab
+

@@ -306,48 +306,6 @@ index 11067f44941..11b346796aa 100644
 -- 
 GitLab
 
-From 701be6f7fefc099064828898cb2341c1b57d9698 Mon Sep 17 00:00:00 2001
-From: Jinoh Kang <jinoh.kang.kr@gmail.com>
-Date: Sun, 18 Sep 2022 22:48:26 +0900
-Subject: [PATCH] kernelbase: Fix reading stale information from IOSB.
-
-Ensure IOSB Information (InternalHigh) is loaded after Status (Internal)
-to avoid reading stale value from the Information (InternalHigh) field.
----
- dlls/kernelbase/file.c | 10 ++++++++--
- 1 file changed, 8 insertions(+), 2 deletions(-)
-
-diff --git a/dlls/kernelbase/file.c b/dlls/kernelbase/file.c
-index 5ba7e0be419..11dbcdeac4a 100644
---- a/dlls/kernelbase/file.c
-+++ b/dlls/kernelbase/file.c
-@@ -3133,7 +3133,7 @@ BOOL WINAPI DECLSPEC_HOTPATCH GetOverlappedResultEx( HANDLE file, OVERLAPPED *ov
- 
-     TRACE( "(%p %p %p %lu %d)\n", file, overlapped, result, timeout, alertable );
- 
--    status = overlapped->Internal;
-+    status = ReadAcquire( (volatile LONG *)&overlapped->Internal );
-     if (status == STATUS_PENDING)
-     {
-         if (!timeout)
-@@ -3150,7 +3150,13 @@ BOOL WINAPI DECLSPEC_HOTPATCH GetOverlappedResultEx( HANDLE file, OVERLAPPED *ov
-             return FALSE;
-         }
- 
--        status = overlapped->Internal;
-+        /* Normally this does not require an atomic load, since the wait above
-+         * acts as a barrier as long as the caller supplied the correct handle
-+         * and nothing else interfered with signalling of I/O completion.
-+         * However, we do it anyway for consistency and extra safety in case
-+         * Windows takes the same precaution for misbehaving applications.
-+         */
-+        status = ReadAcquire( (volatile LONG *)&overlapped->Internal );
-         if (status == STATUS_PENDING) status = STATUS_SUCCESS;
-     }
- 
--- 
-GitLab
-
 From 8c041a1ac7d9d15d63df39c9fbd05d6730c6fd13 Mon Sep 17 00:00:00 2001
 From: Jinoh Kang <jinoh.kang.kr@gmail.com>
 Date: Sun, 18 Sep 2022 23:31:19 +0900

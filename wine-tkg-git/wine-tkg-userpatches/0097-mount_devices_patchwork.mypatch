@@ -1,0 +1,817 @@
+From: Esme Povirk <esme@codeweavers.com>
+Subject: [PATCH] mountmgr: Add SCSI addresses of udisks2 devices to the registry.
+Message-Id: <20201107171450.2377-1-esme@codeweavers.com>
+Date: Sat,  7 Nov 2020 11:14:50 -0600
+
+Wine-Bug: https://bugs.winehq.org/show_bug.cgi?id=49788
+Signed-off-by: Esme Povirk <esme@codeweavers.com>
+---
+ dlls/mountmgr.sys/dbus.c | 63 +++++++++++++++++++++++++++++++++++++---
+ 1 file changed, 59 insertions(+), 4 deletions(-)
+
+diff --git a/dlls/mountmgr.sys/dbus.c b/dlls/mountmgr.sys/dbus.c
+index 11111111111..11111111111 100644
+--- a/dlls/mountmgr.sys/dbus.c
++++ b/dlls/mountmgr.sys/dbus.c
+@@ -333,7 +333,8 @@ static const char *udisks2_string_from_array( DBusMessageIter *iter )
+ 
+ /* find the drive entry in the dictionary and get its parameters */
+ static void udisks2_get_drive_info( const char *drive_name, DBusMessageIter *dict,
+-                                    enum device_type *drive_type, int *removable, const char **serial )
++                                    enum device_type *drive_type, int *removable, const char **serial,
++                                    int *optical, const char **model )
+ {
+     DBusMessageIter iter, drive, variant;
+     const char *name;
+@@ -353,11 +354,59 @@ static void udisks2_get_drive_info( const char *drive_name, DBusMessageIter *dic
+                     *drive_type = udisks_parse_media_compatibility( &variant );
+                 else if (!strcmp( name, "Id" ))
+                     p_dbus_message_iter_get_basic( &variant, serial );
++                else if (!strcmp( name, "Optical" ))
++                    p_dbus_message_iter_get_basic( &variant, optical );
++                else if (!strcmp( name, "Model" ))
++                    p_dbus_message_iter_get_basic( &variant, model );
+             }
+         }
+     }
+ }
+ 
++static void udisks2_get_scsi_info( const char *unix_device, int optical,
++    const char *model, struct scsi_info *scsi_info )
++{
++    WCHAR name[MAX_PATH] = {'\\','?','?','\\','u','n','i','x',0};
++    UNICODE_STRING string;
++    OBJECT_ATTRIBUTES attr = {sizeof(attr)};
++    IO_STATUS_BLOCK iosb;
++    NTSTATUS status;
++    HANDLE handle;
++    DWORD len;
++
++    if (!unix_device)
++        return;
++
++    len = ntdll_umbstowcs( unix_device, strlen( unix_device ) + 1, &name[8], ARRAY_SIZE(name) - 8 );
++    if (len >= ARRAY_SIZE(name) - 8)
++    {
++        ERR("Failed to convert %s to NT, path too long\n", debugstr_a(unix_device));
++        return;
++    }
++
++    string.Buffer = name;
++    string.Length = len + 8;
++    string.MaximumLength = string.Length;
++    attr.ObjectName = &string;
++    status = NtCreateFile( &handle, GENERIC_READ | SYNCHRONIZE, &attr, &iosb, NULL, FILE_ATTRIBUTE_NORMAL,
++                           FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_OPEN, FILE_NON_DIRECTORY_FILE, NULL, 0 );
++    if (!NT_SUCCESS(status))
++    {
++        WARN("Failed to open %s, status %u\n", debugstr_a(unix_device), status);
++        return;
++    }
++
++    if (NtDeviceIoControlFile( handle, 0, NULL, NULL, &iosb, IOCTL_SCSI_GET_ADDRESS, NULL, 0, &scsi_info->addr, sizeof(scsi_info->addr) ))
++    {
++        scsi_info->type = optical ? SCSI_CDROM_PERIPHERAL : SCSI_DISK_PERIPHERAL;
++        scsi_info->init_id = 255; /* FIXME */
++        strcpy( scsi_info->driver, optical ? "atapi" : "WINE SCSI" ); /* FIXME */
++        lstrcpynA( scsi_info->model, model, sizeof(scsi_info->model) );
++    }
++
++    NtClose( handle );
++}
++
+ static void udisks2_add_device( const char *udi, DBusMessageIter *dict, DBusMessageIter *block )
+ {
+     DBusMessageIter iter, variant, paths, string;
+@@ -366,9 +415,10 @@ static void udisks2_add_device( const char *udi, DBusMessageIter *dict, DBusMess
+     const char *type = NULL;
+     const char *drive = NULL;
+     const char *id = NULL;
++    const char *model = NULL;
+     GUID guid, *guid_ptr = NULL;
+     const char *iface, *name;
+-    int removable = FALSE;
++    int removable = FALSE, optical = FALSE;
+     enum device_type drive_type = DEVICE_UNKNOWN;
+ 
+     while ((iface = udisks_next_dict_entry( block, &iter )))
+@@ -399,7 +449,7 @@ static void udisks2_add_device( const char *udi, DBusMessageIter *dict, DBusMess
+                 else if (!strcmp( name, "Drive" ))
+                 {
+                     p_dbus_message_iter_get_basic( &variant, &drive );
+-                    udisks2_get_drive_info( drive, dict, &drive_type, &removable, &id );
++                    udisks2_get_drive_info( drive, dict, &drive_type, &removable, &id, &optical, &model );
+                 }
+                 else if (!strcmp( name, "IdUUID" ))
+                 {
+@@ -433,7 +483,12 @@ static void udisks2_add_device( const char *udi, DBusMessageIter *dict, DBusMess
+     }
+     if (device)
+     {
+-        if (removable) queue_device_op( ADD_DOS_DEVICE, udi, device, mount_point, drive_type, guid_ptr, id, NULL );
++        if (removable)
++        {
++            struct scsi_info scsi_info = {0};
++            udisks2_get_scsi_info( device, optical, model, &scsi_info );
++            queue_device_op( ADD_DOS_DEVICE, udi, device, mount_point, drive_type, guid_ptr, id, scsi_info.type ? &scsi_info : NULL );
++        }
+         else if (guid_ptr) queue_device_op( ADD_VOLUME, udi, device, mount_point, DEVICE_HARDDISK_VOL, guid_ptr, id, NULL );
+     }
+ }
+
+-- 
+2.36.1
+
+From: "Erich E. Hoover" <erich.e.hoover@gmail.com>
+Subject: [PATCH 3/5] mountmgr.sys: Add an ioctl to directly make volume queries.
+Message-Id: <CAEU2+vortP4Y5JDxduj4nwJS=8NOig5+n=bstRWN5jK-xdjr1Q@mail.gmail.com>
+Date: Thu, 18 Mar 2021 10:53:43 -0600
+
+This patch adds a new ioctl similar to
+IOCTL_MOUNTMGR_QUERY_UNIX_DRIVE, but this version directly returns the
+FILE_FS_*_INFORMATION from the mountmgr implementation instead of
+returning properties of the mount point and relying on the caller to
+interpret those properties correctly.
+
+Best,
+Erich
+
+From 5354dedc85423ae46a582bb4af3661fc50d8e0fb Mon Sep 17 00:00:00 2001
+From: "Erich E. Hoover" <erich.e.hoover@gmail.com>
+Date: Sun, 28 Feb 2021 11:21:06 -0700
+#Subject: mountmgr.sys: Add an ioctl to directly make volume queries.
+
+Signed-off-by: Erich E. Hoover <erich.e.hoover@gmail.com>
+---
+ dlls/mountmgr.sys/device.c   | 89 ++++++++++++++++++++++++------------
+ dlls/mountmgr.sys/mountmgr.c | 11 +++++
+ dlls/mountmgr.sys/mountmgr.h |  1 +
+ include/ddk/mountmgr.h       | 10 ++++
+ 4 files changed, 83 insertions(+), 28 deletions(-)
+
+diff --git a/dlls/mountmgr.sys/device.c b/dlls/mountmgr.sys/device.c
+index 11111111111..11111111111 100644
+--- a/dlls/mountmgr.sys/device.c
++++ b/dlls/mountmgr.sys/device.c
+@@ -1642,32 +1642,18 @@ static NTSTATUS query_property( struct disk_device *device, IRP *irp )
+     return status;
+ }
+ 
+-static NTSTATUS WINAPI harddisk_query_volume( DEVICE_OBJECT *device, IRP *irp )
++static NTSTATUS WINAPI fill_volume_info( FS_INFORMATION_CLASS info_class, enum fs_type fs_type,
++                                         DWORD serial, WCHAR *label, void *buff, ULONG length,
++                                         ULONG_PTR *size )
+ {
+-    IO_STACK_LOCATION *irpsp = IoGetCurrentIrpStackLocation( irp );
+-    int info_class = irpsp->Parameters.QueryVolume.FsInformationClass;
+-    ULONG length = irpsp->Parameters.QueryVolume.Length;
+-    struct disk_device *dev = device->DeviceExtension;
+-    PIO_STATUS_BLOCK io = &irp->IoStatus;
+-    struct volume *volume;
+     NTSTATUS status;
+ 
+-    TRACE( "volume query %x length %lu\n", info_class, length );
+-
+-    EnterCriticalSection( &device_section );
+-    volume = dev->volume;
+-    if (!volume)
+-    {
+-        status = STATUS_BAD_DEVICE_TYPE;
+-        goto done;
+-    }
+-
+     switch(info_class)
+     {
+     case FileFsVolumeInformation:
+     {
+ 
+-        FILE_FS_VOLUME_INFORMATION *info = irp->AssociatedIrp.SystemBuffer;
++        FILE_FS_VOLUME_INFORMATION *info = buff;
+ 
+         if (length < sizeof(FILE_FS_VOLUME_INFORMATION))
+         {
+@@ -1676,20 +1662,20 @@ static NTSTATUS WINAPI harddisk_query_volume( DEVICE_OBJECT *device, IRP *irp )
+         }
+ 
+         info->VolumeCreationTime.QuadPart = 0; /* FIXME */
+-        info->VolumeSerialNumber = volume->serial;
+-        info->VolumeLabelLength = min( lstrlenW(volume->label) * sizeof(WCHAR),
++        info->VolumeSerialNumber = serial;
++        info->VolumeLabelLength = min( lstrlenW(label) * sizeof(WCHAR),
+                                        length - offsetof( FILE_FS_VOLUME_INFORMATION, VolumeLabel ) );
+-        info->SupportsObjects = (get_mountmgr_fs_type(volume->fs_type) == MOUNTMGR_FS_TYPE_NTFS);
+-        memcpy( info->VolumeLabel, volume->label, info->VolumeLabelLength );
++        info->SupportsObjects = (get_mountmgr_fs_type(fs_type) == MOUNTMGR_FS_TYPE_NTFS);
++        memcpy( info->VolumeLabel, label, info->VolumeLabelLength );
+ 
+-        io->Information = offsetof( FILE_FS_VOLUME_INFORMATION, VolumeLabel ) + info->VolumeLabelLength;
++        *size = offsetof( FILE_FS_VOLUME_INFORMATION, VolumeLabel ) + info->VolumeLabelLength;
+         status = STATUS_SUCCESS;
+         break;
+     }
+     case FileFsAttributeInformation:
+     {
+-        FILE_FS_ATTRIBUTE_INFORMATION *info = irp->AssociatedIrp.SystemBuffer;
+-        enum mountmgr_fs_type fs_type = get_mountmgr_fs_type(volume->fs_type);
++        FILE_FS_ATTRIBUTE_INFORMATION *info = buff;
++        enum mountmgr_fs_type fs_type = get_mountmgr_fs_type(fs_type);
+         const WCHAR *fsname;
+ 
+         if (length < sizeof(FILE_FS_ATTRIBUTE_INFORMATION))
+@@ -1729,17 +1715,64 @@ static NTSTATUS WINAPI harddisk_query_volume( DEVICE_OBJECT *device, IRP *irp )
+         }
+         info->FileSystemNameLength = min( wcslen(fsname) * sizeof(WCHAR), length - offsetof( FILE_FS_ATTRIBUTE_INFORMATION, FileSystemName ) );
+         memcpy(info->FileSystemName, fsname, info->FileSystemNameLength);
+-        io->Information = offsetof( FILE_FS_ATTRIBUTE_INFORMATION, FileSystemName ) + info->FileSystemNameLength;
++        *size = offsetof( FILE_FS_ATTRIBUTE_INFORMATION, FileSystemName ) + info->FileSystemNameLength;
+         status = STATUS_SUCCESS;
+         break;
+     }
+     default:
+-        FIXME("Unsupported volume query %x\n", irpsp->Parameters.QueryVolume.FsInformationClass);
++        FIXME("Unsupported volume query %x\n", info_class);
+         status = STATUS_NOT_SUPPORTED;
+         break;
+     }
++    return status;
++}
++
++/* implementation of IOCTL_MOUNTMGR_QUERY_VOLUME */
++NTSTATUS query_volume( void *buff, SIZE_T insize, SIZE_T outsize, IO_STATUS_BLOCK *iosb )
++{
++    const struct mountmgr_volume *input = buff;
++    FS_INFORMATION_CLASS info_class = input->info_class;
++    NTSTATUS status = STATUS_NO_SUCH_DEVICE;
++    int letter = towlower( input->letter );
++    struct volume *volume;
++
++    if (letter && (letter < 'a' || letter > 'z')) return STATUS_INVALID_PARAMETER;
++
++    EnterCriticalSection( &device_section );
++    if (letter)
++        volume = find_volume_by_letter( letter - 'a' );
++    else
++        volume = find_volume_by_unixdev( input->unix_dev );
++    if (volume)
++    {
++        status = fill_volume_info( info_class, volume->fs_type, volume->serial, volume->label,
++                                   buff, outsize, &iosb->Information );
++        release_volume( volume );
++    }
++    LeaveCriticalSection( &device_section );
++
++    return status;
++}
++
++static NTSTATUS WINAPI harddisk_query_volume( DEVICE_OBJECT *device, IRP *irp )
++{
++    IO_STACK_LOCATION *irpsp = IoGetCurrentIrpStackLocation( irp );
++    int info_class = irpsp->Parameters.QueryVolume.FsInformationClass;
++    ULONG length = irpsp->Parameters.QueryVolume.Length;
++    struct disk_device *dev = device->DeviceExtension;
++    void *buff = irp->AssociatedIrp.SystemBuffer;
++    NTSTATUS status = STATUS_BAD_DEVICE_TYPE;
++    PIO_STATUS_BLOCK io = &irp->IoStatus;
++    struct volume *volume;
++
++    TRACE( "volume query %x length %u\n", info_class, length );
++
++    EnterCriticalSection( &device_section );
++    volume = dev->volume;
++    if (volume)
++        status = fill_volume_info( info_class, volume->fs_type, volume->serial, volume->label,
++                                   buff, length, &io->Information );
+ 
+-done:
+     io->u.Status = status;
+     LeaveCriticalSection( &device_section );
+     IoCompleteRequest( irp, IO_NO_INCREMENT );
+diff --git a/dlls/mountmgr.sys/mountmgr.c b/dlls/mountmgr.sys/mountmgr.c
+index 11111111111..11111111111 100644
+--- a/dlls/mountmgr.sys/mountmgr.c
++++ b/dlls/mountmgr.sys/mountmgr.c
+@@ -529,6 +529,17 @@ static NTSTATUS WINAPI mountmgr_ioctl( DEVICE_OBJECT *device, IRP *irp )
+                                      irpsp->Parameters.DeviceIoControl.OutputBufferLength,
+                                      &irp->IoStatus );
+         break;
++    case IOCTL_MOUNTMGR_QUERY_VOLUME:
++        if (irpsp->Parameters.DeviceIoControl.InputBufferLength < sizeof(struct mountmgr_volume))
++        {
++            status = STATUS_INVALID_PARAMETER;
++            break;
++        }
++        status = query_volume( irp->AssociatedIrp.SystemBuffer,
++                               irpsp->Parameters.DeviceIoControl.InputBufferLength,
++                               irpsp->Parameters.DeviceIoControl.OutputBufferLength,
++                               &irp->IoStatus );
++        break;
+     case IOCTL_MOUNTMGR_QUERY_DHCP_REQUEST_PARAMS:
+         if (irpsp->Parameters.DeviceIoControl.InputBufferLength < sizeof(struct mountmgr_dhcp_request_params))
+         {
+diff --git a/dlls/mountmgr.sys/mountmgr.h b/dlls/mountmgr.sys/mountmgr.h
+index 11111111111..11111111111 100644
+--- a/dlls/mountmgr.sys/mountmgr.h
++++ b/dlls/mountmgr.sys/mountmgr.h
+@@ -50,6 +50,7 @@ enum device_type
+     DEVICE_RAMDISK
+ };
+ 
++extern NTSTATUS query_volume( void *buff, SIZE_T insize, SIZE_T outsize, IO_STATUS_BLOCK *iosb ) DECLSPEC_HIDDEN;
+ extern NTSTATUS WINAPI harddisk_driver_entry( DRIVER_OBJECT *driver, UNICODE_STRING *path ) DECLSPEC_HIDDEN;
+ extern NTSTATUS WINAPI serial_driver_entry( DRIVER_OBJECT *driver, UNICODE_STRING *path ) DECLSPEC_HIDDEN;
+ extern NTSTATUS WINAPI parallel_driver_entry( DRIVER_OBJECT *driver, UNICODE_STRING *path ) DECLSPEC_HIDDEN;
+diff --git a/include/ddk/mountmgr.h b/include/ddk/mountmgr.h
+index 11111111111..11111111111 100644
+--- a/include/ddk/mountmgr.h
++++ b/include/ddk/mountmgr.h
+@@ -23,6 +23,8 @@
+ 
+ #include "ifdef.h"
+ 
++#include "winternl.h"
++
+ #define MOUNTMGRCONTROLTYPE  ((ULONG)'m')
+ #define MOUNTDEVCONTROLTYPE  ((ULONG)'M')
+ 
+@@ -55,6 +57,7 @@ static const WCHAR MOUNTMGR_DOS_DEVICE_NAME[] = {'\\','\\','.','\\','M','o','u',
+ #define IOCTL_MOUNTMGR_QUERY_UNIX_DRIVE    CTL_CODE(MOUNTMGRCONTROLTYPE, 33, METHOD_BUFFERED, FILE_READ_ACCESS)
+ #define IOCTL_MOUNTMGR_DEFINE_SHELL_FOLDER CTL_CODE(MOUNTMGRCONTROLTYPE, 34, METHOD_BUFFERED, FILE_READ_ACCESS | FILE_WRITE_ACCESS)
+ #define IOCTL_MOUNTMGR_QUERY_SHELL_FOLDER  CTL_CODE(MOUNTMGRCONTROLTYPE, 35, METHOD_BUFFERED, FILE_READ_ACCESS)
++#define IOCTL_MOUNTMGR_QUERY_VOLUME        CTL_CODE(MOUNTMGRCONTROLTYPE, 34, METHOD_BUFFERED, FILE_READ_ACCESS)
+ 
+ enum mountmgr_fs_type
+ {
+@@ -86,6 +89,13 @@ struct mountmgr_shell_folder
+     ULONG    symlink_offset;
+ };
+ 
++struct mountmgr_volume
++{
++    FS_INFORMATION_CLASS info_class;
++    ULONGLONG            unix_dev;
++    WCHAR                letter;
++};
++
+ #define IOCTL_MOUNTMGR_READ_CREDENTIAL       CTL_CODE(MOUNTMGRCONTROLTYPE, 48, METHOD_BUFFERED, FILE_READ_ACCESS)
+ #define IOCTL_MOUNTMGR_WRITE_CREDENTIAL      CTL_CODE(MOUNTMGRCONTROLTYPE, 49, METHOD_BUFFERED, FILE_WRITE_ACCESS)
+ #define IOCTL_MOUNTMGR_DELETE_CREDENTIAL     CTL_CODE(MOUNTMGRCONTROLTYPE, 50, METHOD_BUFFERED, FILE_WRITE_ACCESS)
+
+-- 
+2.36.1
+
+From: "Erich E. Hoover" <erich.e.hoover@gmail.com>
+Subject: [PATCH 4/5] mountmgr.sys: Add the ability to query filesystem attributes on a file handle.
+Message-Id: <CAEU2+vrm7gYrDdPNNQiycA-6bE=QfP3PS8Ue-ObkRMTiLDkkBw@mail.gmail.com>
+Date: Thu, 18 Mar 2021 10:54:04 -0600
+
+This patch adds capability to the new IOCTL_MOUNTMGR_QUERY_VOLUME
+ioctl to be able to return volume information on a file handle.  This
+code represents the "fallback" case when standard volume information
+is unavailable (for more details see the code removed from
+dlls/ntdll/unix/file.c in patch 5 in the case where
+get_mountmgr_fs_info() fails).
+
+Best,
+Erich
+
+From 05fdc0539f5a5ecc5f8b690ef332c96c1ea64bb7 Mon Sep 17 00:00:00 2001
+From: "Erich E. Hoover" <erich.e.hoover@gmail.com>
+Date: Sun, 28 Feb 2021 11:44:43 -0700
+#Subject: mountmgr.sys: Add the ability to query filesystem attributes on a
+ file handle.
+
+Signed-off-by: Erich E. Hoover <erich.e.hoover@gmail.com>
+---
+ dlls/mountmgr.sys/device.c   | 31 ++++++++++++++++--------
+ dlls/mountmgr.sys/mountmgr.h | 10 ++++++++
+ dlls/mountmgr.sys/unixlib.c  | 46 ++++++++++++++++++++++++++++++++++++
+ dlls/mountmgr.sys/unixlib.h  |  7 ++++++
+ include/ddk/mountmgr.h       |  2 ++
+ 5 files changed, 86 insertions(+), 10 deletions(-)
+
+diff --git a/dlls/mountmgr.sys/device.c b/dlls/mountmgr.sys/device.c
+index 11111111111..11111111111 100644
+--- a/dlls/mountmgr.sys/device.c
++++ b/dlls/mountmgr.sys/device.c
+@@ -53,16 +53,6 @@ static const WCHAR drive_types[][8] =
+     L"ramdisk"  /* DEVICE_RAMDISK */
+ };
+ 
+-enum fs_type
+-{
+-    FS_ERROR,    /* error accessing the device */
+-    FS_UNKNOWN,  /* unknown file system */
+-    FS_FAT1216,
+-    FS_FAT32,
+-    FS_ISO9660,
+-    FS_UDF       /* For reference [E] = Ecma-167.pdf, [U] = udf260.pdf */
+-};
+-
+ struct disk_device
+ {
+     enum device_type      type;        /* drive type */
+@@ -1751,6 +1741,27 @@ NTSTATUS query_volume( void *buff, SIZE_T insize, SIZE_T outsize, IO_STATUS_BLOC
+     }
+     LeaveCriticalSection( &device_section );
+ 
++    if (!volume && input->info_class == FileFsAttributeInformation)
++    {
++        enum fs_type fs_type = FS_UNKNOWN;
++        HANDLE hProcess, handle;
++        BOOL ret;
++        struct get_handle_fs_type_params params = { 0, &fs_type };
++
++        if (!(hProcess = OpenProcess( PROCESS_DUP_HANDLE, FALSE, input->process )))
++            return status;
++        ret = DuplicateHandle( hProcess, input->handle, GetCurrentProcess(), &handle, 0, FALSE,
++                               DUPLICATE_SAME_ACCESS );
++        CloseHandle( hProcess );
++        if (!ret) return status;
++        params.handle = handle;
++        status = MOUNTMGR_CALL( get_handle_fs_type, &params );
++        CloseHandle( handle );
++        if (status) return status;
++        status = fill_volume_info( info_class, fs_type, 0, NULL, buff, outsize,
++                                   &iosb->Information );
++    }
++
+     return status;
+ }
+ 
+diff --git a/dlls/mountmgr.sys/mountmgr.h b/dlls/mountmgr.sys/mountmgr.h
+index 11111111111..11111111111 100644
+--- a/dlls/mountmgr.sys/mountmgr.h
++++ b/dlls/mountmgr.sys/mountmgr.h
+@@ -36,6 +36,16 @@
+ #define WINE_MOUNTMGR_EXTENSIONS
+ #include "ddk/mountmgr.h"
+ 
++enum fs_type
++{
++    FS_ERROR,    /* error accessing the device */
++    FS_UNKNOWN,  /* unknown file system */
++    FS_FAT1216,
++    FS_FAT32,
++    FS_ISO9660,
++    FS_UDF       /* For reference [E] = Ecma-167.pdf, [U] = udf260.pdf */
++};
++
+ /* device functions */
+ 
+ enum device_type
+diff --git a/dlls/mountmgr.sys/unixlib.c b/dlls/mountmgr.sys/unixlib.c
+index 11111111111..11111111111 100644
+--- a/dlls/mountmgr.sys/unixlib.c
++++ b/dlls/mountmgr.sys/unixlib.c
+@@ -47,6 +47,7 @@
+ #include <sys/mount.h>
+ #endif
+ #include <termios.h>
++#include "wine/server.h"
+ 
+ #include "unixlib.h"
+ 
+@@ -551,6 +552,50 @@ static NTSTATUS get_shell_folder( void *args )
+     return STATUS_SUCCESS;
+ }
+ 
++static NTSTATUS get_handle_fs_type( void *args )
++{
++    const struct get_handle_fs_type_params *params = args;
++    int fd;
++    NTSTATUS status;
++    enum fs_type fs_type = FS_UNKNOWN;
++    struct statfs stfs;
++
++    status = wine_server_handle_to_fd( params->handle, 0, &fd, NULL );
++    if (status) return status;
++
++    if (!fstatfs( fd, &stfs ))
++    {
++#if defined(linux) && defined(HAVE_FSTATFS)
++        switch (stfs.f_type)
++        {
++        case 0x9660:
++            fs_type = FS_ISO9660;
++            break;
++        case 0x15013346:
++            fs_type = FS_UDF;
++            break;
++        case 0x4d44:
++            fs_type = FS_FAT32;
++            break;
++        }
++#elif defined(__FreeBSD__) || defined(__FreeBSD_kernel__) || defined(__OpenBSD__) || defined(__DragonFly__) || defined(__APPLE__)
++        if (!strcmp( stfs.f_fstypename, "cd9660" ))
++            fs_type = FS_ISO9660;
++        else if (!strcmp( stfs.f_fstypename, "udf" ))
++            fs_type = FS_UDF;
++        else if (!strcmp( stfs.f_fstypename, "msdos" )) /* FreeBSD < 5, Apple */
++            fs_type = FS_FAT32;
++        else if (!strcmp( stfs.f_fstypename, "msdosfs" )) /* FreeBSD >= 5 */
++            fs_type = FS_FAT32;
++#endif
++    }
++
++    close( fd );
++
++    *params->fs_type = fs_type;
++    return status;
++}
++
+ const unixlib_entry_t __wine_unix_call_funcs[] =
+ {
+     run_loop,
+@@ -573,4 +618,5 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
+     delete_credential,
+     enumerate_credentials,
+     get_volume_filesystem,
++    get_handle_fs_type,
+ };
+diff --git a/dlls/mountmgr.sys/unixlib.h b/dlls/mountmgr.sys/unixlib.h
+index 11111111111..11111111111 100644
+--- a/dlls/mountmgr.sys/unixlib.h
++++ b/dlls/mountmgr.sys/unixlib.h
+@@ -143,6 +143,12 @@ struct ioctl_params
+     ULONG *info;
+ };
+ 
++struct get_handle_fs_type_params
++{
++    HANDLE        handle;
++    enum fs_type *fs_type;
++};
++
+ enum mountmgr_funcs
+ {
+     unix_run_loop,
+@@ -165,6 +171,7 @@ enum mountmgr_funcs
+     unix_delete_credential,
+     unix_enumerate_credentials,
+     unix_get_volume_filesystem,
++    unix_get_handle_fs_type,
+ };
+ 
+ extern unixlib_handle_t mountmgr_handle;
+diff --git a/include/ddk/mountmgr.h b/include/ddk/mountmgr.h
+index 11111111111..11111111111 100644
+--- a/include/ddk/mountmgr.h
++++ b/include/ddk/mountmgr.h
+@@ -94,6 +94,8 @@ struct mountmgr_volume
+     FS_INFORMATION_CLASS info_class;
+     ULONGLONG            unix_dev;
+     WCHAR                letter;
++    DWORD                process;
++    HANDLE               handle;
+ };
+ 
+
+ #define IOCTL_MOUNTMGR_READ_CREDENTIAL       CTL_CODE(MOUNTMGRCONTROLTYPE, 48, METHOD_BUFFERED, FILE_READ_ACCESS)
+-- 
+2.36.1
+
+From: "Erich E. Hoover" <erich.e.hoover@gmail.com>
+Subject: [PATCH 5/5] ntdll: Obtain volume information directly from the mountmgr.
+Message-Id: <CAEU2+vpgnjzFRas0kbz7A_ETfwwVVViPNtXKPFFqMXA=YsJKXA@mail.gmail.com>
+Date: Thu, 18 Mar 2021 10:54:28 -0600
+
+This patch replaces the IOCTL_MOUNTMGR_QUERY_UNIX_DRIVE query in
+dlls/ntdll/unix/file.c with the new IOCTL_MOUNTMGR_QUERY_VOLUME.  With
+this patch all FileFsAttributeInformation and FileFsVolumeInformation
+queries run through the mountmgr for both code paths instead of being
+duplicated in ntdll.
+
+Best,
+Erich
+
+From d2864aff1860b635e73f66d9ed1b222749a42cb5 Mon Sep 17 00:00:00 2001
+From: "Erich E. Hoover" <erich.e.hoover@gmail.com>
+Date: Sat, 20 Feb 2021 17:45:18 -0700
+#Subject: ntdll: Obtain volume information directly from the mountmgr.
+
+Signed-off-by: Erich E. Hoover <erich.e.hoover@gmail.com>
+---
+ dlls/ntdll/unix/file.c | 145 ++++++-----------------------------------
+ 1 file changed, 19 insertions(+), 126 deletions(-)
+
+diff --git a/dlls/ntdll/unix/file.c b/dlls/ntdll/unix/file.c
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/unix/file.c
++++ b/dlls/ntdll/unix/file.c
+@@ -2186,8 +2186,11 @@ static int find_dos_device( const char *path )
+     return -1;
+ }
+ 
+-static NTSTATUS get_mountmgr_fs_info( HANDLE handle, int fd, struct mountmgr_unix_drive *drive, ULONG size )
++
++static NTSTATUS get_mountmgr_vol_info( HANDLE handle, int fd, FS_INFORMATION_CLASS info_class,
++                                       void *ptr, ULONG size, ULONG_PTR *outsize )
+ {
++    struct mountmgr_volume volume;
+     OBJECT_ATTRIBUTES attr;
+     UNICODE_STRING string;
+     char *unix_name;
+@@ -2200,16 +2203,19 @@ static NTSTATUS get_mountmgr_fs_info( HANDLE handle, int fd, struct mountmgr_uni
+     letter = find_dos_device( unix_name );
+     free( unix_name );
+ 
+-    memset( drive, 0, sizeof(*drive) );
++    memset( &volume, 0, sizeof(volume) );
+     if (letter == -1)
+     {
+         struct stat st;
+ 
+         fstat( fd, &st );
+-        drive->unix_dev = st.st_rdev ? st.st_rdev : st.st_dev;
++        volume.unix_dev = st.st_rdev ? st.st_rdev : st.st_dev;
+     }
+     else
+-        drive->letter = 'a' + letter;
++        volume.letter = 'a' + letter;
++    volume.info_class = info_class;
++    volume.process = GetCurrentProcessId();
++    volume.handle = handle;
+ 
+     init_unicode_string( &string, MOUNTMGR_DEVICE_NAME );
+     InitializeObjectAttributes( &attr, &string, 0, NULL, NULL );
+@@ -2217,11 +2223,12 @@ static NTSTATUS get_mountmgr_fs_info( HANDLE handle, int fd, struct mountmgr_uni
+                                       FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_SYNCHRONOUS_IO_NONALERT );
+     if (status) return status;
+ 
+-    status = NtDeviceIoControlFile( mountmgr, NULL, NULL, NULL, &io, IOCTL_MOUNTMGR_QUERY_UNIX_DRIVE,
+-                                    drive, sizeof(*drive), drive, size );
++    status = NtDeviceIoControlFile( mountmgr, NULL, NULL, NULL, &io, IOCTL_MOUNTMGR_QUERY_VOLUME,
++                                    &volume, sizeof(volume), ptr, size );
+     NtClose( mountmgr );
+     if (status == STATUS_BUFFER_OVERFLOW) status = STATUS_SUCCESS;
+     else if (status) WARN("failed to retrieve filesystem type from mountmgr, status %#x\n", status);
++    if (outsize && !status) *outsize = io.Information;
+     return status;
+ }
+ 
+@@ -4595,12 +4602,14 @@ NTSTATUS WINAPI NtQueryInformationFile( HANDLE handle, IO_STATUS_BLOCK *io,
+         if (fd_get_file_info( fd, options, &st, &attr ) == -1) status = errno_to_status( errno );
+         else
+         {
+-            struct mountmgr_unix_drive drive;
++            BYTE buf[sizeof(FILE_FS_VOLUME_INFORMATION) + MAX_PATH * sizeof(WCHAR)];
++            FILE_FS_VOLUME_INFORMATION *ffvi = (FILE_FS_VOLUME_INFORMATION *)buf;
++            FS_INFORMATION_CLASS info_class = FileFsVolumeInformation;
+             FILE_ID_INFORMATION *info = ptr;
+ 
+             info->VolumeSerialNumber = 0;
+-            if (!get_mountmgr_fs_info( handle, fd, &drive, sizeof(drive) ))
+-                info->VolumeSerialNumber = drive.serial;
++            if (!get_mountmgr_vol_info( handle, fd, info_class, buf, sizeof(buf), NULL ))
++                info->VolumeSerialNumber = ffvi->VolumeSerialNumber;
+             memset( &info->FileId, 0, sizeof(info->FileId) );
+             *(ULONGLONG *)&info->FileId = st.st_ino;
+         }
+@@ -7821,125 +7830,9 @@ NTSTATUS WINAPI NtQueryVolumeInformationFile( HANDLE handle, IO_STATUS_BLOCK *io
+         break;
+ 
+     case FileFsAttributeInformation:
+-    {
+-        static const WCHAR fatW[] = {'F','A','T'};
+-        static const WCHAR fat32W[] = {'F','A','T','3','2'};
+-        static const WCHAR ntfsW[] = {'N','T','F','S'};
+-        static const WCHAR cdfsW[] = {'C','D','F','S'};
+-        static const WCHAR udfW[] = {'U','D','F'};
+-
+-        FILE_FS_ATTRIBUTE_INFORMATION *info = buffer;
+-        struct mountmgr_unix_drive drive;
+-        enum mountmgr_fs_type fs_type = MOUNTMGR_FS_TYPE_NTFS;
+-
+-        if (length < sizeof(FILE_FS_ATTRIBUTE_INFORMATION))
+-        {
+-            status = STATUS_INFO_LENGTH_MISMATCH;
+-            break;
+-        }
+-
+-        if (!get_mountmgr_fs_info( handle, fd, &drive, sizeof(drive) )) fs_type = drive.fs_type;
+-        else
+-        {
+-            struct statfs stfs;
+-
+-            if (!fstatfs( fd, &stfs ))
+-            {
+-#if defined(linux) && defined(HAVE_FSTATFS)
+-                switch (stfs.f_type)
+-                {
+-                case 0x9660:
+-                    fs_type = MOUNTMGR_FS_TYPE_ISO9660;
+-                    break;
+-                case 0x15013346:
+-                    fs_type = MOUNTMGR_FS_TYPE_UDF;
+-                    break;
+-                case 0x4d44:
+-                    fs_type = MOUNTMGR_FS_TYPE_FAT32;
+-                    break;
+-                }
+-#elif defined(__FreeBSD__) || defined(__FreeBSD_kernel__) || defined(__OpenBSD__) || defined(__DragonFly__) || defined(__APPLE__)
+-                if (!strcmp( stfs.f_fstypename, "cd9660" ))
+-                    fs_type = MOUNTMGR_FS_TYPE_ISO9660;
+-                else if (!strcmp( stfs.f_fstypename, "udf" ))
+-                    fs_type = MOUNTMGR_FS_TYPE_UDF;
+-                else if (!strcmp( stfs.f_fstypename, "msdos" )) /* FreeBSD < 5, Apple */
+-                    fs_type = MOUNTMGR_FS_TYPE_FAT32;
+-                else if (!strcmp( stfs.f_fstypename, "msdosfs" )) /* FreeBSD >= 5 */
+-                    fs_type = MOUNTMGR_FS_TYPE_FAT32;
+-#endif
+-            }
+-        }
+-
+-        switch (fs_type)
+-        {
+-        case MOUNTMGR_FS_TYPE_ISO9660:
+-            info->FileSystemAttributes = FILE_READ_ONLY_VOLUME;
+-            info->MaximumComponentNameLength = 221;
+-            info->FileSystemNameLength = min( sizeof(cdfsW), length - offsetof( FILE_FS_ATTRIBUTE_INFORMATION, FileSystemName ) );
+-            memcpy(info->FileSystemName, cdfsW, info->FileSystemNameLength);
+-            break;
+-        case MOUNTMGR_FS_TYPE_UDF:
+-            info->FileSystemAttributes = FILE_READ_ONLY_VOLUME | FILE_UNICODE_ON_DISK | FILE_CASE_SENSITIVE_SEARCH;
+-            info->MaximumComponentNameLength = 255;
+-            info->FileSystemNameLength = min( sizeof(udfW), length - offsetof( FILE_FS_ATTRIBUTE_INFORMATION, FileSystemName ) );
+-            memcpy(info->FileSystemName, udfW, info->FileSystemNameLength);
+-            break;
+-        case MOUNTMGR_FS_TYPE_FAT:
+-            info->FileSystemAttributes = FILE_CASE_PRESERVED_NAMES; /* FIXME */
+-            info->MaximumComponentNameLength = 255;
+-            info->FileSystemNameLength = min( sizeof(fatW), length - offsetof( FILE_FS_ATTRIBUTE_INFORMATION, FileSystemName ) );
+-            memcpy(info->FileSystemName, fatW, info->FileSystemNameLength);
+-            break;
+-        case MOUNTMGR_FS_TYPE_FAT32:
+-            info->FileSystemAttributes = FILE_CASE_PRESERVED_NAMES; /* FIXME */
+-            info->MaximumComponentNameLength = 255;
+-            info->FileSystemNameLength = min( sizeof(fat32W), length - offsetof( FILE_FS_ATTRIBUTE_INFORMATION, FileSystemName ) );
+-            memcpy(info->FileSystemName, fat32W, info->FileSystemNameLength);
+-            break;
+-        default:
+-            info->FileSystemAttributes = FILE_CASE_PRESERVED_NAMES | FILE_PERSISTENT_ACLS;
+-            info->MaximumComponentNameLength = 255;
+-            info->FileSystemNameLength = min( sizeof(ntfsW), length - offsetof( FILE_FS_ATTRIBUTE_INFORMATION, FileSystemName ) );
+-            memcpy(info->FileSystemName, ntfsW, info->FileSystemNameLength);
+-            break;
+-        }
+-
+-        io->Information = offsetof( FILE_FS_ATTRIBUTE_INFORMATION, FileSystemName ) + info->FileSystemNameLength;
+-        status = STATUS_SUCCESS;
+-        break;
+-    }
+-
+     case FileFsVolumeInformation:
+-    {
+-        FILE_FS_VOLUME_INFORMATION *info = buffer;
+-        ULONGLONG data[64];
+-        struct mountmgr_unix_drive *drive = (struct mountmgr_unix_drive *)data;
+-        const WCHAR *label;
+-
+-        if (length < sizeof(FILE_FS_VOLUME_INFORMATION))
+-        {
+-            status = STATUS_INFO_LENGTH_MISMATCH;
+-            break;
+-        }
+-
+-        if (get_mountmgr_fs_info( handle, fd, drive, sizeof(data) ))
+-        {
+-            status = STATUS_NOT_IMPLEMENTED;
+-            break;
+-        }
+-
+-        label = (WCHAR *)((char *)drive + drive->label_offset);
+-        info->VolumeCreationTime.QuadPart = 0; /* FIXME */
+-        info->VolumeSerialNumber = drive->serial;
+-        info->VolumeLabelLength = min( wcslen( label ) * sizeof(WCHAR),
+-                                       length - offsetof( FILE_FS_VOLUME_INFORMATION, VolumeLabel ) );
+-        info->SupportsObjects = (drive->fs_type == MOUNTMGR_FS_TYPE_NTFS);
+-        memcpy( info->VolumeLabel, label, info->VolumeLabelLength );
+-        io->Information = offsetof( FILE_FS_VOLUME_INFORMATION, VolumeLabel ) + info->VolumeLabelLength;
+-        status = STATUS_SUCCESS;
++        status = get_mountmgr_vol_info( handle, fd, info_class, buffer, length, &io->Information );
+         break;
+-    }
+ 
+     case FileFsControlInformation:
+         FIXME( "%p: control info not supported\n", handle );
+
+-- 
+2.36.1
+
+NOTE: I needed to change this last bit to get Wine-NSPA-7.5.x to compile. the "get_filesystem_flags( volume );" bit
+broke compilation
+
+--- a/dlls/mountmgr.sys/device.c		2022-11-25 17:55:52.572340115 -0500
++++ b/dlls/mountmgr.sys/device.c	2022-11-25 17:55:42.814641767 -0500
+@@ -1698,8 +1698,7 @@ static NTSTATUS WINAPI fill_volume_info(
+             break;
+         default:
+             fsname = L"NTFS";
+-            info->FileSystemAttributes = FILE_CASE_PRESERVED_NAMES | FILE_PERSISTENT_ACLS
+-                                         | get_filesystem_flags( volume );
++            info->FileSystemAttributes = FILE_CASE_PRESERVED_NAMES | FILE_PERSISTENT_ACLS;
+             info->MaximumComponentNameLength = 255;
+             break;
+         }
+
+
