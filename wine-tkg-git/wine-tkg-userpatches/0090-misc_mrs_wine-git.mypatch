@@ -1933,3 +1933,789 @@ index f49fbf40b78..c0fb0eef637 100644
 -- 
 GitLab
 
+From f37c1d491d4da9f97a0634e0bb4944463d804d12 Mon Sep 17 00:00:00 2001
+From: Etaash Mathamsetty <etaash.mathamsetty@gmail.com>
+Date: Sun, 6 Nov 2022 19:37:33 -0500
+Subject: [PATCH] ntoskrnl.exe: Implement ExInterlockedInsertTailList.
+
+---
+ dlls/ntoskrnl.exe/ntoskrnl.exe.spec |  2 +-
+ dlls/ntoskrnl.exe/sync.c            | 28 ++++++++++++++++++++++++++++
+ 2 files changed, 29 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl.exe.spec b/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
+index 0a484829ca3..23770e54367 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
++++ b/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
+@@ -167,7 +167,7 @@
+ @ stub ExInterlockedExtendZone
+ @ stub ExInterlockedIncrementLong
+ @ stub ExInterlockedInsertHeadList
+-@ stub ExInterlockedInsertTailList
++@ stdcall ExInterlockedInsertTailList(ptr ptr ptr)
+ @ stub ExInterlockedPopEntryList
+ @ stub ExInterlockedPushEntryList
+ @ stdcall ExInterlockedRemoveHeadList(ptr ptr)
+diff --git a/dlls/ntoskrnl.exe/sync.c b/dlls/ntoskrnl.exe/sync.c
+index d9b5726b920..c83372401da 100644
+--- a/dlls/ntoskrnl.exe/sync.c
++++ b/dlls/ntoskrnl.exe/sync.c
+@@ -778,6 +778,34 @@ LIST_ENTRY * WINAPI ExInterlockedRemoveHeadList( LIST_ENTRY *list, KSPIN_LOCK *l
+     return ret;
+ }
+ 
++/***********************************************************************
++ *           ExInterlockedInsertTailList   (NTOSKRNL.EXE.@)
++ */
++LIST_ENTRY * WINAPI ExInterlockedInsertTailList( LIST_ENTRY *head, LIST_ENTRY *entry, KSPIN_LOCK *lock )
++{
++    LIST_ENTRY *ret;
++    KIRQL irql;
++
++    TRACE( "(%p %p %p)\n", head, entry, lock );
++
++    if ( !head || !entry || !lock )
++        return NULL;
++
++    KeAcquireSpinLock( lock, &irql );
++
++    if ( !head->Blink )
++    {
++        KeReleaseSpinLock( lock, irql );
++        return NULL;
++    }
++
++    ret = head->Blink;
++    InsertTailList( head, entry );
++
++    KeReleaseSpinLock( lock, irql );
++
++    return ret;
++}
+ 
+ /***********************************************************************
+  *           InterlockedPopEntrySList   (NTOSKRNL.EXE.@)
+-- 
+GitLab
+
+From 6f7fd462b5882bb47271d050366291b0b244deb7 Mon Sep 17 00:00:00 2001
+From: Ivo Ivanov <logos128@gmail.com>
+Date: Thu, 18 Aug 2022 15:23:29 +0300
+Subject: [PATCH 1/3] ntdll: Cancel any pending callbacks on a timer re-set.
+
+---
+ dlls/ntdll/threadpool.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/dlls/ntdll/threadpool.c b/dlls/ntdll/threadpool.c
+index 99525f831e1..0d88ebd34a0 100644
+--- a/dlls/ntdll/threadpool.c
++++ b/dlls/ntdll/threadpool.c
+@@ -2963,6 +2963,9 @@ VOID WINAPI TpSetTimer( TP_TIMER *timer,
+     ULONGLONG timestamp;
+ 
+     TRACE( "%p %p %u %u\n", timer, timeout, period, window_length );
++    
++    /* If the timer has any pending callbacks, cancel them first. */
++    tp_object_cancel( this );
+ 
+     enter_critical_section( &timerqueue.cs );
+ 
+-- 
+GitLab
+
+
+From 4b98beb3c10fd7ba0b4f2a91630030d229079c59 Mon Sep 17 00:00:00 2001
+From: Ivo Ivanov <logos128@gmail.com>
+Date: Thu, 18 Aug 2022 15:48:08 +0300
+Subject: [PATCH 2/3] ntoskrnl.exe: Prevent blocking if timer is reset in DPC.
+
+Fixes NaturalPoint's TrackIR5 app hanging indefinitely on exit,
+while waiting synchronously on an IRP to complete. The blocking
+happens in the app's npusbio_x64 driver, while it tries to reset
+a timer in its DPC.
+Probably fixes other drivers/apps in such situations.
+---
+ dlls/ntoskrnl.exe/sync.c | 10 +++++++---
+ 1 file changed, 7 insertions(+), 3 deletions(-)
+
+diff --git a/dlls/ntoskrnl.exe/sync.c b/dlls/ntoskrnl.exe/sync.c
+index d9b5726b920..0b101158eb6 100644
+--- a/dlls/ntoskrnl.exe/sync.c
++++ b/dlls/ntoskrnl.exe/sync.c
+@@ -493,10 +493,14 @@ BOOLEAN WINAPI KeSetTimerEx( KTIMER *timer, LARGE_INTEGER duetime, LONG period,
+ 
+     EnterCriticalSection( &sync_cs );
+ 
+-    if ((ret = timer->Header.Inserted))
+-        KeCancelTimer(timer);
+-
++    ret = timer->Header.Inserted;
+     timer->Header.Inserted = TRUE;
++    timer->Header.SignalState = FALSE;
++    if (timer->Header.WaitListHead.Blink && !*((ULONG_PTR *)&timer->Header.WaitListHead.Flink))
++    {
++        CloseHandle(timer->Header.WaitListHead.Blink);
++        timer->Header.WaitListHead.Blink = NULL;
++    }
+ 
+     if (!timer->TimerListEntry.Blink)
+         timer->TimerListEntry.Blink = (void *)CreateThreadpoolTimer(ke_timer_complete_proc, timer, NULL);
+-- 
+GitLab
+
+From d61cc801e7f4bcaefb23cb0c9a39788dc8ee669a Mon Sep 17 00:00:00 2001
+From: Alex Henrie <alexhenrie24@gmail.com>
+Date: Wed, 30 Nov 2022 19:06:36 -0700
+Subject: [PATCH] services: Use standard C functions for memory allocation.
+
+---
+ programs/services/rpc.c      |  71 ++++++++++++------------
+ programs/services/services.c | 101 +++++++++++++++++------------------
+ programs/services/services.h |   1 -
+ programs/services/utils.c    |  29 +++-------
+ 4 files changed, 92 insertions(+), 110 deletions(-)
+
+diff --git a/programs/services/rpc.c b/programs/services/rpc.c
+index 7e09abaab12..de918d33b1f 100644
+--- a/programs/services/rpc.c
++++ b/programs/services/rpc.c
+@@ -102,8 +102,8 @@ static void sc_notify_release(struct sc_notify_handle *notify)
+     if (r == 0)
+     {
+         CloseHandle(notify->event);
+-        HeapFree(GetProcessHeap(), 0, notify->params_list);
+-        HeapFree(GetProcessHeap(), 0, notify);
++        free(notify->params_list);
++        free(notify);
+     }
+ }
+ 
+@@ -197,22 +197,22 @@ static void free_service_strings(struct service_entry *old, struct service_entry
+     QUERY_SERVICE_CONFIGW *new_cfg = &new->config;
+ 
+     if (old_cfg->lpBinaryPathName != new_cfg->lpBinaryPathName)
+-        HeapFree(GetProcessHeap(), 0, old_cfg->lpBinaryPathName);
++        free(old_cfg->lpBinaryPathName);
+ 
+     if (old_cfg->lpLoadOrderGroup != new_cfg->lpLoadOrderGroup)
+-        HeapFree(GetProcessHeap(), 0, old_cfg->lpLoadOrderGroup);
++        free(old_cfg->lpLoadOrderGroup);
+ 
+     if (old_cfg->lpServiceStartName != new_cfg->lpServiceStartName)
+-        HeapFree(GetProcessHeap(), 0, old_cfg->lpServiceStartName);
++        free(old_cfg->lpServiceStartName);
+ 
+     if (old_cfg->lpDisplayName != new_cfg->lpDisplayName)
+-        HeapFree(GetProcessHeap(), 0, old_cfg->lpDisplayName);
++        free(old_cfg->lpDisplayName);
+ 
+     if (old->dependOnServices != new->dependOnServices)
+-        HeapFree(GetProcessHeap(), 0, old->dependOnServices);
++        free(old->dependOnServices);
+ 
+     if (old->dependOnGroups != new->dependOnGroups)
+-        HeapFree(GetProcessHeap(), 0, old->dependOnGroups);
++        free(old->dependOnGroups);
+ }
+ 
+ /* Check if the given handle is of the required type and allows the requested access. */
+@@ -281,7 +281,7 @@ DWORD __cdecl svcctl_OpenSCManagerW(
+             return ERROR_INVALID_NAME;
+     }
+ 
+-    if (!(manager = HeapAlloc(GetProcessHeap(), 0, sizeof(*manager))))
++    if (!(manager = malloc(sizeof(*manager))))
+         return ERROR_NOT_ENOUGH_SERVER_MEMORY;
+ 
+     manager->hdr.type = SC_HTYPE_MANAGER;
+@@ -304,7 +304,7 @@ static void SC_RPC_HANDLE_destroy(SC_RPC_HANDLE handle)
+         case SC_HTYPE_MANAGER:
+         {
+             struct sc_manager_handle *manager = (struct sc_manager_handle *)hdr;
+-            HeapFree(GetProcessHeap(), 0, manager);
++            free(manager);
+             break;
+         }
+         case SC_HTYPE_SERVICE:
+@@ -319,7 +319,7 @@ static void SC_RPC_HANDLE_destroy(SC_RPC_HANDLE handle)
+             }
+             service_unlock(service->service_entry);
+             release_service(service->service_entry);
+-            HeapFree(GetProcessHeap(), 0, service);
++            free(service);
+             break;
+         }
+         default:
+@@ -418,7 +418,7 @@ static DWORD create_handle_for_service(struct service_entry *entry, DWORD dwDesi
+ {
+     struct sc_service_handle *service;
+ 
+-    if (!(service = HeapAlloc(GetProcessHeap(), 0, sizeof(*service))))
++    if (!(service = malloc(sizeof(*service))))
+     {
+         release_service(entry);
+         return ERROR_NOT_ENOUGH_SERVER_MEMORY;
+@@ -494,7 +494,7 @@ static DWORD parse_dependencies(const WCHAR *dependencies, struct service_entry
+     if (!len_services) entry->dependOnServices = NULL;
+     else
+     {
+-        services = HeapAlloc(GetProcessHeap(), 0, (len_services + 1) * sizeof(WCHAR));
++        services = malloc((len_services + 1) * sizeof(WCHAR));
+         if (!services)
+             return ERROR_OUTOFMEMORY;
+ 
+@@ -516,10 +516,10 @@ static DWORD parse_dependencies(const WCHAR *dependencies, struct service_entry
+     if (!len_groups) entry->dependOnGroups = NULL;
+     else
+     {
+-        groups = HeapAlloc(GetProcessHeap(), 0, (len_groups + 1) * sizeof(WCHAR));
++        groups = malloc((len_groups + 1) * sizeof(WCHAR));
+         if (!groups)
+         {
+-            HeapFree(GetProcessHeap(), 0, services);
++            free(services);
+             return ERROR_OUTOFMEMORY;
+         }
+         s = groups;
+@@ -591,10 +591,10 @@ static DWORD create_serviceW(
+     entry->config.dwServiceType = entry->status.dwServiceType = dwServiceType;
+     entry->config.dwStartType = dwStartType;
+     entry->config.dwErrorControl = dwErrorControl;
+-    entry->config.lpBinaryPathName = strdupW(lpBinaryPathName);
+-    entry->config.lpLoadOrderGroup = strdupW(lpLoadOrderGroup);
+-    entry->config.lpServiceStartName = strdupW(lpServiceStartName);
+-    entry->config.lpDisplayName = strdupW(lpDisplayName);
++    entry->config.lpBinaryPathName = wcsdup(lpBinaryPathName);
++    entry->config.lpLoadOrderGroup = wcsdup(lpLoadOrderGroup);
++    entry->config.lpServiceStartName = wcsdup(lpServiceStartName);
++    entry->config.lpDisplayName = wcsdup(lpDisplayName);
+ 
+     if (lpdwTagId)      /* TODO: In most situations a non-NULL TagId will generate an ERROR_INVALID_PARAMETER. */
+         entry->config.dwTagId = *lpdwTagId;
+@@ -702,12 +702,12 @@ DWORD __cdecl svcctl_QueryServiceConfigW(
+     config->dwServiceType = service->service_entry->config.dwServiceType;
+     config->dwStartType = service->service_entry->config.dwStartType;
+     config->dwErrorControl = service->service_entry->config.dwErrorControl;
+-    config->lpBinaryPathName = strdupW(service->service_entry->config.lpBinaryPathName);
+-    config->lpLoadOrderGroup = strdupW(service->service_entry->config.lpLoadOrderGroup);
++    config->lpBinaryPathName = wcsdup(service->service_entry->config.lpBinaryPathName);
++    config->lpLoadOrderGroup = wcsdup(service->service_entry->config.lpLoadOrderGroup);
+     config->dwTagId = service->service_entry->config.dwTagId;
+     config->lpDependencies = NULL; /* TODO */
+-    config->lpServiceStartName = strdupW(service->service_entry->config.lpServiceStartName);
+-    config->lpDisplayName = strdupW(service->service_entry->config.lpDisplayName);
++    config->lpServiceStartName = wcsdup(service->service_entry->config.lpServiceStartName);
++    config->lpDisplayName = wcsdup(service->service_entry->config.lpDisplayName);
+     service_unlock(service->service_entry);
+ 
+     return ERROR_SUCCESS;
+@@ -802,16 +802,16 @@ DWORD __cdecl svcctl_ChangeServiceConfigW(
+ 
+     /* configuration OK. The strings needs to be duplicated */
+     if (lpBinaryPathName != NULL)
+-        new_entry.config.lpBinaryPathName = strdupW(lpBinaryPathName);
++        new_entry.config.lpBinaryPathName = wcsdup(lpBinaryPathName);
+ 
+     if (lpLoadOrderGroup != NULL)
+-        new_entry.config.lpLoadOrderGroup = strdupW(lpLoadOrderGroup);
++        new_entry.config.lpLoadOrderGroup = wcsdup(lpLoadOrderGroup);
+ 
+     if (lpServiceStartName != NULL)
+-        new_entry.config.lpServiceStartName = strdupW(lpServiceStartName);
++        new_entry.config.lpServiceStartName = wcsdup(lpServiceStartName);
+ 
+     if (lpDisplayName != NULL)
+-        new_entry.config.lpDisplayName = strdupW(lpDisplayName);
++        new_entry.config.lpDisplayName = wcsdup(lpDisplayName);
+ 
+     /* try to save to Registry, commit or rollback depending on success */
+     err = save_service_config(&new_entry);
+@@ -841,8 +841,7 @@ static void fill_notify(struct sc_notify_handle *notify, struct service_entry *s
+     SC_RPC_NOTIFY_PARAMS_LIST *list;
+     SERVICE_NOTIFY_STATUS_CHANGE_PARAMS_2 *cparams;
+ 
+-    list = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
+-            sizeof(SC_RPC_NOTIFY_PARAMS_LIST) + sizeof(SERVICE_NOTIFY_STATUS_CHANGE_PARAMS_2));
++    list = calloc(1, sizeof(SC_RPC_NOTIFY_PARAMS_LIST) + sizeof(SERVICE_NOTIFY_STATUS_CHANGE_PARAMS_2));
+     if (!list)
+         return;
+ 
+@@ -937,13 +936,13 @@ DWORD __cdecl svcctl_ChangeServiceConfig2W( SC_RPC_HANDLE hService, SC_RPC_CONFI
+ 
+             if (config.descr->lpDescription[0])
+             {
+-                if (!(descr = strdupW( config.descr->lpDescription )))
++                if (!(descr = wcsdup( config.descr->lpDescription )))
+                     return ERROR_NOT_ENOUGH_MEMORY;
+             }
+ 
+             WINE_TRACE( "changing service %p descr to %s\n", service, wine_dbgstr_w(descr) );
+             service_lock( service->service_entry );
+-            HeapFree( GetProcessHeap(), 0, service->service_entry->description );
++            free( service->service_entry->description );
+             service->service_entry->description = descr;
+             save_service_config( service->service_entry );
+             service_unlock( service->service_entry );
+@@ -1197,7 +1196,7 @@ BOOL process_send_control(struct process_entry *process, BOOL shared_process, co
+     /* calculate how much space we need to send the startup info */
+     len = (lstrlenW(name) + 1) * sizeof(WCHAR) + data_size;
+ 
+-    ssi = HeapAlloc(GetProcessHeap(),0,FIELD_OFFSET(service_start_info, data[len]));
++    ssi = malloc(FIELD_OFFSET(service_start_info, data[len]));
+     ssi->magic = SERVICE_PROTOCOL_MAGIC;
+     ssi->control = control;
+     ssi->total_size = FIELD_OFFSET(service_start_info, data[len]);
+@@ -1206,7 +1205,7 @@ BOOL process_send_control(struct process_entry *process, BOOL shared_process, co
+     if (data_size) memcpy(&ssi->data[ssi->name_size * sizeof(WCHAR)], data, data_size);
+ 
+     r = process_send_command(process, ssi, ssi->total_size, result);
+-    HeapFree( GetProcessHeap(), 0, ssi );
++    free(ssi);
+     return r;
+ }
+ 
+@@ -1705,7 +1704,7 @@ DWORD __cdecl svcctl_NotifyServiceStatusChange(
+         return ERROR_CALL_NOT_IMPLEMENTED;
+     }
+ 
+-    notify = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*notify));
++    notify = calloc(1, sizeof(*notify));
+     if (!notify)
+         return ERROR_NOT_ENOUGH_SERVER_MEMORY;
+ 
+@@ -2160,10 +2159,10 @@ void __RPC_USER SC_NOTIFY_RPC_HANDLE_rundown(SC_NOTIFY_RPC_HANDLE handle)
+ 
+ void  __RPC_FAR * __RPC_USER MIDL_user_allocate(SIZE_T len)
+ {
+-    return HeapAlloc(GetProcessHeap(), 0, len);
++    return malloc(len);
+ }
+ 
+ void __RPC_USER MIDL_user_free(void __RPC_FAR * ptr)
+ {
+-    HeapFree(GetProcessHeap(), 0, ptr);
++    free(ptr);
+ }
+diff --git a/programs/services/services.c b/programs/services/services.c
+index 2edc02d300c..6bda0a4008b 100644
+--- a/programs/services/services.c
++++ b/programs/services/services.c
+@@ -31,7 +31,6 @@
+ #include <setupapi.h>
+ 
+ #include "wine/debug.h"
+-#include "wine/heap.h"
+ #include "svcctl.h"
+ 
+ #include "services.h"
+@@ -78,7 +77,7 @@ static DWORD process_create(const WCHAR *name, struct process_entry **entry)
+ {
+     DWORD err;
+ 
+-    *entry = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(**entry));
++    *entry = calloc(1, sizeof(**entry));
+     if (!*entry)
+         return ERROR_NOT_ENOUGH_SERVER_MEMORY;
+     (*entry)->ref_count = 1;
+@@ -101,7 +100,7 @@ error:
+         CloseHandle((*entry)->control_mutex);
+     if ((*entry)->overlapped_event)
+         CloseHandle((*entry)->overlapped_event);
+-    HeapFree(GetProcessHeap(), 0, *entry);
++    free(*entry);
+     return err;
+ }
+ 
+@@ -111,26 +110,26 @@ static void free_process_entry(struct process_entry *entry)
+     CloseHandle(entry->control_mutex);
+     CloseHandle(entry->control_pipe);
+     CloseHandle(entry->overlapped_event);
+-    HeapFree(GetProcessHeap(), 0, entry);
++    free(entry);
+ }
+ 
+ DWORD service_create(LPCWSTR name, struct service_entry **entry)
+ {
+-    *entry = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(**entry));
++    *entry = calloc(1, sizeof(**entry));
+     if (!*entry)
+         return ERROR_NOT_ENOUGH_SERVER_MEMORY;
+-    (*entry)->name = strdupW(name);
++    (*entry)->name = wcsdup(name);
+     list_init(&(*entry)->handles);
+     if (!(*entry)->name)
+     {
+-        HeapFree(GetProcessHeap(), 0, *entry);
++        free(*entry);
+         return ERROR_NOT_ENOUGH_SERVER_MEMORY;
+     }
+     (*entry)->status_changed_event = CreateEventW(NULL, TRUE, FALSE, NULL);
+     if (!(*entry)->status_changed_event)
+     {
+-        HeapFree(GetProcessHeap(), 0, (*entry)->name);
+-        HeapFree(GetProcessHeap(), 0, *entry);
++        free((*entry)->name);
++        free(*entry);
+         return GetLastError();
+     }
+     (*entry)->ref_count = 1;
+@@ -145,17 +144,17 @@ void free_service_entry(struct service_entry *entry)
+ {
+     assert(list_empty(&entry->handles));
+     CloseHandle(entry->status_changed_event);
+-    HeapFree(GetProcessHeap(), 0, entry->name);
+-    HeapFree(GetProcessHeap(), 0, entry->config.lpBinaryPathName);
+-    HeapFree(GetProcessHeap(), 0, entry->config.lpDependencies);
+-    HeapFree(GetProcessHeap(), 0, entry->config.lpLoadOrderGroup);
+-    HeapFree(GetProcessHeap(), 0, entry->config.lpServiceStartName);
+-    HeapFree(GetProcessHeap(), 0, entry->config.lpDisplayName);
+-    HeapFree(GetProcessHeap(), 0, entry->description);
+-    HeapFree(GetProcessHeap(), 0, entry->dependOnServices);
+-    HeapFree(GetProcessHeap(), 0, entry->dependOnGroups);
++    free(entry->name);
++    free(entry->config.lpBinaryPathName);
++    free(entry->config.lpDependencies);
++    free(entry->config.lpLoadOrderGroup);
++    free(entry->config.lpServiceStartName);
++    free(entry->config.lpDisplayName);
++    free(entry->description);
++    free(entry->dependOnServices);
++    free(entry->dependOnGroups);
+     if (entry->process) release_process(entry->process);
+-    HeapFree(GetProcessHeap(), 0, entry);
++    free(entry);
+ }
+ 
+ static DWORD load_service_config(HKEY hKey, struct service_entry *entry)
+@@ -349,8 +348,8 @@ static void CALLBACK delayed_autostart_cancel_callback(void *object, void *userd
+     struct delayed_autostart_params *params = object;
+     while(params->count--)
+         release_service(params->services[params->count]);
+-    heap_free(params->services);
+-    heap_free(params);
++    free(params->services);
++    free(params);
+ }
+ 
+ static void CALLBACK delayed_autostart_callback(TP_CALLBACK_INSTANCE *instance, void *context,
+@@ -379,8 +378,8 @@ static void CALLBACK delayed_autostart_callback(TP_CALLBACK_INSTANCE *instance,
+ 
+     scmdatabase_unlock_startup(active_database);
+ 
+-    heap_free(params->services);
+-    heap_free(params);
++    free(params->services);
++    free(params);
+     CloseThreadpoolTimer(timer);
+ }
+ 
+@@ -398,7 +397,7 @@ static BOOL schedule_delayed_autostart(struct service_entry **services, unsigned
+         return FALSE;
+     }
+ 
+-    if (!(params = heap_alloc(sizeof(*params)))) return FALSE;
++    if (!(params = malloc(sizeof(*params)))) return FALSE;
+     params->count = count;
+     params->services = services;
+ 
+@@ -414,7 +413,7 @@ static BOOL schedule_delayed_autostart(struct service_entry **services, unsigned
+     if (!(timer = CreateThreadpoolTimer(delayed_autostart_callback, params, &environment)))
+     {
+         ERR("CreateThreadpoolWait failed: %lu\n", GetLastError());
+-        heap_free(params);
++        free(params);
+         return FALSE;
+     }
+ 
+@@ -451,7 +450,7 @@ static void scmdatabase_autostart_services(struct scmdatabase *db)
+     struct service_entry *service;
+     HDEVINFO set;
+ 
+-    services_list = HeapAlloc(GetProcessHeap(), 0, size * sizeof(services_list[0]));
++    services_list = malloc(size * sizeof(services_list[0]));
+     if (!services_list)
+         return;
+ 
+@@ -471,7 +470,7 @@ static void scmdatabase_autostart_services(struct scmdatabase *db)
+             {
+                 struct service_entry **slist_new;
+                 size *= 2;
+-                slist_new = HeapReAlloc(GetProcessHeap(), 0, services_list, size * sizeof(services_list[0]));
++                slist_new = realloc(services_list, size * sizeof(services_list[0]));
+                 if (!slist_new)
+                     break;
+                 services_list = slist_new;
+@@ -505,7 +504,7 @@ static void scmdatabase_autostart_services(struct scmdatabase *db)
+     scmdatabase_unlock_startup(db);
+ 
+     if (!delayed_cnt || !schedule_delayed_autostart(services_list, delayed_cnt))
+-        heap_free(services_list);
++        free(services_list);
+     SetupDiDestroyDeviceInfoList(set);
+ }
+ 
+@@ -583,7 +582,7 @@ BOOL validate_service_config(struct service_entry *entry)
+     }
+ 
+     if (entry->config.lpServiceStartName == NULL)
+-        entry->config.lpServiceStartName = strdupW(SZ_LOCAL_SYSTEM);
++        entry->config.lpServiceStartName = wcsdup(SZ_LOCAL_SYSTEM);
+ 
+     return TRUE;
+ }
+@@ -659,7 +658,7 @@ static DWORD scmdatabase_create(struct scmdatabase **db)
+ {
+     DWORD err;
+ 
+-    *db = HeapAlloc(GetProcessHeap(), 0, sizeof(**db));
++    *db = malloc(sizeof(**db));
+     if (!*db)
+         return ERROR_NOT_ENOUGH_SERVER_MEMORY;
+ 
+@@ -674,7 +673,7 @@ static DWORD scmdatabase_create(struct scmdatabase **db)
+                           REG_OPTION_NON_VOLATILE, MAXIMUM_ALLOWED, NULL,
+                           &(*db)->root_key, NULL);
+     if (err != ERROR_SUCCESS)
+-        HeapFree(GetProcessHeap(), 0, *db);
++        free(*db);
+ 
+     return err;
+ }
+@@ -684,7 +683,7 @@ static void scmdatabase_destroy(struct scmdatabase *db)
+     RegCloseKey(db->root_key);
+     db->cs.DebugInfo->Spare[0] = 0;
+     DeleteCriticalSection(&db->cs);
+-    HeapFree(GetProcessHeap(), 0, db);
++    free(db);
+ }
+ 
+ static DWORD scmdatabase_load_services(struct scmdatabase *db)
+@@ -818,7 +817,7 @@ static DWORD get_service_binary_path(const struct service_entry *service_entry,
+ {
+     DWORD size = ExpandEnvironmentStringsW(service_entry->config.lpBinaryPathName, NULL, 0);
+ 
+-    *path = HeapAlloc(GetProcessHeap(), 0, size*sizeof(WCHAR));
++    *path = malloc(size * sizeof(WCHAR));
+     if (!*path)
+         return ERROR_NOT_ENOUGH_SERVER_MEMORY;
+ 
+@@ -838,16 +837,16 @@ static DWORD get_service_binary_path(const struct service_entry *service_entry,
+ 
+         GetSystemWow64DirectoryW( system_dir, MAX_PATH );
+ 
+-        redirected = HeapAlloc( GetProcessHeap(), 0, (lstrlenW( *path ) + lstrlenW( system_dir ))*sizeof(WCHAR));
++        redirected = malloc( (wcslen( *path ) + wcslen( system_dir )) * sizeof(WCHAR) );
+         if (!redirected)
+         {
+-            HeapFree( GetProcessHeap(), 0, *path );
++            free( *path );
+             return ERROR_NOT_ENOUGH_SERVER_MEMORY;
+         }
+ 
+         lstrcpyW( redirected, system_dir );
+         lstrcatW( redirected, &(*path)[len] );
+-        HeapFree( GetProcessHeap(), 0, *path );
++        free( *path );
+         *path = redirected;
+         TRACE("redirected to %s\n", debugstr_w(redirected));
+     }
+@@ -869,8 +868,8 @@ static DWORD get_winedevice_binary_path(struct service_entry *service_entry, WCH
+         *is_wow64 = service_entry->is_wow64;
+ 
+     GetSystemDirectoryW(system_dir, MAX_PATH);
+-    HeapFree(GetProcessHeap(), 0, *path);
+-    if (!(*path = HeapAlloc(GetProcessHeap(), 0, lstrlenW(system_dir) * sizeof(WCHAR) + sizeof(winedeviceW))))
++    free(*path);
++    if (!(*path = malloc(wcslen(system_dir) * sizeof(WCHAR) + sizeof(winedeviceW))))
+        return ERROR_NOT_ENOUGH_SERVER_MEMORY;
+ 
+     lstrcpyW(*path, system_dir);
+@@ -928,14 +927,14 @@ static DWORD add_winedevice_service(const struct service_entry *service, WCHAR *
+     (*entry)->config.dwStartType        = SERVICE_DEMAND_START;
+     (*entry)->status.dwServiceType      = (*entry)->config.dwServiceType;
+ 
+-    if (!((*entry)->config.lpBinaryPathName = strdupW(path)))
++    if (!((*entry)->config.lpBinaryPathName = wcsdup(path)))
+         goto error;
+-    if (!((*entry)->config.lpServiceStartName = strdupW(SZ_LOCAL_SYSTEM)))
++    if (!((*entry)->config.lpServiceStartName = wcsdup(SZ_LOCAL_SYSTEM)))
+         goto error;
+-    if (!((*entry)->config.lpDisplayName = strdupW(name)))
++    if (!((*entry)->config.lpDisplayName = wcsdup(name)))
+         goto error;
+     if (service->config.lpLoadOrderGroup &&
+-        !((*entry)->config.lpLoadOrderGroup = strdupW(service->config.lpLoadOrderGroup)))
++        !((*entry)->config.lpLoadOrderGroup = wcsdup(service->config.lpLoadOrderGroup)))
+         goto error;
+ 
+     (*entry)->db = db;
+@@ -992,29 +991,29 @@ static DWORD service_start_process(struct service_entry *service_entry, struct p
+         if ((err = get_winedevice_binary_path(service_entry, &path, &is_wow64)))
+         {
+             service_unlock(service_entry);
+-            HeapFree(GetProcessHeap(), 0, path);
++            free(path);
+             return err;
+         }
+ 
+         if ((process = get_winedevice_process(service_entry, path, is_wow64)))
+         {
+-            HeapFree(GetProcessHeap(), 0, path);
++            free(path);
+             goto found;
+         }
+ 
+         err = add_winedevice_service(service_entry, path, is_wow64, &winedevice_entry);
+-        HeapFree(GetProcessHeap(), 0, path);
++        free(path);
+         if (err != ERROR_SUCCESS)
+         {
+             service_unlock(service_entry);
+             return err;
+         }
+ 
+-        group = strdupW(winedevice_entry->config.lpLoadOrderGroup);
++        group = wcsdup(winedevice_entry->config.lpLoadOrderGroup);
+         service_unlock(service_entry);
+ 
+         err = service_start(winedevice_entry, group != NULL, (const WCHAR **)&group);
+-        HeapFree(GetProcessHeap(), 0, group);
++        free(group);
+         if (err != ERROR_SUCCESS)
+         {
+             release_service(winedevice_entry);
+@@ -1057,7 +1056,7 @@ found:
+         WINE_ERR("failed to create process object for %s, error = %lu\n",
+                  wine_dbgstr_w(service_entry->name), err);
+         service_unlock(service_entry);
+-        HeapFree(GetProcessHeap(), 0, path);
++        free(path);
+         return err;
+     }
+ 
+@@ -1095,7 +1094,7 @@ found:
+     service_unlock(service_entry);
+ 
+     r = CreateProcessW(NULL, path, NULL, NULL, FALSE, CREATE_UNICODE_ENVIRONMENT | DETACHED_PROCESS, environment, NULL, &si, &pi);
+-    HeapFree(GetProcessHeap(), 0, path);
++    free(path);
+     if (!r)
+     {
+         err = GetLastError();
+@@ -1169,7 +1168,7 @@ static DWORD process_send_start_message(struct process_entry *process, BOOL shar
+         len += lstrlenW(argv[i])+1;
+     len = (len + 1) * sizeof(WCHAR);
+ 
+-    if (!(str = HeapAlloc(GetProcessHeap(), 0, len)))
++    if (!(str = malloc(len)))
+         return ERROR_NOT_ENOUGH_SERVER_MEMORY;
+ 
+     p = str;
+@@ -1186,7 +1185,7 @@ static DWORD process_send_start_message(struct process_entry *process, BOOL shar
+                               SERVICE_CONTROL_START, (const BYTE *)str, len, &result))
+         result = ERROR_SERVICE_REQUEST_TIMEOUT;
+ 
+-    HeapFree(GetProcessHeap(), 0, str);
++    free(str);
+     return result;
+ }
+ 
+diff --git a/programs/services/services.h b/programs/services/services.h
+index 0d400e59183..908a36e6514 100644
+--- a/programs/services/services.h
++++ b/programs/services/services.h
+@@ -110,7 +110,6 @@ DWORD RPC_Init(void);
+ void RPC_Stop(void);
+ 
+ /* from utils.c */
+-LPWSTR strdupW(LPCWSTR str);
+ 
+ BOOL check_multisz(LPCWSTR lpMultiSz, DWORD cbSize);
+ 
+diff --git a/programs/services/utils.c b/programs/services/utils.c
+index 357217b4926..69bd26df814 100644
+--- a/programs/services/utils.c
++++ b/programs/services/utils.c
+@@ -29,21 +29,6 @@
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(service);
+ 
+-LPWSTR strdupW(LPCWSTR str)
+-{
+-    int len;
+-    WCHAR *buf;
+-
+-    if (str == NULL)
+-        return NULL;
+-    len = lstrlenW(str);
+-    buf = HeapAlloc(GetProcessHeap(), 0, sizeof(WCHAR)*(len+1));
+-    if (buf == NULL)
+-        return NULL;
+-    lstrcpyW(buf, str);
+-    return buf;
+-}
+-
+ BOOL check_multisz(LPCWSTR lpMultiSz, DWORD cbSize)
+ {
+     if (cbSize == 0 || (cbSize == sizeof(WCHAR) && lpMultiSz[0] == 0))
+@@ -73,7 +58,7 @@ DWORD load_reg_string(HKEY hKey, LPCWSTR szValue, BOOL bExpand, LPWSTR *output)
+         err = ERROR_INVALID_DATATYPE;
+         goto failed;
+     }
+-    buf = HeapAlloc(GetProcessHeap(), 0, size + sizeof(WCHAR));
++    buf = malloc(size + sizeof(WCHAR));
+     if ((err = RegQueryValueExW(hKey, szValue, 0, &type, (LPBYTE)buf, &size)) != 0)
+         goto failed;
+     buf[size/sizeof(WCHAR)] = 0;
+@@ -86,9 +71,9 @@ DWORD load_reg_string(HKEY hKey, LPCWSTR szValue, BOOL bExpand, LPWSTR *output)
+             err = GetLastError();
+             goto failed;
+         }
+-        str = HeapAlloc(GetProcessHeap(), 0, size * sizeof(WCHAR));
++        str = malloc(size * sizeof(WCHAR));
+         ExpandEnvironmentStringsW(buf, str, size);
+-        HeapFree(GetProcessHeap(), 0, buf);
++        free(buf);
+         *output = str;
+     }
+     else
+@@ -97,7 +82,7 @@ DWORD load_reg_string(HKEY hKey, LPCWSTR szValue, BOOL bExpand, LPWSTR *output)
+ 
+ failed:
+     WINE_ERR("Error %ld while reading value %s\n", err, wine_dbgstr_w(szValue));
+-    HeapFree(GetProcessHeap(), 0, buf);
++    free(buf);
+     return err;
+ }
+ 
+@@ -112,7 +97,7 @@ DWORD load_reg_multisz(HKEY hKey, LPCWSTR szValue, BOOL bAllowSingle, LPWSTR *ou
+     {
+         if (err == ERROR_FILE_NOT_FOUND)
+         {
+-            *output = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(WCHAR));
++            *output = calloc(1, sizeof(WCHAR));
+             return ERROR_SUCCESS;
+         }
+         goto failed;
+@@ -122,7 +107,7 @@ DWORD load_reg_multisz(HKEY hKey, LPCWSTR szValue, BOOL bAllowSingle, LPWSTR *ou
+         err = ERROR_INVALID_DATATYPE;
+         goto failed;
+     }
+-    buf = HeapAlloc(GetProcessHeap(), 0, size + 2*sizeof(WCHAR));
++    buf = malloc(size + 2 * sizeof(WCHAR));
+     if ((err = RegQueryValueExW(hKey, szValue, 0, &type, (LPBYTE)buf, &size)) != 0)
+         goto failed;
+     buf[size/sizeof(WCHAR)] = 0;
+@@ -132,7 +117,7 @@ DWORD load_reg_multisz(HKEY hKey, LPCWSTR szValue, BOOL bAllowSingle, LPWSTR *ou
+ 
+ failed:
+     WINE_ERR("Error %ld while reading value %s\n", err, wine_dbgstr_w(szValue));
+-    HeapFree(GetProcessHeap(), 0, buf);
++    free(buf);
+     return err;
+ }
+ 
+-- 
+GitLab
+
