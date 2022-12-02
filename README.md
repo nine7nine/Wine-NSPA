@@ -16,6 +16,11 @@ Wine-NSPA is currently based on Wine-7.5; due to newer versions having some regr
 
 *note: Wine-NSPA will be rebased on Wine-8.0 in the near future*
 
+Dec/2022 Preview: Ableton Live 11 running in Wine-NSPA with multi-threaded wineserver & kernelbase RT hack.
+![](https://github.com/nine7nine/Wine-NSPA/blob/main/examples/images/Live11.png)
+
+Currently, I'm working with some experimental patchwork to improve multithreading, scalability and my RT support. This should get heavy applications like Ableton Live 11 working nicely in Wine-NSPA. The hope is to fully support this kind of thing for Wine-NSPA-8.0 builds. ~ This should be possible, as is, Live 11 is running reasonably well, albeit with one or two issues to resolve. (Some of which will be solved with a rebase on wine-8.0).
+
 _________________________
 
 ### Features (non-exhaustive)
