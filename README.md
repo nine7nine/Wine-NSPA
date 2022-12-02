@@ -8,7 +8,7 @@ _________________________
 
 ### Preface:
 
-Wine-NSPA focuses on the integration of performance enhancements and RT related features that help proaudio apps run better. Currently, Fsync/futex_waitv is the prefered method for improving syncronization primitives support, which requires kernel-level support (linux-5.16+). I have implemented improved Scheduling and RT support via out-of-tree patchwork, and my own modifications to Wine. This fork also integrates the out-of-tree Wineserver Shared Memory patchset, The Wineserver SHMEM per Thread patches, the Wine Low Fragmentation Heap patchwork, and a number of other out-of-tree patchsets. Some of these other features do require kernel-level support. (but Wine-NSPA will work without them too).
+Wine-NSPA focuses on the integration of performance enhancements and RT related features that help proaudio apps run better. Currently, Fsync/futex_waitv is the prefered method for improving synchronization primitives support, which requires kernel-level support (linux-5.16+). I have implemented improved Scheduling and RT support via out-of-tree patchwork, and my own modifications to Wine. This fork also integrates the out-of-tree Wineserver Shared Memory patchset, a Multi-threaded Wineserver implementation (shmem per Thread patch), the Wine Low Fragmentation Heap patchwork, and a number of other out-of-tree patchsets. Some of these other features do require kernel-level support. (but Wine-NSPA will work without them too).
 
 ![](https://github.com/nine7nine/Wine-NSPA/blob/main/examples/images/terminal-banner.png)
 
@@ -40,6 +40,7 @@ _________________________
 * **Proton's CPU Topology Overrides**: (latest implementation)
 * **Various Locking, Atomics & Membarrier Optmizations/Improvements**
 * **Various Performance Optimizations**:in various areas of wine's codebase)
+* **Kernelbase RT hack**: RT thread hooking within GetThreadPriority() function (WIP). 
 
 *note: too many other bits to list here*
 _________________________
@@ -65,6 +66,7 @@ _________________________
 * Realtime Linux: https://wiki.linuxfoundation.org/realtime/start
 * Jack Audio Connection Kit: https://jackaudio.org/
 * Pipewire: https://gitlab.freedesktop.org/pipewire/pipewire
+* WineASIO: https://github.com/wineasio/wineasio
 * FalkTX: https://github.com/falkTX/Carla
 * Robbert-vdh: https://github.com/robbert-vdh/yabridge
 * Arch Linux: https://archlinux.org/
