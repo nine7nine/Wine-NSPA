@@ -1,0 +1,82 @@
+--- a/server/scheduler.c		2022-12-02 23:35:42.298255079 -0500
++++ b/server/scheduler.c	2022-12-02 23:35:23.176349773 -0500
+@@ -43,9 +43,13 @@
+ #define WIN32_NO_STATUS
+ #include "winternl.h"
+ #include "thread.h"
++#include <unistd.h>
++#include <pthread.h>
+ 
+ #if defined(__linux__) && defined(HAVE_SYS_RESOURCE_H) && defined(HAVE_SCHED_H)
+ 
++// define these for RT code
++static int srv_rt_policy = -1;
+ static int thread_base_priority = -1;
+ static int wine_rt_policy = -1;
+ 
+@@ -67,8 +71,10 @@ static int get_priority( const char *var
+ /* initializes the scheduler */
+ void init_scheduler( void )
+ {
+-    // Get RT policy
+-    const char *policyStr = getenv("WINE_RT_POLICY");
++    pthread_attr_t pthread_attr;
++    struct sched_param param;
++    // Get Wineserver RT policy
++    const char *policyStr = getenv("SRV_RT_POLICY");
+ 
+     // Set RT Priority min, max.
+     int min, max, priority;
+@@ -80,32 +86,32 @@ void init_scheduler( void )
+     // Set RT policy.
+     if (policyStr) {
+         if (strcmp(policyStr, "RR")==0)
+-            wine_rt_policy = SCHED_RR;
+-        else if (strcmp(policyStr, "FF")==0)
+-            wine_rt_policy = SCHED_FIFO;
++            srv_rt_policy = SCHED_RR;
++        if (strcmp(policyStr, "FF")==0)
++            srv_rt_policy = SCHED_FIFO;
++        else if (strcmp(policyStr, "TS")==0)
++            srv_rt_policy = SCHED_OTHER;
+     } 
++    
++    /* change the wineserver nice priority */
++    setpriority( PRIO_PROCESS, getpid(), -20 );
+ 
+     /* change the wineserver priority */
+     if ((priority = get_priority( "WINE_RT_PRIO", min, max -1)) != -1)
+-    {       
+-        struct sched_param param;
++    {
++        // use pthread functionsm, instead of sched_setcheduler()
++        
+         memset( &param, 0, sizeof(param) );
+-        param.sched_priority = priority -1;
+-        // hardcode to SCHED_FIFO for wineserver.
+-        wine_rt_policy = SCHED_FIFO;
++        param.sched_priority = priority -1;
++    
++        pthread_attr_init( &pthread_attr );
++        pthread_attr_setschedpolicy (&pthread_attr, srv_rt_policy);
++        pthread_attr_setschedparam (&pthread_attr, &param);
++        pthread_attr_setinheritsched (&pthread_attr, PTHREAD_EXPLICIT_SCHED);
++        pthread_attr_setscope( &pthread_attr, PTHREAD_SCOPE_SYSTEM ); 
+         
+-        if (sched_setscheduler( 0, wine_rt_policy | SCHED_RESET_ON_FORK, &param ) == -1 &&
+-            sched_setscheduler( 0, wine_rt_policy, &param ) == -1)
+-        {
+-            fprintf( stderr, "wineserver: failed to change priority to SCHED_FIFO/%d\n",
+-                     param.sched_priority );
+-            /* do not bother to check the rest */
+-            return;
+-        }
+-
+-        if (debug_level) fprintf( stderr, "wineserver: changed priority to SCHED_FIFO/%d\n",
+-                                  param.sched_priority );
+-    }
++        pthread_setschedparam (pthread_self(), srv_rt_policy, &param);
++    }    
+ 
+     /* determine base priority which will be used for all threads */
+     if ((priority = get_priority( "WINE_RT_PRIO", min, max )) != -1)
