@@ -1,0 +1,656 @@
+From b5d3759fc5852f083632792d6213f54151a6467a Mon Sep 17 00:00:00 2001
+From: Kevin Puetz <PuetzKevinA@JohnDeere.com>
+Date: Wed, 31 Aug 2022 09:53:17 -0500
+Subject: [PATCH] winecrt0: Remove free_delay_imports.
+
+MSVC's delayimp.lib does not actually free delayload dependencies.
+winecrt0's attempt to do so from ELF __attribute__((destructor))
+is unnecessary and potentially harmful:
+
+- When triggered naturally via LdrUnloadDll, this leads to recursive calls
+  to FreeLibrary, violating free_lib_count and missing DLL_PROCESS_DETACH
+- when triggered by glibc's _dl_fini (at process exit), it leads to
+  use-after-free of the TEB (GetCurrentThreadID after the main thread is no longer Win32)
+  via  FreeLibrary -> LdrLdrUnloadDll -> RtlEnterCriticalSection( &loader_section )
+- double-free of the library itself, since the DLL_PROCESS_DETACH has
+  already been handled by LdrShutdownProcess
+- Race against wineserver sending a SIGKILL from process_killed,
+  since all Win32 threads of the process have exited
+
+Wine-Bug: https://bugs.winehq.org/show_bug.cgi?id=53032
+---
+ dlls/winecrt0/delay_load.c | 10 ----------
+ 1 file changed, 10 deletions(-)
+
+diff --git a/dlls/winecrt0/delay_load.c b/dlls/winecrt0/delay_load.c
+index 8f28c94d1d5..4ba840479d8 100644
+--- a/dlls/winecrt0/delay_load.c
++++ b/dlls/winecrt0/delay_load.c
+@@ -69,14 +69,4 @@ FARPROC WINAPI DECLSPEC_HIDDEN __wine_spec_delay_load( unsigned int id )
+     return proc;
+ }
+ 
+-#if defined(__GNUC__) && !defined(__APPLE__)  /* we can't support destructors properly on Mac OS */
+-static void free_delay_imports(void) __attribute__((destructor));
+-static void free_delay_imports(void)
+-{
+-    struct ImgDelayDescr *descr;
+-    for (descr = __wine_spec_delay_imports; descr->szName; descr++)
+-        if (*descr->phmod) FreeLibrary( *descr->phmod );
+-}
+-#endif
+-
+ #endif /* __WINE_PE_BUILD */
+-- 
+GitLab
+
+From 7527869fe868834ede7601aa40f11d28cb809f06 Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Mon, 11 Jul 2022 17:54:36 -0500
+Subject: [PATCH] ntdll: Preserve rbx register when calling DLL entry point on
+ x64.
+
+---
+ dlls/ntdll/loader.c | 29 ++++++++++++++++++++++++++---
+ 1 file changed, 26 insertions(+), 3 deletions(-)
+
+diff --git a/dlls/ntdll/loader.c b/dlls/ntdll/loader.c
+index 20a96664825..043bce67ea9 100644
+--- a/dlls/ntdll/loader.c
++++ b/dlls/ntdll/loader.c
+@@ -264,7 +264,7 @@ void WINAPI RtlGetUnloadEventTraceEx(ULONG **size, ULONG **count, void **trace)
+  * that only modifying esi leads to a crash, so use this one to backup
+  * ebp while running the dll entry proc.
+  */
+-#ifdef __i386__
++#if defined(__i386__)
+ extern BOOL call_dll_entry_point( DLLENTRYPROC proc, void *module, UINT reason, void *reserved );
+ __ASM_GLOBAL_FUNC(call_dll_entry_point,
+                   "pushl %ebp\n\t"
+@@ -298,13 +298,36 @@ __ASM_GLOBAL_FUNC(call_dll_entry_point,
+                   __ASM_CFI(".cfi_def_cfa %esp,4\n\t")
+                   __ASM_CFI(".cfi_same_value %ebp\n\t")
+                   "ret" )
+-#else /* __i386__ */
++#elif defined(__x86_64__)
++extern BOOL CDECL call_dll_entry_point( DLLENTRYPROC proc, void *module, UINT reason, void *reserved );
++/* Some apps modify rbx in TLS entry point. */
++__ASM_GLOBAL_FUNC(call_dll_entry_point,
++                  "pushq %rbx\n\t"
++                  __ASM_SEH(".seh_pushreg %rbx\n\t")
++                  __ASM_CFI(".cfi_adjust_cfa_offset 8\n\t")
++                  __ASM_CFI(".cfi_rel_offset %rbx,0\n\t")
++                  "subq $48,%rsp\n\t"
++                  __ASM_SEH(".seh_stackalloc 48\n\t")
++                  __ASM_SEH(".seh_endprologue\n\t")
++                  __ASM_CFI(".cfi_adjust_cfa_offset 48\n\t")
++                  "mov %rcx,%r10\n\t"
++                  "mov %rdx,%rcx\n\t"
++                  "mov %r8d,%edx\n\t"
++                  "mov %r9,%r8\n\t"
++                  "call *%r10\n\t"
++                  "addq $48,%rsp\n\t"
++                  __ASM_CFI(".cfi_adjust_cfa_offset -48\n\t")
++                  "popq %rbx\n\t"
++                   __ASM_CFI(".cfi_adjust_cfa_offset -8\n\t")
++                   __ASM_CFI(".cfi_same_value %rbx\n\t")
++                  "ret" )
++#else
+ static inline BOOL call_dll_entry_point( DLLENTRYPROC proc, void *module,
+                                          UINT reason, void *reserved )
+ {
+     return proc( module, reason, reserved );
+ }
+-#endif /* __i386__ */
++#endif
+ 
+ 
+ #if defined(__i386__) || defined(__x86_64__) || defined(__arm__) || defined(__aarch64__)
+-- 
+GitLab
+
+From 15320277f8171e1a72a69ca2df869014f9d86fe6 Mon Sep 17 00:00:00 2001
+From: Zebediah Figura <zfigura@codeweavers.com>
+Date: Sun, 3 Jul 2022 20:20:21 -0500
+Subject: [PATCH 1/4] ntdll: Fix the calling convention for runtime 64-bit
+ shift functions.
+
+Based on a patch by Zhao Yi.
+---
+ dlls/ntdll/large_int.c              | 74 ++++++++++++++---------------
+ dlls/ntdll/ntdll.spec               |  6 +--
+ dlls/ntoskrnl.exe/ntoskrnl.exe.spec |  6 +--
+ 3 files changed, 42 insertions(+), 44 deletions(-)
+
+diff --git a/dlls/ntdll/large_int.c b/dlls/ntdll/large_int.c
+index b38074158c8..15716b132a2 100644
+--- a/dlls/ntdll/large_int.c
++++ b/dlls/ntdll/large_int.c
+@@ -809,40 +809,55 @@ ULONGLONG WINAPI _aulldiv( ULONGLONG a, ULONGLONG b )
+     return udivmod(a, b, NULL);
+ }
+ 
++
++LONGLONG __stdcall __regs__allshl( LONGLONG a, unsigned char b )
++{
++    return a << b;
++}
++
+ /******************************************************************************
+  *        _allshl   (NTDLL.@)
+- *
+- * Shift a 64 bit integer to the left.
+- *
+- * PARAMS
+- *  a [I] Initial number.
+- *  b [I] Number to shift a by to the left.
+- *
+- * RETURNS
+- *  The left-shifted value.
+  */
+-LONGLONG WINAPI _allshl( LONGLONG a, LONG b )
++__ASM_GLOBAL_FUNC( _allshl,
++                   "xchgl (%esp),%ecx\n\t"
++                   "pushl %edx\n\t"
++                   "pushl %eax\n\t"
++                   "pushl %ecx\n\t"
++                   "jmp " __ASM_STDCALL("__regs__allshl", 12) )
++
++
++LONGLONG __stdcall __regs__allshr( LONGLONG a, unsigned char b )
+ {
+-    return a << b;
++    return a >> b;
+ }
+ 
+ /******************************************************************************
+  *        _allshr   (NTDLL.@)
+- *
+- * Shift a 64 bit integer to the right.
+- *
+- * PARAMS
+- *  a [I] Initial number.
+- *  b [I] Number to shift a by to the right.
+- *
+- * RETURNS
+- *  The right-shifted value.
+  */
+-LONGLONG WINAPI _allshr( LONGLONG a, LONG b )
++__ASM_GLOBAL_FUNC( _allshr,
++                   "xchgl (%esp),%ecx\n\t"
++                   "pushl %edx\n\t"
++                   "pushl %eax\n\t"
++                   "pushl %ecx\n\t"
++                   "jmp " __ASM_STDCALL("__regs__allshr", 12) )
++
++
++ULONGLONG __stdcall __regs__aullshr( ULONGLONG a, unsigned char b )
+ {
+     return a >> b;
+ }
+ 
++/******************************************************************************
++ *        _allshr   (NTDLL.@)
++ */
++__ASM_GLOBAL_FUNC( _aullshr,
++                   "xchgl (%esp),%ecx\n\t"
++                   "pushl %edx\n\t"
++                   "pushl %eax\n\t"
++                   "pushl %ecx\n\t"
++                   "jmp " __ASM_STDCALL("__regs__aullshr", 12) )
++
++
+ /******************************************************************************
+  *        _alldvrm   (NTDLL.@)
+  *
+@@ -899,23 +914,6 @@ ULONGLONG WINAPI _aullrem( ULONGLONG a, ULONGLONG b )
+     return r;
+ }
+ 
+-/******************************************************************************
+- *        _aullshr   (NTDLL.@)
+- *
+- * Shift a 64 bit unsigned integer to the right.
+- *
+- * PARAMS
+- *  a [I] Initial number.
+- *  b [I] Number to shift a by to the right.
+- *
+- * RETURNS
+- *  The right-shifted value.
+- */
+-ULONGLONG WINAPI _aullshr( ULONGLONG a, LONG b )
+-{
+-    return a >> b;
+-}
+-
+ /******************************************************************************
+  *        _aulldvrm   (NTDLL.@)
+  *
+diff --git a/dlls/ntdll/ntdll.spec b/dlls/ntdll/ntdll.spec
+index 1862358e593..89b05728951 100644
+--- a/dlls/ntdll/ntdll.spec
++++ b/dlls/ntdll/ntdll.spec
+@@ -1492,13 +1492,13 @@
+ @ cdecl -norelay -arch=i386 -ret64 _allmul(int64 int64)
+ @ cdecl -arch=i386 -norelay _alloca_probe()
+ @ cdecl -norelay -arch=i386 -ret64 _allrem(int64 int64)
+-@ stdcall -arch=i386 -ret64 _allshl(int64 long)
+-@ stdcall -arch=i386 -ret64 _allshr(int64 long)
++@ cdecl -norelay -arch=i386 -ret64 _allshl(int64 long)
++@ cdecl -norelay -arch=i386 -ret64 _allshr(int64 long)
+ @ cdecl -ret64 _atoi64(str)
+ @ cdecl -norelay -arch=i386 -ret64 _aulldiv(int64 int64)
+ @ cdecl -arch=i386 -norelay _aulldvrm(int64 int64)
+ @ cdecl -norelay -arch=i386 -ret64 _aullrem(int64 int64)
+-@ stdcall -arch=i386 -ret64 _aullshr(int64 long)
++@ cdecl -norelay -arch=i386 -ret64 _aullshr(int64 long)
+ @ cdecl -arch=i386 -norelay _chkstk()
+ @ stub _fltused
+ @ cdecl -arch=i386 -ret64 _ftol()
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl.exe.spec b/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
+index 8b0ee1c4b51..460d7d0459f 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
++++ b/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
+@@ -1540,12 +1540,12 @@
+ @ cdecl -arch=i386 -norelay -ret64 _allmul(int64 int64)
+ @ cdecl -arch=i386 -norelay _alloca_probe()
+ @ cdecl -arch=i386 -norelay -ret64 _allrem(int64 int64)
+-@ stdcall -arch=i386 -ret64 _allshl(int64 long)
+-@ stdcall -arch=i386 -ret64 _allshr(int64 long)
++@ cdecl -arch=i386 -norelay -ret64 _allshl(int64 long)
++@ cdecl -arch=i386 -norelay -ret64 _allshr(int64 long)
+ @ cdecl -arch=i386 -norelay -ret64 _aulldiv(int64 int64)
+ @ cdecl -arch=i386 -norelay _aulldvrm(int64 int64)
+ @ cdecl -arch=i386 -norelay -ret64 _aullrem(int64 int64)
+-@ stdcall -arch=i386 -ret64 _aullshr(int64 long)
++@ cdecl -arch=i386 -norelay -ret64 _aullshr(int64 long)
+ @ cdecl -arch=i386 -norelay _chkstk()
+ @ cdecl -arch=i386 _except_handler2(ptr ptr ptr ptr)
+ @ cdecl -arch=i386 _except_handler3(ptr ptr ptr ptr)
+-- 
+GitLab
+
+
+From 42636254f4edd5cbb0f7d0f5dcc90d15afd86da3 Mon Sep 17 00:00:00 2001
+From: Zebediah Figura <zfigura@codeweavers.com>
+Date: Sun, 3 Jul 2022 20:25:59 -0500
+Subject: [PATCH 2/4] ntdll/tests: Add tests for runtime 64-bit shift
+ functions.
+
+---
+ dlls/ntdll/tests/large_int.c | 79 ++++++++++++++++++++++++++++++++++++
+ 1 file changed, 79 insertions(+)
+
+diff --git a/dlls/ntdll/tests/large_int.c b/dlls/ntdll/tests/large_int.c
+index 9635cac24ad..d2c7d386f16 100644
+--- a/dlls/ntdll/tests/large_int.c
++++ b/dlls/ntdll/tests/large_int.c
+@@ -39,6 +39,7 @@ static LONGLONG (WINAPI *p_allrem)( LONGLONG a, LONGLONG b );
+ static LONGLONG (WINAPI *p_allmul)( LONGLONG a, LONGLONG b );
+ static ULONGLONG (WINAPI *p_aulldiv)( ULONGLONG a, ULONGLONG b );
+ static ULONGLONG (WINAPI *p_aullrem)( ULONGLONG a, ULONGLONG b );
++static void *p_allshl, *p_allshr, *p_aullshr;
+ 
+ static void InitFunctionPtrs(void)
+ {
+@@ -54,8 +55,11 @@ static void InitFunctionPtrs(void)
+         p_alldiv = (void *)GetProcAddress(hntdll, "_alldiv");
+         p_allrem = (void *)GetProcAddress(hntdll, "_allrem");
+         p_allmul = (void *)GetProcAddress(hntdll, "_allmul");
++        p_allshl = (void *)GetProcAddress(hntdll, "_allshl");
++        p_allshr = (void *)GetProcAddress(hntdll, "_allshr");
+         p_aulldiv = (void *)GetProcAddress(hntdll, "_aulldiv");
+         p_aullrem = (void *)GetProcAddress(hntdll, "_aullrem");
++        p_aullshr = (void *)GetProcAddress(hntdll, "_aullshr");
+     } /* if */
+ }
+ 
+@@ -445,9 +449,31 @@ static void test_RtlLargeIntegerToChar(void)
+ static void test_builtins(void)
+ {
+ #ifdef __i386__
++    void *code_mem;
+     ULONGLONG u;
+     LONGLONG l;
+ 
++    static const BYTE call_shift_code[] =
++    {
++        0x55,                           /* pushl %ebp */
++        0x89, 0xe5,                     /* movl %esp,%ebp */
++        0x31, 0xc0,                     /* xorl %eax,%eax */
++        0x31, 0xd2,                     /* xorl %edx,%edx */
++        0x31, 0xc9,                     /* xorl %ecx,%ecx */
++        0x87, 0x45, 0x0c,               /* xchgl 12(%ebp),%eax */
++        0x87, 0x55, 0x10,               /* xchgl 16(%ebp),%edx */
++        0x87, 0x4d, 0x14,               /* xchgl 20(%ebp),%ecx */
++        0xff, 0x55, 0x08,               /* call *8(%ebp) */
++        0x39, 0xe5,                     /* cmpl %esp,%ebp */
++        0x74, 0x05,                     /* je 1f */
++        0xb8, 0xef, 0xbe, 0xad, 0xde,   /* movl $0xdeadbeef,%eax */
++        0xc9,                           /* leave */
++        0xc3,                           /* ret */
++    };
++    LONGLONG (__cdecl *call_shift_func)(void *func, LONGLONG a, LONG b);
++
++    code_mem = VirtualAlloc(NULL, 0x1000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
++
+     l = p_alldiv(100, 7);
+     ok(l == 14, "_alldiv returned %s\n", wine_dbgstr_longlong(l));
+ 
+@@ -489,6 +515,59 @@ static void test_builtins(void)
+ 
+     l = p_allmul(0x300000001ll, 4);
+     ok(l == 0xc00000004, "_allmul = %s\n", wine_dbgstr_longlong(l));
++
++    memcpy(code_mem, call_shift_code, sizeof(call_shift_code));
++    call_shift_func = code_mem;
++
++    l = call_shift_func(p_allshl, 0x0123456789abcdefll, 12);
++    ok(l == 0x3456789abcdef000ll, "got %#I64x\n", l);
++
++    l = call_shift_func(p_allshl, 0x0123456789abcdefll, 44);
++    ok(l == 0xbcdef00000000000ll, "got %#I64x\n", l);
++
++    l = call_shift_func(p_allshl, 0x0123456789abcdefll, 88);
++    todo_wine ok(!l, "got %#I64x\n", l);
++
++    l = call_shift_func(p_allshl, 0x0123456789abcdefll, 0x88);
++    todo_wine ok(!l, "got %#I64x\n", l);
++
++    l = call_shift_func(p_allshl, 0x0123456789abcdefll, 0x108);
++    ok(l == 0x23456789abcdef00ll, "got %#I64x\n", l);
++
++    l = call_shift_func(p_allshr, 0x0123456789abcdefll, 12);
++    ok(l == 0x0123456789abcll, "got %#I64x\n", l);
++
++    l = call_shift_func(p_allshr, 0x0123456789abcdefll, 44);
++    ok(l == 0x01234ll, "got %#I64x\n", l);
++
++    l = call_shift_func(p_allshr, 0x0123456789abcdefll, 88);
++    todo_wine ok(!l, "got %#I64x\n", l);
++
++    l = call_shift_func(p_allshr, 0x8123456789abcdefll, 12);
++    ok(l == 0xfff8123456789abcll, "got %#I64x\n", l);
++
++    l = call_shift_func(p_allshr, 0x8123456789abcdefll, 44);
++    ok(l == 0xfffffffffff81234ll, "got %#I64x\n", l);
++
++    l = call_shift_func(p_allshr, 0x8123456789abcdefll, 88);
++    todo_wine ok(l == -1ll, "got %#I64x\n", l);
++
++    l = call_shift_func(p_allshr, 0x8123456789abcdefll, 0x108);
++    ok(l == 0xff8123456789abcdll, "got %#I64x\n", l);
++
++    l = call_shift_func(p_aullshr, 0x8123456789abcdefll, 12);
++    ok(l == 0x8123456789abcll, "got %#I64x\n", l);
++
++    l = call_shift_func(p_aullshr, 0x8123456789abcdefll, 44);
++    ok(l == 0x81234ll, "got %#I64x\n", l);
++
++    l = call_shift_func(p_aullshr, 0x8123456789abcdefll, 88);
++    todo_wine ok(!l, "got %#I64x\n", l);
++
++    l = call_shift_func(p_aullshr, 0x8123456789abcdefll, 0x108);
++    ok(l == 0x8123456789abcdll, "got %#I64x\n", l);
++
++    VirtualFree(code_mem, 0, MEM_RELEASE);
+ #endif /* __i386__ */
+ }
+ 
+-- 
+GitLab
+
+
+From 9ef7246243ad5446350130bb57b392d688f678ef Mon Sep 17 00:00:00 2001
+From: Zebediah Figura <zfigura@codeweavers.com>
+Date: Tue, 5 Jul 2022 21:32:01 -0500
+Subject: [PATCH 3/4] ntdll: Avoid depending on compiler support for 64-bit
+ shift functions.
+
+---
+ dlls/ntdll/large_int.c | 45 +++++++++++++++++++++++++++++++++++++++---
+ 1 file changed, 42 insertions(+), 3 deletions(-)
+
+diff --git a/dlls/ntdll/large_int.c b/dlls/ntdll/large_int.c
+index 15716b132a2..038a552545f 100644
+--- a/dlls/ntdll/large_int.c
++++ b/dlls/ntdll/large_int.c
+@@ -812,7 +812,20 @@ ULONGLONG WINAPI _aulldiv( ULONGLONG a, ULONGLONG b )
+ 
+ LONGLONG __stdcall __regs__allshl( LONGLONG a, unsigned char b )
+ {
+-    return a << b;
++    const LARGE_INTEGER x = { .QuadPart = a };
++    LARGE_INTEGER ret;
++
++    if (b >= 32)
++    {
++        ret.HighPart = x.LowPart << (b & 31);
++        ret.LowPart = 0;
++    }
++    else
++    {
++        ret.HighPart = (x.LowPart >> (32 - b)) | (x.HighPart << b);
++        ret.LowPart = x.LowPart << b;
++    }
++    return ret.QuadPart;
+ }
+ 
+ /******************************************************************************
+@@ -828,7 +841,20 @@ __ASM_GLOBAL_FUNC( _allshl,
+ 
+ LONGLONG __stdcall __regs__allshr( LONGLONG a, unsigned char b )
+ {
+-    return a >> b;
++    const LARGE_INTEGER x = { .QuadPart = a };
++    LARGE_INTEGER ret;
++
++    if (b >= 32)
++    {
++        ret.HighPart = x.HighPart >> 31;
++        ret.LowPart = x.HighPart >> (b & 31);
++    }
++    else
++    {
++        ret.HighPart = x.HighPart >> b;
++        ret.LowPart = (x.HighPart << (32 - b)) | (x.LowPart >> b);
++    }
++    return ret.QuadPart;
+ }
+ 
+ /******************************************************************************
+@@ -844,7 +870,20 @@ __ASM_GLOBAL_FUNC( _allshr,
+ 
+ ULONGLONG __stdcall __regs__aullshr( ULONGLONG a, unsigned char b )
+ {
+-    return a >> b;
++    const ULARGE_INTEGER x = { .QuadPart = a };
++    ULARGE_INTEGER ret;
++
++    if (b >= 32)
++    {
++        ret.HighPart = 0;
++        ret.LowPart = x.HighPart >> (b & 31);
++    }
++    else
++    {
++        ret.HighPart = x.HighPart >> b;
++        ret.LowPart = (x.HighPart << (32 - b)) | (x.LowPart >> b);
++    }
++    return ret.QuadPart;
+ }
+ 
+ /******************************************************************************
+-- 
+GitLab
+
+
+From bc270a54323c04647f40a2820c10f8eec2e49d15 Mon Sep 17 00:00:00 2001
+From: Zebediah Figura <zfigura@codeweavers.com>
+Date: Sun, 3 Jul 2022 20:27:12 -0500
+Subject: [PATCH 4/4] ntdll: Correctly handle shift greater than the type width
+ in 64-bit shift functions.
+
+Based on a patch by Zhao Yi.
+---
+ dlls/ntdll/large_int.c       | 15 ++++++++++++---
+ dlls/ntdll/tests/large_int.c | 10 +++++-----
+ 2 files changed, 17 insertions(+), 8 deletions(-)
+
+diff --git a/dlls/ntdll/large_int.c b/dlls/ntdll/large_int.c
+index 038a552545f..0973888d654 100644
+--- a/dlls/ntdll/large_int.c
++++ b/dlls/ntdll/large_int.c
+@@ -817,7 +817,10 @@ LONGLONG __stdcall __regs__allshl( LONGLONG a, unsigned char b )
+ 
+     if (b >= 32)
+     {
+-        ret.HighPart = x.LowPart << (b & 31);
++        if (b >= 64)
++            ret.HighPart = 0;
++        else
++            ret.HighPart = x.LowPart << (b & 31);
+         ret.LowPart = 0;
+     }
+     else
+@@ -847,7 +850,10 @@ LONGLONG __stdcall __regs__allshr( LONGLONG a, unsigned char b )
+     if (b >= 32)
+     {
+         ret.HighPart = x.HighPart >> 31;
+-        ret.LowPart = x.HighPart >> (b & 31);
++        if (b >= 64)
++            ret.LowPart = x.HighPart >> 31;
++        else
++            ret.LowPart = x.HighPart >> (b & 31);
+     }
+     else
+     {
+@@ -876,7 +882,10 @@ ULONGLONG __stdcall __regs__aullshr( ULONGLONG a, unsigned char b )
+     if (b >= 32)
+     {
+         ret.HighPart = 0;
+-        ret.LowPart = x.HighPart >> (b & 31);
++        if (b >= 64)
++            ret.LowPart = 0;
++        else
++            ret.LowPart = x.HighPart >> (b & 31);
+     }
+     else
+     {
+diff --git a/dlls/ntdll/tests/large_int.c b/dlls/ntdll/tests/large_int.c
+index d2c7d386f16..29b5795b31d 100644
+--- a/dlls/ntdll/tests/large_int.c
++++ b/dlls/ntdll/tests/large_int.c
+@@ -526,10 +526,10 @@ static void test_builtins(void)
+     ok(l == 0xbcdef00000000000ll, "got %#I64x\n", l);
+ 
+     l = call_shift_func(p_allshl, 0x0123456789abcdefll, 88);
+-    todo_wine ok(!l, "got %#I64x\n", l);
++    ok(!l, "got %#I64x\n", l);
+ 
+     l = call_shift_func(p_allshl, 0x0123456789abcdefll, 0x88);
+-    todo_wine ok(!l, "got %#I64x\n", l);
++    ok(!l, "got %#I64x\n", l);
+ 
+     l = call_shift_func(p_allshl, 0x0123456789abcdefll, 0x108);
+     ok(l == 0x23456789abcdef00ll, "got %#I64x\n", l);
+@@ -541,7 +541,7 @@ static void test_builtins(void)
+     ok(l == 0x01234ll, "got %#I64x\n", l);
+ 
+     l = call_shift_func(p_allshr, 0x0123456789abcdefll, 88);
+-    todo_wine ok(!l, "got %#I64x\n", l);
++    ok(!l, "got %#I64x\n", l);
+ 
+     l = call_shift_func(p_allshr, 0x8123456789abcdefll, 12);
+     ok(l == 0xfff8123456789abcll, "got %#I64x\n", l);
+@@ -550,7 +550,7 @@ static void test_builtins(void)
+     ok(l == 0xfffffffffff81234ll, "got %#I64x\n", l);
+ 
+     l = call_shift_func(p_allshr, 0x8123456789abcdefll, 88);
+-    todo_wine ok(l == -1ll, "got %#I64x\n", l);
++    ok(l == -1ll, "got %#I64x\n", l);
+ 
+     l = call_shift_func(p_allshr, 0x8123456789abcdefll, 0x108);
+     ok(l == 0xff8123456789abcdll, "got %#I64x\n", l);
+@@ -562,7 +562,7 @@ static void test_builtins(void)
+     ok(l == 0x81234ll, "got %#I64x\n", l);
+ 
+     l = call_shift_func(p_aullshr, 0x8123456789abcdefll, 88);
+-    todo_wine ok(!l, "got %#I64x\n", l);
++    ok(!l, "got %#I64x\n", l);
+ 
+     l = call_shift_func(p_aullshr, 0x8123456789abcdefll, 0x108);
+     ok(l == 0x8123456789abcdll, "got %#I64x\n", l);
+-- 
+GitLab
+
+From 173ffe5011d91e945d4e9ee8ed9619d7982a957c Mon Sep 17 00:00:00 2001
+From: Fabian Maurer <dark.shadow4@web.de>
+Date: Mon, 16 May 2022 18:39:35 +0200
+Subject: [PATCH] ntdll: Prevent double free (Coverity).
+
+The fd gets overwritten, therefore we need to close it before doing so.
+
+Signed-off-by: Fabian Maurer <dark.shadow4@web.de>
+---
+ dlls/ntdll/unix/file.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/dlls/ntdll/unix/file.c b/dlls/ntdll/unix/file.c
+index e203ff6c41d..c7ba12a5c13 100644
+--- a/dlls/ntdll/unix/file.c
++++ b/dlls/ntdll/unix/file.c
+@@ -4617,7 +4617,6 @@ NTSTATUS WINAPI NtQueryInformationFile(
+                         int res = recv( fd, tmpbuf, size, MSG_PEEK );
+                         info->MessagesAvailable = (res > 0);
+                         info->NextMessageSize = (res >= 0) ? res : MAILSLOT_NO_MESSAGE;
+-                        if (needs_close) close( fd );
+                     }
+                     free( tmpbuf );
+                 }
+-- 
+GitLab
+
+From c069cc6645c7363400f960e195aeddcb1f0ff2c4 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Mon, 11 Oct 2021 10:58:33 +0200
+Subject: [PATCH] ntdll: Use RTLD_NOLOAD to find already mapped modules.
+
+This makes it possible to detect modules that weren't unmapped from
+dlclose, and that we should not fixup again.
+
+Wine-Bug: https://bugs.winehq.org/show_bug.cgi?id=49640
+---
+ dlls/ntdll/unix/loader.c | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
+index 3bb7f056b2a..cd2019be582 100644
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -1274,9 +1274,11 @@ static NTSTATUS dlopen_dll( const char *so_name, UNICODE_STRING *nt_name, void *
+ {
+     void *module, *handle;
+     const IMAGE_NT_HEADERS *nt;
++    BOOL mapped = FALSE;
+ 
+     callback_module = (void *)1;
+-    handle = dlopen( so_name, RTLD_NOW );
++    if ((handle = dlopen( so_name, RTLD_NOW | RTLD_NOLOAD ))) mapped = TRUE;
++    else handle = dlopen( so_name, RTLD_NOW );
+     if (!handle)
+     {
+         WARN( "failed to load .so lib %s: %s\n", debugstr_a(so_name), dlerror() );
+@@ -1293,7 +1295,7 @@ static NTSTATUS dlopen_dll( const char *so_name, UNICODE_STRING *nt_name, void *
+     {
+         module = (HMODULE)((nt->OptionalHeader.ImageBase + 0xffff) & ~0xffff);
+         if (get_builtin_so_handle( module )) goto already_loaded;
+-        if (map_so_dll( nt, module ))
++        if (!mapped && map_so_dll( nt, module ))
+         {
+             dlclose( handle );
+             return STATUS_NO_MEMORY;
+-- 
+GitLab
+
