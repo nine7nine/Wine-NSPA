@@ -1,3 +1,253 @@
+From 942eb6008d81673990ede01a1dd64e1f1958dc84 Mon Sep 17 00:00:00 2001
+From: Alex Henrie <alexhenrie24@gmail.com>
+Date: Sun, 29 May 2022 15:39:29 -0600
+Subject: [PATCH] ntoskrnl: Add ExNotifyCallback stub.
+
+Wine-Bug: https://bugs.winehq.org/show_bug.cgi?id=53051
+Signed-off-by: Alex Henrie <alexhenrie24@gmail.com>
+---
+ dlls/ntoskrnl.exe/ntoskrnl.c        | 8 ++++++++
+ dlls/ntoskrnl.exe/ntoskrnl.exe.spec | 2 +-
+ 2 files changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl.c b/dlls/ntoskrnl.exe/ntoskrnl.c
+index f8e1c24bb49..0994af447f9 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl.c
++++ b/dlls/ntoskrnl.exe/ntoskrnl.c
+@@ -2250,6 +2250,14 @@ void WINAPI ExUnregisterCallback(void *callback_registration)
+     FIXME("callback_registration %p stub.\n", callback_registration);
+ }
+ 
++/***********************************************************************
++ *           ExNotifyCallback   (NTOSKRNL.EXE.@)
++ */
++void WINAPI ExNotifyCallback(void *obj, void *arg1, void *arg2)
++{
++    FIXME("(%p, %p, %p): stub\n", obj, arg1, arg2);
++}
++
+ /***********************************************************************
+  *           ExFreePool   (NTOSKRNL.EXE.@)
+  */
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl.exe.spec b/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
+index d445c5a5557..4df6b1ae472 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
++++ b/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
+@@ -175,7 +175,7 @@
+ @ stdcall ExIsResourceAcquiredExclusiveLite(ptr)
+ @ stdcall ExIsResourceAcquiredSharedLite(ptr)
+ @ stdcall ExLocalTimeToSystemTime(ptr ptr) RtlLocalTimeToSystemTime
+-@ stub ExNotifyCallback
++@ stdcall ExNotifyCallback(ptr ptr ptr)
+ @ stub ExQueryPoolBlockSize
+ @ stub ExQueueWorkItem
+ @ stub ExRaiseAccessViolation
+-- 
+GitLab
+
+From 9fbdf2b43435caf62742d997bf8b3fb8752f606c Mon Sep 17 00:00:00 2001
+From: Zebediah Figura <zfigura@codeweavers.com>
+Date: Sat, 9 Jul 2022 15:46:54 -0500
+Subject: [PATCH 4/4] ntoskrnl: Enumerate child devices on a separate thread.
+
+---
+ dlls/ntoskrnl.exe/ntoskrnl_private.h |  1 +
+ dlls/ntoskrnl.exe/pnp.c              | 40 +++++++++++++++++++++++++++-
+ dlls/ntoskrnl.exe/tests/driver_pnp.c | 10 +++----
+ 3 files changed, 45 insertions(+), 6 deletions(-)
+
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl_private.h b/dlls/ntoskrnl.exe/ntoskrnl_private.h
+index c736a9805a0..ef1fa99057c 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl_private.h
++++ b/dlls/ntoskrnl.exe/ntoskrnl_private.h
+@@ -22,6 +22,7 @@
+ #define __WINE_NTOSKRNL_PRIVATE_H
+ 
+ #include <stdarg.h>
++#include <stdbool.h>
+ #include "ntstatus.h"
+ #define WIN32_NO_STATUS
+ #include "windef.h"
+diff --git a/dlls/ntoskrnl.exe/pnp.c b/dlls/ntoskrnl.exe/pnp.c
+index 5d9ca2dca38..71c03586897 100644
+--- a/dlls/ntoskrnl.exe/pnp.c
++++ b/dlls/ntoskrnl.exe/pnp.c
+@@ -38,6 +38,12 @@ DEFINE_GUID(GUID_NULL,0,0,0,0,0,0,0,0,0,0,0);
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(plugplay);
+ 
++DECLARE_CRITICAL_SECTION(invalidated_devices_cs);
++static CONDITION_VARIABLE invalidated_devices_cv = CONDITION_VARIABLE_INIT;
++
++static DEVICE_OBJECT **invalidated_devices;
++static size_t invalidated_devices_count;
++
+ static inline const char *debugstr_propkey( const DEVPROPKEY *id )
+ {
+     if (!id) return "(null)";
+@@ -468,8 +474,14 @@ void WINAPI IoInvalidateDeviceRelations( DEVICE_OBJECT *device_object, DEVICE_RE
+     switch (type)
+     {
+         case BusRelations:
+-            handle_bus_relations( device_object );
++            EnterCriticalSection( &invalidated_devices_cs );
++            invalidated_devices = realloc( invalidated_devices,
++                    (invalidated_devices_count + 1) * sizeof(*invalidated_devices) );
++            invalidated_devices[invalidated_devices_count++] = device_object;
++            LeaveCriticalSection( &invalidated_devices_cs );
++            WakeConditionVariable( &invalidated_devices_cv );
+             break;
++
+         default:
+             FIXME("Unhandled relation %#x.\n", type);
+             break;
+@@ -1086,6 +1098,30 @@ static NTSTATUS WINAPI pnp_manager_driver_entry( DRIVER_OBJECT *driver, UNICODE_
+     return STATUS_SUCCESS;
+ }
+ 
++static DWORD CALLBACK device_enum_thread_proc(void *arg)
++{
++    for (;;)
++    {
++        DEVICE_OBJECT *device;
++
++        EnterCriticalSection( &invalidated_devices_cs );
++
++        while (!invalidated_devices_count)
++            SleepConditionVariableCS( &invalidated_devices_cv, &invalidated_devices_cs, INFINITE );
++
++        device = invalidated_devices[--invalidated_devices_count];
++
++        /* Don't hold the CS while enumerating the device. Tests show that
++         * calling IoInvalidateDeviceRelations() from another thread shouldn't
++         * block, even if this thread is blocked in an IRP handler. */
++        LeaveCriticalSection( &invalidated_devices_cs );
++
++        handle_bus_relations( device );
++    }
++
++    return 0;
++}
++
+ void pnp_manager_start(void)
+ {
+     static const WCHAR driver_nameW[] = {'\\','D','r','i','v','e','r','\\','P','n','p','M','a','n','a','g','e','r',0};
+@@ -1109,6 +1145,8 @@ void pnp_manager_start(void)
+     RpcStringFreeW( &binding_str );
+     if (err)
+         ERR("RpcBindingFromStringBinding() failed, error %#lx\n", err);
++
++    CreateThread( NULL, 0, device_enum_thread_proc, NULL, 0, NULL );
+ }
+ 
+ void pnp_manager_stop_driver( struct wine_driver *driver )
+
+From bafb181c42a88e9cb847d589799d62ff0261a621 Mon Sep 17 00:00:00 2001
+From: Etaash Mathamsetty <etaash.mathamsetty@gmail.com>
+Date: Sun, 21 Aug 2022 14:33:54 -0400
+Subject: [PATCH] ntoskrnl.exe: Implement KeAreAllApcsDisabled.
+
+Required for vgk.sys (vanguard anti-cheat).
+---
+ dlls/ntoskrnl.exe/ntoskrnl.c        | 8 ++++++++
+ dlls/ntoskrnl.exe/ntoskrnl.exe.spec | 1 +
+ 2 files changed, 9 insertions(+)
+
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl.c b/dlls/ntoskrnl.exe/ntoskrnl.c
+index 085d0eebaef..eff23a5b576 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl.c
++++ b/dlls/ntoskrnl.exe/ntoskrnl.c
+@@ -3533,6 +3533,14 @@ BOOLEAN WINAPI KeAreApcsDisabled(void)
+     return !!critical_region;
+ }
+ 
++/***********************************************************************
++ *           KeAreAllApcsDisabled    (NTOSKRNL.@)
++ */
++BOOLEAN WINAPI KeAreAllApcsDisabled(void)
++{
++    return KeAreApcsDisabled();
++}
++
+ /***********************************************************************
+  *           KeBugCheck    (NTOSKRNL.@)
+  */
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl.exe.spec b/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
+index 460d7d0459f..d8e082f032f 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
++++ b/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
+@@ -532,6 +532,7 @@
+ @ stdcall -arch=!i386 KeAcquireSpinLockRaiseToDpc(ptr)
+ @ stub KeAddSystemServiceTable
+ @ stdcall KeAlertThread(ptr long)
++@ stdcall KeAreAllApcsDisabled()
+ @ stdcall KeAreApcsDisabled()
+ @ stub KeAttachProcess
+ @ stdcall KeBugCheck(long)
+-- 
+GitLab
+
+From e934e746bee9c16ec484abef300ebc073828e494 Mon Sep 17 00:00:00 2001
+From: Etaash Mathamsetty <etaash.mathamsetty@gmail.com>
+Date: Sun, 21 Aug 2022 14:59:35 -0400
+Subject: [PATCH] ntoskrnl: Implement IoCreateFileEx.
+
+---
+ dlls/ntoskrnl.exe/ntoskrnl.c        | 18 ++++++++++++++++--
+ dlls/ntoskrnl.exe/ntoskrnl.exe.spec |  1 +
+ 2 files changed, 17 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl.c b/dlls/ntoskrnl.exe/ntoskrnl.c
+index eff23a5b576..031e9900544 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl.c
++++ b/dlls/ntoskrnl.exe/ntoskrnl.c
+@@ -4013,6 +4013,19 @@ NTSTATUS WINAPI ZwUnloadDriver( const UNICODE_STRING *service_name )
+     return STATUS_SUCCESS;
+ }
+ 
++/***********************************************************************
++ *           IoCreateFileEx (NTOSKRNL.EXE.@)
++ */
++NTSTATUS WINAPI IoCreateFileEx(HANDLE *handle, ACCESS_MASK access, OBJECT_ATTRIBUTES *attr,
++                              IO_STATUS_BLOCK *io, LARGE_INTEGER *alloc_size, ULONG attributes, ULONG sharing,
++                              ULONG disposition, ULONG create_options, VOID *ea_buffer, ULONG ea_length,
++                              CREATE_FILE_TYPE file_type, VOID *parameters, ULONG options, void *driverctx)
++{
++    FIXME(": semi-stub\n");
++    return NtCreateFile(handle, access, attr, io, alloc_size, attributes, sharing, disposition,
++                        create_options, ea_buffer, ea_length);
++}
++
+ /***********************************************************************
+  *           IoCreateFile (NTOSKRNL.EXE.@)
+  */
+@@ -4021,8 +4034,9 @@ NTSTATUS WINAPI IoCreateFile(HANDLE *handle, ACCESS_MASK access, OBJECT_ATTRIBUT
+                               ULONG disposition, ULONG create_options, VOID *ea_buffer, ULONG ea_length,
+                               CREATE_FILE_TYPE file_type, VOID *parameters, ULONG options )
+ {
+-    FIXME(": stub\n");
+-    return STATUS_NOT_IMPLEMENTED;
++    FIXME(": semi-stub\n");
++    return IoCreateFileEx(handle, access, attr, io, alloc_size, attributes, sharing, disposition,
++                          create_options, ea_buffer, ea_length, file_type, parameters, options, NULL);
+ }
+ 
+ /***********************************************************************
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl.exe.spec b/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
+index d8e082f032f..e3898b06f89 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
++++ b/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
+@@ -357,6 +357,7 @@
+ @ stdcall IoCreateDeviceSecure(ptr long ptr long long long ptr ptr ptr)
+ @ stub IoCreateDisk
+ @ stdcall IoCreateDriver(ptr ptr)
++@ stdcall IoCreateFileEx(ptr long ptr ptr ptr long long long long ptr long long ptr long ptr)
+ @ stdcall IoCreateFile(ptr long ptr ptr ptr long long long long ptr long long ptr long)
+ @ stub IoCreateFileSpecifyDeviceObjectHint
+ @ stdcall IoCreateNotificationEvent(ptr ptr)
+-- 
+GitLab
+
 From dce43869b794bb4817a6866a6e0d1a280b73462f Mon Sep 17 00:00:00 2001
 From: Etaash Mathamsetty <etaash.mathamsetty@gmail.com>
 Date: Sun, 11 Sep 2022 21:18:15 -0400
@@ -308,7 +558,6 @@ index 0aad83ade8c..ced5b71aa75 100644
 -- 
 GitLab
 
-
 From 54a158eaab6d68873c76c63219ac805316a0b71a Mon Sep 17 00:00:00 2001
 From: Etaash Mathamsetty <etaash.mathamsetty@gmail.com>
 Date: Tue, 13 Sep 2022 17:47:55 -0400
@@ -473,10 +722,11 @@ diff --git a/dlls/ntoskrnl.exe/ntoskrnl.exe.spec b/dlls/ntoskrnl.exe/ntoskrnl.ex
 index a1a42d52fd1..790e11bf3fb 100644
 --- a/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
 +++ b/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
-@@ -597,12 +597,17 @@
+@@ -598,13 +599,17 @@
+ @ stub KeProfileInterruptWithSource
  @ stub KePulseEvent
  @ stdcall KeQueryActiveProcessors()
- @ stdcall KeQueryActiveProcessorCountEx(long)
+-@ stdcall KeQueryActiveProcessorCountEx(long)
 +@ stdcall KeQueryActiveProcessorCount(ptr)
 +@ stdcall KeQueryActiveGroupCount() GetActiveProcessorGroupCount
  @ stdcall KeQueryInterruptTime()
@@ -503,6 +753,189 @@ index 3cfc4649c7d..a4d69e85187 100644
  WINBASEAPI DWORD       WINAPI GetModuleFileNameA(HMODULE,LPSTR,DWORD);
  WINBASEAPI DWORD       WINAPI GetModuleFileNameW(HMODULE,LPWSTR,DWORD);
  #define                       GetModuleFileName WINELIB_NAME_AW(GetModuleFileName)
+-- 
+GitLab
+
+From e740eaee08479c71f2d3021fef620a99ea7fd7d4 Mon Sep 17 00:00:00 2001
+From: Etaash Mathamsetty <etaash.mathamsetty@gmail.com>
+Date: Thu, 13 Oct 2022 19:42:22 -0400
+Subject: [PATCH 1/2] ntoskrnl.exe: Implement IoCreateNotificationEvent.
+
+---
+ dlls/ntoskrnl.exe/ntoskrnl.c | 10 ----------
+ dlls/ntoskrnl.exe/sync.c     | 26 ++++++++++++++++++++++++++
+ 2 files changed, 26 insertions(+), 10 deletions(-)
+
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl.c b/dlls/ntoskrnl.exe/ntoskrnl.c
+index 6f5564042a6..2c080eaf9f6 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl.c
++++ b/dlls/ntoskrnl.exe/ntoskrnl.c
+@@ -4075,16 +4075,6 @@ NTSTATUS WINAPI IoCreateFile(HANDLE *handle, ACCESS_MASK access, OBJECT_ATTRIBUT
+                           create_options, ea_buffer, ea_length, file_type, parameters, options, NULL);
+ }
+ 
+-/***********************************************************************
+- *           IoCreateNotificationEvent (NTOSKRNL.EXE.@)
+- */
+-PKEVENT WINAPI IoCreateNotificationEvent(UNICODE_STRING *name, HANDLE *handle)
+-{
+-    FIXME( "stub: %s %p\n", debugstr_us(name), handle );
+-    return NULL;
+-}
+-
+-
+ /**************************************************************************
+  *		__chkstk (NTOSKRNL.@)
+  */
+diff --git a/dlls/ntoskrnl.exe/sync.c b/dlls/ntoskrnl.exe/sync.c
+index b8239b0cd7d..409d5752547 100644
+--- a/dlls/ntoskrnl.exe/sync.c
++++ b/dlls/ntoskrnl.exe/sync.c
+@@ -231,6 +231,32 @@ PKEVENT WINAPI IoCreateSynchronizationEvent( UNICODE_STRING *name, HANDLE *ret_h
+     return event;
+ }
+ 
++/***********************************************************************
++ *           IoCreateNotificationEvent (NTOSKRNL.EXE.@)
++ */
++PKEVENT WINAPI IoCreateNotificationEvent( UNICODE_STRING *name, HANDLE *ret_handle )
++{
++    OBJECT_ATTRIBUTES attr;
++    HANDLE handle;
++    KEVENT *event;
++    NTSTATUS ret;
++
++    TRACE( "(%s %p)\n", debugstr_us(name), ret_handle );
++
++    InitializeObjectAttributes( &attr, name, 0, 0, NULL );
++    ret = NtCreateEvent( &handle, EVENT_ALL_ACCESS, &attr, NotificationEvent, TRUE );
++    if (ret) return NULL;
++
++    if (kernel_object_from_handle( handle, ExEventObjectType, (void**)&event ))
++    {
++        NtClose(handle);
++        return NULL;
++    }
++
++    *ret_handle = handle;
++    return event;
++}
++
+ /***********************************************************************
+  *           KeSetEvent   (NTOSKRNL.EXE.@)
+  */
+-- 
+GitLab
+
+From f58c48b85e4e1379223b1a51df7c4ed483a745db Mon Sep 17 00:00:00 2001
+From: Etaash Mathamsetty <etaash.mathamsetty@gmail.com>
+Date: Thu, 13 Oct 2022 19:44:54 -0400
+Subject: [PATCH 2/2] ntoskrnl.exe: Fix formatting in
+ IoCreateSynchronizationEvent.
+
+---
+ dlls/ntoskrnl.exe/sync.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/ntoskrnl.exe/sync.c b/dlls/ntoskrnl.exe/sync.c
+index 409d5752547..ada468c73dc 100644
+--- a/dlls/ntoskrnl.exe/sync.c
++++ b/dlls/ntoskrnl.exe/sync.c
+@@ -215,7 +215,7 @@ PKEVENT WINAPI IoCreateSynchronizationEvent( UNICODE_STRING *name, HANDLE *ret_h
+     KEVENT *event;
+     NTSTATUS ret;
+ 
+-    TRACE( "(%p %p)\n", name, ret_handle );
++    TRACE( "(%s %p)\n", debugstr_us(name), ret_handle );
+ 
+     InitializeObjectAttributes( &attr, name, 0, 0, NULL );
+     ret = NtCreateEvent( &handle, EVENT_ALL_ACCESS, &attr, SynchronizationEvent, TRUE );
+@@ -223,7 +223,7 @@ PKEVENT WINAPI IoCreateSynchronizationEvent( UNICODE_STRING *name, HANDLE *ret_h
+ 
+     if (kernel_object_from_handle( handle, ExEventObjectType, (void**)&event ))
+     {
+-        NtClose( handle);
++        NtClose( handle );
+         return NULL;
+     }
+ 
+-- 
+GitLab
+
+From c212987dc56b565d9a5cc767c3ec240728a6dc4c Mon Sep 17 00:00:00 2001
+From: Etaash Mathamsetty <etaash.mathamsetty@gmail.com>
+Date: Sun, 30 Oct 2022 11:22:57 -0400
+Subject: [PATCH] ntoskrnl.exe: Implement KeInitializeGuardedMutex.
+
+---
+ dlls/ntoskrnl.exe/ntoskrnl.exe.spec |  1 +
+ dlls/ntoskrnl.exe/sync.c            | 12 ++++++++++++
+ include/ddk/wdm.h                   | 17 +++++++++++++++++
+ 3 files changed, 30 insertions(+)
+
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl.exe.spec b/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
+index 8f8edcac7a0..d3910c380df 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
++++ b/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
+@@ -577,6 +577,7 @@
+ @ stub KeInitializeInterrupt
+ @ stub KeInitializeMutant
+ @ stdcall KeInitializeMutex(ptr long)
++@ stdcall KeInitializeGuardedMutex(ptr)
+ @ stub KeInitializeQueue
+ @ stdcall KeInitializeSemaphore(ptr long long)
+ @ stdcall KeInitializeSpinLock(ptr) NTOSKRNL_KeInitializeSpinLock
+diff --git a/dlls/ntoskrnl.exe/sync.c b/dlls/ntoskrnl.exe/sync.c
+index ada468c73dc..d9b5726b920 100644
+--- a/dlls/ntoskrnl.exe/sync.c
++++ b/dlls/ntoskrnl.exe/sync.c
+@@ -427,6 +427,18 @@ LONG WINAPI KeReleaseMutex( PRKMUTEX mutex, BOOLEAN wait )
+     return ret;
+ }
+ 
++/***********************************************************************
++ *           KeInitializeGuardedMutex   (NTOSKRNL.EXE.@)
++ */
++void WINAPI KeInitializeGuardedMutex(PKGUARDED_MUTEX mutex)
++{
++    TRACE("mutex %p.\n", mutex);
++    mutex->Count = FM_LOCK_BIT;
++    mutex->Owner = NULL;
++    mutex->Contention = 0;
++    KeInitializeEvent(&mutex->Event, SynchronizationEvent, FALSE);
++}
++
+ static void CALLBACK ke_timer_complete_proc(PTP_CALLBACK_INSTANCE instance, void *timer_, PTP_TIMER tp_timer)
+ {
+     KTIMER *timer = timer_;
+diff --git a/include/ddk/wdm.h b/include/ddk/wdm.h
+index 0aad83ade8c..bd6ddbd67c5 100644
+--- a/include/ddk/wdm.h
++++ b/include/ddk/wdm.h
+@@ -253,6 +253,23 @@ typedef struct _FAST_MUTEX
+     ULONG OldIrql;
+ } FAST_MUTEX, *PFAST_MUTEX;
+ 
++typedef struct _KGUARDED_MUTEX
++{
++     LONG Count;
++     PKTHREAD Owner;
++     ULONG Contention;
++     KEVENT Event;
++     union
++     {
++          struct
++          {
++               SHORT KernelApcDisable;
++               SHORT SpecialApcDisable;
++          };
++          ULONG CombinedApcDisable;
++     };
++} KGUARDED_MUTEX, *PKGUARDED_MUTEX;
++
+ #define MAXIMUM_VOLUME_LABEL_LENGTH       (32 * sizeof(WCHAR))
+ 
+ typedef struct _VPB {
 -- 
 GitLab
 
