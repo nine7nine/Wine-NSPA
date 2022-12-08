@@ -5765,3 +5765,1050 @@ index ac6647b8dad..1cfef5007d5 100644
 -- 
 GitLab
 
+From 8fe1c2282e92fb455c55d4c999133b10aa927ed9 Mon Sep 17 00:00:00 2001
+From: Nikolay Sivov <nsivov@codeweavers.com>
+Date: Wed, 23 Nov 2022 08:49:03 +0300
+Subject: [PATCH 1/5] comctl32/header: Use CRT allocation functions.
+
+Signed-off-by: Nikolay Sivov <nsivov@codeweavers.com>
+---
+ dlls/comctl32/header.c | 41 ++++++++++++++++++++---------------------
+ 1 file changed, 20 insertions(+), 21 deletions(-)
+
+diff --git a/dlls/comctl32/header.c b/dlls/comctl32/header.c
+index be4c5616bb7..e905d18e2fa 100644
+--- a/dlls/comctl32/header.c
++++ b/dlls/comctl32/header.c
+@@ -41,7 +41,6 @@
+ #include "vssym32.h"
+ #include "uxtheme.h"
+ #include "wine/debug.h"
+-#include "wine/heap.h"
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(header);
+ 
+@@ -141,7 +140,7 @@ static void HEADER_StoreHDItemInHeader(HEADER_ITEM *lpItem, UINT mask, const HDI
+ 
+     if (mask & HDI_TEXT)
+     {
+-        heap_free(lpItem->pszText);
++        free(lpItem->pszText);
+         lpItem->pszText = NULL;
+ 
+         if (phdi->pszText != LPSTR_TEXTCALLBACKW) /* covers != TEXTCALLBACKA too */
+@@ -336,7 +335,7 @@ static HRGN create_sort_arrow( INT x, INT y, INT h, BOOL is_up )
+ 
+     if (size > sizeof(buffer))
+     {
+-        data = heap_alloc( size );
++        data = malloc( size );
+         if (!data) return NULL;
+     }
+     data->rdh.dwSize = sizeof(data->rdh);
+@@ -362,7 +361,7 @@ static HRGN create_sort_arrow( INT x, INT y, INT h, BOOL is_up )
+         data->rdh.nCount++;
+     }
+     rgn = ExtCreateRegion( NULL, size, data );
+-    if (data != (RGNDATA *)buffer) heap_free( data );
++    if (data != (RGNDATA *)buffer) free( data );
+     return rgn;
+ }
+ 
+@@ -983,7 +982,7 @@ HEADER_PrepareCallbackItems(const HEADER_INFO *infoPtr, INT iItem, INT reqMask)
+     if (mask&HDI_TEXT && lpItem->pszText != NULL)
+     {
+         ERR("(): function called without a call to FreeCallbackItems\n");
+-        heap_free(lpItem->pszText);
++        free(lpItem->pszText);
+         lpItem->pszText = NULL;
+     }
+     
+@@ -994,13 +993,13 @@ HEADER_PrepareCallbackItems(const HEADER_INFO *infoPtr, INT iItem, INT reqMask)
+     {
+         dispInfo.hdr.code = HDN_GETDISPINFOW;
+         if (mask & HDI_TEXT)
+-            pvBuffer = heap_alloc_zero(MAX_HEADER_TEXT_LEN * sizeof(WCHAR));
++            pvBuffer = calloc(MAX_HEADER_TEXT_LEN, sizeof(WCHAR));
+     }
+     else
+     {
+         dispInfo.hdr.code = HDN_GETDISPINFOA;
+         if (mask & HDI_TEXT)
+-            pvBuffer = heap_alloc_zero(MAX_HEADER_TEXT_LEN * sizeof(CHAR));
++            pvBuffer = calloc(MAX_HEADER_TEXT_LEN, sizeof(CHAR));
+     }
+     dispInfo.pszText      = pvBuffer;
+     dispInfo.cchTextMax   = (pvBuffer!=NULL?MAX_HEADER_TEXT_LEN:0);
+@@ -1031,7 +1030,7 @@ HEADER_PrepareCallbackItems(const HEADER_INFO *infoPtr, INT iItem, INT reqMask)
+         else
+         {
+             Str_SetPtrAtoW(&lpItem->pszText, (LPSTR)dispInfo.pszText);
+-            heap_free(pvBuffer);
++            free(pvBuffer);
+         }
+     }
+         
+@@ -1057,7 +1056,7 @@ HEADER_FreeCallbackItems(HEADER_ITEM *lpItem)
+ {
+     if (lpItem->callbackMask&HDI_TEXT)
+     {
+-        heap_free(lpItem->pszText);
++        free(lpItem->pszText);
+         lpItem->pszText = NULL;
+     }
+ 
+@@ -1179,15 +1178,15 @@ HEADER_DeleteItem (HEADER_INFO *infoPtr, INT iItem)
+        TRACE("%d: order=%d, iOrder=%d, ->iOrder=%d\n", i, infoPtr->order[i], infoPtr->items[i].iOrder, infoPtr->items[infoPtr->order[i]].iOrder);
+ 
+     iOrder = infoPtr->items[iItem].iOrder;
+-    heap_free(infoPtr->items[iItem].pszText);
++    free(infoPtr->items[iItem].pszText);
+ 
+     infoPtr->uNumItem--;
+     memmove(&infoPtr->items[iItem], &infoPtr->items[iItem + 1],
+             (infoPtr->uNumItem - iItem) * sizeof(HEADER_ITEM));
+     memmove(&infoPtr->order[iOrder], &infoPtr->order[iOrder + 1],
+             (infoPtr->uNumItem - iOrder) * sizeof(INT));
+-    infoPtr->items = heap_realloc(infoPtr->items, sizeof(HEADER_ITEM) * infoPtr->uNumItem);
+-    infoPtr->order = heap_realloc(infoPtr->order, sizeof(INT) * infoPtr->uNumItem);
++    infoPtr->items = realloc(infoPtr->items, sizeof(HEADER_ITEM) * infoPtr->uNumItem);
++    infoPtr->order = realloc(infoPtr->order, sizeof(INT) * infoPtr->uNumItem);
+         
+     /* Correct the orders */
+     for (i = 0; i < infoPtr->uNumItem; i++)
+@@ -1417,8 +1416,8 @@ HEADER_InsertItemT (HEADER_INFO *infoPtr, INT nItem, const HDITEMW *phdi, BOOL b
+         iOrder = infoPtr->uNumItem;
+ 
+     infoPtr->uNumItem++;
+-    infoPtr->items = heap_realloc(infoPtr->items, sizeof(HEADER_ITEM) * infoPtr->uNumItem);
+-    infoPtr->order = heap_realloc(infoPtr->order, sizeof(INT) * infoPtr->uNumItem);
++    infoPtr->items = realloc(infoPtr->items, sizeof(HEADER_ITEM) * infoPtr->uNumItem);
++    infoPtr->order = realloc(infoPtr->order, sizeof(INT) * infoPtr->uNumItem);
+     
+     /* make space for the new item */
+     memmove(&infoPtr->items[nItem + 1], &infoPtr->items[nItem],
+@@ -1537,7 +1536,7 @@ HEADER_SetItemT (HEADER_INFO *infoPtr, INT nItem, const HDITEMW *phdi, BOOL bUni
+     HEADER_CopyHDItemForNotify(infoPtr, &hdNotify, phdi, bUnicode, &pvScratch);
+     if (HEADER_SendNotifyWithHDItemT(infoPtr, HDN_ITEMCHANGINGW, nItem, &hdNotify))
+     {
+-        heap_free(pvScratch);
++        free(pvScratch);
+         return FALSE;
+     }
+ 
+@@ -1554,7 +1553,7 @@ HEADER_SetItemT (HEADER_INFO *infoPtr, INT nItem, const HDITEMW *phdi, BOOL bUni
+ 
+     InvalidateRect(infoPtr->hwndSelf, NULL, FALSE);
+ 
+-    heap_free(pvScratch);
++    free(pvScratch);
+     return TRUE;
+ }
+ 
+@@ -1577,7 +1576,7 @@ HEADER_Create (HWND hwnd, const CREATESTRUCTW *lpcs)
+     HFONT hOldFont;
+     HDC   hdc;
+ 
+-    infoPtr = heap_alloc_zero (sizeof(*infoPtr));
++    infoPtr = calloc(1, sizeof(*infoPtr));
+     SetWindowLongPtrW (hwnd, 0, (DWORD_PTR)infoPtr);
+ 
+     infoPtr->hwndSelf = hwnd;
+@@ -1632,14 +1631,14 @@ HEADER_NCDestroy (HEADER_INFO *infoPtr)
+     if (infoPtr->items) {
+         lpItem = infoPtr->items;
+         for (nItem = 0; nItem < infoPtr->uNumItem; nItem++, lpItem++)
+-            heap_free(lpItem->pszText);
+-        heap_free(infoPtr->items);
++            free(lpItem->pszText);
++        free(infoPtr->items);
+     }
+ 
+-    heap_free(infoPtr->order);
++    free(infoPtr->order);
+ 
+     SetWindowLongPtrW (infoPtr->hwndSelf, 0, 0);
+-    heap_free(infoPtr);
++    free(infoPtr);
+ 
+     return 0;
+ }
+-- 
+GitLab
+
+
+From a1f4a2d13ab33fa82bc42ae14e7f6c39ef4ddca5 Mon Sep 17 00:00:00 2001
+From: Nikolay Sivov <nsivov@codeweavers.com>
+Date: Wed, 23 Nov 2022 08:51:28 +0300
+Subject: [PATCH 2/5] comctl32/monthcal: Use CRT allocation functions.
+
+Signed-off-by: Nikolay Sivov <nsivov@codeweavers.com>
+---
+ dlls/comctl32/monthcal.c | 28 +++++++++++++---------------
+ 1 file changed, 13 insertions(+), 15 deletions(-)
+
+diff --git a/dlls/comctl32/monthcal.c b/dlls/comctl32/monthcal.c
+index 4fc984f6f4b..ea220136182 100644
+--- a/dlls/comctl32/monthcal.c
++++ b/dlls/comctl32/monthcal.c
+@@ -46,7 +46,6 @@
+ #include "uxtheme.h"
+ #include "vssym32.h"
+ #include "wine/debug.h"
+-#include "wine/heap.h"
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(monthcal);
+ 
+@@ -1946,7 +1945,7 @@ static void MONTHCAL_NotifyDayState(MONTHCAL_INFO *infoPtr)
+   nmds.nmhdr.idFrom   = GetWindowLongPtrW(infoPtr->hwndSelf, GWLP_ID);
+   nmds.nmhdr.code     = MCN_GETDAYSTATE;
+   nmds.cDayState      = MONTHCAL_GetMonthRange(infoPtr, GMR_DAYSTATE, 0);
+-  nmds.prgDayState    = state = heap_alloc_zero(nmds.cDayState * sizeof(MONTHDAYSTATE));
++  nmds.prgDayState    = state = calloc(nmds.cDayState, sizeof(MONTHDAYSTATE));
+ 
+   MONTHCAL_GetMinDate(infoPtr, &nmds.stStart);
+   nmds.stStart.wDay = 1;
+@@ -1955,7 +1954,7 @@ static void MONTHCAL_NotifyDayState(MONTHCAL_INFO *infoPtr)
+   memcpy(infoPtr->monthdayState, nmds.prgDayState,
+       MONTHCAL_GetMonthRange(infoPtr, GMR_DAYSTATE, 0)*sizeof(MONTHDAYSTATE));
+ 
+-  heap_free(state);
++  free(state);
+ }
+ 
+ /* no valid range check performed */
+@@ -2593,9 +2592,9 @@ static void MONTHCAL_UpdateSize(MONTHCAL_INFO *infoPtr)
+   {
+       infoPtr->dim.cx = x;
+       infoPtr->dim.cy = y;
+-      infoPtr->calendars = heap_realloc(infoPtr->calendars, MONTHCAL_GetCalCount(infoPtr)*sizeof(CALENDAR_INFO));
++      infoPtr->calendars = realloc(infoPtr->calendars, MONTHCAL_GetCalCount(infoPtr)*sizeof(CALENDAR_INFO));
+ 
+-      infoPtr->monthdayState = heap_realloc(infoPtr->monthdayState,
++      infoPtr->monthdayState = realloc(infoPtr->monthdayState,
+           MONTHCAL_GetMonthRange(infoPtr, GMR_DAYSTATE, 0)*sizeof(MONTHDAYSTATE));
+       MONTHCAL_NotifyDayState(infoPtr);
+ 
+@@ -2750,7 +2749,7 @@ MONTHCAL_Create(HWND hwnd, LPCREATESTRUCTW lpcs)
+   MONTHCAL_INFO *infoPtr;
+ 
+   /* allocate memory for info structure */
+-  infoPtr = heap_alloc_zero(sizeof(*infoPtr));
++  infoPtr = calloc(1, sizeof(*infoPtr));
+   SetWindowLongPtrW(hwnd, 0, (DWORD_PTR)infoPtr);
+ 
+   if (infoPtr == NULL) {
+@@ -2762,9 +2761,9 @@ MONTHCAL_Create(HWND hwnd, LPCREATESTRUCTW lpcs)
+   infoPtr->hwndNotify = lpcs->hwndParent;
+   infoPtr->dwStyle = GetWindowLongW(hwnd, GWL_STYLE);
+   infoPtr->dim.cx = infoPtr->dim.cy = 1;
+-  infoPtr->calendars = heap_alloc_zero(sizeof(CALENDAR_INFO));
++  infoPtr->calendars = calloc(1, sizeof(*infoPtr->calendars));
+   if (!infoPtr->calendars) goto fail;
+-  infoPtr->monthdayState = heap_alloc_zero(3 * sizeof(MONTHDAYSTATE));
++  infoPtr->monthdayState = calloc(3, sizeof(*infoPtr->monthdayState));
+   if (!infoPtr->monthdayState) goto fail;
+ 
+   /* initialize info structure */
+@@ -2805,9 +2804,9 @@ MONTHCAL_Create(HWND hwnd, LPCREATESTRUCTW lpcs)
+   return 0;
+ 
+ fail:
+-  heap_free(infoPtr->monthdayState);
+-  heap_free(infoPtr->calendars);
+-  heap_free(infoPtr);
++  free(infoPtr->monthdayState);
++  free(infoPtr->calendars);
++  free(infoPtr);
+   return 0;
+ }
+ 
+@@ -2816,9 +2815,8 @@ MONTHCAL_Destroy(MONTHCAL_INFO *infoPtr)
+ {
+   INT i;
+ 
+-  /* free month calendar info data */
+-  heap_free(infoPtr->monthdayState);
+-  heap_free(infoPtr->calendars);
++  free(infoPtr->monthdayState);
++  free(infoPtr->calendars);
+   SetWindowLongPtrW(infoPtr->hwndSelf, 0, 0);
+ 
+   CloseThemeData (GetWindowTheme (infoPtr->hwndSelf));
+@@ -2826,7 +2824,7 @@ MONTHCAL_Destroy(MONTHCAL_INFO *infoPtr)
+   for (i = 0; i < BrushLast; i++) DeleteObject(infoPtr->brushes[i]);
+   for (i = 0; i < PenLast; i++) DeleteObject(infoPtr->pens[i]);
+ 
+-  heap_free(infoPtr);
++  free(infoPtr);
+   return 0;
+ }
+ 
+-- 
+GitLab
+
+
+From 7ef99635fbbec9c553bfb70f945730aa43e9ed0f Mon Sep 17 00:00:00 2001
+From: Nikolay Sivov <nsivov@codeweavers.com>
+Date: Wed, 23 Nov 2022 08:53:32 +0300
+Subject: [PATCH 3/5] comctl32/static: Use CRT allocation functions.
+
+Signed-off-by: Nikolay Sivov <nsivov@codeweavers.com>
+---
+ dlls/comctl32/static.c | 12 ++++++------
+ 1 file changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/dlls/comctl32/static.c b/dlls/comctl32/static.c
+index 25eee289204..cab0235b8d3 100644
+--- a/dlls/comctl32/static.c
++++ b/dlls/comctl32/static.c
+@@ -29,6 +29,7 @@
+  */
+ 
+ #include <stdarg.h>
++#include <stdlib.h>
+ 
+ #include "windef.h"
+ #include "winbase.h"
+@@ -37,7 +38,6 @@
+ #include "commctrl.h"
+ #include "uxtheme.h"
+ 
+-#include "wine/heap.h"
+ #include "wine/debug.h"
+ 
+ #include "comctl32.h"
+@@ -94,7 +94,7 @@ static struct static_extra_info *get_extra_ptr( HWND hwnd, BOOL force )
+     struct static_extra_info *extra = (struct static_extra_info *)GetWindowLongPtrW( hwnd, 0 );
+     if (!extra && force)
+     {
+-        extra = heap_alloc_zero( sizeof(*extra) );
++        extra = calloc( 1, sizeof(*extra) );
+         if (extra)
+             SetWindowLongPtrW( hwnd, 0, (ULONG_PTR)extra );
+     }
+@@ -470,7 +470,7 @@ static LRESULT CALLBACK STATIC_WindowProc( HWND hwnd, UINT uMsg, WPARAM wParam,
+             {
+                 if (extra->image_has_alpha)
+                     DeleteObject( extra->image.hbitmap );
+-                heap_free( extra );
++                free( extra );
+             }
+ /*
+  * FIXME
+@@ -751,13 +751,13 @@ static void STATIC_PaintTextfn( HWND hwnd, HDC hdc, HBRUSH hbrush, DWORD style )
+     }
+ 
+     buf_size = 256;
+-    if (!(text = HeapAlloc( GetProcessHeap(), 0, buf_size * sizeof(WCHAR) )))
++    if (!(text = malloc( buf_size * sizeof(WCHAR) )))
+         goto no_TextOut;
+ 
+     while ((len = InternalGetWindowText( hwnd, text, buf_size )) == buf_size - 1)
+     {
+         buf_size *= 2;
+-        if (!(text = HeapReAlloc( GetProcessHeap(), 0, text, buf_size * sizeof(WCHAR) )))
++        if (!(text = realloc( text, buf_size * sizeof(WCHAR) )))
+             goto no_TextOut;
+     }
+ 
+@@ -777,7 +777,7 @@ static void STATIC_PaintTextfn( HWND hwnd, HDC hdc, HBRUSH hbrush, DWORD style )
+     }
+ 
+ no_TextOut:
+-    HeapFree( GetProcessHeap(), 0, text );
++    free( text );
+ 
+     if (hFont)
+         SelectObject( hdc, hOldFont );
+-- 
+GitLab
+
+
+From aa98d43c45d3c0d71dfd2f28c4f89ca108a8614c Mon Sep 17 00:00:00 2001
+From: Nikolay Sivov <nsivov@codeweavers.com>
+Date: Wed, 23 Nov 2022 11:43:49 +0300
+Subject: [PATCH 4/5] comctl32/button: Use CRT allocation functions.
+
+Signed-off-by: Nikolay Sivov <nsivov@codeweavers.com>
+---
+ dlls/comctl32/button.c | 33 ++++++++++++++++-----------------
+ 1 file changed, 16 insertions(+), 17 deletions(-)
+
+diff --git a/dlls/comctl32/button.c b/dlls/comctl32/button.c
+index 6c04c458a6a..d4196b144ed 100644
+--- a/dlls/comctl32/button.c
++++ b/dlls/comctl32/button.c
+@@ -55,7 +55,6 @@
+ #include "uxtheme.h"
+ #include "vssym32.h"
+ #include "wine/debug.h"
+-#include "wine/heap.h"
+ 
+ #include "comctl32.h"
+ 
+@@ -255,7 +254,7 @@ static inline void paint_button( BUTTON_INFO *infoPtr, LONG style, UINT action )
+ static inline WCHAR *get_button_text( const BUTTON_INFO *infoPtr )
+ {
+     INT len = GetWindowTextLengthW( infoPtr->hwnd );
+-    WCHAR *buffer = heap_alloc( (len + 1) * sizeof(WCHAR) );
++    WCHAR *buffer = malloc( (len + 1) * sizeof(WCHAR) );
+     if (buffer)
+         GetWindowTextW( infoPtr->hwnd, buffer, len + 1 );
+     return buffer;
+@@ -335,7 +334,7 @@ HRGN set_control_clipping( HDC hdc, const RECT *rect )
+ static WCHAR *heap_strndupW(const WCHAR *src, size_t length)
+ {
+     size_t size = (length + 1) * sizeof(WCHAR);
+-    WCHAR *dst = heap_alloc(size);
++    WCHAR *dst = malloc(size);
+     if (dst) memcpy(dst, src, size);
+     return dst;
+ }
+@@ -504,7 +503,7 @@ static LRESULT CALLBACK BUTTON_WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
+     {
+         CREATESTRUCTW *cs = (CREATESTRUCTW *)lParam;
+ 
+-        infoPtr = heap_alloc_zero( sizeof(*infoPtr) );
++        infoPtr = calloc( 1, sizeof(*infoPtr) );
+         SetWindowLongPtrW( hWnd, 0, (LONG_PTR)infoPtr );
+         infoPtr->hwnd = hWnd;
+         infoPtr->parent = cs->hwndParent;
+@@ -521,8 +520,8 @@ static LRESULT CALLBACK BUTTON_WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
+             DeleteObject(infoPtr->u.bitmap);
+         else if (infoPtr->image_type == IMAGE_ICON)
+             DestroyIcon(infoPtr->u.icon);
+-        heap_free(infoPtr->note);
+-        heap_free(infoPtr);
++        free(infoPtr->note);
++        free(infoPtr);
+         break;
+ 
+     case WM_CREATE:
+@@ -782,7 +781,7 @@ static LRESULT CALLBACK BUTTON_WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
+             return FALSE;
+         }
+ 
+-        heap_free(infoPtr->note);
++        free(infoPtr->note);
+         if (note)
+         {
+             infoPtr->note_length = lstrlenW(note);
+@@ -792,7 +791,7 @@ static LRESULT CALLBACK BUTTON_WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
+         if (!note || !infoPtr->note)
+         {
+             infoPtr->note_length = 0;
+-            infoPtr->note = heap_alloc_zero(sizeof(WCHAR));
++            infoPtr->note = calloc(1, sizeof(WCHAR));
+         }
+ 
+         SetLastError(NO_ERROR);
+@@ -1289,7 +1288,7 @@ static void BUTTON_GetTextIdealSize(BUTTON_INFO *infoPtr, LONG maxWidth, SIZE *s
+     hdc = GetDC(infoPtr->hwnd);
+     rect = BUTTON_GetTextRect(infoPtr, hdc, text, maxWidth);
+     ReleaseDC(infoPtr->hwnd, hdc);
+-    heap_free(text);
++    free(text);
+ 
+     size->cx = rect.right - rect.left + margin->left + margin->right;
+     size->cy = rect.bottom - rect.top + margin->top + margin->bottom;
+@@ -1489,7 +1488,7 @@ static BOOL CL_GetIdealSize(BUTTON_INFO *infoPtr, SIZE *size)
+             RECT r;
+             GetThemeTextExtent(theme, hdc, BP_COMMANDLINK, CMDLS_NORMAL,
+                                text, -1, flags, &text_bound, &r);
+-            heap_free(text);
++            free(text);
+             text_w = r.right - r.left;
+             text_h = r.bottom - r.top;
+         }
+@@ -1527,7 +1526,7 @@ static BOOL CL_GetIdealSize(BUTTON_INFO *infoPtr, SIZE *size)
+                     RECT r = text_bound;
+                     old_font = SelectObject(hdc, font);
+                     DrawTextW(hdc, text, -1, &r, flags | DT_CALCRECT);
+-                    heap_free(text);
++                    free(text);
+ 
+                     text_w = r.right - r.left;
+                     text_h = r.bottom - r.top;
+@@ -1596,7 +1595,7 @@ static UINT BUTTON_CalcLayoutRects(const BUTTON_INFO *infoPtr, HDC hdc, RECT *la
+        SetRectEmpty(labelRc);
+        SetRectEmpty(imageRc);
+        SetRectEmpty(textRc);
+-       heap_free(text);
++       free(text);
+        return (UINT)-1;
+    }
+ 
+@@ -1699,7 +1698,7 @@ static UINT BUTTON_CalcLayoutRects(const BUTTON_INFO *infoPtr, HDC hdc, RECT *la
+            SetRectEmpty(&imageRect);
+        }
+    }
+-   heap_free(text);
++   free(text);
+ 
+    CopyRect(labelRc, &labelRect);
+    CopyRect(imageRc, &imageRect);
+@@ -1792,7 +1791,7 @@ static void BUTTON_DrawLabel(const BUTTON_INFO *infoPtr, HDC hdc, UINT dtFlags,
+    if (!(text = get_button_text(infoPtr))) return;
+    DrawStateW(hdc, hbr, BUTTON_DrawTextCallback, (LPARAM)text, dtFlags, textRect->left, textRect->top,
+               textRect->right - textRect->left, textRect->bottom - textRect->top, flags);
+-   heap_free(text);
++   free(text);
+ }
+ 
+ static void BUTTON_DrawThemedLabel(const BUTTON_INFO *info, HDC hdc, UINT text_flags,
+@@ -1824,7 +1823,7 @@ static void BUTTON_DrawThemedLabel(const BUTTON_INFO *info, HDC hdc, UINT text_f
+        return;
+ 
+    DrawThemeText(theme, hdc, part, state, text, lstrlenW(text), text_flags, 0, text_rect);
+-   heap_free(text);
++   free(text);
+ }
+ 
+ /**********************************************************************
+@@ -2660,7 +2659,7 @@ static void CL_Paint( const BUTTON_INFO *infoPtr, HDC hDC, UINT action )
+                     SelectObject(hDC, font);
+                     txt_h = DrawTextW(hDC, text, -1, &r,
+                                       DT_TOP | DT_LEFT | DT_WORDBREAK | DT_END_ELLIPSIS);
+-                    heap_free(text);
++                    free(text);
+                 }
+                 DeleteObject(font);
+             }
+@@ -3153,7 +3152,7 @@ static void CL_ThemedPaint(HTHEME theme, const BUTTON_INFO *infoPtr, HDC hDC, in
+             DrawThemeText(theme, hDC, part, state, text, len, dtFlags | DT_END_ELLIPSIS, 0, &r);
+ 
+             txt_h = text_rect.bottom - text_rect.top;
+-            heap_free(text);
++            free(text);
+         }
+ 
+         /* Draw the note */
+-- 
+GitLab
+
+
+From 0002cb89ec511b1ba0193a78bc46e7b2cae40ae8 Mon Sep 17 00:00:00 2001
+From: Nikolay Sivov <nsivov@codeweavers.com>
+Date: Wed, 23 Nov 2022 11:50:29 +0300
+Subject: [PATCH 5/5] comctl32/listview: Use CRT allocation functions.
+
+Signed-off-by: Nikolay Sivov <nsivov@codeweavers.com>
+---
+ dlls/comctl32/listview.c | 91 ++++++++++++++++++++--------------------
+ 1 file changed, 45 insertions(+), 46 deletions(-)
+
+diff --git a/dlls/comctl32/listview.c b/dlls/comctl32/listview.c
+index d060fd5c977..116c3c5cf94 100644
+--- a/dlls/comctl32/listview.c
++++ b/dlls/comctl32/listview.c
+@@ -485,7 +485,7 @@ static inline LPWSTR textdupTtoW(LPCWSTR text, BOOL isW)
+     if (!isW && is_text(text))
+     {
+ 	INT len = MultiByteToWideChar(CP_ACP, 0, (LPCSTR)text, -1, NULL, 0);
+-	wstr = Alloc(len * sizeof(WCHAR));
++	wstr = calloc(len, sizeof(WCHAR));
+ 	if (wstr) MultiByteToWideChar(CP_ACP, 0, (LPCSTR)text, -1, wstr, len);
+     }
+     TRACE("   wstr=%s\n", text == LPSTR_TEXTCALLBACKW ?  "(callback)" : debugstr_w(wstr));
+@@ -494,7 +494,7 @@ static inline LPWSTR textdupTtoW(LPCWSTR text, BOOL isW)
+ 
+ static inline void textfreeT(LPWSTR wstr, BOOL isW)
+ {
+-    if (!isW && is_text(wstr)) Free (wstr);
++    if (!isW && is_text(wstr)) free (wstr);
+ }
+ 
+ /*
+@@ -507,7 +507,7 @@ static BOOL textsetptrT(LPWSTR *dest, LPCWSTR src, BOOL isW)
+     
+     if (src == LPSTR_TEXTCALLBACKW)
+     {
+-	if (is_text(*dest)) Free(*dest);
++	if (is_text(*dest)) free(*dest);
+ 	*dest = LPSTR_TEXTCALLBACKW;
+     }
+     else
+@@ -808,12 +808,12 @@ static LRESULT notify_forward_header(const LISTVIEW_INFO *infoPtr, NMHEADERW *lp
+     /* cleanup */
+     if(text)
+     {
+-        Free(lpnmh->pitem->pszText);
++        free(lpnmh->pitem->pszText);
+         lpnmh->pitem->pszText = (LPSTR)text;
+     }
+     if(filter)
+     {
+-        Free(((HD_TEXTFILTERA*)lpnmh->pitem->pvFilter)->pszText);
++        free(((HD_TEXTFILTERA*)lpnmh->pitem->pvFilter)->pszText);
+         ((HD_TEXTFILTERA*)lpnmh->pitem->pvFilter)->pszText = (LPSTR)filter;
+     }
+ 
+@@ -958,7 +958,7 @@ static BOOL notify_dispinfoT(const LISTVIEW_INFO *infoPtr, UINT code, LPNMLVDISP
+             *pdi->item.pszText = 0; /* make sure we don't process garbage */
+         }
+ 
+-        buffer = Alloc( (return_ansi ? sizeof(WCHAR) : sizeof(CHAR)) * length);
++        buffer = calloc( length, return_ansi ? sizeof(WCHAR) : sizeof(CHAR) );
+         if (!buffer) return FALSE;
+ 
+         if (return_ansi)
+@@ -1001,7 +1001,7 @@ static BOOL notify_dispinfoT(const LISTVIEW_INFO *infoPtr, UINT code, LPNMLVDISP
+         pdi->item.pszText = ret_text; /* restores our buffer */
+         pdi->item.cchTextMax = ret_length;
+ 
+-        Free(buffer);
++        free(buffer);
+         return ret;
+     }
+ 
+@@ -1010,14 +1010,14 @@ static BOOL notify_dispinfoT(const LISTVIEW_INFO *infoPtr, UINT code, LPNMLVDISP
+     {
+         length = WideCharToMultiByte(CP_ACP, 0, pdi->item.pszText, -1, NULL, 0, NULL, NULL);
+ 
+-        buffer = Alloc(length * sizeof(CHAR));
++        buffer = calloc(length, sizeof(CHAR));
+         if (!buffer) return FALSE;
+ 
+         WideCharToMultiByte(CP_ACP, 0, pdi->item.pszText, -1, (LPSTR) buffer,
+                 ret_length, NULL, NULL);
+ 
+         strcpy((LPSTR)pdi->item.pszText, (LPSTR)buffer);
+-        Free(buffer);
++        free(buffer);
+     }
+ 
+     return ret;
+@@ -3118,11 +3118,11 @@ static void ranges_assert(RANGES ranges, LPCSTR desc, const char *file, int line
+ 
+ static RANGES ranges_create(int count)
+ {
+-    RANGES ranges = Alloc(sizeof(struct tagRANGES));
++    RANGES ranges = calloc(1, sizeof(*ranges));
+     if (!ranges) return NULL;
+     ranges->hdpa = DPA_Create(count);
+     if (ranges->hdpa) return ranges;
+-    Free(ranges);
++    free(ranges);
+     return NULL;
+ }
+ 
+@@ -3131,7 +3131,7 @@ static void ranges_clear(RANGES ranges)
+     INT i;
+ 	
+     for(i = 0; i < DPA_GetPtrCount(ranges->hdpa); i++)
+-	Free(DPA_GetPtr(ranges->hdpa, i));
++        free(DPA_GetPtr(ranges->hdpa, i));
+     DPA_DeleteAllPtrs(ranges->hdpa);
+ }
+ 
+@@ -3141,7 +3141,7 @@ static void ranges_destroy(RANGES ranges)
+     if (!ranges) return;
+     ranges_clear(ranges);
+     DPA_Destroy(ranges->hdpa);
+-    Free(ranges);
++    free(ranges);
+ }
+ 
+ static RANGES ranges_clone(RANGES ranges)
+@@ -3153,12 +3153,12 @@ static RANGES ranges_clone(RANGES ranges)
+ 
+     for (i = 0; i < DPA_GetPtrCount(ranges->hdpa); i++)
+     {
+-        RANGE *newrng = Alloc(sizeof(RANGE));
++        RANGE *newrng = calloc(1, sizeof(*newrng));
+ 	if (!newrng) goto fail;
+ 	*newrng = *((RANGE*)DPA_GetPtr(ranges->hdpa, i));
+         if (!DPA_SetPtr(clone->hdpa, i, newrng))
+         {
+-            Free(newrng);
++            free(newrng);
+             goto fail;
+         }
+     }
+@@ -3249,7 +3249,7 @@ static BOOL ranges_add(RANGES ranges, RANGE range)
+ 	TRACE("Adding new range\n");
+ 
+ 	/* create the brand new range to insert */	
+-        newrgn = Alloc(sizeof(RANGE));
++        newrgn = calloc(1, sizeof(*newrgn));
+ 	if(!newrgn) goto fail;
+ 	*newrgn = range;
+ 	
+@@ -3261,7 +3261,7 @@ static BOOL ranges_add(RANGES ranges, RANGE range)
+ 	/* and get it over with */
+ 	if (DPA_InsertPtr(ranges->hdpa, index, newrgn) == -1)
+ 	{
+-	    Free(newrgn);
++	    free(newrgn);
+ 	    goto fail;
+ 	}
+     }
+@@ -3298,7 +3298,7 @@ static BOOL ranges_add(RANGES ranges, RANGE range)
+ 	    mrgrgn = DPA_GetPtr(ranges->hdpa, mergeindex);
+ 	    chkrgn->lower = min(chkrgn->lower, mrgrgn->lower);
+ 	    chkrgn->upper = max(chkrgn->upper, mrgrgn->upper);
+-	    Free(mrgrgn);
++	    free(mrgrgn);
+ 	    DPA_DeletePtr(ranges->hdpa, mergeindex);
+ 	    if (mergeindex < index) index --;
+ 	} while(1);
+@@ -3334,7 +3334,7 @@ static BOOL ranges_del(RANGES ranges, RANGE range)
+ 	     (chkrgn->lower == range.lower) )
+ 	{
+ 	    DPA_DeletePtr(ranges->hdpa, index);
+-	    Free(chkrgn);
++	    free(chkrgn);
+ 	    break;
+ 	}
+ 	/* case 2: engulf */
+@@ -3342,7 +3342,7 @@ static BOOL ranges_del(RANGES ranges, RANGE range)
+ 		  (chkrgn->lower >= range.lower) )
+ 	{
+ 	    DPA_DeletePtr(ranges->hdpa, index);
+-	    Free(chkrgn);
++	    free(chkrgn);
+ 	}
+ 	/* case 3: overlap upper */
+ 	else if ( (chkrgn->upper <= range.upper) &&
+@@ -3362,13 +3362,13 @@ static BOOL ranges_del(RANGES ranges, RANGE range)
+ 	{
+ 	    RANGE *newrgn;
+ 
+-	    if (!(newrgn = Alloc(sizeof(RANGE)))) goto fail;
++	    if (!(newrgn = calloc(1, sizeof(*newrgn)))) goto fail;
+ 	    newrgn->lower = chkrgn->lower;
+ 	    newrgn->upper = range.lower;
+ 	    chkrgn->lower = range.upper;
+ 	    if (DPA_InsertPtr(ranges->hdpa, index, newrgn) == -1)
+ 	    {
+-		Free(newrgn);
++		free(newrgn);
+ 		goto fail;
+ 	    }
+ 	    break;
+@@ -4422,7 +4422,7 @@ static BOOL set_sub_item(const LISTVIEW_INFO *infoPtr, const LVITEMW *lpLVItem,
+ 	SUBITEM_INFO *tmpSubItem;
+ 	INT i;
+ 
+-	lpSubItem = Alloc(sizeof(SUBITEM_INFO));
++	lpSubItem = calloc(1, sizeof(*lpSubItem));
+ 	if (!lpSubItem) return FALSE;
+ 	/* we could binary search here, if need be...*/
+   	for (i = 1; i < DPA_GetPtrCount(hdpaSubItems); i++)
+@@ -4432,7 +4432,7 @@ static BOOL set_sub_item(const LISTVIEW_INFO *infoPtr, const LVITEMW *lpLVItem,
+   	}
+ 	if (DPA_InsertPtr(hdpaSubItems, i, lpSubItem) == -1)
+ 	{
+-	    Free(lpSubItem);
++	    free(lpSubItem);
+ 	    return FALSE;
+ 	}
+         lpSubItem->iSubItem = lpLVItem->iSubItem;
+@@ -5568,13 +5568,13 @@ static BOOL LISTVIEW_DeleteAllItems(LISTVIEW_INFO *infoPtr, BOOL destroy)
+ 	    j = DPA_GetPtrIndex(infoPtr->hdpaItemIds, lpItem->id);
+ 	    lpID = DPA_GetPtr(infoPtr->hdpaItemIds, j);
+ 	    DPA_DeletePtr(infoPtr->hdpaItemIds, j);
+-	    Free(lpID);
++	    free(lpID);
+ 	    /* both item and subitem start with ITEMHDR header */
+ 	    for (j = 0; j < DPA_GetPtrCount(hdpaSubItems); j++)
+ 	    {
+ 	        hdrItem = DPA_GetPtr(hdpaSubItems, j);
+-		if (is_text(hdrItem->pszText)) Free(hdrItem->pszText);
+-		Free(hdrItem);
++		if (is_text(hdrItem->pszText)) free(hdrItem->pszText);
++		free(hdrItem);
+ 	    }
+ 	    DPA_Destroy(hdpaSubItems);
+ 	    DPA_DeletePtr(infoPtr->hdpaItems, i);
+@@ -5683,7 +5683,7 @@ static BOOL LISTVIEW_DeleteColumn(LISTVIEW_INFO *infoPtr, INT nColumn)
+     if (!SendMessageW(infoPtr->hwndHeader, HDM_DELETEITEM, nColumn, 0))
+ 	return FALSE;
+ 
+-    Free(DPA_GetPtr(infoPtr->hdpaColumns, nColumn));
++    free(DPA_GetPtr(infoPtr->hdpaColumns, nColumn));
+     DPA_DeletePtr(infoPtr->hdpaColumns, nColumn);
+   
+     if (!(infoPtr->dwStyle & LVS_OWNERDATA) && nColumn)
+@@ -5716,10 +5716,10 @@ static BOOL LISTVIEW_DeleteColumn(LISTVIEW_INFO *infoPtr, INT nColumn)
+ 	    {
+ 		/* free string */
+ 		if (is_text(lpDelItem->hdr.pszText))
+-		    Free(lpDelItem->hdr.pszText);
++		    free(lpDelItem->hdr.pszText);
+ 
+ 		/* free item */
+-		Free(lpDelItem);
++		free(lpDelItem);
+ 
+ 		/* free dpa memory */
+ 		DPA_DeletePtr(hdpaSubItems, nSubItem);
+@@ -5858,12 +5858,12 @@ static BOOL LISTVIEW_DeleteItem(LISTVIEW_INFO *infoPtr, INT nItem)
+ 	i = DPA_GetPtrIndex(infoPtr->hdpaItemIds, lpItem->id);
+ 	lpID = DPA_GetPtr(infoPtr->hdpaItemIds, i);
+ 	DPA_DeletePtr(infoPtr->hdpaItemIds, i);
+-	Free(lpID);
++	free(lpID);
+ 	for (i = 0; i < DPA_GetPtrCount(hdpaSubItems); i++)
+     	{
+             hdrItem = DPA_GetPtr(hdpaSubItems, i);
+-	    if (is_text(hdrItem->pszText)) Free(hdrItem->pszText);
+-            Free(hdrItem);
++	    if (is_text(hdrItem->pszText)) free(hdrItem->pszText);
++            free(hdrItem);
+         }
+         DPA_Destroy(hdpaSubItems);
+     }
+@@ -5914,7 +5914,7 @@ static BOOL LISTVIEW_EndEditLabelT(LISTVIEW_INFO *infoPtr, BOOL storeText, BOOL
+ 
+         if (len++)
+         {
+-            if (!(pszText = Alloc(len * (isW ? sizeof(WCHAR) : sizeof(CHAR)))))
++            if (!(pszText = calloc(len, isW ? sizeof(WCHAR) : sizeof(CHAR))))
+                 return FALSE;
+ 
+             if (isW)
+@@ -5998,7 +5998,7 @@ static BOOL LISTVIEW_EndEditLabelT(LISTVIEW_INFO *infoPtr, BOOL storeText, BOOL
+     res = LISTVIEW_SetItemT(infoPtr, &dispInfo.item, isW);
+ 
+ cleanup:
+-    Free(pszText);
++    free(pszText);
+ 
+     return res;
+ }
+@@ -7788,14 +7788,14 @@ static INT LISTVIEW_InsertItemT(LISTVIEW_INFO *infoPtr, const LVITEMW *lpLVItem,
+ 
+     if (!is_assignable_item(lpLVItem, infoPtr->dwStyle)) return -1;
+ 
+-    if (!(lpItem = Alloc(sizeof(ITEM_INFO)))) return -1;
++    if (!(lpItem = calloc(1, sizeof(*lpItem)))) return -1;
+     
+     /* insert item in listview control data structure */
+     if ( !(hdpaSubItems = DPA_Create(8)) ) goto fail;
+     if ( !DPA_SetPtr(hdpaSubItems, 0, lpItem) ) assert (FALSE);
+ 
+     /* link with id struct */
+-    if (!(lpID = Alloc(sizeof(ITEM_ID)))) goto fail;
++    if (!(lpID = calloc(1, sizeof(*lpID)))) goto fail;
+     lpItem->id = lpID;
+     lpID->item = hdpaSubItems;
+     lpID->id = get_next_itemid(infoPtr);
+@@ -7923,7 +7923,7 @@ undo:
+ fail:
+     DPA_DeletePtr(hdpaSubItems, 0);
+     DPA_Destroy (hdpaSubItems);
+-    Free (lpItem);
++    free (lpItem);
+     return -1;
+ }
+ 
+@@ -8248,7 +8248,7 @@ static INT LISTVIEW_InsertColumnT(LISTVIEW_INFO *infoPtr, INT nColumn,
+     if (nNewColumn != nColumn) ERR("nColumn=%d, nNewColumn=%d\n", nColumn, nNewColumn);
+    
+     /* create our own column info */ 
+-    if (!(lpColumnInfo = Alloc(sizeof(COLUMN_INFO)))) goto fail;
++    if (!(lpColumnInfo = calloc(1, sizeof(*lpColumnInfo)))) goto fail;
+     if (DPA_InsertPtr(infoPtr->hdpaColumns, nNewColumn, lpColumnInfo) == -1) goto fail;
+ 
+     if (lpColumn->mask & LVCF_FMT) lpColumnInfo->fmt = lpColumn->fmt;
+@@ -8296,8 +8296,8 @@ fail:
+     if (nNewColumn != -1) SendMessageW(infoPtr->hwndHeader, HDM_DELETEITEM, nNewColumn, 0);
+     if (lpColumnInfo)
+     {
+-	DPA_DeletePtr(infoPtr->hdpaColumns, nNewColumn);
+-	Free(lpColumnInfo);
++        DPA_DeletePtr(infoPtr->hdpaColumns, nNewColumn);
++        free(lpColumnInfo);
+     }
+     return -1;
+ }
+@@ -9546,7 +9546,7 @@ static LRESULT LISTVIEW_NCCreate(HWND hwnd, WPARAM wParam, const CREATESTRUCTW *
+   TRACE("(lpcs=%p)\n", lpcs);
+ 
+   /* initialize info pointer */
+-  infoPtr = Alloc(sizeof(LISTVIEW_INFO));
++  infoPtr = calloc(1, sizeof(*infoPtr));
+   if (!infoPtr) return FALSE;
+ 
+   SetWindowLongPtrW(hwnd, 0, (DWORD_PTR)infoPtr);
+@@ -9609,7 +9609,7 @@ fail:
+     DPA_Destroy(infoPtr->hdpaPosX);
+     DPA_Destroy(infoPtr->hdpaPosY);
+     DPA_Destroy(infoPtr->hdpaColumns);
+-    Free(infoPtr);
++    free(infoPtr);
+     return FALSE;
+ }
+ 
+@@ -10485,7 +10485,7 @@ static LRESULT LISTVIEW_NCDestroy(LISTVIEW_INFO *infoPtr)
+   DPA_Destroy(infoPtr->hdpaPosY);
+   /* columns */
+   for (i = 0; i < DPA_GetPtrCount(infoPtr->hdpaColumns); i++)
+-      Free(DPA_GetPtr(infoPtr->hdpaColumns, i));
++      free(DPA_GetPtr(infoPtr->hdpaColumns, i));
+   DPA_Destroy(infoPtr->hdpaColumns);
+   ranges_destroy(infoPtr->selectionRanges);
+ 
+@@ -10505,8 +10505,7 @@ static LRESULT LISTVIEW_NCDestroy(LISTVIEW_INFO *infoPtr)
+ 
+   SetWindowLongPtrW(infoPtr->hwndSelf, 0, 0);
+ 
+-  /* free listview info pointer*/
+-  Free(infoPtr);
++  free(infoPtr);
+ 
+   return 0;
+ }
+-- 
+GitLab
+
+From a97911fdfe77dac2996d9bb3c1a56acc47bd3fa3 Mon Sep 17 00:00:00 2001
+From: Bartosz Kosiorek <gang65@poczta.onet.pl>
+Date: Thu, 1 Dec 2022 01:22:07 +0100
+Subject: [PATCH 1/2] gdiplus: Improve performance of GdipScaleMatrix.
+
+Wine-Bug: https://bugs.winehq.org/show_bug.cgi?id=53947
+---
+ dlls/gdiplus/matrix.c       | 25 ++++++++++++----------
+ dlls/gdiplus/tests/matrix.c | 41 +++++++++++++++++++++++++++++++++++++
+ 2 files changed, 55 insertions(+), 11 deletions(-)
+
+diff --git a/dlls/gdiplus/matrix.c b/dlls/gdiplus/matrix.c
+index 40abbc93e21..13e7aa05e11 100644
+--- a/dlls/gdiplus/matrix.c
++++ b/dlls/gdiplus/matrix.c
+@@ -287,24 +287,27 @@ GpStatus WINGDIPAPI GdipRotateMatrix(GpMatrix *matrix, REAL angle,
+ GpStatus WINGDIPAPI GdipScaleMatrix(GpMatrix *matrix, REAL scaleX, REAL scaleY,
+     GpMatrixOrder order)
+ {
+-    REAL scale[6];
+-
+     TRACE("(%p, %.2f, %.2f, %d)\n", matrix, scaleX, scaleY, order);
+ 
+     if(!matrix)
+         return InvalidParameter;
+ 
+-    scale[0] = scaleX;
+-    scale[1] = 0.0;
+-    scale[2] = 0.0;
+-    scale[3] = scaleY;
+-    scale[4] = 0.0;
+-    scale[5] = 0.0;
+-
+     if(order == MatrixOrderAppend)
+-        matrix_multiply(matrix->matrix, scale, matrix->matrix);
++    {
++        matrix->matrix[0] *= scaleX;
++        matrix->matrix[1] *= scaleY;
++        matrix->matrix[2] *= scaleX;
++        matrix->matrix[3] *= scaleY;
++        matrix->matrix[4] *= scaleX;
++        matrix->matrix[5] *= scaleY;
++    }
+     else if (order == MatrixOrderPrepend)
+-        matrix_multiply(scale, matrix->matrix, matrix->matrix);
++    {
++        matrix->matrix[0] *= scaleX;
++        matrix->matrix[1] *= scaleX;
++        matrix->matrix[2] *= scaleY;
++        matrix->matrix[3] *= scaleY;
++    }
+     else
+         return InvalidParameter;
+ 
+From 13b16116bfdebf5e198827ad02661db7cffadbcd Mon Sep 17 00:00:00 2001
+From: Bartosz Kosiorek <gang65@poczta.onet.pl>
+Date: Thu, 1 Dec 2022 18:16:02 +0100
+Subject: [PATCH 2/2] gdiplus: Improve performance of matrix multiplication by
+ unrolling loop.
+
+---
+ dlls/gdiplus/matrix.c | 16 +++++++---------
+ 1 file changed, 7 insertions(+), 9 deletions(-)
+
+diff --git a/dlls/gdiplus/matrix.c b/dlls/gdiplus/matrix.c
+index 13e7aa05e11..d790daab2af 100644
+--- a/dlls/gdiplus/matrix.c
++++ b/dlls/gdiplus/matrix.c
+@@ -39,17 +39,15 @@ WINE_DEFAULT_DEBUG_CHANNEL(gdiplus);
+  *
+  * and puts the output in out.
+  * */
+-static void matrix_multiply(GDIPCONST REAL * left, GDIPCONST REAL * right, REAL * out)
++static inline void matrix_multiply(GDIPCONST REAL * left, GDIPCONST REAL * right, REAL * out)
+ {
+     REAL temp[6];
+-    int i, odd;
+-
+-    for(i = 0; i < 6; i++){
+-        odd = i % 2;
+-        temp[i] = left[i - odd] * right[odd] + left[i - odd + 1] * right[odd + 2] +
+-                  (i >= 4 ? right[odd + 4] : 0.0);
+-    }
+-
++    temp[0] = left[0] * right[0] + left[1] * right[2];
++    temp[1] = left[0] * right[1] + left[1] * right[3];
++    temp[2] = left[2] * right[0] + left[3] * right[2];
++    temp[3] = left[2] * right[1] + left[3] * right[3];
++    temp[4] = left[4] * right[0] + left[5] * right[2] + right[4];
++    temp[5] = left[4] * right[1] + left[5] * right[3] + right[5];
+     memcpy(out, temp, 6 * sizeof(REAL));
+ }
+ 
+-- 
+GitLab
+
+From e2c081a8ebc0722df08e85e32fc26bd42c23ae46 Mon Sep 17 00:00:00 2001
+From: Zebediah Figura <zfigura@codeweavers.com>
+Date: Fri, 18 Nov 2022 20:08:09 -0600
+Subject: [PATCH] ntdll: Trace the name of critical sections which are released
+ while not acquired.
+
+---
+ dlls/ntdll/sync.c | 14 ++++++++++----
+ 1 file changed, 10 insertions(+), 4 deletions(-)
+
+diff --git a/dlls/ntdll/sync.c b/dlls/ntdll/sync.c
+index f9f906df723..4f5ee820286 100644
+--- a/dlls/ntdll/sync.c
++++ b/dlls/ntdll/sync.c
+@@ -155,6 +155,13 @@ static BOOL crit_section_has_debuginfo( const RTL_CRITICAL_SECTION *crit )
+     return crit->DebugInfo != NULL && crit->DebugInfo != no_debug_info_marker;
+ }
+ 
++static const char *crit_section_get_name( const RTL_CRITICAL_SECTION *crit )
++{
++    if (crit_section_has_debuginfo( crit ))
++        return (char *)crit->DebugInfo->Spare[0];
++    return "?";
++}
++
+ static inline HANDLE get_semaphore( RTL_CRITICAL_SECTION *crit )
+ {
+     HANDLE ret = crit->LockSemaphore;
+@@ -328,9 +335,8 @@ NTSTATUS WINAPI RtlpWaitForCriticalSecti
+ 
+         if ( status == STATUS_TIMEOUT )
+         {
+-            const char *name = NULL;
+-            if (crit_section_has_debuginfo( crit )) name = (char *)crit->DebugInfo->Spare[0];
+-            if (!name) name = "?";
++            const char *name = crit_section_get_name( crit );
++            
+             ERR( "section %p %s wait timed out in thread %04x, blocked by %04x, retrying (60 sec)\n",
+                  crit, debugstr_a(name), GetCurrentThreadId(), HandleToULong(crit->OwningThread) );
+             status = wait_semaphore( crit, 60 );
+@@ -461,7 +467,7 @@ NTSTATUS WINAPI RtlLeaveCriticalSection( RTL_CRITICAL_SECTION *crit )
+     if (--crit->RecursionCount)
+     {
+         if (crit->RecursionCount > 0) InterlockedDecrement( &crit->LockCount );
+-        else ERR( "section %p is not acquired\n", crit );
++        else ERR( "section %p %s is not acquired\n", crit, debugstr_a( crit_section_get_name( crit )));
+     }
+     else
+     {
+-- 
+GitLab
+
