@@ -1,0 +1,418 @@
+# Created by: Tk-Glitch <ti3nou at gmail dot com>
+
+pkgname=wine-tkg
+pkgver=0
+
+# workaround for pkgrel overwritten on regen
+pkgrel=1
+eval pkgrel=327
+
+_stgsrcdir='wine-staging-git'
+_esyncsrcdir='esync'
+export _where="$PWD" # track basedir as different Arch based distros are moving srcdir around
+_configure_args=() # additional args to ./configure will be added during prepare()
+_makepkg_options=()
+
+# load functions
+source "$_where"/wine-tkg-scripts/prepare.sh
+source "$_where"/wine-tkg-scripts/build.sh
+
+exit_cleanup() {
+  _exit_cleanup
+  remove_deps || true
+}
+
+# init steps
+if msg2; then # Arch chroot workaround for even more looping fun
+  _init
+fi
+
+if [ -z "$_localbuild" ]; then
+ _pkgnaming
+fi
+
+# custom plain wine commit to pass to git
+if [ -n "$_plain_version" ]; then
+  if [ "$_use_staging" = "false" ] || ( [ "$_use_staging" = "true" ] && [ "$_staging_upstreamignore" = "true" ] ); then
+    _plain_commit="#commit=$_plain_version"
+  fi
+fi
+
+# custom staging commit to pass to git
+if [ "$_use_staging" = "true" ] && [ -n "$_staging_version" ]; then
+  _staging_commit="#commit=$_staging_version"
+fi
+
+pkgdesc='This "Wine to rule them all" package is the result of some random pkgbuild found online. Looks safe to me, amirite? Some variants of it can be found in lutris runners.'
+url='https://github.com/Tk-Glitch/PKGBUILDS/tree/master/wine-tkg-git'
+arch=('x86_64')
+
+_makepkg_options+=('!strip')
+_makepkg_options+=('!ccache')
+
+# Only pass the staticlibs option to system-wide installs
+if [ "$_EXTERNAL_INSTALL" != "true" ]; then
+  _makepkg_options+=(staticlibs)
+fi
+
+if [ "$_NOCCACHE" != "true" ]; then
+  if msg2; then # Arch chroot workaround for even more looping fun
+    # Use ccache if available
+    if pacman -Qq ccache &> /dev/null; then
+      msg2 'ccache was found and will be used'
+    else
+      msg2 'ccache was not found and will not be used'
+    fi
+  fi
+fi
+
+options=(${_makepkg_options[@]} !lto)
+
+license=('LGPL')
+depends=(
+    'attr'                  'lib32-attr'
+    'fontconfig'            'lib32-fontconfig'
+    'lcms2'                 'lib32-lcms2'
+    'libxml2'               'lib32-libxml2'
+    'libxcursor'            'lib32-libxcursor'
+    'libxrandr'             'lib32-libxrandr'
+    'libxdamage'            'lib32-libxdamage'
+    'libxi'                 'lib32-libxi'
+    'gettext'               'lib32-gettext'
+    'freetype2'             'lib32-freetype2'
+    'glu'                   'lib32-glu'
+    'libsm'                 'lib32-libsm'
+    'gcc-libs'              'lib32-gcc-libs'
+    'libpcap'               'lib32-libpcap'
+    'faudio'                'lib32-faudio'
+    'desktop-file-utils'    'jxrlib'
+    $_user_deps
+)
+
+makedepends=('git' 'autoconf' 'ncurses' 'bison' 'perl' 'fontforge' 'flex'
+    'gcc>=4.5.0-2'          'pkgconf'
+    'giflib'                'lib32-giflib'
+    'libpng'                'lib32-libpng'
+    'gnutls'                'lib32-gnutls'
+    'libxinerama'           'lib32-libxinerama'
+    'libxcomposite'         'lib32-libxcomposite'
+    'libxmu'                'lib32-libxmu'
+    'libxxf86vm'            'lib32-libxxf86vm'
+    'libldap'               'lib32-libldap'
+    'mpg123'                'lib32-mpg123'
+    'openal'                'lib32-openal'
+    'v4l-utils'             'lib32-v4l-utils'
+    'alsa-lib'              'lib32-alsa-lib'
+    'libxcomposite'         'lib32-libxcomposite'
+    'mesa'                  'lib32-mesa'
+    'libgl'                 'lib32-libgl'
+    'libxslt'               'lib32-libxslt'
+    'libpulse'              'lib32-libpulse'
+    'libva'                 'lib32-libva'
+    'gtk3'                  'lib32-gtk3'
+    'gst-plugins-base-libs' 'lib32-gst-plugins-base-libs'
+    'gst-plugins-good'      'lib32-gst-plugins-good'
+    'vulkan-icd-loader'     'lib32-vulkan-icd-loader'
+    'sdl2'                  'lib32-sdl2'
+    'libcups'               'lib32-libcups'
+    'samba'                 'opencl-headers'
+    'meson'                 'ninja'
+    'glslang'               'wget'
+    'ocl-icd'               'lib32-ocl-icd'
+    'jack'                  'lib32-jack'
+    'libxpresent'           'libgcrypt'
+    'lib32-libgcrypt'       $_user_makedeps
+)
+
+# mingw
+if [ -z "${CUSTOM_MINGW_PATH}" ]; then
+  makedepends+=('mingw-w64-gcc')
+fi
+
+# proton-tkg deps
+if [ -e "$_where"/proton_tkg_token ]; then
+  makedepends+=('fontforge' 'python-fonttools')
+  depends+=('tk')
+fi
+if [ "$_build_mediaconv" = "true" ]; then
+  depends+=('gst-plugins-ugly')
+fi
+
+# wine-mono deps
+if [ "$_use_mono" = "true" ]; then
+  depends+=('wine-mono')
+fi
+
+optdepends=(
+    'giflib'                'lib32-giflib'
+    'libpng'                'lib32-libpng'
+    'libldap'               'lib32-libldap'
+    'gnutls'                'lib32-gnutls'
+    'mpg123'                'lib32-mpg123'
+    'openal'                'lib32-openal'
+    'v4l-utils'             'lib32-v4l-utils'
+    'libpulse'              'lib32-libpulse'
+    'alsa-plugins'          'lib32-alsa-plugins'
+    'alsa-lib'              'lib32-alsa-lib'
+    'libjpeg-turbo'         'lib32-libjpeg-turbo'
+    'libxcomposite'         'lib32-libxcomposite'
+    'libxinerama'           'lib32-libxinerama'
+    'ncurses'               'lib32-ncurses'
+    'libxslt'               'lib32-libxslt'
+    'libva'                 'lib32-libva'
+    'gtk3'                  'lib32-gtk3'
+    'gst-plugins-base-libs' 'lib32-gst-plugins-base-libs'
+    'vulkan-icd-loader'     'lib32-vulkan-icd-loader'
+    'sdl2'                  'lib32-sdl2'
+    'cups'                  'zapcc'
+    'samba'                 'clang'
+    'dosbox'                'ccache'
+    'faudio'                'lib32-faudio'
+    'schedtool'
+)
+
+# Wine source
+if [ -n "$_custom_wine_source" ]; then
+  _winesrcdir=$( sed 's|/|-|g' <<< $(sed 's|.*://.[^/]*/||g' <<< ${_custom_wine_source//./}))
+  if [[ "$_custom_wine_source" = https* ]]; then
+    _winesrctarget="git+$_custom_wine_source"
+  else
+    _winesrctarget="$_custom_wine_source"
+  fi
+else
+  if [ "$_plain_mirrorsrc" = "true" ]; then
+    _winesrcdir="wine-mirror-git"
+    _winesrctarget="git+https://github.com/wine-mirror/wine.git"
+  else
+    _winesrcdir="wine-git"
+    _winesrctarget="git://source.winehq.org/git/wine.git"
+  fi
+fi
+
+if [ ! -e "$_where"/BIG_UGLY_FROGMINER ]; then
+  find "$_where"/wine-tkg-patches -type f '(' -iname '*patch' -or -iname '*.conf' ')' -not -path "*hotfixes*" -exec cp -n {} "$_where" \; && # copy patches inside the PKGBUILD's dir to preserve makepkg sourcing and md5sum checking
+  cp "$_where"/wine-tkg-userpatches/*.my* "$_where" 2>/dev/null # copy userpatches inside the PKGBUILD's dir
+fi
+
+# Handle unbranched bleeding version
+if [[ "$_LOCAL_PRESET" = valve* ]] && [ -n "$_bleeding_tag" ]; then
+  _plain_commit="${_bleeding_tag}"
+fi
+
+source=("$_winesrcdir"::"${_winesrctarget}${_plain_commit}"
+		"$_stgsrcdir"::"git+https://github.com/wine-staging/wine-staging.git${_staging_commit}"
+		# misc
+		'30-win32-aliases.conf' # 32-bit font antialiasing
+		'wine-binfmt.conf' # Enables launching windows executables directly
+)
+
+md5sums=('SKIP'
+         'SKIP'
+         '1ff4e467f59409272088d92173a0f801'
+         'cff441678d798466a13a0d03b01e23d7'
+)
+
+if [ "$_EXTERNAL_INSTALL" = "true" ]; then
+  provides=(
+    "$pkgname=$pkgver"
+  )
+  conflicts=("$pkgname")
+else
+  provides=(
+    "wine=$pkgver"
+    "wine-wow64=$pkgver"
+    "wine-staging=$pkgver"
+    "wine-esync=$pkgver"
+  )
+  conflicts=('wine' 'wine-wow64' 'wine-staging' 'wine-esync')
+  if [[ "$pkgname" == *-git ]]; then
+    replaces=("${pkgname/%-git/-faudio-git}")
+  fi
+fi
+
+if [ -n "$_localbuild" ]; then
+  _winesrcdir="$_localbuild"
+  _use_staging="false"
+  pkgname="$_localbuild"
+  if [ -n "$_PKGNAME_OVERRIDE" ]; then
+    if [ "$_PKGNAME_OVERRIDE" = "none" ]; then
+      pkgname="${pkgname}"
+    else
+      pkgname="${pkgname}-${_PKGNAME_OVERRIDE}"
+    fi
+    if msg2; then # Arch chroot workaround for even more looping fun
+      msg2 "Overriding default pkgname. New pkgname: ${pkgname}"
+    fi
+  fi
+fi
+
+makedepends=("${makedepends[@]}" "${depends[@]}")
+
+nonuser_patcher() {
+  if [ "$_NUKR" != "debug" ] || [[ "$_DEBUGANSW1" =~ [yY] ]]; then
+    if [ "$_nopatchmsg" != "true" ]; then
+      _fullpatchmsg=" -- ( $_patchmsg )"
+    fi
+    msg2 "Applying ${_patchname}"
+    echo -e "\n${_patchname}${_fullpatchmsg}" >> "$_where"/prepare.log
+    patch -Np1 < ../"$_patchname" >> "$_where"/prepare.log || (error "Patch application has failed. The error was logged to $_where/prepare.log for your convenience." && exit 1)
+    echo -e "${_patchname}${_fullpatchmsg}" >> "$_where"/last_build_config.log
+  fi
+}
+
+pkgver() {
+	if [ "$_use_staging" = "true" ] && [[ "$_custom_wine_source" != *"ValveSoftware"* ]]; then
+	  cd "${srcdir}/${_stgsrcdir}"
+	else
+	  cd "${srcdir}/${_winesrcdir}"
+	fi
+
+	# retrieve current wine version - if staging is enabled, staging version will be used instead
+	_ismakepkg="true" _describe_wine
+}
+
+prepare() {
+	# Handle unbranched bleeding version
+	if [ "$_LOCAL_PRESET" = "valve-exp-bleeding" ]; then
+	  (
+	  cd "${srcdir}/${_winesrcdir}"
+	  if [ -z "$_bleeding_tag" ]; then
+	    _bleeding_tag=$(git tag -l --sort=-v:refname | grep "bleeding" | head -n 1)
+	    echo "_bleeding_tag='$_bleeding_tag'" >> "$_where"/temp
+	  fi
+	  _bleeding_commit=$(git rev-list -n 1 "${_bleeding_tag}")
+	  _plain_commit="${_bleeding_commit}"
+	  git -c advice.detachedHead=false checkout "${_bleeding_commit}"
+	  )
+	fi
+
+	if msg2; then # Arch chroot workaround for even more looping fun
+	  # Remove gst-editing-services
+	  if pacman -Qq gst-editing-services &> /dev/null; then
+	    warning '! found gst-editing-services package, known to break wine prefix creation !'
+	    read -rp "  Uninstall it?"$'\n> N/y : ' _gst_editing_services;
+	    if [[ "$_gst_editing_services" =~ [yY] ]]; then
+	      sudo pacman -R gst-editing-services
+	    fi
+	  fi
+	fi
+
+	# Symlink legacy patches to srcdir
+	if [ "$_NUKR" != "debug" ] || [[ "$_DEBUGANSW1" =~ [yY] ]]; then
+	  for _sympatch in "$_where"/*.patch; do
+	    if [[ ! "${source[@]##*/}" =~ "${_sympatch##*/}" ]]; then
+	      ln -s "$_sympatch" "$srcdir/"
+	    fi
+	  done
+	fi
+
+	# state tracker start - FEAR THE MIGHTY FROG MINER
+	touch "${_where}"/BIG_UGLY_FROGMINER
+
+	# prepare steps
+	if [ -z "$_localbuild" ]; then
+	  _source_cleanup > "$_where"/prepare.log
+	  _prepare
+	else
+	  echo -e "Building local source $_localbuild" > "$_where"/prepare.log
+	fi
+	_polish
+	_makedirs
+
+    if [ "$_allow_server_rt_prio" = "true" ] || [ "$_allow_wine_net_raw" = "true" ]; then
+      if [ "$_EXTERNAL_INSTALL" = "true" ]; then
+        if [ "$_EXTERNAL_NOVER" = "true" ]; then
+          _serverpath="$_DEFAULT_EXTERNAL_PATH/$pkgname/bin/wineserver"
+          _preloaderpath="$_DEFAULT_EXTERNAL_PATH/$pkgname/bin/wine-preloader"
+          _preloader64path="$_DEFAULT_EXTERNAL_PATH/$pkgname/bin/wine64-preloader"
+        else
+          if [ "$_use_staging" = "true" ]; then
+            cd "$srcdir/$_stgsrcdir"
+          else
+            cd "$srcdir/$_winesrcdir"
+          fi
+          _realwineversion=$(_describe_wine)
+          _serverpath="$_DEFAULT_EXTERNAL_PATH/$pkgname-$_realwineversion/bin/wineserver"
+          _preloaderpath="$_DEFAULT_EXTERNAL_PATH/$pkgname-$_realwineversion/bin/wine-preloader"
+          _preloader64path="$_DEFAULT_EXTERNAL_PATH/$pkgname-$_realwineversion/bin/wine64-preloader"
+        fi
+      else
+        _serverpath="/usr/bin/wineserver"
+        _preloaderpath="/usr/bin/wine-preloader"
+        _preloader64path="/usr/bin/wine64-preloader"
+      fi
+      cp "$_where"/wine.install "$_where"/wine-tkg.install
+      sed -i "s|#echo \"Setting wineserver and/or wine-preloader capabilities\"|echo \"Setting wineserver and/or wine-preloader capabilities\"|g" "$_where"/wine-tkg.install
+      if [ "$_allow_server_rt_prio" = "true" ] && [ "$_allow_wine_net_raw" != "true" ]; then
+        sed -i "s|#setcap cap_net_raw+eip /usr/bin/wineserver 2>/dev/null|setcap cap_sys_nice+ep $_serverpath 2>/dev/null|g" "$_where"/wine-tkg.install
+      fi
+      if [ "$_allow_wine_net_raw" = "true" ] && [ "$_allow_server_rt_prio" != "true" ]; then
+        sed -i "s|#setcap cap_net_raw+eip /usr/bin/wineserver 2>/dev/null|setcap cap_net_raw+eip $_serverpath 2>/dev/null|g" "$_where"/wine-tkg.install
+      fi
+      if [ "$_allow_wine_net_raw" = "true" ] && [ "$_allow_server_rt_prio" = "true" ]; then
+        sed -i "s|#setcap cap_net_raw+eip /usr/bin/wineserver 2>/dev/null|setcap cap_sys_nice,cap_net_raw+eip $_serverpath 2>/dev/null|g" "$_where"/wine-tkg.install
+      fi
+      if [ "$_allow_wine_net_raw" = "true" ]; then
+        sed -i "s|#setcap cap_net_raw+eip /usr/bin/wine-preloader 2>/dev/null|setcap cap_net_raw+eip $_preloaderpath 2>/dev/null|g" "$_where"/wine-tkg.install
+        sed -i "s|#setcap cap_net_raw+eip /usr/bin/wine64-preloader 2>/dev/null|setcap cap_net_raw+eip $_preloader64path 2>/dev/null|g" "$_where"/wine-tkg.install
+      fi
+    fi
+}
+
+build() {
+  _prebuild_common
+
+  local _prefix=/usr
+  local _lib32name="lib32"
+  local _lib64name="lib"
+
+  # configure args
+  if [ -n "$_configure_userargs64" ]; then
+    _configure_args64+=($_configure_userargs64)
+  fi
+  if [ -n "$_configure_userargs32" ]; then
+    _configure_args32+=($_configure_userargs32)
+  fi
+
+  # External install
+  if [ "$_EXTERNAL_INSTALL" = "true" ]; then
+    _lib32name="lib" && _lib64name="lib64"
+    if [ "$_EXTERNAL_NOVER" = "true" ]; then
+      _prefix="$_DEFAULT_EXTERNAL_PATH/$pkgname"
+    else
+      if [ "$_use_staging" = "true" ]; then
+        cd "$srcdir/$_stgsrcdir"
+      else
+        cd "$srcdir/$_winesrcdir"
+      fi
+      _realwineversion=$(_describe_wine)
+      _prefix="$_DEFAULT_EXTERNAL_PATH/$pkgname-$_realwineversion"
+    fi
+    _configure_args64+=(--libdir="$_prefix/$_lib64name")
+    _configure_args32+=(--libdir="$_prefix/$_lib32name")
+  elif [ "$_EXTERNAL_INSTALL" = "proton" ]; then
+    _prefix="$_where"
+    _configure_args+=(--without-curses)
+  else
+    _configure_args64+=(--libdir="$_prefix/$_lib64name")
+    _configure_args32+=(--libdir="$_prefix/$_lib32name")
+  fi
+
+  if [ "$_SKIPBUILDING" != "true" ] && [ "$_NOCOMPILE" != "true" ]; then
+    _build
+  fi
+}
+
+package() {
+  if [ "$_allow_server_rt_prio" = "true" ]; then
+    install=wine-tkg.install
+  else
+    install=wine.install
+  fi
+
+  if [ "$_NOCOMPILE" != "true" ]; then
+    _package_makepkg
+  fi
+}
+
+trap exit_cleanup EXIT

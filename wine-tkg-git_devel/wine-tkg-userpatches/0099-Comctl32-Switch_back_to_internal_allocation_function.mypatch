@@ -1,0 +1,1835 @@
+From a1f03980be1fcb6136972616ff4180dd0622f68b Mon Sep 17 00:00:00 2001
+From: Nikolay Sivov <nsivov@codeweavers.com>
+Date: Wed, 7 Dec 2022 18:58:19 +0300
+Subject: [PATCH] comctl32: Switch back to internal allocation function.
+
+We are still using exported string functions internally,
+and that caused mismatches after recent incomplete switching to crt functions.
+
+There is also no evidence that crt functions are used at all there,
+so for now switch back to fix mismatching calls.
+
+Signed-off-by: Nikolay Sivov <nsivov@codeweavers.com>
+---
+ dlls/comctl32/animate.c   | 28 ++++++-------
+ dlls/comctl32/button.c    | 32 +++++++-------
+ dlls/comctl32/combo.c     | 21 +++++-----
+ dlls/comctl32/edit.c      | 67 ++++++++++++++---------------
+ dlls/comctl32/header.c    | 42 +++++++++----------
+ dlls/comctl32/hotkey.c    |  6 +--
+ dlls/comctl32/imagelist.c | 49 +++++++++++-----------
+ dlls/comctl32/ipaddress.c |  4 +-
+ dlls/comctl32/listbox.c   |  3 +-
+ dlls/comctl32/listview.c  | 88 +++++++++++++++++++--------------------
+ dlls/comctl32/monthcal.c  | 26 ++++++------
+ dlls/comctl32/pager.c     | 18 ++++----
+ dlls/comctl32/progress.c  |  2 +-
+ dlls/comctl32/static.c    | 10 ++---
+ dlls/comctl32/treeview.c  | 42 +++++++++----------
+ dlls/comctl32/updown.c    | 10 ++---
+ 16 files changed, 223 insertions(+), 225 deletions(-)
+
+diff --git a/dlls/comctl32/animate.c b/dlls/comctl32/animate.c
+index 87687fce7b1..f4d848fef91 100644
+--- a/dlls/comctl32/animate.c
++++ b/dlls/comctl32/animate.c
+@@ -187,20 +187,20 @@ static void ANIMATE_Free(ANIMATE_INFO *infoPtr)
+             FreeResource(infoPtr->hRes);
+             infoPtr->hRes = 0;
+         }
+-        free (infoPtr->lpIndex);
++        Free (infoPtr->lpIndex);
+         infoPtr->lpIndex = NULL;
+         if (infoPtr->hic)
+         {
+             fnIC.fnICClose(infoPtr->hic);
+             infoPtr->hic = 0;
+         }
+-        free (infoPtr->inbih);
++        Free (infoPtr->inbih);
+         infoPtr->inbih = NULL;
+-        free (infoPtr->outbih);
++        Free (infoPtr->outbih);
+         infoPtr->outbih = NULL;
+-        free (infoPtr->indata);
++        Free (infoPtr->indata);
+         infoPtr->indata = NULL;
+-        free (infoPtr->outdata);
++        Free (infoPtr->outdata);
+         infoPtr->outdata = NULL;
+         if (infoPtr->hbmPrevFrame)
+         {
+@@ -564,7 +564,7 @@ static BOOL ANIMATE_GetAviInfo(ANIMATE_INFO *infoPtr)
+ 	return FALSE;
+     }
+ 
+-    infoPtr->inbih = calloc(1, mmckInfo.cksize);
++    infoPtr->inbih = Alloc(mmckInfo.cksize);
+     if (!infoPtr->inbih) {
+ 	WARN("Can't alloc input BIH\n");
+ 	return FALSE;
+@@ -611,7 +611,7 @@ static BOOL ANIMATE_GetAviInfo(ANIMATE_INFO *infoPtr)
+ 
+     /* FIXME: should handle the 'rec ' LIST when present */
+ 
+-    infoPtr->lpIndex = calloc(infoPtr->mah.dwTotalFrames, sizeof(DWORD));
++    infoPtr->lpIndex = Alloc(infoPtr->mah.dwTotalFrames * sizeof(DWORD));
+     if (!infoPtr->lpIndex) 
+ 	return FALSE;
+ 
+@@ -635,7 +635,7 @@ static BOOL ANIMATE_GetAviInfo(ANIMATE_INFO *infoPtr)
+         infoPtr->ash.dwSuggestedBufferSize = insize;
+     }
+ 
+-    infoPtr->indata = calloc(1, infoPtr->ash.dwSuggestedBufferSize);
++    infoPtr->indata = Alloc(infoPtr->ash.dwSuggestedBufferSize);
+     if (!infoPtr->indata) 
+ 	return FALSE;
+ 
+@@ -666,7 +666,7 @@ static BOOL ANIMATE_GetAviCodec(ANIMATE_INFO *infoPtr)
+     outSize = fnIC.fnICSendMessage(infoPtr->hic, ICM_DECOMPRESS_GET_FORMAT,
+ 			    (DWORD_PTR)infoPtr->inbih, 0L);
+ 
+-    if (!(infoPtr->outbih = calloc(1, outSize)))
++    if (!(infoPtr->outbih = Alloc(outSize)))
+         return FALSE;
+ 
+     if (fnIC.fnICSendMessage(infoPtr->hic, ICM_DECOMPRESS_GET_FORMAT,
+@@ -676,7 +676,7 @@ static BOOL ANIMATE_GetAviCodec(ANIMATE_INFO *infoPtr)
+ 	return FALSE;
+     }
+ 
+-    if (!(infoPtr->outdata = calloc(1, infoPtr->outbih->biSizeImage)))
++    if (!(infoPtr->outdata = Alloc(infoPtr->outbih->biSizeImage)))
+         return FALSE;
+ 
+     if (fnIC.fnICSendMessage(infoPtr->hic, ICM_DECOMPRESS_BEGIN,
+@@ -769,12 +769,12 @@ static BOOL ANIMATE_OpenA(ANIMATE_INFO *infoPtr, HINSTANCE hInstance, LPSTR lpsz
+         return ANIMATE_OpenW(infoPtr, hInstance, (LPWSTR)lpszName);
+ 
+     len = MultiByteToWideChar(CP_ACP, 0, lpszName, -1, NULL, 0);
+-    lpwszName = malloc(len * sizeof(WCHAR));
++    lpwszName = Alloc(len * sizeof(WCHAR));
+     if (!lpwszName) return FALSE;
+     MultiByteToWideChar(CP_ACP, 0, lpszName, -1, lpwszName, len);
+ 
+     result = ANIMATE_OpenW(infoPtr, hInstance, lpwszName);
+-    free (lpwszName);
++    Free (lpwszName);
+     return result;
+ }
+ 
+@@ -806,7 +806,7 @@ static BOOL ANIMATE_Create(HWND hWnd, const CREATESTRUCTW *lpcs)
+     }
+ 
+     /* allocate memory for info structure */
+-    infoPtr = calloc(1, sizeof(*infoPtr));
++    infoPtr = Alloc(sizeof(*infoPtr));
+     if (!infoPtr) return FALSE;
+ 
+     /* store crossref hWnd <-> info structure */
+@@ -836,7 +836,7 @@ static LRESULT ANIMATE_Destroy(ANIMATE_INFO *infoPtr)
+ 
+     infoPtr->cs.DebugInfo->Spare[0] = 0;
+     DeleteCriticalSection(&infoPtr->cs);
+-    free(infoPtr);
++    Free(infoPtr);
+ 
+     return 0;
+ }
+diff --git a/dlls/comctl32/button.c b/dlls/comctl32/button.c
+index d4196b144ed..77eb54fbcf1 100644
+--- a/dlls/comctl32/button.c
++++ b/dlls/comctl32/button.c
+@@ -254,7 +254,7 @@ static inline void paint_button( BUTTON_INFO *infoPtr, LONG style, UINT action )
+ static inline WCHAR *get_button_text( const BUTTON_INFO *infoPtr )
+ {
+     INT len = GetWindowTextLengthW( infoPtr->hwnd );
+-    WCHAR *buffer = malloc( (len + 1) * sizeof(WCHAR) );
++    WCHAR *buffer = Alloc( (len + 1) * sizeof(WCHAR) );
+     if (buffer)
+         GetWindowTextW( infoPtr->hwnd, buffer, len + 1 );
+     return buffer;
+@@ -334,7 +334,7 @@ HRGN set_control_clipping( HDC hdc, const RECT *rect )
+ static WCHAR *heap_strndupW(const WCHAR *src, size_t length)
+ {
+     size_t size = (length + 1) * sizeof(WCHAR);
+-    WCHAR *dst = malloc(size);
++    WCHAR *dst = Alloc(size);
+     if (dst) memcpy(dst, src, size);
+     return dst;
+ }
+@@ -503,7 +503,7 @@ static LRESULT CALLBACK BUTTON_WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
+     {
+         CREATESTRUCTW *cs = (CREATESTRUCTW *)lParam;
+ 
+-        infoPtr = calloc( 1, sizeof(*infoPtr) );
++        infoPtr = Alloc( sizeof(*infoPtr) );
+         SetWindowLongPtrW( hWnd, 0, (LONG_PTR)infoPtr );
+         infoPtr->hwnd = hWnd;
+         infoPtr->parent = cs->hwndParent;
+@@ -520,8 +520,8 @@ static LRESULT CALLBACK BUTTON_WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
+             DeleteObject(infoPtr->u.bitmap);
+         else if (infoPtr->image_type == IMAGE_ICON)
+             DestroyIcon(infoPtr->u.icon);
+-        free(infoPtr->note);
+-        free(infoPtr);
++        Free(infoPtr->note);
++        Free(infoPtr);
+         break;
+ 
+     case WM_CREATE:
+@@ -781,7 +781,7 @@ static LRESULT CALLBACK BUTTON_WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
+             return FALSE;
+         }
+ 
+-        free(infoPtr->note);
++        Free(infoPtr->note);
+         if (note)
+         {
+             infoPtr->note_length = lstrlenW(note);
+@@ -791,7 +791,7 @@ static LRESULT CALLBACK BUTTON_WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
+         if (!note || !infoPtr->note)
+         {
+             infoPtr->note_length = 0;
+-            infoPtr->note = calloc(1, sizeof(WCHAR));
++            infoPtr->note = Alloc(sizeof(WCHAR));
+         }
+ 
+         SetLastError(NO_ERROR);
+@@ -1288,7 +1288,7 @@ static void BUTTON_GetTextIdealSize(BUTTON_INFO *infoPtr, LONG maxWidth, SIZE *s
+     hdc = GetDC(infoPtr->hwnd);
+     rect = BUTTON_GetTextRect(infoPtr, hdc, text, maxWidth);
+     ReleaseDC(infoPtr->hwnd, hdc);
+-    free(text);
++    Free(text);
+ 
+     size->cx = rect.right - rect.left + margin->left + margin->right;
+     size->cy = rect.bottom - rect.top + margin->top + margin->bottom;
+@@ -1488,7 +1488,7 @@ static BOOL CL_GetIdealSize(BUTTON_INFO *infoPtr, SIZE *size)
+             RECT r;
+             GetThemeTextExtent(theme, hdc, BP_COMMANDLINK, CMDLS_NORMAL,
+                                text, -1, flags, &text_bound, &r);
+-            free(text);
++            Free(text);
+             text_w = r.right - r.left;
+             text_h = r.bottom - r.top;
+         }
+@@ -1526,7 +1526,7 @@ static BOOL CL_GetIdealSize(BUTTON_INFO *infoPtr, SIZE *size)
+                     RECT r = text_bound;
+                     old_font = SelectObject(hdc, font);
+                     DrawTextW(hdc, text, -1, &r, flags | DT_CALCRECT);
+-                    free(text);
++                    Free(text);
+ 
+                     text_w = r.right - r.left;
+                     text_h = r.bottom - r.top;
+@@ -1595,7 +1595,7 @@ static UINT BUTTON_CalcLayoutRects(const BUTTON_INFO *infoPtr, HDC hdc, RECT *la
+        SetRectEmpty(labelRc);
+        SetRectEmpty(imageRc);
+        SetRectEmpty(textRc);
+-       free(text);
++       Free(text);
+        return (UINT)-1;
+    }
+ 
+@@ -1698,7 +1698,7 @@ static UINT BUTTON_CalcLayoutRects(const BUTTON_INFO *infoPtr, HDC hdc, RECT *la
+            SetRectEmpty(&imageRect);
+        }
+    }
+-   free(text);
++   Free(text);
+ 
+    CopyRect(labelRc, &labelRect);
+    CopyRect(imageRc, &imageRect);
+@@ -1791,7 +1791,7 @@ static void BUTTON_DrawLabel(const BUTTON_INFO *infoPtr, HDC hdc, UINT dtFlags,
+    if (!(text = get_button_text(infoPtr))) return;
+    DrawStateW(hdc, hbr, BUTTON_DrawTextCallback, (LPARAM)text, dtFlags, textRect->left, textRect->top,
+               textRect->right - textRect->left, textRect->bottom - textRect->top, flags);
+-   free(text);
++   Free(text);
+ }
+ 
+ static void BUTTON_DrawThemedLabel(const BUTTON_INFO *info, HDC hdc, UINT text_flags,
+@@ -1823,7 +1823,7 @@ static void BUTTON_DrawThemedLabel(const BUTTON_INFO *info, HDC hdc, UINT text_f
+        return;
+ 
+    DrawThemeText(theme, hdc, part, state, text, lstrlenW(text), text_flags, 0, text_rect);
+-   free(text);
++   Free(text);
+ }
+ 
+ /**********************************************************************
+@@ -2659,7 +2659,7 @@ static void CL_Paint( const BUTTON_INFO *infoPtr, HDC hDC, UINT action )
+                     SelectObject(hDC, font);
+                     txt_h = DrawTextW(hDC, text, -1, &r,
+                                       DT_TOP | DT_LEFT | DT_WORDBREAK | DT_END_ELLIPSIS);
+-                    free(text);
++                    Free(text);
+                 }
+                 DeleteObject(font);
+             }
+@@ -3152,7 +3152,7 @@ static void CL_ThemedPaint(HTHEME theme, const BUTTON_INFO *infoPtr, HDC hDC, in
+             DrawThemeText(theme, hDC, part, state, text, len, dtFlags | DT_END_ELLIPSIS, 0, &r);
+ 
+             txt_h = text_rect.bottom - text_rect.top;
+-            free(text);
++            Free(text);
+         }
+ 
+         /* Draw the note */
+diff --git a/dlls/comctl32/combo.c b/dlls/comctl32/combo.c
+index 5876c2acbb8..cb0e9745b2a 100644
+--- a/dlls/comctl32/combo.c
++++ b/dlls/comctl32/combo.c
+@@ -33,7 +33,6 @@
+ #include "vssym32.h"
+ #include "commctrl.h"
+ #include "wine/debug.h"
+-#include "wine/heap.h"
+ 
+ #include "comctl32.h"
+ 
+@@ -125,7 +124,7 @@ static LRESULT COMBO_NCCreate(HWND hwnd, LONG style)
+ {
+     HEADCOMBO *lphc;
+ 
+-    if (COMBO_Init() && (lphc = heap_alloc_zero(sizeof(*lphc))))
++    if (COMBO_Init() && (lphc = Alloc(sizeof(*lphc))))
+     {
+         lphc->self = hwnd;
+         SetWindowLongPtrW( hwnd, 0, (LONG_PTR)lphc );
+@@ -166,7 +165,7 @@ static LRESULT COMBO_NCDestroy( HEADCOMBO *lphc )
+             DestroyWindow( lphc->hWndLBox );
+ 
+         SetWindowLongPtrW( lphc->self, 0, 0 );
+-        heap_free( lphc );
++        Free( lphc );
+     }
+ 
+     return 0;
+@@ -635,7 +634,7 @@ static void CBPaintText(HEADCOMBO *lphc, HDC hdc_paint)
+         size = SendMessageW(lphc->hWndLBox, LB_GETTEXTLEN, id, 0);
+ 	if (size == LB_ERR)
+ 	  FIXME("LB_ERR probably not handled yet\n");
+-        if ((pText = heap_alloc((size + 1) * sizeof(WCHAR))))
++        if ((pText = Alloc((size + 1) * sizeof(WCHAR))))
+ 	{
+             /* size from LB_GETTEXTLEN may be too large, from LB_GETTEXT is accurate */
+            size=SendMessageW(lphc->hWndLBox, LB_GETTEXT, id, (LPARAM)pText);
+@@ -731,7 +730,7 @@ static void CBPaintText(HEADCOMBO *lphc, HDC hdc_paint)
+        ReleaseDC( lphc->self, hdc );
+    }
+ 
+-    heap_free(pText);
++    Free(pText);
+ }
+ 
+ /***********************************************************************
+@@ -853,7 +852,7 @@ static INT CBUpdateLBox( LPHEADCOMBO lphc, BOOL bSelect )
+    length = SendMessageW( lphc->hWndEdit, WM_GETTEXTLENGTH, 0, 0 );
+ 
+     if (length > 0)
+-        pText = heap_alloc((length + 1) * sizeof(WCHAR));
++        pText = Alloc((length + 1) * sizeof(WCHAR));
+ 
+    TRACE("\t edit text length %i\n", length );
+ 
+@@ -861,7 +860,7 @@ static INT CBUpdateLBox( LPHEADCOMBO lphc, BOOL bSelect )
+    {
+        GetWindowTextW( lphc->hWndEdit, pText, length + 1);
+        idx = SendMessageW(lphc->hWndLBox, LB_FINDSTRING, -1, (LPARAM)pText);
+-       heap_free( pText );
++       Free( pText );
+    }
+ 
+    SendMessageW(lphc->hWndLBox, LB_SETCURSEL, bSelect ? idx : -1, 0);
+@@ -890,7 +889,7 @@ static void CBUpdateEdit( LPHEADCOMBO lphc , INT index )
+        length = SendMessageW(lphc->hWndLBox, LB_GETTEXTLEN, index, 0);
+        if( length != LB_ERR)
+        {
+-           if ((pText = heap_alloc((length + 1) * sizeof(WCHAR))))
++           if ((pText = Alloc((length + 1) * sizeof(WCHAR))))
+                SendMessageW(lphc->hWndLBox, LB_GETTEXT, index, (LPARAM)pText);
+        }
+    }
+@@ -905,7 +904,7 @@ static void CBUpdateEdit( LPHEADCOMBO lphc , INT index )
+    if( lphc->wState & CBF_FOCUSED )
+       SendMessageW(lphc->hWndEdit, EM_SETSEL, 0, -1);
+ 
+-    heap_free( pText );
++    Free( pText );
+ }
+ 
+ /***********************************************************************
+@@ -1319,7 +1318,7 @@ static LRESULT COMBO_GetText( HEADCOMBO *lphc, INT count, LPWSTR buf )
+         /* 'length' is without the terminating character */
+         if (length >= count)
+         {
+-            WCHAR *lpBuffer = heap_alloc((length + 1) * sizeof(WCHAR));
++            WCHAR *lpBuffer = Alloc((length + 1) * sizeof(WCHAR));
+             if (!lpBuffer) goto error;
+             length = SendMessageW(lphc->hWndLBox, LB_GETTEXT, idx, (LPARAM)lpBuffer);
+ 
+@@ -1329,7 +1328,7 @@ static LRESULT COMBO_GetText( HEADCOMBO *lphc, INT count, LPWSTR buf )
+                 lstrcpynW( buf, lpBuffer, count );
+                 length = count;
+             }
+-            heap_free( lpBuffer );
++            Free( lpBuffer );
+         }
+         else length = SendMessageW(lphc->hWndLBox, LB_GETTEXT, idx, (LPARAM)buf);
+ 
+diff --git a/dlls/comctl32/edit.c b/dlls/comctl32/edit.c
+index eb74af29aa5..883dd5d9145 100644
+--- a/dlls/comctl32/edit.c
++++ b/dlls/comctl32/edit.c
+@@ -43,6 +43,7 @@
+ #include "commctrl.h"
+ #include "uxtheme.h"
+ #include "vsstyle.h"
++#include "comctl32.h"
+ #include "wine/debug.h"
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(edit);
+@@ -238,7 +239,7 @@ static INT EDIT_WordBreakProc(EDITSTATE *es, LPWSTR s, INT index, INT count, INT
+         memset(&psa,0,sizeof(SCRIPT_ANALYSIS));
+         psa.eScript = SCRIPT_UNDEFINED;
+ 
+-        es->logAttr = malloc(sizeof(SCRIPT_LOGATTR) * get_text_length(es));
++        es->logAttr = Alloc(sizeof(SCRIPT_LOGATTR) * get_text_length(es));
+         ScriptBreak(es->text, get_text_length(es), &psa, es->logAttr);
+     }
+ 
+@@ -476,7 +477,7 @@ static void EDIT_BuildLineDefs_ML(EDITSTATE *es, INT istart, INT iend, INT delta
+ 			{
+ 				/* The buffer has been expanded, create a new line and
+ 				   insert it into the link list */
+-				LINEDEF *new_line = calloc(1, sizeof(*new_line));
++				LINEDEF *new_line = Alloc(sizeof(*new_line));
+ 				new_line->next = previous_line->next;
+ 				previous_line->next = new_line;
+ 				current_line = new_line;
+@@ -486,7 +487,7 @@ static void EDIT_BuildLineDefs_ML(EDITSTATE *es, INT istart, INT iend, INT delta
+ 			{
+ 				/* The previous line merged with this line so we delete this extra entry */
+ 				previous_line->next = current_line->next;
+-				free(current_line);
++				Free(current_line);
+ 				current_line = previous_line->next;
+ 				es->line_count--;
+ 				continue;
+@@ -586,7 +587,7 @@ static void EDIT_BuildLineDefs_ML(EDITSTATE *es, INT istart, INT iend, INT delta
+ 				if (current_line->ssa)
+ 				{
+ 					count = ScriptString_pcOutChars(current_line->ssa);
+-					piDx = malloc(sizeof(INT) * (*count));
++					piDx = Alloc(sizeof(INT) * (*count));
+ 					ScriptStringGetLogicalWidths(current_line->ssa,piDx);
+ 
+ 					prev = current_line->net_length-1;
+@@ -596,7 +597,7 @@ static void EDIT_BuildLineDefs_ML(EDITSTATE *es, INT istart, INT iend, INT delta
+ 					} while ( prev > 0 && current_line->width > fw);
+ 					if (prev<=0)
+ 						prev = 1;
+-					free(piDx);
++					Free(piDx);
+ 				}
+ 				else
+ 					prev = (fw / es->char_width);
+@@ -685,7 +686,7 @@ static void EDIT_BuildLineDefs_ML(EDITSTATE *es, INT istart, INT iend, INT delta
+ 		{
+ 			pnext = current_line->next;
+ 			EDIT_InvalidateUniscribeData_linedef(current_line);
+-			free(current_line);
++			Free(current_line);
+ 			current_line = pnext;
+ 			es->line_count--;
+ 		}
+@@ -1173,7 +1174,7 @@ static inline void text_buffer_changed(EDITSTATE *es)
+ {
+     es->text_length = (UINT)-1;
+ 
+-    free(es->logAttr);
++    Free(es->logAttr);
+     es->logAttr = NULL;
+     EDIT_InvalidateUniscribeData(es);
+ }
+@@ -1299,7 +1300,7 @@ static BOOL EDIT_MakeUndoFit(EDITSTATE *es, UINT size)
+ 	TRACE("trying to ReAlloc to %d+1\n", size);
+ 
+ 	alloc_size = ROUND_TO_GROW((size + 1) * sizeof(WCHAR));
+-	if ((new_undo_text = realloc(es->undo_text, alloc_size))) {
++	if ((new_undo_text = ReAlloc(es->undo_text, alloc_size))) {
+ 		memset(new_undo_text + es->undo_buffer_size, 0, alloc_size - es->undo_buffer_size * sizeof(WCHAR));
+ 		es->undo_text = new_undo_text;
+ 		es->undo_buffer_size = alloc_size/sizeof(WCHAR) - 1;
+@@ -2473,7 +2474,7 @@ static void EDIT_EM_ReplaceSel(EDITSTATE *es, BOOL can_undo, const WCHAR *lpsz_r
+ 		/* there is something to be deleted */
+ 		TRACE("deleting stuff.\n");
+ 		bufl = e - s;
+-		buf = malloc((bufl + 1) * sizeof(WCHAR));
++		buf = Alloc((bufl + 1) * sizeof(WCHAR));
+ 		if (!buf) return;
+ 		memcpy(buf, es->text + s, bufl * sizeof(WCHAR));
+ 		buf[bufl] = 0; /* ensure 0 termination */
+@@ -2586,7 +2587,7 @@ static void EDIT_EM_ReplaceSel(EDITSTATE *es, BOOL can_undo, const WCHAR *lpsz_r
+ 			EDIT_EM_EmptyUndoBuffer(es);
+ 	}
+ 
+-	free(buf);
++	Free(buf);
+ 
+ 	s += strl;
+ 
+@@ -2831,12 +2832,12 @@ static BOOL EDIT_EM_SetTabStops(EDITSTATE *es, INT count, const INT *tabs)
+ {
+ 	if (!(es->style & ES_MULTILINE))
+ 		return FALSE;
+-	free(es->tabs);
++	Free(es->tabs);
+ 	es->tabs_count = count;
+ 	if (!count)
+ 		es->tabs = NULL;
+ 	else {
+-		es->tabs = malloc(count * sizeof(INT));
++		es->tabs = Alloc(count * sizeof(INT));
+ 		memcpy(es->tabs, tabs, count * sizeof(INT));
+ 	}
+ 	EDIT_InvalidateUniscribeData(es);
+@@ -2880,7 +2881,7 @@ static BOOL EDIT_EM_Undo(EDITSTATE *es)
+ 
+ 	ulength = lstrlenW(es->undo_text);
+ 
+-	utext = malloc((ulength + 1) * sizeof(WCHAR));
++	utext = Alloc((ulength + 1) * sizeof(WCHAR));
+ 
+ 	lstrcpyW(utext, es->undo_text);
+ 
+@@ -2894,7 +2895,7 @@ static BOOL EDIT_EM_Undo(EDITSTATE *es)
+         /* send the notification after the selection start and end are set */
+         if (!notify_parent(es, EN_CHANGE)) return TRUE;
+ 	EDIT_EM_ScrollCaret(es);
+-	free(utext);
++	Free(utext);
+ 
+ 	TRACE("after UNDO:insertion length = %d, deletion buffer = %s\n",
+ 			es->undo_insert_count, debugstr_w(es->undo_text));
+@@ -4213,7 +4214,7 @@ static BOOL EDIT_EM_SetCueBanner(EDITSTATE *es, BOOL draw_focused, const WCHAR *
+     if (es->style & ES_MULTILINE || !cue_text)
+         return FALSE;
+ 
+-    free(es->cue_banner_text);
++    Free(es->cue_banner_text);
+     es->cue_banner_text = wcsdup(cue_text);
+     es->cue_banner_draw_focused = draw_focused;
+ 
+@@ -4264,7 +4265,7 @@ static void EDIT_GetCompositionStr(HIMC hIMC, LPARAM CompFlag, EDITSTATE *es)
+         return;
+     }
+ 
+-    lpCompStr = malloc(buflen);
++    lpCompStr = Alloc(buflen);
+     if (!lpCompStr)
+     {
+         ERR("Unable to allocate IME CompositionString\n");
+@@ -4284,11 +4285,11 @@ static void EDIT_GetCompositionStr(HIMC hIMC, LPARAM CompFlag, EDITSTATE *es)
+         if (dwBufLenAttr)
+         {
+             dwBufLenAttr ++;
+-            lpCompStrAttr = malloc(dwBufLenAttr + 1);
++            lpCompStrAttr = Alloc(dwBufLenAttr + 1);
+             if (!lpCompStrAttr)
+             {
+                 ERR("Unable to allocate IME Attribute String\n");
+-                free(lpCompStr);
++                Free(lpCompStr);
+                 return;
+             }
+             ImmGetCompositionStringW(hIMC,GCS_COMPATTR, lpCompStrAttr,
+@@ -4315,8 +4316,8 @@ static void EDIT_GetCompositionStr(HIMC hIMC, LPARAM CompFlag, EDITSTATE *es)
+     es->selection_start = es->composition_start;
+     es->selection_end = es->selection_start + es->composition_len;
+ 
+-    free(lpCompStrAttr);
+-    free(lpCompStr);
++    Free(lpCompStrAttr);
++    Free(lpCompStr);
+ }
+ 
+ static void EDIT_GetResultStr(HIMC hIMC, EDITSTATE *es)
+@@ -4330,7 +4331,7 @@ static void EDIT_GetResultStr(HIMC hIMC, EDITSTATE *es)
+         return;
+     }
+ 
+-    lpResultStr = malloc(buflen);
++    lpResultStr = Alloc(buflen);
+     if (!lpResultStr)
+     {
+         ERR("Unable to alloc buffer for IME string\n");
+@@ -4349,7 +4350,7 @@ static void EDIT_GetResultStr(HIMC hIMC, EDITSTATE *es)
+     es->composition_start = es->selection_end;
+     es->composition_len = 0;
+ 
+-    free(lpResultStr);
++    Free(lpResultStr);
+ }
+ 
+ static void EDIT_ImeComposition(HWND hwnd, LPARAM CompFlag, EDITSTATE *es)
+@@ -4396,7 +4397,7 @@ static LRESULT EDIT_WM_NCCreate(HWND hwnd, LPCREATESTRUCTW lpcs)
+ 
+     TRACE("Creating edit control, style = %#lx\n", lpcs->style);
+ 
+-    if (!(es = calloc(1, sizeof(*es))))
++    if (!(es = Alloc(sizeof(*es))))
+         return FALSE;
+     SetWindowLongPtrW( hwnd, 0, (LONG_PTR)es );
+ 
+@@ -4458,12 +4459,12 @@ static LRESULT EDIT_WM_NCCreate(HWND hwnd, LPCREATESTRUCTW lpcs)
+ 	    goto cleanup;
+ 	es->buffer_size = LocalSize(es->hloc32W)/sizeof(WCHAR) - 1;
+ 
+-	if (!(es->undo_text = calloc(es->buffer_size + 1, sizeof(WCHAR))))
++	if (!(es->undo_text = Alloc((es->buffer_size + 1) * sizeof(WCHAR))))
+ 		goto cleanup;
+ 	es->undo_buffer_size = es->buffer_size;
+ 
+ 	if (es->style & ES_MULTILINE)
+-	    if (!(es->first_line_def = calloc(1, sizeof(LINEDEF))))
++	    if (!(es->first_line_def = Alloc(sizeof(LINEDEF))))
+ 	        goto cleanup;
+ 	es->line_count = 1;
+ 
+@@ -4488,11 +4489,11 @@ static LRESULT EDIT_WM_NCCreate(HWND hwnd, LPCREATESTRUCTW lpcs)
+ cleanup:
+ 	SetWindowLongPtrW(es->hwndSelf, 0, 0);
+ 	EDIT_InvalidateUniscribeData(es);
+-	free(es->first_line_def);
+-	free(es->undo_text);
++	Free(es->first_line_def);
++	Free(es->undo_text);
+ 	if (es->hloc32W) LocalFree(es->hloc32W);
+-	free(es->logAttr);
+-	free(es);
++	Free(es->logAttr);
++	Free(es);
+ 	return FALSE;
+ }
+ 
+@@ -4575,14 +4576,14 @@ static LRESULT EDIT_WM_NCDestroy(EDITSTATE *es)
+     while (pc)
+     {
+         pp = pc->next;
+-        free(pc);
++        Free(pc);
+         pc = pp;
+     }
+ 
+     SetWindowLongPtrW( es->hwndSelf, 0, 0 );
+-    free(es->undo_text);
+-    free(es->cue_banner_text);
+-    free(es);
++    Free(es->undo_text);
++    Free(es->cue_banner_text);
++    Free(es);
+ 
+     return 0;
+ }
+diff --git a/dlls/comctl32/header.c b/dlls/comctl32/header.c
+index e905d18e2fa..191a314bcd8 100644
+--- a/dlls/comctl32/header.c
++++ b/dlls/comctl32/header.c
+@@ -140,7 +140,7 @@ static void HEADER_StoreHDItemInHeader(HEADER_ITEM *lpItem, UINT mask, const HDI
+ 
+     if (mask & HDI_TEXT)
+     {
+-        free(lpItem->pszText);
++        Free(lpItem->pszText);
+         lpItem->pszText = NULL;
+ 
+         if (phdi->pszText != LPSTR_TEXTCALLBACKW) /* covers != TEXTCALLBACKA too */
+@@ -335,7 +335,7 @@ static HRGN create_sort_arrow( INT x, INT y, INT h, BOOL is_up )
+ 
+     if (size > sizeof(buffer))
+     {
+-        data = malloc( size );
++        data = Alloc( size );
+         if (!data) return NULL;
+     }
+     data->rdh.dwSize = sizeof(data->rdh);
+@@ -361,7 +361,7 @@ static HRGN create_sort_arrow( INT x, INT y, INT h, BOOL is_up )
+         data->rdh.nCount++;
+     }
+     rgn = ExtCreateRegion( NULL, size, data );
+-    if (data != (RGNDATA *)buffer) free( data );
++    if (data != (RGNDATA *)buffer) Free( data );
+     return rgn;
+ }
+ 
+@@ -960,7 +960,7 @@ HEADER_SendNotifyWithIntFieldT(const HEADER_INFO *infoPtr, UINT code, INT iItem,
+  *   (so we handle the two cases only doing a specific cast for pszText).
+  * Checks if any of the required fields is a callback. If this is the case sends a
+  * NMHDISPINFO notify to retrieve these items. The items are stored in the
+- * HEADER_ITEM pszText and iImage fields. They should be freed with
++ * HEADER_ITEM pszText and iImage fields. They should be Freed with
+  * HEADER_FreeCallbackItems.
+  *
+  * @param hwnd : hwnd header container handler
+@@ -982,7 +982,7 @@ HEADER_PrepareCallbackItems(const HEADER_INFO *infoPtr, INT iItem, INT reqMask)
+     if (mask&HDI_TEXT && lpItem->pszText != NULL)
+     {
+         ERR("(): function called without a call to FreeCallbackItems\n");
+-        free(lpItem->pszText);
++        Free(lpItem->pszText);
+         lpItem->pszText = NULL;
+     }
+     
+@@ -993,13 +993,13 @@ HEADER_PrepareCallbackItems(const HEADER_INFO *infoPtr, INT iItem, INT reqMask)
+     {
+         dispInfo.hdr.code = HDN_GETDISPINFOW;
+         if (mask & HDI_TEXT)
+-            pvBuffer = calloc(MAX_HEADER_TEXT_LEN, sizeof(WCHAR));
++            pvBuffer = Alloc(MAX_HEADER_TEXT_LEN * sizeof(WCHAR));
+     }
+     else
+     {
+         dispInfo.hdr.code = HDN_GETDISPINFOA;
+         if (mask & HDI_TEXT)
+-            pvBuffer = calloc(MAX_HEADER_TEXT_LEN, sizeof(CHAR));
++            pvBuffer = Alloc(MAX_HEADER_TEXT_LEN * sizeof(CHAR));
+     }
+     dispInfo.pszText      = pvBuffer;
+     dispInfo.cchTextMax   = (pvBuffer!=NULL?MAX_HEADER_TEXT_LEN:0);
+@@ -1030,7 +1030,7 @@ HEADER_PrepareCallbackItems(const HEADER_INFO *infoPtr, INT iItem, INT reqMask)
+         else
+         {
+             Str_SetPtrAtoW(&lpItem->pszText, (LPSTR)dispInfo.pszText);
+-            free(pvBuffer);
++            Free(pvBuffer);
+         }
+     }
+         
+@@ -1056,7 +1056,7 @@ HEADER_FreeCallbackItems(HEADER_ITEM *lpItem)
+ {
+     if (lpItem->callbackMask&HDI_TEXT)
+     {
+-        free(lpItem->pszText);
++        Free(lpItem->pszText);
+         lpItem->pszText = NULL;
+     }
+ 
+@@ -1178,15 +1178,15 @@ HEADER_DeleteItem (HEADER_INFO *infoPtr, INT iItem)
+        TRACE("%d: order=%d, iOrder=%d, ->iOrder=%d\n", i, infoPtr->order[i], infoPtr->items[i].iOrder, infoPtr->items[infoPtr->order[i]].iOrder);
+ 
+     iOrder = infoPtr->items[iItem].iOrder;
+-    free(infoPtr->items[iItem].pszText);
++    Free(infoPtr->items[iItem].pszText);
+ 
+     infoPtr->uNumItem--;
+     memmove(&infoPtr->items[iItem], &infoPtr->items[iItem + 1],
+             (infoPtr->uNumItem - iItem) * sizeof(HEADER_ITEM));
+     memmove(&infoPtr->order[iOrder], &infoPtr->order[iOrder + 1],
+             (infoPtr->uNumItem - iOrder) * sizeof(INT));
+-    infoPtr->items = realloc(infoPtr->items, sizeof(HEADER_ITEM) * infoPtr->uNumItem);
+-    infoPtr->order = realloc(infoPtr->order, sizeof(INT) * infoPtr->uNumItem);
++    infoPtr->items = ReAlloc(infoPtr->items, sizeof(HEADER_ITEM) * infoPtr->uNumItem);
++    infoPtr->order = ReAlloc(infoPtr->order, sizeof(INT) * infoPtr->uNumItem);
+         
+     /* Correct the orders */
+     for (i = 0; i < infoPtr->uNumItem; i++)
+@@ -1416,8 +1416,8 @@ HEADER_InsertItemT (HEADER_INFO *infoPtr, INT nItem, const HDITEMW *phdi, BOOL b
+         iOrder = infoPtr->uNumItem;
+ 
+     infoPtr->uNumItem++;
+-    infoPtr->items = realloc(infoPtr->items, sizeof(HEADER_ITEM) * infoPtr->uNumItem);
+-    infoPtr->order = realloc(infoPtr->order, sizeof(INT) * infoPtr->uNumItem);
++    infoPtr->items = ReAlloc(infoPtr->items, sizeof(HEADER_ITEM) * infoPtr->uNumItem);
++    infoPtr->order = ReAlloc(infoPtr->order, sizeof(INT) * infoPtr->uNumItem);
+     
+     /* make space for the new item */
+     memmove(&infoPtr->items[nItem + 1], &infoPtr->items[nItem],
+@@ -1536,7 +1536,7 @@ HEADER_SetItemT (HEADER_INFO *infoPtr, INT nItem, const HDITEMW *phdi, BOOL bUni
+     HEADER_CopyHDItemForNotify(infoPtr, &hdNotify, phdi, bUnicode, &pvScratch);
+     if (HEADER_SendNotifyWithHDItemT(infoPtr, HDN_ITEMCHANGINGW, nItem, &hdNotify))
+     {
+-        free(pvScratch);
++        Free(pvScratch);
+         return FALSE;
+     }
+ 
+@@ -1553,7 +1553,7 @@ HEADER_SetItemT (HEADER_INFO *infoPtr, INT nItem, const HDITEMW *phdi, BOOL bUni
+ 
+     InvalidateRect(infoPtr->hwndSelf, NULL, FALSE);
+ 
+-    free(pvScratch);
++    Free(pvScratch);
+     return TRUE;
+ }
+ 
+@@ -1576,7 +1576,7 @@ HEADER_Create (HWND hwnd, const CREATESTRUCTW *lpcs)
+     HFONT hOldFont;
+     HDC   hdc;
+ 
+-    infoPtr = calloc(1, sizeof(*infoPtr));
++    infoPtr = Alloc(sizeof(*infoPtr));
+     SetWindowLongPtrW (hwnd, 0, (DWORD_PTR)infoPtr);
+ 
+     infoPtr->hwndSelf = hwnd;
+@@ -1631,14 +1631,14 @@ HEADER_NCDestroy (HEADER_INFO *infoPtr)
+     if (infoPtr->items) {
+         lpItem = infoPtr->items;
+         for (nItem = 0; nItem < infoPtr->uNumItem; nItem++, lpItem++)
+-            free(lpItem->pszText);
+-        free(infoPtr->items);
++            Free(lpItem->pszText);
++        Free(infoPtr->items);
+     }
+ 
+-    free(infoPtr->order);
++    Free(infoPtr->order);
+ 
+     SetWindowLongPtrW (infoPtr->hwndSelf, 0, 0);
+-    free(infoPtr);
++    Free(infoPtr);
+ 
+     return 0;
+ }
+diff --git a/dlls/comctl32/hotkey.c b/dlls/comctl32/hotkey.c
+index ed2be658cc9..1fc9658c179 100644
+--- a/dlls/comctl32/hotkey.c
++++ b/dlls/comctl32/hotkey.c
+@@ -241,9 +241,9 @@ HOTKEY_Create (HOTKEY_INFO *infoPtr, const CREATESTRUCTW *lpcs)
+ static LRESULT
+ HOTKEY_Destroy (HOTKEY_INFO *infoPtr)
+ {
+-    /* free hotkey info data */
++    /* Free hotkey info data */
+     SetWindowLongPtrW (infoPtr->hwndSelf, 0, 0);
+-    free (infoPtr);
++    Free (infoPtr);
+     return 0;
+ }
+ 
+@@ -412,7 +412,7 @@ HOTKEY_NCCreate (HWND hwnd, const CREATESTRUCTW *lpcs)
+                     dwExStyle | WS_EX_CLIENTEDGE);
+ 
+     /* allocate memory for info structure */
+-    infoPtr = calloc(1, sizeof(*infoPtr));
++    infoPtr = Alloc(sizeof(*infoPtr));
+     SetWindowLongPtrW(hwnd, 0, (DWORD_PTR)infoPtr);
+ 
+     /* initialize info structure */
+diff --git a/dlls/comctl32/imagelist.c b/dlls/comctl32/imagelist.c
+index 22d8d8c40e0..85bb2fe0026 100644
+--- a/dlls/comctl32/imagelist.c
++++ b/dlls/comctl32/imagelist.c
+@@ -45,7 +45,6 @@
+ #include "commoncontrols.h"
+ #include "wine/debug.h"
+ #include "wine/exception.h"
+-#include "wine/heap.h"
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(imagelist);
+ 
+@@ -269,7 +268,7 @@ static BOOL add_with_alpha( HIMAGELIST himl, HDC hdc, int pos, int count,
+     SelectObject( hdc, hbmImage );
+     mask_width = (bm.bmWidth + 31) / 32 * 4;
+ 
+-    if (!(info = heap_alloc( FIELD_OFFSET( BITMAPINFO, bmiColors[256] )))) goto done;
++    if (!(info = Alloc( FIELD_OFFSET( BITMAPINFO, bmiColors[256] )))) goto done;
+     info->bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+     info->bmiHeader.biWidth = bm.bmWidth;
+     info->bmiHeader.biHeight = -height;
+@@ -281,17 +280,17 @@ static BOOL add_with_alpha( HIMAGELIST himl, HDC hdc, int pos, int count,
+     info->bmiHeader.biYPelsPerMeter = 0;
+     info->bmiHeader.biClrUsed = 0;
+     info->bmiHeader.biClrImportant = 0;
+-    if (!(bits = heap_alloc( info->bmiHeader.biSizeImage ))) goto done;
++    if (!(bits = Alloc( info->bmiHeader.biSizeImage ))) goto done;
+     if (!GetDIBits( hdc, hbmImage, 0, height, bits, info, DIB_RGB_COLORS )) goto done;
+ 
+     if (hbmMask)
+     {
+-        if (!(mask_info = heap_alloc( FIELD_OFFSET( BITMAPINFO, bmiColors[2] ))))
++        if (!(mask_info = Alloc( FIELD_OFFSET( BITMAPINFO, bmiColors[2] ))))
+             goto done;
+         mask_info->bmiHeader = info->bmiHeader;
+         mask_info->bmiHeader.biBitCount = 1;
+         mask_info->bmiHeader.biSizeImage = mask_width * height;
+-        if (!(mask_bits = heap_alloc_zero( mask_info->bmiHeader.biSizeImage )))
++        if (!(mask_bits = Alloc( mask_info->bmiHeader.biSizeImage )))
+             goto done;
+         if (!GetDIBits( hdc, hbmMask, 0, height, mask_bits, mask_info, DIB_RGB_COLORS )) goto done;
+     }
+@@ -300,10 +299,10 @@ static BOOL add_with_alpha( HIMAGELIST himl, HDC hdc, int pos, int count,
+     ret = TRUE;
+ 
+ done:
+-    heap_free( info );
+-    heap_free( mask_info );
+-    heap_free( bits );
+-    heap_free( mask_bits );
++    Free( info );
++    Free( mask_info );
++    Free( bits );
++    Free( mask_bits );
+     return ret;
+ }
+ 
+@@ -848,7 +847,7 @@ ImageList_Create (INT cx, INT cy, UINT flags,
+     else
+         himl->hbmMask = 0;
+ 
+-    himl->item_flags = heap_alloc_zero( himl->cMaxImage * sizeof(*himl->item_flags) );
++    himl->item_flags = Alloc( himl->cMaxImage * sizeof(*himl->item_flags) );
+ 
+     /* create blending brushes */
+     hbmTemp = CreateBitmap (8, 8, 1, 1, aBitBlend25);
+@@ -1260,7 +1259,7 @@ static BOOL alpha_blend_image( HIMAGELIST himl, HDC dest_dc, int dest_x, int des
+     func.AlphaFormat = AC_SRC_ALPHA;
+ 
+     if (!(hdc = CreateCompatibleDC( 0 ))) return FALSE;
+-    if (!(info = heap_alloc( FIELD_OFFSET( BITMAPINFO, bmiColors[256] )))) goto done;
++    if (!(info = Alloc( FIELD_OFFSET( BITMAPINFO, bmiColors[256] )))) goto done;
+     info->bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+     info->bmiHeader.biWidth = cx;
+     info->bmiHeader.biHeight = cy;
+@@ -1371,7 +1370,7 @@ done:
+     DeleteDC( hdc );
+     if (bmp) DeleteObject( bmp );
+     if (mask) DeleteObject( mask );
+-    heap_free( info );
++    Free( info );
+     return ret;
+ }
+ 
+@@ -1981,11 +1980,11 @@ ImageList_LoadImageA (HINSTANCE hi, LPCSTR lpbmp, INT cx, INT cGrow,
+                                     uType, uFlags);
+ 
+     len = MultiByteToWideChar(CP_ACP, 0, lpbmp, -1, NULL, 0);
+-    lpbmpW = heap_alloc(len * sizeof(WCHAR));
++    lpbmpW = Alloc(len * sizeof(WCHAR));
+     MultiByteToWideChar(CP_ACP, 0, lpbmp, -1, lpbmpW, len);
+ 
+     himl = ImageList_LoadImageW(hi, lpbmpW, cx, cGrow, clrMask, uType, uFlags);
+-    heap_free (lpbmpW);
++    Free (lpbmpW);
+     return himl;
+ }
+ 
+@@ -2226,12 +2225,12 @@ static void *read_bitmap(IStream *pstm, BITMAPINFO *bmi)
+     if (palspace && FAILED(IStream_Read(pstm, bmi->bmiColors, palspace, NULL)))
+         return NULL;
+ 
+-    bits = heap_alloc_zero(bmi->bmiHeader.biSizeImage);
++    bits = Alloc(bmi->bmiHeader.biSizeImage);
+     if (!bits) return NULL;
+ 
+     if (FAILED(IStream_Read(pstm, bits, bmi->bmiHeader.biSizeImage, NULL)))
+     {
+-        heap_free(bits);
++        Free(bits);
+         return NULL;
+     }
+     return bits;
+@@ -2343,8 +2342,8 @@ HIMAGELIST WINAPI ImageList_Read(IStream *pstm)
+                            0, 0, mask_info->bmiHeader.biWidth, mask_info->bmiHeader.biHeight,
+                            mask_bits, mask_info, DIB_RGB_COLORS, SRCCOPY);
+     }
+-    heap_free( image_bits );
+-    heap_free( mask_bits );
++    Free( image_bits );
++    Free( mask_bits );
+ 
+     himl->cCurImage = ilHead.cCurImage;
+     himl->cMaxImage = ilHead.cMaxImage;
+@@ -2406,8 +2405,8 @@ ImageList_Remove (HIMAGELIST himl, INT i)
+         for (nCount = 0; nCount < MAX_OVERLAYIMAGE; nCount++)
+              himl->nOvlIdx[nCount] = -1;
+ 
+-        heap_free( himl->item_flags );
+-        himl->item_flags = heap_alloc_zero( himl->cMaxImage * sizeof(*himl->item_flags) );
++        Free( himl->item_flags );
++        himl->item_flags = Alloc( himl->cMaxImage * sizeof(*himl->item_flags) );
+ 
+         hbmNewImage = ImageList_CreateImage(himl->hdcImage, himl, himl->cMaxImage);
+         SelectObject (himl->hdcImage, hbmNewImage);
+@@ -3013,7 +3012,7 @@ static BOOL _write_bitmap(HBITMAP hBitmap, IStream *pstm)
+     offBits = totalSize;
+     totalSize += sizeImage;
+ 
+-    data = heap_alloc_zero(totalSize);
++    data = Alloc(totalSize);
+     bmfh = (LPBITMAPFILEHEADER)data;
+     bmih = (LPBITMAPINFOHEADER)(data + sizeof(BITMAPFILEHEADER));
+     lpBits = data + offBits;
+@@ -3054,7 +3053,7 @@ static BOOL _write_bitmap(HBITMAP hBitmap, IStream *pstm)
+     result = TRUE;
+ 
+ failed:
+-    heap_free(data);
++    Free(data);
+ 
+     return result;
+ }
+@@ -3299,8 +3298,8 @@ static ULONG WINAPI ImageListImpl_Release(IImageList2 *iface)
+         if (This->hbrBlend50) DeleteObject (This->hbrBlend50);
+ 
+         This->IImageList2_iface.lpVtbl = NULL;
+-        heap_free(This->item_flags);
+-        heap_free(This);
++        Free(This->item_flags);
++        Free(This);
+     }
+ 
+     return ref;
+@@ -3834,7 +3833,7 @@ static HRESULT ImageListImpl_CreateInstance(const IUnknown *pUnkOuter, REFIID ii
+ 
+     if (pUnkOuter) return CLASS_E_NOAGGREGATION;
+ 
+-    This = heap_alloc_zero(sizeof(struct _IMAGELIST));
++    This = Alloc(sizeof(struct _IMAGELIST));
+     if (!This) return E_OUTOFMEMORY;
+ 
+     This->IImageList2_iface.lpVtbl = &ImageListImpl_Vtbl;
+diff --git a/dlls/comctl32/ipaddress.c b/dlls/comctl32/ipaddress.c
+index 2bdf4c0503b..493ea77f618 100644
+--- a/dlls/comctl32/ipaddress.c
++++ b/dlls/comctl32/ipaddress.c
+@@ -209,7 +209,7 @@ static LRESULT IPADDRESS_Create (HWND hwnd, const CREATESTRUCTA *lpCreate)
+     SetWindowLongW (hwnd, GWL_STYLE,
+ 		    GetWindowLongW(hwnd, GWL_STYLE) & ~WS_BORDER);
+ 
+-    infoPtr = calloc (1, sizeof(*infoPtr));
++    infoPtr = Alloc (sizeof(*infoPtr));
+     if (!infoPtr) return -1;
+     SetWindowLongPtrW (hwnd, 0, (DWORD_PTR)infoPtr);
+ 
+@@ -272,7 +272,7 @@ static LRESULT IPADDRESS_Destroy (IPADDRESS_INFO *infoPtr)
+     SetWindowLongPtrW (infoPtr->Self, 0, 0);
+     theme = GetWindowTheme (infoPtr->Self);
+     CloseThemeData (theme);
+-    free (infoPtr);
++    Free (infoPtr);
+     return 0;
+ }
+ 
+diff --git a/dlls/comctl32/listbox.c b/dlls/comctl32/listbox.c
+index 6724dee1487..f2f42c1d533 100644
+--- a/dlls/comctl32/listbox.c
++++ b/dlls/comctl32/listbox.c
+@@ -33,7 +33,6 @@
+ #include "vssym32.h"
+ #include "wine/exception.h"
+ #include "wine/debug.h"
+-#include "wine/heap.h"
+ 
+ #include "comctl32.h"
+ 
+@@ -153,7 +152,7 @@ static BOOL resize_storage(LB_DESCR *descr, UINT items_size)
+         items_size = (items_size + LB_ARRAY_GRANULARITY - 1) & ~(LB_ARRAY_GRANULARITY - 1);
+         if ((descr->style & (LBS_NODATA | LBS_MULTIPLESEL | LBS_EXTENDEDSEL)) != LBS_NODATA)
+         {
+-            items = heap_realloc(descr->u.items, items_size * get_sizeof_item(descr));
++            items = ReAlloc(descr->u.items, items_size * get_sizeof_item(descr));
+             if (!items)
+             {
+                 SEND_NOTIFICATION(descr, LBN_ERRSPACE);
+diff --git a/dlls/comctl32/listview.c b/dlls/comctl32/listview.c
+index 116c3c5cf94..7c394d60273 100644
+--- a/dlls/comctl32/listview.c
++++ b/dlls/comctl32/listview.c
+@@ -485,7 +485,7 @@ static inline LPWSTR textdupTtoW(LPCWSTR text, BOOL isW)
+     if (!isW && is_text(text))
+     {
+ 	INT len = MultiByteToWideChar(CP_ACP, 0, (LPCSTR)text, -1, NULL, 0);
+-	wstr = calloc(len, sizeof(WCHAR));
++	wstr = Alloc(len * sizeof(WCHAR));
+ 	if (wstr) MultiByteToWideChar(CP_ACP, 0, (LPCSTR)text, -1, wstr, len);
+     }
+     TRACE("   wstr=%s\n", text == LPSTR_TEXTCALLBACKW ?  "(callback)" : debugstr_w(wstr));
+@@ -494,7 +494,7 @@ static inline LPWSTR textdupTtoW(LPCWSTR text, BOOL isW)
+ 
+ static inline void textfreeT(LPWSTR wstr, BOOL isW)
+ {
+-    if (!isW && is_text(wstr)) free (wstr);
++    if (!isW && is_text(wstr)) Free (wstr);
+ }
+ 
+ /*
+@@ -507,7 +507,7 @@ static BOOL textsetptrT(LPWSTR *dest, LPCWSTR src, BOOL isW)
+     
+     if (src == LPSTR_TEXTCALLBACKW)
+     {
+-	if (is_text(*dest)) free(*dest);
++	if (is_text(*dest)) Free(*dest);
+ 	*dest = LPSTR_TEXTCALLBACKW;
+     }
+     else
+@@ -808,12 +808,12 @@ static LRESULT notify_forward_header(const LISTVIEW_INFO *infoPtr, NMHEADERW *lp
+     /* cleanup */
+     if(text)
+     {
+-        free(lpnmh->pitem->pszText);
++        Free(lpnmh->pitem->pszText);
+         lpnmh->pitem->pszText = (LPSTR)text;
+     }
+     if(filter)
+     {
+-        free(((HD_TEXTFILTERA*)lpnmh->pitem->pvFilter)->pszText);
++        Free(((HD_TEXTFILTERA*)lpnmh->pitem->pvFilter)->pszText);
+         ((HD_TEXTFILTERA*)lpnmh->pitem->pvFilter)->pszText = (LPSTR)filter;
+     }
+ 
+@@ -958,7 +958,7 @@ static BOOL notify_dispinfoT(const LISTVIEW_INFO *infoPtr, UINT code, LPNMLVDISP
+             *pdi->item.pszText = 0; /* make sure we don't process garbage */
+         }
+ 
+-        buffer = calloc( length, return_ansi ? sizeof(WCHAR) : sizeof(CHAR) );
++        buffer = Alloc( length * (return_ansi ? sizeof(WCHAR) : sizeof(CHAR)) );
+         if (!buffer) return FALSE;
+ 
+         if (return_ansi)
+@@ -1001,7 +1001,7 @@ static BOOL notify_dispinfoT(const LISTVIEW_INFO *infoPtr, UINT code, LPNMLVDISP
+         pdi->item.pszText = ret_text; /* restores our buffer */
+         pdi->item.cchTextMax = ret_length;
+ 
+-        free(buffer);
++        Free(buffer);
+         return ret;
+     }
+ 
+@@ -1010,14 +1010,14 @@ static BOOL notify_dispinfoT(const LISTVIEW_INFO *infoPtr, UINT code, LPNMLVDISP
+     {
+         length = WideCharToMultiByte(CP_ACP, 0, pdi->item.pszText, -1, NULL, 0, NULL, NULL);
+ 
+-        buffer = calloc(length, sizeof(CHAR));
++        buffer = Alloc(length * sizeof(CHAR));
+         if (!buffer) return FALSE;
+ 
+         WideCharToMultiByte(CP_ACP, 0, pdi->item.pszText, -1, (LPSTR) buffer,
+                 ret_length, NULL, NULL);
+ 
+         strcpy((LPSTR)pdi->item.pszText, (LPSTR)buffer);
+-        free(buffer);
++        Free(buffer);
+     }
+ 
+     return ret;
+@@ -3118,11 +3118,11 @@ static void ranges_assert(RANGES ranges, LPCSTR desc, const char *file, int line
+ 
+ static RANGES ranges_create(int count)
+ {
+-    RANGES ranges = calloc(1, sizeof(*ranges));
++    RANGES ranges = Alloc(sizeof(*ranges));
+     if (!ranges) return NULL;
+     ranges->hdpa = DPA_Create(count);
+     if (ranges->hdpa) return ranges;
+-    free(ranges);
++    Free(ranges);
+     return NULL;
+ }
+ 
+@@ -3131,7 +3131,7 @@ static void ranges_clear(RANGES ranges)
+     INT i;
+ 	
+     for(i = 0; i < DPA_GetPtrCount(ranges->hdpa); i++)
+-        free(DPA_GetPtr(ranges->hdpa, i));
++        Free(DPA_GetPtr(ranges->hdpa, i));
+     DPA_DeleteAllPtrs(ranges->hdpa);
+ }
+ 
+@@ -3141,7 +3141,7 @@ static void ranges_destroy(RANGES ranges)
+     if (!ranges) return;
+     ranges_clear(ranges);
+     DPA_Destroy(ranges->hdpa);
+-    free(ranges);
++    Free(ranges);
+ }
+ 
+ static RANGES ranges_clone(RANGES ranges)
+@@ -3153,12 +3153,12 @@ static RANGES ranges_clone(RANGES ranges)
+ 
+     for (i = 0; i < DPA_GetPtrCount(ranges->hdpa); i++)
+     {
+-        RANGE *newrng = calloc(1, sizeof(*newrng));
++        RANGE *newrng = Alloc(sizeof(*newrng));
+ 	if (!newrng) goto fail;
+ 	*newrng = *((RANGE*)DPA_GetPtr(ranges->hdpa, i));
+         if (!DPA_SetPtr(clone->hdpa, i, newrng))
+         {
+-            free(newrng);
++            Free(newrng);
+             goto fail;
+         }
+     }
+@@ -3249,7 +3249,7 @@ static BOOL ranges_add(RANGES ranges, RANGE range)
+ 	TRACE("Adding new range\n");
+ 
+ 	/* create the brand new range to insert */	
+-        newrgn = calloc(1, sizeof(*newrgn));
++        newrgn = Alloc(sizeof(*newrgn));
+ 	if(!newrgn) goto fail;
+ 	*newrgn = range;
+ 	
+@@ -3261,7 +3261,7 @@ static BOOL ranges_add(RANGES ranges, RANGE range)
+ 	/* and get it over with */
+ 	if (DPA_InsertPtr(ranges->hdpa, index, newrgn) == -1)
+ 	{
+-	    free(newrgn);
++	    Free(newrgn);
+ 	    goto fail;
+ 	}
+     }
+@@ -3298,7 +3298,7 @@ static BOOL ranges_add(RANGES ranges, RANGE range)
+ 	    mrgrgn = DPA_GetPtr(ranges->hdpa, mergeindex);
+ 	    chkrgn->lower = min(chkrgn->lower, mrgrgn->lower);
+ 	    chkrgn->upper = max(chkrgn->upper, mrgrgn->upper);
+-	    free(mrgrgn);
++	    Free(mrgrgn);
+ 	    DPA_DeletePtr(ranges->hdpa, mergeindex);
+ 	    if (mergeindex < index) index --;
+ 	} while(1);
+@@ -3334,7 +3334,7 @@ static BOOL ranges_del(RANGES ranges, RANGE range)
+ 	     (chkrgn->lower == range.lower) )
+ 	{
+ 	    DPA_DeletePtr(ranges->hdpa, index);
+-	    free(chkrgn);
++	    Free(chkrgn);
+ 	    break;
+ 	}
+ 	/* case 2: engulf */
+@@ -3342,7 +3342,7 @@ static BOOL ranges_del(RANGES ranges, RANGE range)
+ 		  (chkrgn->lower >= range.lower) )
+ 	{
+ 	    DPA_DeletePtr(ranges->hdpa, index);
+-	    free(chkrgn);
++	    Free(chkrgn);
+ 	}
+ 	/* case 3: overlap upper */
+ 	else if ( (chkrgn->upper <= range.upper) &&
+@@ -3362,13 +3362,13 @@ static BOOL ranges_del(RANGES ranges, RANGE range)
+ 	{
+ 	    RANGE *newrgn;
+ 
+-	    if (!(newrgn = calloc(1, sizeof(*newrgn)))) goto fail;
++	    if (!(newrgn = Alloc(sizeof(*newrgn)))) goto fail;
+ 	    newrgn->lower = chkrgn->lower;
+ 	    newrgn->upper = range.lower;
+ 	    chkrgn->lower = range.upper;
+ 	    if (DPA_InsertPtr(ranges->hdpa, index, newrgn) == -1)
+ 	    {
+-		free(newrgn);
++		Free(newrgn);
+ 		goto fail;
+ 	    }
+ 	    break;
+@@ -4422,7 +4422,7 @@ static BOOL set_sub_item(const LISTVIEW_INFO *infoPtr, const LVITEMW *lpLVItem,
+ 	SUBITEM_INFO *tmpSubItem;
+ 	INT i;
+ 
+-	lpSubItem = calloc(1, sizeof(*lpSubItem));
++	lpSubItem = Alloc(sizeof(*lpSubItem));
+ 	if (!lpSubItem) return FALSE;
+ 	/* we could binary search here, if need be...*/
+   	for (i = 1; i < DPA_GetPtrCount(hdpaSubItems); i++)
+@@ -4432,7 +4432,7 @@ static BOOL set_sub_item(const LISTVIEW_INFO *infoPtr, const LVITEMW *lpLVItem,
+   	}
+ 	if (DPA_InsertPtr(hdpaSubItems, i, lpSubItem) == -1)
+ 	{
+-	    free(lpSubItem);
++	    Free(lpSubItem);
+ 	    return FALSE;
+ 	}
+         lpSubItem->iSubItem = lpLVItem->iSubItem;
+@@ -5568,13 +5568,13 @@ static BOOL LISTVIEW_DeleteAllItems(LISTVIEW_INFO *infoPtr, BOOL destroy)
+ 	    j = DPA_GetPtrIndex(infoPtr->hdpaItemIds, lpItem->id);
+ 	    lpID = DPA_GetPtr(infoPtr->hdpaItemIds, j);
+ 	    DPA_DeletePtr(infoPtr->hdpaItemIds, j);
+-	    free(lpID);
++	    Free(lpID);
+ 	    /* both item and subitem start with ITEMHDR header */
+ 	    for (j = 0; j < DPA_GetPtrCount(hdpaSubItems); j++)
+ 	    {
+ 	        hdrItem = DPA_GetPtr(hdpaSubItems, j);
+-		if (is_text(hdrItem->pszText)) free(hdrItem->pszText);
+-		free(hdrItem);
++		if (is_text(hdrItem->pszText)) Free(hdrItem->pszText);
++		Free(hdrItem);
+ 	    }
+ 	    DPA_Destroy(hdpaSubItems);
+ 	    DPA_DeletePtr(infoPtr->hdpaItems, i);
+@@ -5683,7 +5683,7 @@ static BOOL LISTVIEW_DeleteColumn(LISTVIEW_INFO *infoPtr, INT nColumn)
+     if (!SendMessageW(infoPtr->hwndHeader, HDM_DELETEITEM, nColumn, 0))
+ 	return FALSE;
+ 
+-    free(DPA_GetPtr(infoPtr->hdpaColumns, nColumn));
++    Free(DPA_GetPtr(infoPtr->hdpaColumns, nColumn));
+     DPA_DeletePtr(infoPtr->hdpaColumns, nColumn);
+   
+     if (!(infoPtr->dwStyle & LVS_OWNERDATA) && nColumn)
+@@ -5716,10 +5716,10 @@ static BOOL LISTVIEW_DeleteColumn(LISTVIEW_INFO *infoPtr, INT nColumn)
+ 	    {
+ 		/* free string */
+ 		if (is_text(lpDelItem->hdr.pszText))
+-		    free(lpDelItem->hdr.pszText);
++		    Free(lpDelItem->hdr.pszText);
+ 
+ 		/* free item */
+-		free(lpDelItem);
++		Free(lpDelItem);
+ 
+ 		/* free dpa memory */
+ 		DPA_DeletePtr(hdpaSubItems, nSubItem);
+@@ -5858,12 +5858,12 @@ static BOOL LISTVIEW_DeleteItem(LISTVIEW_INFO *infoPtr, INT nItem)
+ 	i = DPA_GetPtrIndex(infoPtr->hdpaItemIds, lpItem->id);
+ 	lpID = DPA_GetPtr(infoPtr->hdpaItemIds, i);
+ 	DPA_DeletePtr(infoPtr->hdpaItemIds, i);
+-	free(lpID);
++	Free(lpID);
+ 	for (i = 0; i < DPA_GetPtrCount(hdpaSubItems); i++)
+     	{
+             hdrItem = DPA_GetPtr(hdpaSubItems, i);
+-	    if (is_text(hdrItem->pszText)) free(hdrItem->pszText);
+-            free(hdrItem);
++	    if (is_text(hdrItem->pszText)) Free(hdrItem->pszText);
++            Free(hdrItem);
+         }
+         DPA_Destroy(hdpaSubItems);
+     }
+@@ -5914,7 +5914,7 @@ static BOOL LISTVIEW_EndEditLabelT(LISTVIEW_INFO *infoPtr, BOOL storeText, BOOL
+ 
+         if (len++)
+         {
+-            if (!(pszText = calloc(len, isW ? sizeof(WCHAR) : sizeof(CHAR))))
++            if (!(pszText = Alloc(len * (isW ? sizeof(WCHAR) : sizeof(CHAR)))))
+                 return FALSE;
+ 
+             if (isW)
+@@ -5998,7 +5998,7 @@ static BOOL LISTVIEW_EndEditLabelT(LISTVIEW_INFO *infoPtr, BOOL storeText, BOOL
+     res = LISTVIEW_SetItemT(infoPtr, &dispInfo.item, isW);
+ 
+ cleanup:
+-    free(pszText);
++    Free(pszText);
+ 
+     return res;
+ }
+@@ -7788,14 +7788,14 @@ static INT LISTVIEW_InsertItemT(LISTVIEW_INFO *infoPtr, const LVITEMW *lpLVItem,
+ 
+     if (!is_assignable_item(lpLVItem, infoPtr->dwStyle)) return -1;
+ 
+-    if (!(lpItem = calloc(1, sizeof(*lpItem)))) return -1;
++    if (!(lpItem = Alloc(sizeof(*lpItem)))) return -1;
+     
+     /* insert item in listview control data structure */
+     if ( !(hdpaSubItems = DPA_Create(8)) ) goto fail;
+     if ( !DPA_SetPtr(hdpaSubItems, 0, lpItem) ) assert (FALSE);
+ 
+     /* link with id struct */
+-    if (!(lpID = calloc(1, sizeof(*lpID)))) goto fail;
++    if (!(lpID = Alloc(sizeof(*lpID)))) goto fail;
+     lpItem->id = lpID;
+     lpID->item = hdpaSubItems;
+     lpID->id = get_next_itemid(infoPtr);
+@@ -7923,7 +7923,7 @@ undo:
+ fail:
+     DPA_DeletePtr(hdpaSubItems, 0);
+     DPA_Destroy (hdpaSubItems);
+-    free (lpItem);
++    Free (lpItem);
+     return -1;
+ }
+ 
+@@ -8248,7 +8248,7 @@ static INT LISTVIEW_InsertColumnT(LISTVIEW_INFO *infoPtr, INT nColumn,
+     if (nNewColumn != nColumn) ERR("nColumn=%d, nNewColumn=%d\n", nColumn, nNewColumn);
+    
+     /* create our own column info */ 
+-    if (!(lpColumnInfo = calloc(1, sizeof(*lpColumnInfo)))) goto fail;
++    if (!(lpColumnInfo = Alloc(sizeof(*lpColumnInfo)))) goto fail;
+     if (DPA_InsertPtr(infoPtr->hdpaColumns, nNewColumn, lpColumnInfo) == -1) goto fail;
+ 
+     if (lpColumn->mask & LVCF_FMT) lpColumnInfo->fmt = lpColumn->fmt;
+@@ -8297,7 +8297,7 @@ fail:
+     if (lpColumnInfo)
+     {
+         DPA_DeletePtr(infoPtr->hdpaColumns, nNewColumn);
+-        free(lpColumnInfo);
++        Free(lpColumnInfo);
+     }
+     return -1;
+ }
+@@ -9546,7 +9546,7 @@ static LRESULT LISTVIEW_NCCreate(HWND hwnd, WPARAM wParam, const CREATESTRUCTW *
+   TRACE("(lpcs=%p)\n", lpcs);
+ 
+   /* initialize info pointer */
+-  infoPtr = calloc(1, sizeof(*infoPtr));
++  infoPtr = Alloc(sizeof(*infoPtr));
+   if (!infoPtr) return FALSE;
+ 
+   SetWindowLongPtrW(hwnd, 0, (DWORD_PTR)infoPtr);
+@@ -9609,7 +9609,7 @@ fail:
+     DPA_Destroy(infoPtr->hdpaPosX);
+     DPA_Destroy(infoPtr->hdpaPosY);
+     DPA_Destroy(infoPtr->hdpaColumns);
+-    free(infoPtr);
++    Free(infoPtr);
+     return FALSE;
+ }
+ 
+@@ -10485,7 +10485,7 @@ static LRESULT LISTVIEW_NCDestroy(LISTVIEW_INFO *infoPtr)
+   DPA_Destroy(infoPtr->hdpaPosY);
+   /* columns */
+   for (i = 0; i < DPA_GetPtrCount(infoPtr->hdpaColumns); i++)
+-      free(DPA_GetPtr(infoPtr->hdpaColumns, i));
++      Free(DPA_GetPtr(infoPtr->hdpaColumns, i));
+   DPA_Destroy(infoPtr->hdpaColumns);
+   ranges_destroy(infoPtr->selectionRanges);
+ 
+@@ -10505,7 +10505,7 @@ static LRESULT LISTVIEW_NCDestroy(LISTVIEW_INFO *infoPtr)
+ 
+   SetWindowLongPtrW(infoPtr->hwndSelf, 0, 0);
+ 
+-  free(infoPtr);
++  Free(infoPtr);
+ 
+   return 0;
+ }
+diff --git a/dlls/comctl32/monthcal.c b/dlls/comctl32/monthcal.c
+index ea220136182..ac8a382310e 100644
+--- a/dlls/comctl32/monthcal.c
++++ b/dlls/comctl32/monthcal.c
+@@ -1945,7 +1945,7 @@ static void MONTHCAL_NotifyDayState(MONTHCAL_INFO *infoPtr)
+   nmds.nmhdr.idFrom   = GetWindowLongPtrW(infoPtr->hwndSelf, GWLP_ID);
+   nmds.nmhdr.code     = MCN_GETDAYSTATE;
+   nmds.cDayState      = MONTHCAL_GetMonthRange(infoPtr, GMR_DAYSTATE, 0);
+-  nmds.prgDayState    = state = calloc(nmds.cDayState, sizeof(MONTHDAYSTATE));
++  nmds.prgDayState    = state = Alloc(nmds.cDayState * sizeof(MONTHDAYSTATE));
+ 
+   MONTHCAL_GetMinDate(infoPtr, &nmds.stStart);
+   nmds.stStart.wDay = 1;
+@@ -1954,7 +1954,7 @@ static void MONTHCAL_NotifyDayState(MONTHCAL_INFO *infoPtr)
+   memcpy(infoPtr->monthdayState, nmds.prgDayState,
+       MONTHCAL_GetMonthRange(infoPtr, GMR_DAYSTATE, 0)*sizeof(MONTHDAYSTATE));
+ 
+-  free(state);
++  Free(state);
+ }
+ 
+ /* no valid range check performed */
+@@ -2592,9 +2592,9 @@ static void MONTHCAL_UpdateSize(MONTHCAL_INFO *infoPtr)
+   {
+       infoPtr->dim.cx = x;
+       infoPtr->dim.cy = y;
+-      infoPtr->calendars = realloc(infoPtr->calendars, MONTHCAL_GetCalCount(infoPtr)*sizeof(CALENDAR_INFO));
++      infoPtr->calendars = ReAlloc(infoPtr->calendars, MONTHCAL_GetCalCount(infoPtr)*sizeof(CALENDAR_INFO));
+ 
+-      infoPtr->monthdayState = realloc(infoPtr->monthdayState,
++      infoPtr->monthdayState = ReAlloc(infoPtr->monthdayState,
+           MONTHCAL_GetMonthRange(infoPtr, GMR_DAYSTATE, 0)*sizeof(MONTHDAYSTATE));
+       MONTHCAL_NotifyDayState(infoPtr);
+ 
+@@ -2749,7 +2749,7 @@ MONTHCAL_Create(HWND hwnd, LPCREATESTRUCTW lpcs)
+   MONTHCAL_INFO *infoPtr;
+ 
+   /* allocate memory for info structure */
+-  infoPtr = calloc(1, sizeof(*infoPtr));
++  infoPtr = Alloc(sizeof(*infoPtr));
+   SetWindowLongPtrW(hwnd, 0, (DWORD_PTR)infoPtr);
+ 
+   if (infoPtr == NULL) {
+@@ -2761,9 +2761,9 @@ MONTHCAL_Create(HWND hwnd, LPCREATESTRUCTW lpcs)
+   infoPtr->hwndNotify = lpcs->hwndParent;
+   infoPtr->dwStyle = GetWindowLongW(hwnd, GWL_STYLE);
+   infoPtr->dim.cx = infoPtr->dim.cy = 1;
+-  infoPtr->calendars = calloc(1, sizeof(*infoPtr->calendars));
++  infoPtr->calendars = Alloc(sizeof(*infoPtr->calendars));
+   if (!infoPtr->calendars) goto fail;
+-  infoPtr->monthdayState = calloc(3, sizeof(*infoPtr->monthdayState));
++  infoPtr->monthdayState = Alloc(3 * sizeof(*infoPtr->monthdayState));
+   if (!infoPtr->monthdayState) goto fail;
+ 
+   /* initialize info structure */
+@@ -2804,9 +2804,9 @@ MONTHCAL_Create(HWND hwnd, LPCREATESTRUCTW lpcs)
+   return 0;
+ 
+ fail:
+-  free(infoPtr->monthdayState);
+-  free(infoPtr->calendars);
+-  free(infoPtr);
++  Free(infoPtr->monthdayState);
++  Free(infoPtr->calendars);
++  Free(infoPtr);
+   return 0;
+ }
+ 
+@@ -2815,8 +2815,8 @@ MONTHCAL_Destroy(MONTHCAL_INFO *infoPtr)
+ {
+   INT i;
+ 
+-  free(infoPtr->monthdayState);
+-  free(infoPtr->calendars);
++  Free(infoPtr->monthdayState);
++  Free(infoPtr->calendars);
+   SetWindowLongPtrW(infoPtr->hwndSelf, 0, 0);
+ 
+   CloseThemeData (GetWindowTheme (infoPtr->hwndSelf));
+@@ -2824,7 +2824,7 @@ MONTHCAL_Destroy(MONTHCAL_INFO *infoPtr)
+   for (i = 0; i < BrushLast; i++) DeleteObject(infoPtr->brushes[i]);
+   for (i = 0; i < PenLast; i++) DeleteObject(infoPtr->pens[i]);
+ 
+-  free(infoPtr);
++  Free(infoPtr);
+   return 0;
+ }
+ 
+diff --git a/dlls/comctl32/pager.c b/dlls/comctl32/pager.c
+index 42516a34607..07484c6ebf5 100644
+--- a/dlls/comctl32/pager.c
++++ b/dlls/comctl32/pager.c
+@@ -576,7 +576,7 @@ PAGER_Create (HWND hwnd, const CREATESTRUCTW *lpcs)
+     INT ret;
+ 
+     /* allocate memory for info structure */
+-    infoPtr = calloc(1, sizeof(*infoPtr));
++    infoPtr = Alloc(sizeof(*infoPtr));
+     if (!infoPtr) return -1;
+     SetWindowLongPtrW (hwnd, 0, (DWORD_PTR)infoPtr);
+ 
+@@ -611,8 +611,8 @@ static LRESULT
+ PAGER_Destroy (PAGER_INFO *infoPtr)
+ {
+     SetWindowLongPtrW (infoPtr->hwndSelf, 0, 0);
+-    free (infoPtr->pwszBuffer);
+-    free (infoPtr);
++    Free (infoPtr->pwszBuffer);
++    Free (infoPtr);
+     return 0;
+ }
+ 
+@@ -1099,9 +1099,9 @@ static UINT PAGER_GetAnsiNtfCode(UINT code)
+ static BOOL PAGER_AdjustBuffer(PAGER_INFO *infoPtr, INT size)
+ {
+     if (!infoPtr->pwszBuffer)
+-        infoPtr->pwszBuffer = malloc(size);
++        infoPtr->pwszBuffer = Alloc(size);
+     else if (infoPtr->nBufferSize < size)
+-        infoPtr->pwszBuffer = realloc(infoPtr->pwszBuffer, size);
++        infoPtr->pwszBuffer = ReAlloc(infoPtr->pwszBuffer, size);
+ 
+     if (!infoPtr->pwszBuffer) return FALSE;
+     if (infoPtr->nBufferSize < size) infoPtr->nBufferSize = size;
+@@ -1153,7 +1153,7 @@ static LRESULT PAGER_SendConvertedNotify(PAGER_INFO *infoPtr, NMHDR *hdr, UINT *
+     if ((*text && flags & (CONVERT_SEND | ZERO_SEND)) || (!*text && flags & SEND_EMPTY_IF_NULL))
+     {
+         bufferSize = textMax ? *textMax : lstrlenW(*text) + 1;
+-        sendBuffer = calloc(1, bufferSize);
++        sendBuffer = Alloc(bufferSize);
+         if (!sendBuffer) goto done;
+         if (!(flags & ZERO_SEND)) WideCharToMultiByte(CP_ACP, 0, *text, -1, sendBuffer, bufferSize, NULL, FALSE);
+         *text = (WCHAR *)sendBuffer;
+@@ -1167,18 +1167,18 @@ static LRESULT PAGER_SendConvertedNotify(PAGER_INFO *infoPtr, NMHDR *hdr, UINT *
+         if (*text == oldText)
+         {
+             bufferSize = lstrlenA((CHAR *)*text)  + 1;
+-            receiveBuffer = malloc(bufferSize);
++            receiveBuffer = Alloc(bufferSize);
+             if (!receiveBuffer) goto done;
+             memcpy(receiveBuffer, *text, bufferSize);
+             MultiByteToWideChar(CP_ACP, 0, receiveBuffer, bufferSize, oldText, oldTextMax);
+-            free(receiveBuffer);
++            Free(receiveBuffer);
+         }
+         else
+             MultiByteToWideChar(CP_ACP, 0, (CHAR *)*text, -1, oldText, oldTextMax);
+     }
+ 
+ done:
+-    free(sendBuffer);
++    Free(sendBuffer);
+     *text = oldText;
+     return ret;
+ }
+diff --git a/dlls/comctl32/progress.c b/dlls/comctl32/progress.c
+index d8e4e343156..a329995a40e 100644
+--- a/dlls/comctl32/progress.c
++++ b/dlls/comctl32/progress.c
+@@ -554,7 +554,7 @@ static LRESULT WINAPI ProgressWindowProc(HWND hwnd, UINT message,
+ 	    SWP_FRAMECHANGED | SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+ 
+         /* allocate memory for info struct */
+-        infoPtr = calloc(1, sizeof(*infoPtr));
++        infoPtr = Alloc(sizeof(*infoPtr));
+         if (!infoPtr) return -1;
+         SetWindowLongPtrW (hwnd, 0, (DWORD_PTR)infoPtr);
+ 
+diff --git a/dlls/comctl32/static.c b/dlls/comctl32/static.c
+index cab0235b8d3..29a0498ba09 100644
+--- a/dlls/comctl32/static.c
++++ b/dlls/comctl32/static.c
+@@ -94,7 +94,7 @@ static struct static_extra_info *get_extra_ptr( HWND hwnd, BOOL force )
+     struct static_extra_info *extra = (struct static_extra_info *)GetWindowLongPtrW( hwnd, 0 );
+     if (!extra && force)
+     {
+-        extra = calloc( 1, sizeof(*extra) );
++        extra = Alloc( sizeof(*extra) );
+         if (extra)
+             SetWindowLongPtrW( hwnd, 0, (ULONG_PTR)extra );
+     }
+@@ -470,7 +470,7 @@ static LRESULT CALLBACK STATIC_WindowProc( HWND hwnd, UINT uMsg, WPARAM wParam,
+             {
+                 if (extra->image_has_alpha)
+                     DeleteObject( extra->image.hbitmap );
+-                free( extra );
++                Free( extra );
+             }
+ /*
+  * FIXME
+@@ -751,13 +751,13 @@ static void STATIC_PaintTextfn( HWND hwnd, HDC hdc, HBRUSH hbrush, DWORD style )
+     }
+ 
+     buf_size = 256;
+-    if (!(text = malloc( buf_size * sizeof(WCHAR) )))
++    if (!(text = Alloc( buf_size * sizeof(WCHAR) )))
+         goto no_TextOut;
+ 
+     while ((len = InternalGetWindowText( hwnd, text, buf_size )) == buf_size - 1)
+     {
+         buf_size *= 2;
+-        if (!(text = realloc( text, buf_size * sizeof(WCHAR) )))
++        if (!(text = ReAlloc( text, buf_size * sizeof(WCHAR) )))
+             goto no_TextOut;
+     }
+ 
+@@ -777,7 +777,7 @@ static void STATIC_PaintTextfn( HWND hwnd, HDC hdc, HBRUSH hbrush, DWORD style )
+     }
+ 
+ no_TextOut:
+-    free( text );
++    Free( text );
+ 
+     if (hFont)
+         SelectObject( hdc, hOldFont );
+diff --git a/dlls/comctl32/treeview.c b/dlls/comctl32/treeview.c
+index d9ef075489b..1c87dc29b05 100644
+--- a/dlls/comctl32/treeview.c
++++ b/dlls/comctl32/treeview.c
+@@ -548,7 +548,7 @@ TREEVIEW_TVItemFromItem(const TREEVIEW_INFO *infoPtr, UINT mask, TVITEMW *tvItem
+         if (!infoPtr->bNtfUnicode)
+         {
+             tvItem->cchTextMax = WideCharToMultiByte( CP_ACP, 0, item->pszText, -1, NULL, 0, NULL, NULL );
+-            tvItem->pszText = malloc (tvItem->cchTextMax);
++            tvItem->pszText = Alloc (tvItem->cchTextMax);
+             WideCharToMultiByte( CP_ACP, 0, item->pszText, -1, (LPSTR)tvItem->pszText, tvItem->cchTextMax, 0, 0 );
+ 	}
+         else
+@@ -589,8 +589,8 @@ TREEVIEW_SendTreeviewNotify(const TREEVIEW_INFO *infoPtr, UINT code, UINT action
+     ret = TREEVIEW_SendRealNotify(infoPtr, code, &nmhdr.hdr);
+     if (!infoPtr->bNtfUnicode)
+     {
+-        free(nmhdr.itemOld.pszText);
+-        free(nmhdr.itemNew.pszText);
++        Free(nmhdr.itemOld.pszText);
++        Free(nmhdr.itemNew.pszText);
+     }
+     return ret;
+ }
+@@ -689,7 +689,7 @@ TREEVIEW_BeginLabelEditNotify(const TREEVIEW_INFO *infoPtr, TREEVIEW_ITEM *editI
+     ret = TREEVIEW_SendRealNotify(infoPtr, TVN_BEGINLABELEDITW, &tvdi.hdr);
+ 
+     if (!infoPtr->bNtfUnicode)
+-        free(tvdi.item.pszText);
++        Free(tvdi.item.pszText);
+ 
+     return ret;
+ }
+@@ -735,7 +735,7 @@ TREEVIEW_UpdateDispInfo(const TREEVIEW_INFO *infoPtr, TREEVIEW_ITEM *item,
+ 					   (LPSTR)callback.item.pszText, -1,
+                                            NULL, 0);
+ 	    buflen = max((len)*sizeof(WCHAR), TEXT_CALLBACK_SIZE);
+-            newText = realloc(item->pszText, buflen);
++            newText = ReAlloc(item->pszText, buflen);
+ 
+ 	    TRACE("returned str %s, len=%d, buflen=%d\n",
+ 		  debugstr_a((LPSTR)callback.item.pszText), len, buflen);
+@@ -753,7 +753,7 @@ TREEVIEW_UpdateDispInfo(const TREEVIEW_INFO *infoPtr, TREEVIEW_ITEM *item,
+ 	else {
+ 	    int len = max(lstrlenW(callback.item.pszText) + 1,
+ 			  TEXT_CALLBACK_SIZE);
+-	    LPWSTR newText = realloc(item->pszText, len*sizeof(WCHAR));
++	    LPWSTR newText = ReAlloc(item->pszText, len*sizeof(WCHAR));
+ 
+ 	    TRACE("returned wstr %s, len=%d\n",
+ 		  debugstr_w(callback.item.pszText), len);
+@@ -776,7 +776,7 @@ TREEVIEW_UpdateDispInfo(const TREEVIEW_INFO *infoPtr, TREEVIEW_ITEM *item,
+ 					  (LPSTR)callback.item.pszText, -1,
+                                            NULL, 0);
+ 	    buflen = max((len)*sizeof(WCHAR), TEXT_CALLBACK_SIZE);
+-            newText = malloc(buflen);
++            newText = Alloc(buflen);
+ 
+ 	    TRACE("same buffer str %s, len=%d, buflen=%d\n",
+ 		  debugstr_a((LPSTR)callback.item.pszText), len, buflen);
+@@ -789,7 +789,7 @@ TREEVIEW_UpdateDispInfo(const TREEVIEW_INFO *infoPtr, TREEVIEW_ITEM *item,
+ 				     (LPSTR)callback.item.pszText, -1,
+ 				     item->pszText, buflen/sizeof(WCHAR));
+ 		item->cchTextMax = buflen/sizeof(WCHAR);
+-		free(oldText);
++		Free(oldText);
+ 	    }
+ 	}
+     }
+@@ -997,7 +997,7 @@ TREEVIEW_UpdateSubTree(const TREEVIEW_INFO *infoPtr, TREEVIEW_ITEM *root)
+ static TREEVIEW_ITEM *
+ TREEVIEW_AllocateItem(const TREEVIEW_INFO *infoPtr)
+ {
+-    TREEVIEW_ITEM *newItem = calloc(1, sizeof(*newItem));
++    TREEVIEW_ITEM *newItem = Alloc(sizeof(*newItem));
+ 
+     if (!newItem)
+ 	return NULL;
+@@ -1013,7 +1013,7 @@ TREEVIEW_AllocateItem(const TREEVIEW_INFO *infoPtr)
+ 
+     if (DPA_InsertPtr(infoPtr->items, INT_MAX, newItem) == -1)
+     {
+-        free(newItem);
++        Free(newItem);
+         return NULL;
+     }
+ 
+@@ -1038,7 +1038,7 @@ TREEVIEW_FreeItem(TREEVIEW_INFO *infoPtr, TREEVIEW_ITEM *item)
+         infoPtr->dropItem = NULL;
+     if (infoPtr->insertMarkItem == item)
+         infoPtr->insertMarkItem = NULL;
+-    free(item);
++    Free(item);
+ }
+ 
+ 
+@@ -1132,13 +1132,13 @@ TREEVIEW_DoSetItemT(const TREEVIEW_INFO *infoPtr, TREEVIEW_ITEM *item,
+                 len = MultiByteToWideChar(CP_ACP, 0, (LPSTR)tvItem->pszText, -1, NULL, 0);
+ 
+             /* Allocate new block to make pointer comparison in item_changed() work. */
+-            newText = malloc(len * sizeof(WCHAR));
++            newText = Alloc(len * sizeof(WCHAR));
+ 
+             if (newText == NULL) return FALSE;
+ 
+             callbackClear |= TVIF_TEXT;
+ 
+-            free(item->pszText);
++            Free(item->pszText);
+             item->pszText = newText;
+             item->cchTextMax = len;
+             if (isW)
+@@ -1152,7 +1152,7 @@ TREEVIEW_DoSetItemT(const TREEVIEW_INFO *infoPtr, TREEVIEW_ITEM *item,
+ 	else
+ 	{
+             callbackSet |= TVIF_TEXT;
+-            item->pszText = realloc(item->pszText, TEXT_CALLBACK_SIZE * sizeof(WCHAR));
++            item->pszText = ReAlloc(item->pszText, TEXT_CALLBACK_SIZE * sizeof(WCHAR));
+ 	    item->cchTextMax = TEXT_CALLBACK_SIZE;
+ 	    TRACE("setting callback, item %p\n", item);
+ 	}
+@@ -1497,7 +1497,7 @@ TREEVIEW_RemoveItem(TREEVIEW_INFO *infoPtr, TREEVIEW_ITEM *item)
+     infoPtr->uNumItems--;
+ 
+     if (item->pszText != LPSTR_TEXTCALLBACKW)
+-        free(item->pszText);
++        Free(item->pszText);
+ 
+     TREEVIEW_FreeItem(infoPtr, item);
+ }
+@@ -4085,7 +4085,7 @@ TREEVIEW_EndEditLabelNow(TREEVIEW_INFO *infoPtr, BOOL bCancel)
+         if (!infoPtr->bNtfUnicode)
+         {
+             DWORD len = MultiByteToWideChar( CP_ACP, 0, (LPSTR)tvdi.item.pszText, -1, NULL, 0 );
+-            newText = malloc(len * sizeof(WCHAR));
++            newText = Alloc(len * sizeof(WCHAR));
+             MultiByteToWideChar( CP_ACP, 0, (LPSTR)tvdi.item.pszText, -1, newText, len );
+             iLength = len - 1;
+         }
+@@ -4094,11 +4094,11 @@ TREEVIEW_EndEditLabelNow(TREEVIEW_INFO *infoPtr, BOOL bCancel)
+ 
+         if (lstrcmpW(newText, editedItem->pszText) != 0)
+         {
+-            WCHAR *ptr = realloc(editedItem->pszText, sizeof(WCHAR)*(iLength + 1));
++            WCHAR *ptr = ReAlloc(editedItem->pszText, sizeof(WCHAR)*(iLength + 1));
+             if (ptr == NULL)
+             {
+                 ERR("OutOfMemory, cannot allocate space for label\n");
+-                if (newText != tmpText) free(newText);
++                if (newText != tmpText) Free(newText);
+                 DestroyWindow(infoPtr->hwndEdit);
+                 infoPtr->hwndEdit = 0;
+                 infoPtr->editItem = NULL;
+@@ -4112,7 +4112,7 @@ TREEVIEW_EndEditLabelNow(TREEVIEW_INFO *infoPtr, BOOL bCancel)
+                 TREEVIEW_ComputeTextWidth(infoPtr, editedItem, 0);
+             }
+         }
+-        if (newText != tmpText) free(newText);
++        if (newText != tmpText) Free(newText);
+     }
+ 
+     ShowWindow(infoPtr->hwndEdit, SW_HIDE);
+@@ -5134,7 +5134,7 @@ TREEVIEW_Create(HWND hwnd, const CREATESTRUCTW *lpcs)
+ 
+     TRACE("wnd %p, style %#lx\n", hwnd, GetWindowLongW(hwnd, GWL_STYLE));
+ 
+-    if (!(infoPtr = calloc(1, sizeof(*infoPtr))))
++    if (!(infoPtr = Alloc(sizeof(*infoPtr))))
+     {
+ 	ERR("could not allocate info memory!\n");
+ 	return 0;
+@@ -5257,7 +5257,7 @@ TREEVIEW_Destroy(TREEVIEW_INFO *infoPtr)
+     DeleteObject(infoPtr->hUnderlineFont);
+     DeleteObject(infoPtr->hBoldUnderlineFont);
+     DestroyWindow(infoPtr->hwndToolTip);
+-    free(infoPtr);
++    Free(infoPtr);
+ 
+     return 0;
+ }
+diff --git a/dlls/comctl32/updown.c b/dlls/comctl32/updown.c
+index f2befd9d448..9f46bfaffa7 100644
+--- a/dlls/comctl32/updown.c
++++ b/dlls/comctl32/updown.c
+@@ -901,7 +901,7 @@ static LRESULT WINAPI UpDownWindowProc(HWND hwnd, UINT message, WPARAM wParam, L
+ 	    {
+ 	    CREATESTRUCTW *pcs = (CREATESTRUCTW*)lParam;
+ 
+-            infoPtr = calloc(1, sizeof(*infoPtr));
++            infoPtr = Alloc(sizeof(*infoPtr));
+ 	    SetWindowLongPtrW (hwnd, 0, (DWORD_PTR)infoPtr);
+ 
+ 	    /* initialize the info struct */
+@@ -934,9 +934,9 @@ static LRESULT WINAPI UpDownWindowProc(HWND hwnd, UINT message, WPARAM wParam, L
+ 	    break;
+ 
+ 	case WM_DESTROY:
+-	    free (infoPtr->AccelVect);
++	    Free (infoPtr->AccelVect);
+             UPDOWN_ResetSubclass (infoPtr);
+-	    free (infoPtr);
++	    Free (infoPtr);
+ 	    SetWindowLongPtrW (hwnd, 0, 0);
+             theme = GetWindowTheme (hwnd);
+             CloseThemeData (theme);
+@@ -1059,12 +1059,12 @@ static LRESULT WINAPI UpDownWindowProc(HWND hwnd, UINT message, WPARAM wParam, L
+ 	    TRACE("UDM_SETACCEL\n");
+ 
+ 	    if(infoPtr->AccelVect) {
+-		free (infoPtr->AccelVect);
++		Free (infoPtr->AccelVect);
+ 		infoPtr->AccelCount = 0;
+ 		infoPtr->AccelVect  = 0;
+       	    }
+ 	    if(wParam==0) return TRUE;
+-	    infoPtr->AccelVect = malloc(wParam*sizeof(UDACCEL));
++	    infoPtr->AccelVect = Alloc(wParam*sizeof(UDACCEL));
+ 	    if(!infoPtr->AccelVect) return FALSE;
+ 	    memcpy(infoPtr->AccelVect, (void*)lParam, wParam*sizeof(UDACCEL));
+             infoPtr->AccelCount = wParam;
+-- 
+GitLab
+

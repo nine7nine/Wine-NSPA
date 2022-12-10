@@ -1,0 +1,133 @@
+
+ - remove the dbus code, it breaks compilation and I don't need it anyway
+
+--- a/server/thread.c	2022-12-09 11:12:08.172426483 -0500
++++ b/server/thread.c	2022-12-09 11:11:54.997334378 -0500
+@@ -43,7 +43,6 @@
+ #include <sys/resource.h>
+ 
+ #define HAVE_SCHED_SETSCHEDULER 1
+-#define HAVE_DBUS_DBUS_H 1
+ #define HAVE_SETPRIORITY 1
+ 
+ #include "ntstatus.h"
+@@ -138,78 +137,6 @@ static const struct object_ops thread_ap
+     thread_apc_destroy          /* destroy */
+ };
+ 
+-#ifdef HAVE_DBUS_DBUS_H
+-//#include <dbus/dbus.h>
+-
+-static int rtkit_set_realtime( dbus_uint64_t process, dbus_uint64_t thread, dbus_uint32_t priority )
+-{
+-    DBusConnection* dbus;
+-    DBusMessage *msg;
+-    int ret = -1;
+-
+-    if ((dbus = dbus_bus_get(DBUS_BUS_SYSTEM, NULL)))
+-    {
+-        dbus_connection_set_exit_on_disconnect(dbus, 0);
+-
+-        if ((msg = dbus_message_new_method_call("org.freedesktop.RealtimeKit1",
+-                                                "/org/freedesktop/RealtimeKit1",
+-                                                "org.freedesktop.RealtimeKit1",
+-                                                "MakeThreadRealtimeWithPID")))
+-        {
+-            dbus_message_set_no_reply(msg, 1);
+-
+-            if (dbus_message_append_args(msg,
+-                                         DBUS_TYPE_UINT64, &process,
+-                                         DBUS_TYPE_UINT64, &thread,
+-                                         DBUS_TYPE_UINT32, &priority,
+-                                         DBUS_TYPE_INVALID) &&
+-                dbus_connection_send(dbus, msg, NULL))
+-                ret = 0;
+-
+-            dbus_message_unref(msg);
+-        }
+-
+-        dbus_connection_unref(dbus);
+-    }
+-
+-    return ret;
+-}
+-
+-static int rtkit_set_niceness( dbus_uint64_t process, dbus_uint64_t thread, dbus_int32_t niceness )
+-{
+-    DBusConnection* dbus;
+-    DBusMessage *msg;
+-    int ret = -1;
+-
+-    if ((dbus = dbus_bus_get(DBUS_BUS_SYSTEM, NULL)))
+-    {
+-        dbus_connection_set_exit_on_disconnect(dbus, 0);
+-
+-        if ((msg = dbus_message_new_method_call("org.freedesktop.RealtimeKit1",
+-                                                "/org/freedesktop/RealtimeKit1",
+-                                                "org.freedesktop.RealtimeKit1",
+-                                                "MakeThreadHighPriorityWithPID")))
+-        {
+-            dbus_message_set_no_reply(msg, 1);
+-
+-            if (dbus_message_append_args(msg,
+-                                         DBUS_TYPE_UINT64, &process,
+-                                         DBUS_TYPE_UINT64, &thread,
+-                                         DBUS_TYPE_INT32, &niceness,
+-                                         DBUS_TYPE_INVALID) &&
+-                dbus_connection_send(dbus, msg, NULL))
+-                ret = 0;
+-
+-            dbus_message_unref(msg);
+-        }
+-
+-        dbus_connection_unref(dbus);
+-    }
+-
+-    return ret;
+-}
+-#endif
+-
+ /* thread CPU context */
+ 
+ struct context
+@@ -1009,8 +937,7 @@ affinity_t get_thread_affinity( struct t
+ #define THREAD_PRIORITY_REALTIME_HIGHEST 6
+ #define THREAD_PRIORITY_REALTIME_LOWEST -7
+ 
+-#if defined(HAVE_SCHED_SETSCHEDULER) || defined(HAVE_SETPRIORITY) || \
+-    defined(HAVE_DBUS_DBUS_H)
++#if defined(HAVE_SCHED_SETSCHEDULER) || defined(HAVE_SETPRIORITY) 
+ static int get_unix_priority( int priority_class, int priority )
+ {
+     int min, max, base_priority;
+@@ -1157,14 +1084,6 @@ int set_thread_priority( struct thread*
+         if (sched_setscheduler( thread->fsync_idx, wine_rt_policy|SCHED_RESET_ON_FORK, &param ) == 0)
+             return 0;
+ #endif
+-#ifdef HAVE_DBUS_DBUS_H
+-        if (rtkit_set_realtime( thread->unix_pid, thread->unix_tid,
+-                                get_unix_priority( thread->process->priority, priority ) ) == 0)
+-            return 0;
+-        if (rtkit_set_realtime( thread->fsync_idx, thread->unix_tid,
+-                                get_unix_priority( thread->process->priority, priority ) ) == 0)
+-            return 0;
+-#endif
+     }
+     else
+     {
+@@ -1176,14 +1095,6 @@ int set_thread_priority( struct thread*
+                          get_unix_priority( thread->process->priority, priority ) ) == 0)
+             return 0;
+ #endif
+-#ifdef HAVE_DBUS_DBUS_H
+-        if (rtkit_set_niceness( thread->unix_pid, thread->unix_tid,
+-                                get_unix_priority( thread->process->priority, priority ) ) == 0)
+-            return 0;
+-        if (rtkit_set_niceness( thread->fsync_idx, thread->fsync_idx,
+-                                get_unix_priority( thread->process->priority, priority ) ) == 0)
+-            return 0;
+-#endif
+     }
+ #endif
+ 
+

@@ -1,0 +1,270 @@
+From 80ed5b7b64c34e1ded4c10a0acc761a80bc01415 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Thu, 24 Mar 2022 22:08:09 +0100
+Subject: [PATCH 2/4] user32: Set error from set_parent and set_window_pos
+ server calls.
+
+---
+ dlls/user32/tests/win.c | 2 --
+ dlls/win32u/window.c    | 2 +-
+ 2 files changed, 1 insertion(+), 3 deletions(-)
+
+diff --git a/dlls/user32/tests/win.c b/dlls/user32/tests/win.c
+index 11111111111..11111111111 100644
+--- a/dlls/user32/tests/win.c
++++ b/dlls/user32/tests/win.c
+@@ -916,13 +916,11 @@ static void test_thread_exit_destroy(void)
+     ret = SetWindowPos( child2, HWND_TOPMOST, 0, 0, 100, 100, SWP_NOSIZE|SWP_NOMOVE );
+     todo_wine
+     ok( !ret, "SetWindowPos succeeded\n" );
+-    todo_wine
+     ok( GetLastError() == ERROR_INVALID_PARAMETER, "SetWindowPos returned error %lu\n", GetLastError() );
+     SetLastError( 0xdeadbeef );
+     ret = SetWindowPos( child2, 0, 10, 10, 200, 200, SWP_NOZORDER | SWP_NOACTIVATE );
+     todo_wine
+     ok( !ret, "SetWindowPos succeeded\n" );
+-    todo_wine
+     ok( GetLastError() == ERROR_INVALID_PARAMETER, "SetWindowPos returned error %lu\n", GetLastError() );
+ 
+     rgn = CreateRectRgn( 5, 5, 15, 15 );
+diff --git a/dlls/win32u/window.c b/dlls/win32u/window.c
+index 11111111111..11111111111 100644
+--- a/dlls/win32u/window.c
++++ b/dlls/win32u/window.c
+@@ -1871,7 +1871,7 @@ static BOOL apply_window_pos( HWND hwnd, HWND insert_after, UINT swp_flags,
+         if (new_surface) req->paint_flags |= SET_WINPOS_PAINT_SURFACE;
+         if (win->pixel_format) req->paint_flags |= SET_WINPOS_PIXEL_FORMAT;
+ 
+-        if ((ret = !wine_server_call( req )))
++        if ((ret = !wine_server_call_err( req )))
+         {
+             win->dwStyle      = reply->new_style;
+             win->dwExStyle    = reply->new_ex_style;
+-- 
+2.37.2
+
+From b7c5d94b9fb551f94c28cb074e4d814d25505011 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Fri, 15 Oct 2021 11:37:02 +0200
+Subject: [PATCH 3/4] server: Factor sent or posted message receive helpers.
+
+---
+ server/queue.c | 76 +++++++++++++++++---------------------------------
+ 1 file changed, 26 insertions(+), 50 deletions(-)
+
+diff --git a/server/queue.c b/server/queue.c
+index 11111111111..11111111111 100644
+--- a/server/queue.c
++++ b/server/queue.c
+@@ -968,16 +968,14 @@ static struct message_result *alloc_message_result( struct msg_queue *send_queue
+ }
+ 
+ /* receive a message, removing it from the sent queue */
+-static void receive_message( struct msg_queue *queue, struct message *msg,
+-                             struct get_message_reply *reply )
++static int receive_message( struct msg_queue *queue, struct message *msg,
++                            struct get_message_reply *reply )
+ {
+-    struct message_result *result = msg->result;
+-
+     reply->total = msg->data_size;
+     if (msg->data_size > get_reply_max_size())
+     {
+         set_error( STATUS_BUFFER_OVERFLOW );
+-        return;
++        return 0;
+     }
+     reply->type   = msg->type;
+     reply->win    = msg->win;
+@@ -989,17 +987,7 @@ static void receive_message( struct msg_queue *queue, struct message *msg,
+     reply->time   = msg->time;
+ 
+     if (msg->data) set_reply_data_ptr( msg->data, msg->data_size );
+-
+-    list_remove( &msg->entry );
+-    /* put the result on the receiver result stack */
+-    if (result)
+-    {
+-        result->msg = NULL;
+-        result->recv_next  = queue->recv_result;
+-        queue->recv_result = result;
+-    }
+-    free( msg );
+-    if (list_empty( &queue->msg_list[SEND_MESSAGE] )) clear_queue_bits( queue, QS_SENDMESSAGE );
++    return 1;
+ }
+ 
+ /* set the result of the current received message */
+@@ -1033,17 +1021,18 @@ static int match_window( user_handle_t win, user_handle_t msg_win )
+     return is_child_window( win, msg_win );
+ }
+ 
+-/* retrieve a posted message */
+-static int get_posted_message( struct msg_queue *queue, unsigned int ignore_msg, user_handle_t win,
++/* retrieve a sent or posted message */
++static int get_queued_message( struct msg_queue *queue, unsigned int ignore_msg, enum message_kind kind, user_handle_t win,
+                                unsigned int first, unsigned int last, unsigned int flags,
+                                struct get_message_reply *reply )
+ {
++    struct message_result *result;
+     struct message *msg;
+ 
+     /* check against the filters */
+-    LIST_FOR_EACH_ENTRY( msg, &queue->msg_list[POST_MESSAGE], struct message, entry )
++    LIST_FOR_EACH_ENTRY( msg, &queue->msg_list[kind], struct message, entry )
+     {
+-        if (!match_window( win, msg->win )) continue;
++        if (kind != SEND_MESSAGE && !match_window( win, msg->win )) continue;
+         if (!check_msg_filter( msg->msg, first, last )) continue;
+         if (ignore_msg && (int)(msg->unique_id - ignore_msg) >= 0) continue;
+         goto found; /* found one */
+@@ -1052,32 +1041,24 @@ static int get_posted_message( struct msg_queue *queue, unsigned int ignore_msg,
+ 
+     /* return it to the app */
+ found:
+-    reply->total = msg->data_size;
+-    if (msg->data_size > get_reply_max_size())
+-    {
+-        set_error( STATUS_BUFFER_OVERFLOW );
++    if (!receive_message( queue, msg, reply ))
+         return 1;
++
++    /* put the result on the receiver result stack */
++    if (kind == SEND_MESSAGE && (result = msg->result))
++    {
++        msg->result = NULL;
++        result->msg = NULL;
++        result->recv_next  = queue->recv_result;
++        queue->recv_result = result;
+     }
+-    reply->type   = msg->type;
+-    reply->win    = msg->win;
+-    reply->msg    = msg->msg;
+-    reply->wparam = msg->wparam;
+-    reply->lparam = msg->lparam;
+-    reply->x      = msg->x;
+-    reply->y      = msg->y;
+-    reply->time   = msg->time;
+ 
+     if (flags & PM_REMOVE)
+     {
+-        if (msg->data)
+-        {
+-            set_reply_data_ptr( msg->data, msg->data_size );
+-            msg->data = NULL;
+-            msg->data_size = 0;
+-        }
+-        remove_queue_message( queue, msg, POST_MESSAGE );
++        msg->data = NULL;
++        msg->data_size = 0;
++        remove_queue_message( queue, msg, kind );
+     }
+-    else if (msg->data) set_reply_data( msg->data, msg->data_size );
+ 
+     return 1;
+ }
+@@ -2902,7 +2883,6 @@ DECL_HANDLER(post_quit_message)
+ DECL_HANDLER(get_message)
+ {
+     struct timer *timer;
+-    struct list *ptr;
+     struct msg_queue *queue = get_current_queue();
+     user_handle_t get_win = get_user_full_handle( req->get_win );
+     unsigned int filter = req->flags >> 16;
+@@ -2918,12 +2898,8 @@ DECL_HANDLER(get_message)
+     if (!filter) filter = QS_ALLINPUT;
+ 
+     /* first check for sent messages */
+-    if ((ptr = list_head( &queue->msg_list[SEND_MESSAGE] )))
+-    {
+-        struct message *msg = LIST_ENTRY( ptr, struct message, entry );
+-        receive_message( queue, msg, reply );
++    if (get_queued_message( queue, 0, SEND_MESSAGE, 0, 0, 0xffffffff, PM_REMOVE, reply ))
+         return;
+-    }
+ 
+     /* clear changed bits so we can wait on them if we don't find a message */
+     if (filter & QS_POSTMESSAGE)
+@@ -2943,12 +2919,12 @@ DECL_HANDLER(get_message)
+ 
+     /* then check for posted messages */
+     if ((filter & QS_POSTMESSAGE) &&
+-        get_posted_message( queue, queue->ignore_post_msg, get_win, req->get_first, req->get_last, req->flags, reply ))
++        get_queued_message( queue, queue->ignore_post_msg, POST_MESSAGE, get_win, req->get_first, req->get_last, req->flags, reply ))
+         return;
+ 
+     if ((filter & QS_HOTKEY) && queue->hotkey_count &&
+         req->get_first <= WM_HOTKEY && req->get_last >= WM_HOTKEY &&
+-        get_posted_message( queue, queue->ignore_post_msg, get_win, WM_HOTKEY, WM_HOTKEY, req->flags, reply ))
++        get_queued_message( queue, queue->ignore_post_msg, POST_MESSAGE, get_win, WM_HOTKEY, WM_HOTKEY, req->flags, reply ))
+         return;
+ 
+     /* only check for quit messages if not posted messages pending */
+@@ -2993,12 +2969,12 @@ DECL_HANDLER(get_message)
+ 
+     /* if we previously skipped posted messages then check again */
+     if (queue->ignore_post_msg && (filter & QS_POSTMESSAGE) &&
+-        get_posted_message( queue, 0, get_win, req->get_first, req->get_last, req->flags, reply ))
++        get_queued_message( queue, 0, POST_MESSAGE, get_win, req->get_first, req->get_last, req->flags, reply ))
+         return;
+ 
+     if (queue->ignore_post_msg && (filter & QS_HOTKEY) && queue->hotkey_count &&
+         req->get_first <= WM_HOTKEY && req->get_last >= WM_HOTKEY &&
+-        get_posted_message( queue, 0, get_win, WM_HOTKEY, WM_HOTKEY, req->flags, reply ))
++        get_queued_message( queue, 0, POST_MESSAGE, get_win, WM_HOTKEY, WM_HOTKEY, req->flags, reply ))
+         return;
+ 
+     if (get_win == -1 && current->process->idle_event) set_event( current->process->idle_event );
+-- 
+2.37.2
+
+From 60f2f828cefeb6b5b40c6cc6e08ac63f0225df14 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Fri, 15 Oct 2021 11:39:46 +0200
+Subject: [PATCH 4/4] server: Check for internal messages before validating
+ window handle.
+
+---
+ dlls/user32/tests/win.c | 1 -
+ server/queue.c          | 6 +++++-
+ 2 files changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/user32/tests/win.c b/dlls/user32/tests/win.c
+index 11111111111..11111111111 100644
+--- a/dlls/user32/tests/win.c
++++ b/dlls/user32/tests/win.c
+@@ -952,7 +952,6 @@ static void test_thread_exit_destroy(void)
+     ret = IsWindow( child2 );
+     ok( !ret, "IsWindow returned %lu\n", ret );
+     ret = IsWindow( child3 );
+-    todo_wine
+     ok( !ret, "IsWindow returned %lu\n", ret );
+     ret = DestroyWindow( child2 );
+     ok( !ret, "DestroyWindow returned %lu\n", ret );
+diff --git a/server/queue.c b/server/queue.c
+index 11111111111..11111111111 100644
+--- a/server/queue.c
++++ b/server/queue.c
+@@ -2887,6 +2887,10 @@ DECL_HANDLER(get_message)
+     user_handle_t get_win = get_user_full_handle( req->get_win );
+     unsigned int filter = req->flags >> 16;
+ 
++    /* first check for internal messages */
++    if (queue && get_queued_message( queue, 0, SEND_MESSAGE, 0, 0x80000000, 0xffffffff, PM_REMOVE, reply ))
++        return;
++
+     if (get_win && get_win != 1 && get_win != -1 && !get_user_object( get_win, USER_WINDOW ))
+     {
+         set_win32_error( ERROR_INVALID_WINDOW_HANDLE );
+@@ -2898,7 +2902,7 @@ DECL_HANDLER(get_message)
+     if (!filter) filter = QS_ALLINPUT;
+ 
+     /* first check for sent messages */
+-    if (get_queued_message( queue, 0, SEND_MESSAGE, 0, 0, 0xffffffff, PM_REMOVE, reply ))
++    if (get_queued_message( queue, 0, SEND_MESSAGE, 0, 0, 0x7fffffff, PM_REMOVE, reply ))
+         return;
+ 
+     /* clear changed bits so we can wait on them if we don't find a message */
+-- 
+2.37.2
+

@@ -1,0 +1,1775 @@
+From 11af5b750c990d6541110527a214687f4f5c2ce2 Mon Sep 17 00:00:00 2001
+From: Torge Matthies <tmatthies@codeweavers.com>
+Date: Mon, 26 Sep 2022 23:04:00 +0200
+Subject: [PATCH 1/7] msvcr100: Implement
+ _StructuredTaskCollection::_RunAndWait.
+
+---
+ dlls/msvcrt/concurrency.c | 58 +++++++++++++++++++++++++++++++--------
+ 1 file changed, 47 insertions(+), 11 deletions(-)
+
+diff --git a/dlls/msvcrt/concurrency.c b/dlls/msvcrt/concurrency.c
+index c5db2868d58..3f0fbe6b62c 100644
+--- a/dlls/msvcrt/concurrency.c
++++ b/dlls/msvcrt/concurrency.c
+@@ -1900,6 +1900,15 @@ static ThreadScheduler *get_thread_scheduler_from_context(Context *context)
+     return NULL;
+ }
+ 
++static void execute_chore(_UnrealizedChore *chore,
++        _StructuredTaskCollection *task_collection)
++{
++    TRACE("(%p %p)\n", chore, task_collection);
++
++    if (chore->chore_proc)
++        chore->chore_proc(chore);
++}
++
+ static void CALLBACK chore_wrapper_finally(BOOL normal, void *data)
+ {
+     _UnrealizedChore *chore = data;
+@@ -1921,23 +1930,20 @@ static void CALLBACK chore_wrapper_finally(BOOL normal, void *data)
+             new_finished = prev_finished + 1;
+     } while (InterlockedCompareExchange(ptr, new_finished, prev_finished)
+              != prev_finished);
++    RtlWakeAddressSingle((LONG*)ptr);
+ }
+ 
+ static void __cdecl chore_wrapper(_UnrealizedChore *chore)
+ {
+-    TRACE("(%p)\n", chore);
+-
+     __TRY
+     {
+-        if (chore->chore_proc)
+-            chore->chore_proc(chore);
++        execute_chore(chore, chore->task_collection);
+     }
+     __FINALLY_CTX(chore_wrapper_finally, chore)
+ }
+ 
+-static void __cdecl _StructuredTaskCollection_scheduler_cb(void *data)
++static BOOL pick_and_execute_chore(ThreadScheduler *scheduler)
+ {
+-    ThreadScheduler *scheduler = (ThreadScheduler*)get_current_scheduler();
+     struct list *entry;
+     struct scheduled_chore *sc;
+     _UnrealizedChore *chore;
+@@ -1947,7 +1953,7 @@ static void __cdecl _StructuredTaskCollection_scheduler_cb(void *data)
+     if (scheduler->scheduler.vtable != &ThreadScheduler_vtable)
+     {
+         ERR("unknown scheduler set\n");
+-        return;
++        return FALSE;
+     }
+ 
+     EnterCriticalSection(&scheduler->cs);
+@@ -1956,13 +1962,19 @@ static void __cdecl _StructuredTaskCollection_scheduler_cb(void *data)
+         list_remove(entry);
+     LeaveCriticalSection(&scheduler->cs);
+     if (!entry)
+-        return;
++        return FALSE;
+ 
+     sc = LIST_ENTRY(entry, struct scheduled_chore, entry);
+     chore = sc->chore;
+     operator_delete(sc);
+ 
+     chore->chore_wrapper(chore);
++    return TRUE;
++}
++
++static void __cdecl _StructuredTaskCollection_scheduler_cb(void *data)
++{
++    pick_and_execute_chore((ThreadScheduler*)get_current_scheduler());
+ }
+ 
+ static bool schedule_chore(_StructuredTaskCollection *this,
+@@ -2044,11 +2056,35 @@ void __thiscall _StructuredTaskCollection__Schedule(
+ /* ?_RunAndWait@_StructuredTaskCollection@details@Concurrency@@QAA?AW4_TaskCollectionStatus@23@PAV_UnrealizedChore@23@@Z */
+ /* ?_RunAndWait@_StructuredTaskCollection@details@Concurrency@@QAG?AW4_TaskCollectionStatus@23@PAV_UnrealizedChore@23@@Z */
+ /* ?_RunAndWait@_StructuredTaskCollection@details@Concurrency@@QEAA?AW4_TaskCollectionStatus@23@PEAV_UnrealizedChore@23@@Z */
+-/*enum Concurrency::details::_TaskCollectionStatus*/int __stdcall
+-_StructuredTaskCollection__RunAndWait(
++/*_TaskCollectionStatus*/int __stdcall _StructuredTaskCollection__RunAndWait(
+         _StructuredTaskCollection *this, _UnrealizedChore *chore)
+ {
+-    FIXME("(%p %p): stub!\n", this, chore);
++    LONG expected, val;
++
++    TRACE("(%p %p)\n", this, chore);
++
++    if (chore) {
++        if (chore->task_collection) {
++            invalid_multiple_scheduling e;
++            invalid_multiple_scheduling_ctor_str(&e, "Chore scheduled multiple times");
++            _CxxThrowException(&e, &invalid_multiple_scheduling_exception_type);
++        }
++        execute_chore(chore, this);
++    }
++
++    if (this->context) {
++        ThreadScheduler *scheduler = get_thread_scheduler_from_context(this->context);
++        if (scheduler) {
++            while (pick_and_execute_chore(scheduler)) ;
++        }
++    }
++
++    expected = this->count ? this->count : FINISHED_INITIAL;
++    while ((val = this->finished) != expected)
++        RtlWaitOnAddress((LONG*)&this->finished, &val, sizeof(val), NULL);
++
++    this->finished = 0;
++    this->count = 0;
+     return 1;
+ }
+ 
+-- 
+GitLab
+
+
+From 11631680346a9395540b245d9e0989c1d9ca52cc Mon Sep 17 00:00:00 2001
+From: Torge Matthies <tmatthies@codeweavers.com>
+Date: Mon, 26 Sep 2022 23:04:01 +0200
+Subject: [PATCH 2/7] msvcr100: Move exception_ptr functions to a separate
+ file.
+
+---
+ dlls/msvcr100/Makefile.in   |   1 +
+ dlls/msvcr110/Makefile.in   |   1 +
+ dlls/msvcr120/Makefile.in   |   1 +
+ dlls/msvcrt/Makefile.in     |   1 +
+ dlls/msvcrt/cpp.c           | 357 ++----------------------------------
+ dlls/msvcrt/cxx.h           |   8 +
+ dlls/msvcrt/exception_ptr.c | 350 +++++++++++++++++++++++++++++++++++
+ 7 files changed, 378 insertions(+), 341 deletions(-)
+ create mode 100644 dlls/msvcrt/exception_ptr.c
+
+diff --git a/dlls/msvcr100/Makefile.in b/dlls/msvcr100/Makefile.in
+index a48ae314257..d17aa79b3d7 100644
+--- a/dlls/msvcr100/Makefile.in
++++ b/dlls/msvcr100/Makefile.in
+@@ -19,6 +19,7 @@ C_SRCS = \
+ 	except_arm64.c \
+ 	except_i386.c \
+ 	except_x86_64.c \
++	exception_ptr.c \
+ 	exit.c \
+ 	file.c \
+ 	heap.c \
+diff --git a/dlls/msvcr110/Makefile.in b/dlls/msvcr110/Makefile.in
+index 26db1d46f7a..0bc15e27d94 100644
+--- a/dlls/msvcr110/Makefile.in
++++ b/dlls/msvcr110/Makefile.in
+@@ -19,6 +19,7 @@ C_SRCS = \
+ 	except_arm64.c \
+ 	except_i386.c \
+ 	except_x86_64.c \
++	exception_ptr.c \
+ 	exit.c \
+ 	file.c \
+ 	heap.c \
+diff --git a/dlls/msvcr120/Makefile.in b/dlls/msvcr120/Makefile.in
+index d2957c2f1d3..cc3d5b2bdff 100644
+--- a/dlls/msvcr120/Makefile.in
++++ b/dlls/msvcr120/Makefile.in
+@@ -19,6 +19,7 @@ C_SRCS = \
+ 	except_arm64.c \
+ 	except_i386.c \
+ 	except_x86_64.c \
++	exception_ptr.c \
+ 	exit.c \
+ 	file.c \
+ 	heap.c \
+diff --git a/dlls/msvcrt/Makefile.in b/dlls/msvcrt/Makefile.in
+index e8a510d9937..8cd0c4ea7f4 100644
+--- a/dlls/msvcrt/Makefile.in
++++ b/dlls/msvcrt/Makefile.in
+@@ -23,6 +23,7 @@ C_SRCS = \
+ 	except_arm64.c \
+ 	except_i386.c \
+ 	except_x86_64.c \
++	exception_ptr.c \
+ 	exit.c \
+ 	file.c \
+ 	heap.c \
+diff --git a/dlls/msvcrt/cpp.c b/dlls/msvcrt/cpp.c
+index f3200e046cb..4c46b3d4e86 100644
+--- a/dlls/msvcrt/cpp.c
++++ b/dlls/msvcrt/cpp.c
+@@ -583,7 +583,9 @@ DEFINE_RTTI_DATA1( bad_cast, 0, &exception_rtti_base_descriptor, ".?AVbad_cast@@
+ DEFINE_RTTI_DATA2( __non_rtti_object, 0, &bad_typeid_rtti_base_descriptor, &exception_rtti_base_descriptor, ".?AV__non_rtti_object@@" )
+ #endif
+ 
++#if _MSVCR_VER >= 100
+ DEFINE_CXX_EXCEPTION0( exception, exception_dtor )
++#endif
+ DEFINE_CXX_DATA1( bad_typeid, &exception_cxx_type_info, bad_typeid_dtor )
+ DEFINE_CXX_DATA1( bad_cast, &exception_cxx_type_info, bad_cast_dtor )
+ DEFINE_CXX_DATA2( __non_rtti_object, &bad_typeid_cxx_type_info,
+@@ -605,7 +607,11 @@ void msvcrt_init_exception(void *base)
+     init_bad_cast_rtti(base);
+     init___non_rtti_object_rtti(base);
+ 
++#if _MSVCR_VER >= 100
+     init_exception_cxx(base);
++#else
++    init_exception_cxx_type_info(base);
++#endif
+     init_bad_typeid_cxx(base);
+     init_bad_cast_cxx(base);
+     init___non_rtti_object_cxx(base);
+@@ -624,6 +630,15 @@ void throw_bad_alloc(void)
+ }
+ #endif
+ 
++#if _MSVCR_VER >= 100
++void throw_exception(const char* msg)
++{
++    exception e;
++    __exception_ctor(&e, msg, &exception_vtable);
++    _CxxThrowException(&e, &exception_exception_type);
++}
++#endif
++
+ /******************************************************************
+  *		?set_terminate@@YAP6AXXZP6AXXZ@Z (MSVCRT.@)
+  *
+@@ -1128,351 +1143,11 @@ const char * __thiscall type_info_name_internal_method(type_info * _this, struct
+     return type_info_name(_this);
+ }
+ 
+-#endif /* _MSVCR_VER >= 80 */
+-
+-/* std::exception_ptr class helpers */
+-typedef struct
+-{
+-    EXCEPTION_RECORD *rec;
+-    LONG *ref; /* not binary compatible with native msvcr100 */
+-} exception_ptr;
+-
+-#if _MSVCR_VER >= 100
+-
+-/*********************************************************************
+- * ?__ExceptionPtrCreate@@YAXPAX@Z
+- * ?__ExceptionPtrCreate@@YAXPEAX@Z
+- */
+-void __cdecl __ExceptionPtrCreate(exception_ptr *ep)
+-{
+-    TRACE("(%p)\n", ep);
+-
+-    ep->rec = NULL;
+-    ep->ref = NULL;
+-}
+-
+-#ifdef __ASM_USE_THISCALL_WRAPPER
+-extern void call_dtor(const cxx_exception_type *type, void *func, void *object);
+-
+-__ASM_GLOBAL_FUNC( call_dtor,
+-                   "movl 12(%esp),%ecx\n\t"
+-                   "call *8(%esp)\n\t"
+-                   "ret" );
+-#elif __x86_64__
+-static inline void call_dtor(const cxx_exception_type *type, unsigned int dtor, void *object)
+-{
+-    char *base = RtlPcToFileHeader((void*)type, (void**)&base);
+-    void (__cdecl *func)(void*) = (void*)(base + dtor);
+-    func(object);
+-}
+-#else
+-#define call_dtor(type, func, object) ((void (__thiscall*)(void*))(func))(object)
+-#endif
+-
+-/*********************************************************************
+- * ?__ExceptionPtrDestroy@@YAXPAX@Z
+- * ?__ExceptionPtrDestroy@@YAXPEAX@Z
+- */
+-void __cdecl __ExceptionPtrDestroy(exception_ptr *ep)
+-{
+-    TRACE("(%p)\n", ep);
+-
+-    if (!ep->rec)
+-        return;
+-
+-    if (!InterlockedDecrement(ep->ref))
+-    {
+-        if (ep->rec->ExceptionCode == CXX_EXCEPTION)
+-        {
+-            const cxx_exception_type *type = (void*)ep->rec->ExceptionInformation[2];
+-            void *obj = (void*)ep->rec->ExceptionInformation[1];
+-
+-            if (type && type->destructor) call_dtor(type, type->destructor, obj);
+-            HeapFree(GetProcessHeap(), 0, obj);
+-        }
+-
+-        HeapFree(GetProcessHeap(), 0, ep->rec);
+-        HeapFree(GetProcessHeap(), 0, ep->ref);
+-    }
+-}
+-
+-/*********************************************************************
+- * ?__ExceptionPtrCopy@@YAXPAXPBX@Z
+- * ?__ExceptionPtrCopy@@YAXPEAXPEBX@Z
+- */
+-void __cdecl __ExceptionPtrCopy(exception_ptr *ep, const exception_ptr *copy)
+-{
+-    TRACE("(%p %p)\n", ep, copy);
+-
+-    /* don't destroy object stored in ep */
+-    *ep = *copy;
+-    if (ep->ref)
+-        InterlockedIncrement(copy->ref);
+-}
+-
+-/*********************************************************************
+- * ?__ExceptionPtrAssign@@YAXPAXPBX@Z
+- * ?__ExceptionPtrAssign@@YAXPEAXPEBX@Z
+- */
+-void __cdecl __ExceptionPtrAssign(exception_ptr *ep, const exception_ptr *assign)
+-{
+-    TRACE("(%p %p)\n", ep, assign);
+-
+-    /* don't destroy object stored in ep */
+-    if (ep->ref)
+-        InterlockedDecrement(ep->ref);
+-
+-    *ep = *assign;
+-    if (ep->ref)
+-        InterlockedIncrement(ep->ref);
+-}
+-
+-#endif /* _MSVCR_VER >= 100 */
+-
+-/*********************************************************************
+- * ?__ExceptionPtrRethrow@@YAXPBX@Z
+- * ?__ExceptionPtrRethrow@@YAXPEBX@Z
+- */
+-void __cdecl __ExceptionPtrRethrow(const exception_ptr *ep)
+-{
+-    TRACE("(%p)\n", ep);
+-
+-    if (!ep->rec)
+-    {
+-        static const char *exception_msg = "bad exception";
+-        exception e;
+-
+-        exception_ctor(&e, &exception_msg);
+-        _CxxThrowException(&e, &exception_exception_type);
+-        return;
+-    }
+-
+-    RaiseException(ep->rec->ExceptionCode, ep->rec->ExceptionFlags & (~EH_UNWINDING),
+-            ep->rec->NumberParameters, ep->rec->ExceptionInformation);
+-}
+-
+-#if _MSVCR_VER >= 100
+-
+-#ifdef __i386__
+-extern void call_copy_ctor( void *func, void *this, void *src, int has_vbase );
+-#else
+-static inline void call_copy_ctor( void *func, void *this, void *src, int has_vbase )
+-{
+-    TRACE( "calling copy ctor %p object %p src %p\n", func, this, src );
+-    if (has_vbase)
+-        ((void (__cdecl*)(void*, void*, BOOL))func)(this, src, 1);
+-    else
+-        ((void (__cdecl*)(void*, void*))func)(this, src);
+-}
+-#endif
+-
+-/*********************************************************************
+- * ?__ExceptionPtrCurrentException@@YAXPAX@Z
+- * ?__ExceptionPtrCurrentException@@YAXPEAX@Z
+- */
+-#ifndef __x86_64__
+-void __cdecl __ExceptionPtrCurrentException(exception_ptr *ep)
+-{
+-    EXCEPTION_RECORD *rec = msvcrt_get_thread_data()->exc_record;
+-
+-    TRACE("(%p)\n", ep);
+-
+-    if (!rec)
+-    {
+-        ep->rec = NULL;
+-        ep->ref = NULL;
+-        return;
+-    }
+-
+-    ep->rec = HeapAlloc(GetProcessHeap(), 0, sizeof(EXCEPTION_RECORD));
+-    ep->ref = HeapAlloc(GetProcessHeap(), 0, sizeof(int));
+-
+-    *ep->rec = *rec;
+-    *ep->ref = 1;
+-
+-    if (ep->rec->ExceptionCode == CXX_EXCEPTION)
+-    {
+-        const cxx_exception_type *et = (void*)ep->rec->ExceptionInformation[2];
+-        const cxx_type_info *ti;
+-        void **data, *obj;
+-
+-        ti = et->type_info_table->info[0];
+-        data = HeapAlloc(GetProcessHeap(), 0, ti->size);
+-
+-        obj = (void*)ep->rec->ExceptionInformation[1];
+-        if (ti->flags & CLASS_IS_SIMPLE_TYPE)
+-        {
+-            memcpy(data, obj, ti->size);
+-            if (ti->size == sizeof(void *)) *data = get_this_pointer(&ti->offsets, *data);
+-        }
+-        else if (ti->copy_ctor)
+-        {
+-            call_copy_ctor(ti->copy_ctor, data, get_this_pointer(&ti->offsets, obj),
+-                    ti->flags & CLASS_HAS_VIRTUAL_BASE_CLASS);
+-        }
+-        else
+-            memcpy(data, get_this_pointer(&ti->offsets, obj), ti->size);
+-        ep->rec->ExceptionInformation[1] = (ULONG_PTR)data;
+-    }
+-    return;
+-}
+-#else
+-void __cdecl __ExceptionPtrCurrentException(exception_ptr *ep)
+-{
+-    EXCEPTION_RECORD *rec = msvcrt_get_thread_data()->exc_record;
+-
+-    TRACE("(%p)\n", ep);
+-
+-    if (!rec)
+-    {
+-        ep->rec = NULL;
+-        ep->ref = NULL;
+-        return;
+-    }
+-
+-    ep->rec = HeapAlloc(GetProcessHeap(), 0, sizeof(EXCEPTION_RECORD));
+-    ep->ref = HeapAlloc(GetProcessHeap(), 0, sizeof(int));
+-
+-    *ep->rec = *rec;
+-    *ep->ref = 1;
+-
+-    if (ep->rec->ExceptionCode == CXX_EXCEPTION)
+-    {
+-        const cxx_exception_type *et = (void*)ep->rec->ExceptionInformation[2];
+-        const cxx_type_info *ti;
+-        void **data, *obj;
+-        char *base = RtlPcToFileHeader((void*)et, (void**)&base);
+-
+-        ti = (const cxx_type_info*)(base + ((const cxx_type_info_table*)(base + et->type_info_table))->info[0]);
+-        data = HeapAlloc(GetProcessHeap(), 0, ti->size);
+-
+-        obj = (void*)ep->rec->ExceptionInformation[1];
+-        if (ti->flags & CLASS_IS_SIMPLE_TYPE)
+-        {
+-            memcpy(data, obj, ti->size);
+-            if (ti->size == sizeof(void *)) *data = get_this_pointer(&ti->offsets, *data);
+-        }
+-        else if (ti->copy_ctor)
+-        {
+-            call_copy_ctor(base + ti->copy_ctor, data, get_this_pointer(&ti->offsets, obj),
+-                    ti->flags & CLASS_HAS_VIRTUAL_BASE_CLASS);
+-        }
+-        else
+-            memcpy(data, get_this_pointer(&ti->offsets, obj), ti->size);
+-        ep->rec->ExceptionInformation[1] = (ULONG_PTR)data;
+-    }
+-    return;
+-}
+-#endif
+-
+-#endif /* _MSVCR_VER >= 100 */
+-
+-#if _MSVCR_VER >= 110
+-/*********************************************************************
+- * ?__ExceptionPtrToBool@@YA_NPBX@Z
+- * ?__ExceptionPtrToBool@@YA_NPEBX@Z
+- */
+-bool __cdecl __ExceptionPtrToBool(exception_ptr *ep)
+-{
+-    return !!ep->rec;
+-}
+-#endif
+-
+-#if _MSVCR_VER >= 100
+-
+-/*********************************************************************
+- * ?__ExceptionPtrCopyException@@YAXPAXPBX1@Z
+- * ?__ExceptionPtrCopyException@@YAXPEAXPEBX1@Z
+- */
+-#ifndef __x86_64__
+-void __cdecl __ExceptionPtrCopyException(exception_ptr *ep,
+-        exception *object, const cxx_exception_type *type)
+-{
+-    const cxx_type_info *ti;
+-    void **data;
+-
+-    __ExceptionPtrDestroy(ep);
+-
+-    ep->rec = HeapAlloc(GetProcessHeap(), 0, sizeof(EXCEPTION_RECORD));
+-    ep->ref = HeapAlloc(GetProcessHeap(), 0, sizeof(int));
+-    *ep->ref = 1;
+-
+-    memset(ep->rec, 0, sizeof(EXCEPTION_RECORD));
+-    ep->rec->ExceptionCode = CXX_EXCEPTION;
+-    ep->rec->ExceptionFlags = EH_NONCONTINUABLE;
+-    ep->rec->NumberParameters = 3;
+-    ep->rec->ExceptionInformation[0] = CXX_FRAME_MAGIC_VC6;
+-    ep->rec->ExceptionInformation[2] = (ULONG_PTR)type;
+-
+-    ti = type->type_info_table->info[0];
+-    data = HeapAlloc(GetProcessHeap(), 0, ti->size);
+-    if (ti->flags & CLASS_IS_SIMPLE_TYPE)
+-    {
+-        memcpy(data, object, ti->size);
+-        if (ti->size == sizeof(void *)) *data = get_this_pointer(&ti->offsets, *data);
+-    }
+-    else if (ti->copy_ctor)
+-    {
+-        call_copy_ctor(ti->copy_ctor, data, get_this_pointer(&ti->offsets, object),
+-                ti->flags & CLASS_HAS_VIRTUAL_BASE_CLASS);
+-    }
+-    else
+-        memcpy(data, get_this_pointer(&ti->offsets, object), ti->size);
+-    ep->rec->ExceptionInformation[1] = (ULONG_PTR)data;
+-}
+-#else
+-void __cdecl __ExceptionPtrCopyException(exception_ptr *ep,
+-        exception *object, const cxx_exception_type *type)
+-{
+-    const cxx_type_info *ti;
+-    void **data;
+-    char *base;
+-
+-    RtlPcToFileHeader((void*)type, (void**)&base);
+-    __ExceptionPtrDestroy(ep);
+-
+-    ep->rec = HeapAlloc(GetProcessHeap(), 0, sizeof(EXCEPTION_RECORD));
+-    ep->ref = HeapAlloc(GetProcessHeap(), 0, sizeof(int));
+-    *ep->ref = 1;
+-
+-    memset(ep->rec, 0, sizeof(EXCEPTION_RECORD));
+-    ep->rec->ExceptionCode = CXX_EXCEPTION;
+-    ep->rec->ExceptionFlags = EH_NONCONTINUABLE;
+-    ep->rec->NumberParameters = 4;
+-    ep->rec->ExceptionInformation[0] = CXX_FRAME_MAGIC_VC6;
+-    ep->rec->ExceptionInformation[2] = (ULONG_PTR)type;
+-    ep->rec->ExceptionInformation[3] = (ULONG_PTR)base;
+-
+-    ti = (const cxx_type_info*)(base + ((const cxx_type_info_table*)(base + type->type_info_table))->info[0]);
+-    data = HeapAlloc(GetProcessHeap(), 0, ti->size);
+-    if (ti->flags & CLASS_IS_SIMPLE_TYPE)
+-    {
+-        memcpy(data, object, ti->size);
+-        if (ti->size == sizeof(void *)) *data = get_this_pointer(&ti->offsets, *data);
+-    }
+-    else if (ti->copy_ctor)
+-    {
+-        call_copy_ctor(base + ti->copy_ctor, data, get_this_pointer(&ti->offsets, object),
+-                ti->flags & CLASS_HAS_VIRTUAL_BASE_CLASS);
+-    }
+-    else
+-        memcpy(data, get_this_pointer(&ti->offsets, object), ti->size);
+-    ep->rec->ExceptionInformation[1] = (ULONG_PTR)data;
+-}
+-#endif
+-
+-bool __cdecl __ExceptionPtrCompare(const exception_ptr *ep1, const exception_ptr *ep2)
+-{
+-    return ep1->rec == ep2->rec;
+-}
+-
+-#endif /* _MSVCR_VER >= 100 */
+-
+-#if _MSVCR_VER >= 80
+ void* __cdecl __AdjustPointer(void *obj, const this_ptr_offsets *off)
+ {
+     return get_this_pointer(off, obj);
+ }
++
+ #endif
+ 
+ #if _MSVCR_VER >= 140
+diff --git a/dlls/msvcrt/cxx.h b/dlls/msvcrt/cxx.h
+index cacbb1524b6..4051229c626 100644
+--- a/dlls/msvcrt/cxx.h
++++ b/dlls/msvcrt/cxx.h
+@@ -308,3 +308,11 @@ __ASM_BLOCK_BEGIN(type_info_vtables) \
+     __ASM_VTABLE(type_info, \
+             VTABLE_ADD_FUNC(type_info_vector_dtor)); \
+ __ASM_BLOCK_END
++
++typedef struct
++{
++    EXCEPTION_RECORD *rec;
++    LONG *ref; /* not binary compatible with native msvcr100 */
++} exception_ptr;
++
++void throw_exception(const char*) DECLSPEC_HIDDEN;
+diff --git a/dlls/msvcrt/exception_ptr.c b/dlls/msvcrt/exception_ptr.c
+new file mode 100644
+index 00000000000..d4c427e436f
+--- /dev/null
++++ b/dlls/msvcrt/exception_ptr.c
+@@ -0,0 +1,350 @@
++/*
++ * std::exception_ptr helper functions
++ *
++ * Copyright 2022 Torge Matthies for CodeWeavers
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++ */
++
++#include <stdarg.h>
++#include <stdbool.h>
++
++#include "windef.h"
++#include "winternl.h"
++#include "wine/exception.h"
++#include "wine/debug.h"
++#include "msvcrt.h"
++#include "cxx.h"
++
++#if _MSVCR_VER >= 100
++
++WINE_DEFAULT_DEBUG_CHANNEL(msvcrt);
++
++/*********************************************************************
++ * ?__ExceptionPtrCreate@@YAXPAX@Z
++ * ?__ExceptionPtrCreate@@YAXPEAX@Z
++ */
++void __cdecl __ExceptionPtrCreate(exception_ptr *ep)
++{
++    TRACE("(%p)\n", ep);
++
++    ep->rec = NULL;
++    ep->ref = NULL;
++}
++
++#ifdef __ASM_USE_THISCALL_WRAPPER
++extern void call_dtor(const cxx_exception_type *type, void *func, void *object);
++
++__ASM_GLOBAL_FUNC( call_dtor,
++                   "movl 12(%esp),%ecx\n\t"
++                   "call *8(%esp)\n\t"
++                   "ret" );
++#elif __x86_64__
++static inline void call_dtor(const cxx_exception_type *type, unsigned int dtor, void *object)
++{
++    char *base = RtlPcToFileHeader((void*)type, (void**)&base);
++    void (__cdecl *func)(void*) = (void*)(base + dtor);
++    func(object);
++}
++#else
++#define call_dtor(type, func, object) ((void (__thiscall*)(void*))(func))(object)
++#endif
++
++/*********************************************************************
++ * ?__ExceptionPtrDestroy@@YAXPAX@Z
++ * ?__ExceptionPtrDestroy@@YAXPEAX@Z
++ */
++void __cdecl __ExceptionPtrDestroy(exception_ptr *ep)
++{
++    TRACE("(%p)\n", ep);
++
++    if (!ep->rec)
++        return;
++
++    if (!InterlockedDecrement(ep->ref))
++    {
++        if (ep->rec->ExceptionCode == CXX_EXCEPTION)
++        {
++            const cxx_exception_type *type = (void*)ep->rec->ExceptionInformation[2];
++            void *obj = (void*)ep->rec->ExceptionInformation[1];
++
++            if (type && type->destructor) call_dtor(type, type->destructor, obj);
++            HeapFree(GetProcessHeap(), 0, obj);
++        }
++
++        HeapFree(GetProcessHeap(), 0, ep->rec);
++        HeapFree(GetProcessHeap(), 0, ep->ref);
++    }
++}
++
++/*********************************************************************
++ * ?__ExceptionPtrCopy@@YAXPAXPBX@Z
++ * ?__ExceptionPtrCopy@@YAXPEAXPEBX@Z
++ */
++void __cdecl __ExceptionPtrCopy(exception_ptr *ep, const exception_ptr *copy)
++{
++    TRACE("(%p %p)\n", ep, copy);
++
++    /* don't destroy object stored in ep */
++    *ep = *copy;
++    if (ep->ref)
++        InterlockedIncrement(copy->ref);
++}
++
++/*********************************************************************
++ * ?__ExceptionPtrAssign@@YAXPAXPBX@Z
++ * ?__ExceptionPtrAssign@@YAXPEAXPEBX@Z
++ */
++void __cdecl __ExceptionPtrAssign(exception_ptr *ep, const exception_ptr *assign)
++{
++    TRACE("(%p %p)\n", ep, assign);
++
++    /* don't destroy object stored in ep */
++    if (ep->ref)
++        InterlockedDecrement(ep->ref);
++
++    *ep = *assign;
++    if (ep->ref)
++        InterlockedIncrement(ep->ref);
++}
++
++/*********************************************************************
++ * ?__ExceptionPtrRethrow@@YAXPBX@Z
++ * ?__ExceptionPtrRethrow@@YAXPEBX@Z
++ */
++void __cdecl __ExceptionPtrRethrow(const exception_ptr *ep)
++{
++    TRACE("(%p)\n", ep);
++
++    if (!ep->rec)
++    {
++        throw_exception("bad exception");
++        return;
++    }
++
++    RaiseException(ep->rec->ExceptionCode, ep->rec->ExceptionFlags & (~EH_UNWINDING),
++            ep->rec->NumberParameters, ep->rec->ExceptionInformation);
++}
++
++#ifdef __i386__
++extern void call_copy_ctor( void *func, void *this, void *src, int has_vbase );
++#else
++static inline void call_copy_ctor( void *func, void *this, void *src, int has_vbase )
++{
++    TRACE( "calling copy ctor %p object %p src %p\n", func, this, src );
++    if (has_vbase)
++        ((void (__cdecl*)(void*, void*, BOOL))func)(this, src, 1);
++    else
++        ((void (__cdecl*)(void*, void*))func)(this, src);
++}
++#endif
++
++/*********************************************************************
++ * ?__ExceptionPtrCurrentException@@YAXPAX@Z
++ * ?__ExceptionPtrCurrentException@@YAXPEAX@Z
++ */
++#ifndef __x86_64__
++void __cdecl __ExceptionPtrCurrentException(exception_ptr *ep)
++{
++    EXCEPTION_RECORD *rec = msvcrt_get_thread_data()->exc_record;
++
++    TRACE("(%p)\n", ep);
++
++    if (!rec)
++    {
++        ep->rec = NULL;
++        ep->ref = NULL;
++        return;
++    }
++
++    ep->rec = HeapAlloc(GetProcessHeap(), 0, sizeof(EXCEPTION_RECORD));
++    ep->ref = HeapAlloc(GetProcessHeap(), 0, sizeof(int));
++
++    *ep->rec = *rec;
++    *ep->ref = 1;
++
++    if (ep->rec->ExceptionCode == CXX_EXCEPTION)
++    {
++        const cxx_exception_type *et = (void*)ep->rec->ExceptionInformation[2];
++        const cxx_type_info *ti;
++        void **data, *obj;
++
++        ti = et->type_info_table->info[0];
++        data = HeapAlloc(GetProcessHeap(), 0, ti->size);
++
++        obj = (void*)ep->rec->ExceptionInformation[1];
++        if (ti->flags & CLASS_IS_SIMPLE_TYPE)
++        {
++            memcpy(data, obj, ti->size);
++            if (ti->size == sizeof(void *)) *data = get_this_pointer(&ti->offsets, *data);
++        }
++        else if (ti->copy_ctor)
++        {
++            call_copy_ctor(ti->copy_ctor, data, get_this_pointer(&ti->offsets, obj),
++                    ti->flags & CLASS_HAS_VIRTUAL_BASE_CLASS);
++        }
++        else
++            memcpy(data, get_this_pointer(&ti->offsets, obj), ti->size);
++        ep->rec->ExceptionInformation[1] = (ULONG_PTR)data;
++    }
++    return;
++}
++#else
++void __cdecl __ExceptionPtrCurrentException(exception_ptr *ep)
++{
++    EXCEPTION_RECORD *rec = msvcrt_get_thread_data()->exc_record;
++
++    TRACE("(%p)\n", ep);
++
++    if (!rec)
++    {
++        ep->rec = NULL;
++        ep->ref = NULL;
++        return;
++    }
++
++    ep->rec = HeapAlloc(GetProcessHeap(), 0, sizeof(EXCEPTION_RECORD));
++    ep->ref = HeapAlloc(GetProcessHeap(), 0, sizeof(int));
++
++    *ep->rec = *rec;
++    *ep->ref = 1;
++
++    if (ep->rec->ExceptionCode == CXX_EXCEPTION)
++    {
++        const cxx_exception_type *et = (void*)ep->rec->ExceptionInformation[2];
++        const cxx_type_info *ti;
++        void **data, *obj;
++        char *base = RtlPcToFileHeader((void*)et, (void**)&base);
++
++        ti = (const cxx_type_info*)(base + ((const cxx_type_info_table*)(base + et->type_info_table))->info[0]);
++        data = HeapAlloc(GetProcessHeap(), 0, ti->size);
++
++        obj = (void*)ep->rec->ExceptionInformation[1];
++        if (ti->flags & CLASS_IS_SIMPLE_TYPE)
++        {
++            memcpy(data, obj, ti->size);
++            if (ti->size == sizeof(void *)) *data = get_this_pointer(&ti->offsets, *data);
++        }
++        else if (ti->copy_ctor)
++        {
++            call_copy_ctor(base + ti->copy_ctor, data, get_this_pointer(&ti->offsets, obj),
++                    ti->flags & CLASS_HAS_VIRTUAL_BASE_CLASS);
++        }
++        else
++            memcpy(data, get_this_pointer(&ti->offsets, obj), ti->size);
++        ep->rec->ExceptionInformation[1] = (ULONG_PTR)data;
++    }
++    return;
++}
++#endif
++
++#if _MSVCR_VER >= 110
++/*********************************************************************
++ * ?__ExceptionPtrToBool@@YA_NPBX@Z
++ * ?__ExceptionPtrToBool@@YA_NPEBX@Z
++ */
++bool __cdecl __ExceptionPtrToBool(exception_ptr *ep)
++{
++    return !!ep->rec;
++}
++#endif
++
++/*********************************************************************
++ * ?__ExceptionPtrCopyException@@YAXPAXPBX1@Z
++ * ?__ExceptionPtrCopyException@@YAXPEAXPEBX1@Z
++ */
++#ifndef __x86_64__
++void __cdecl __ExceptionPtrCopyException(exception_ptr *ep,
++        exception *object, const cxx_exception_type *type)
++{
++    const cxx_type_info *ti;
++    void **data;
++
++    __ExceptionPtrDestroy(ep);
++
++    ep->rec = HeapAlloc(GetProcessHeap(), 0, sizeof(EXCEPTION_RECORD));
++    ep->ref = HeapAlloc(GetProcessHeap(), 0, sizeof(int));
++    *ep->ref = 1;
++
++    memset(ep->rec, 0, sizeof(EXCEPTION_RECORD));
++    ep->rec->ExceptionCode = CXX_EXCEPTION;
++    ep->rec->ExceptionFlags = EH_NONCONTINUABLE;
++    ep->rec->NumberParameters = 3;
++    ep->rec->ExceptionInformation[0] = CXX_FRAME_MAGIC_VC6;
++    ep->rec->ExceptionInformation[2] = (ULONG_PTR)type;
++
++    ti = type->type_info_table->info[0];
++    data = HeapAlloc(GetProcessHeap(), 0, ti->size);
++    if (ti->flags & CLASS_IS_SIMPLE_TYPE)
++    {
++        memcpy(data, object, ti->size);
++        if (ti->size == sizeof(void *)) *data = get_this_pointer(&ti->offsets, *data);
++    }
++    else if (ti->copy_ctor)
++    {
++        call_copy_ctor(ti->copy_ctor, data, get_this_pointer(&ti->offsets, object),
++                ti->flags & CLASS_HAS_VIRTUAL_BASE_CLASS);
++    }
++    else
++        memcpy(data, get_this_pointer(&ti->offsets, object), ti->size);
++    ep->rec->ExceptionInformation[1] = (ULONG_PTR)data;
++}
++#else
++void __cdecl __ExceptionPtrCopyException(exception_ptr *ep,
++        exception *object, const cxx_exception_type *type)
++{
++    const cxx_type_info *ti;
++    void **data;
++    char *base;
++
++    RtlPcToFileHeader((void*)type, (void**)&base);
++    __ExceptionPtrDestroy(ep);
++
++    ep->rec = HeapAlloc(GetProcessHeap(), 0, sizeof(EXCEPTION_RECORD));
++    ep->ref = HeapAlloc(GetProcessHeap(), 0, sizeof(int));
++    *ep->ref = 1;
++
++    memset(ep->rec, 0, sizeof(EXCEPTION_RECORD));
++    ep->rec->ExceptionCode = CXX_EXCEPTION;
++    ep->rec->ExceptionFlags = EH_NONCONTINUABLE;
++    ep->rec->NumberParameters = 4;
++    ep->rec->ExceptionInformation[0] = CXX_FRAME_MAGIC_VC6;
++    ep->rec->ExceptionInformation[2] = (ULONG_PTR)type;
++    ep->rec->ExceptionInformation[3] = (ULONG_PTR)base;
++
++    ti = (const cxx_type_info*)(base + ((const cxx_type_info_table*)(base + type->type_info_table))->info[0]);
++    data = HeapAlloc(GetProcessHeap(), 0, ti->size);
++    if (ti->flags & CLASS_IS_SIMPLE_TYPE)
++    {
++        memcpy(data, object, ti->size);
++        if (ti->size == sizeof(void *)) *data = get_this_pointer(&ti->offsets, *data);
++    }
++    else if (ti->copy_ctor)
++    {
++        call_copy_ctor(base + ti->copy_ctor, data, get_this_pointer(&ti->offsets, object),
++                ti->flags & CLASS_HAS_VIRTUAL_BASE_CLASS);
++    }
++    else
++        memcpy(data, get_this_pointer(&ti->offsets, object), ti->size);
++    ep->rec->ExceptionInformation[1] = (ULONG_PTR)data;
++}
++#endif
++
++bool __cdecl __ExceptionPtrCompare(const exception_ptr *ep1, const exception_ptr *ep2)
++{
++    return ep1->rec == ep2->rec;
++}
++
++#endif /* _MSVCR_VER >= 100 */
+-- 
+GitLab
+
+
+From 96e2a766f8b9e84bf01c98d4fbcb4ae849f8e8a9 Mon Sep 17 00:00:00 2001
+From: Torge Matthies <tmatthies@codeweavers.com>
+Date: Mon, 26 Sep 2022 23:04:01 +0200
+Subject: [PATCH 3/7] msvcr100: Factor out EXCEPTION_RECORD to exception_ptr
+ conversion.
+
+---
+ dlls/msvcrt/exception_ptr.c | 22 ++++++++++++----------
+ 1 file changed, 12 insertions(+), 10 deletions(-)
+
+diff --git a/dlls/msvcrt/exception_ptr.c b/dlls/msvcrt/exception_ptr.c
+index d4c427e436f..8238baec548 100644
+--- a/dlls/msvcrt/exception_ptr.c
++++ b/dlls/msvcrt/exception_ptr.c
+@@ -151,15 +151,9 @@ static inline void call_copy_ctor( void *func, void *this, void *src, int has_vb
+ }
+ #endif
+ 
+-/*********************************************************************
+- * ?__ExceptionPtrCurrentException@@YAXPAX@Z
+- * ?__ExceptionPtrCurrentException@@YAXPEAX@Z
+- */
+ #ifndef __x86_64__
+-void __cdecl __ExceptionPtrCurrentException(exception_ptr *ep)
++static void exception_ptr_from_record(exception_ptr *ep, EXCEPTION_RECORD *rec)
+ {
+-    EXCEPTION_RECORD *rec = msvcrt_get_thread_data()->exc_record;
+-
+     TRACE("(%p)\n", ep);
+ 
+     if (!rec)
+@@ -202,10 +196,8 @@ void __cdecl __ExceptionPtrCurrentException(exception_ptr *ep)
+     return;
+ }
+ #else
+-void __cdecl __ExceptionPtrCurrentException(exception_ptr *ep)
++static void exception_ptr_from_record(exception_ptr *ep, EXCEPTION_RECORD *rec)
+ {
+-    EXCEPTION_RECORD *rec = msvcrt_get_thread_data()->exc_record;
+-
+     TRACE("(%p)\n", ep);
+ 
+     if (!rec)
+@@ -250,6 +242,16 @@ void __cdecl __ExceptionPtrCurrentException(exception_ptr *ep)
+ }
+ #endif
+ 
++/*********************************************************************
++ * ?__ExceptionPtrCurrentException@@YAXPAX@Z
++ * ?__ExceptionPtrCurrentException@@YAXPEAX@Z
++ */
++void __cdecl __ExceptionPtrCurrentException(exception_ptr *ep)
++{
++    TRACE("(%p)\n", ep);
++    exception_ptr_from_record(ep, msvcrt_get_thread_data()->exc_record);
++}
++
+ #if _MSVCR_VER >= 110
+ /*********************************************************************
+  * ?__ExceptionPtrToBool@@YA_NPBX@Z
+-- 
+GitLab
+
+
+From f26985affee6517def3d32e412b0e1117d325857 Mon Sep 17 00:00:00 2001
+From: Torge Matthies <tmatthies@codeweavers.com>
+Date: Mon, 26 Sep 2022 23:04:01 +0200
+Subject: [PATCH 4/7] msvcr100: Implement exception passing from chore threads
+ to _RunAndWait.
+
+---
+ dlls/concrt140/Makefile.in  |  4 ++-
+ dlls/concrt140/concrt140.c  | 10 +++++-
+ dlls/crtdll/Makefile.in     |  1 +
+ dlls/msvcr70/Makefile.in    |  1 +
+ dlls/msvcr71/Makefile.in    |  1 +
+ dlls/msvcr80/Makefile.in    |  1 +
+ dlls/msvcr90/Makefile.in    |  1 +
+ dlls/msvcrt/concurrency.c   | 69 +++++++++++++++++++++++++++++++++++--
+ dlls/msvcrt/cxx.h           |  5 +++
+ dlls/msvcrt/except_i386.c   | 15 --------
+ dlls/msvcrt/exception_ptr.c | 56 ++++++++++++++++++++++--------
+ dlls/msvcrtd/Makefile.in    |  1 +
+ dlls/ucrtbase/Makefile.in   |  1 +
+ 13 files changed, 132 insertions(+), 34 deletions(-)
+
+diff --git a/dlls/concrt140/Makefile.in b/dlls/concrt140/Makefile.in
+index aac1ed7b34a..05258adf7ee 100644
+--- a/dlls/concrt140/Makefile.in
++++ b/dlls/concrt140/Makefile.in
+@@ -1,7 +1,9 @@
++EXTRADEFS = -D_CONCRT=
+ MODULE = concrt140.dll
+ PARENTSRC = ../msvcrt
+ 
+ C_SRCS = \
+ 	concrt140.c \
+ 	concurrency.c \
+-	details.c
++	details.c \
++	exception_ptr.c
+diff --git a/dlls/concrt140/concrt140.c b/dlls/concrt140/concrt140.c
+index 0a770c9dae6..758fbb52ad9 100644
+--- a/dlls/concrt140/concrt140.c
++++ b/dlls/concrt140/concrt140.c
+@@ -91,6 +91,7 @@ __ASM_VTABLE(range_error,
+         VTABLE_ADD_FUNC(exception_what));
+ __ASM_BLOCK_END
+ 
++DEFINE_CXX_EXCEPTION0( exception, exception_dtor )
+ DEFINE_RTTI_DATA1(runtime_error, 0, &exception_rtti_base_descriptor, ".?AVruntime_error@std@@")
+ DEFINE_CXX_TYPE_INFO(runtime_error)
+ DEFINE_RTTI_DATA2(range_error, 0, &runtime_error_rtti_base_descriptor,
+@@ -105,6 +106,13 @@ void DECLSPEC_NORETURN throw_range_error(const char *str)
+     _CxxThrowException(&e, &range_error_exception_type);
+ }
+ 
++void DECLSPEC_NORETURN throw_exception(const char* msg)
++{
++    exception e;
++    __exception_ctor(&e, msg, &exception_vtable);
++    _CxxThrowException(&e, &exception_exception_type);
++}
++
+ static BOOL init_cxx_funcs(void)
+ {
+     msvcp140 = LoadLibraryA("msvcp140.dll");
+@@ -138,7 +146,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
+        init_runtime_error_rtti((char*)inst);
+        init_type_info_rtti((char*)inst);
+ 
+-       init_exception_cxx_type_info((char*)inst);
++       init_exception_cxx((char*)inst);
+        init_runtime_error_cxx_type_info((char*)inst);
+        init_range_error_cxx((char*)inst);
+ #endif
+diff --git a/dlls/crtdll/Makefile.in b/dlls/crtdll/Makefile.in
+index ffdbb2ab7a1..d54e8d49964 100644
+--- a/dlls/crtdll/Makefile.in
++++ b/dlls/crtdll/Makefile.in
+@@ -17,6 +17,7 @@ C_SRCS = \
+ 	except_arm64.c \
+ 	except_i386.c \
+ 	except_x86_64.c \
++	exception_ptr.c \
+ 	exit.c \
+ 	file.c \
+ 	heap.c \
+diff --git a/dlls/msvcr70/Makefile.in b/dlls/msvcr70/Makefile.in
+index 4383c5ccb87..5782a64bf03 100644
+--- a/dlls/msvcr70/Makefile.in
++++ b/dlls/msvcr70/Makefile.in
+@@ -18,6 +18,7 @@ C_SRCS = \
+ 	except_arm64.c \
+ 	except_i386.c \
+ 	except_x86_64.c \
++	exception_ptr.c \
+ 	exit.c \
+ 	file.c \
+ 	heap.c \
+diff --git a/dlls/msvcr71/Makefile.in b/dlls/msvcr71/Makefile.in
+index 5a83c81c547..f849158e2ee 100644
+--- a/dlls/msvcr71/Makefile.in
++++ b/dlls/msvcr71/Makefile.in
+@@ -18,6 +18,7 @@ C_SRCS = \
+ 	except_arm64.c \
+ 	except_i386.c \
+ 	except_x86_64.c \
++	exception_ptr.c \
+ 	exit.c \
+ 	file.c \
+ 	heap.c \
+diff --git a/dlls/msvcr80/Makefile.in b/dlls/msvcr80/Makefile.in
+index 2153949b41e..b3c44b3a530 100644
+--- a/dlls/msvcr80/Makefile.in
++++ b/dlls/msvcr80/Makefile.in
+@@ -18,6 +18,7 @@ C_SRCS = \
+ 	except_arm64.c \
+ 	except_i386.c \
+ 	except_x86_64.c \
++	exception_ptr.c \
+ 	exit.c \
+ 	file.c \
+ 	heap.c \
+diff --git a/dlls/msvcr90/Makefile.in b/dlls/msvcr90/Makefile.in
+index 96176a12553..1f7ba4cdcde 100644
+--- a/dlls/msvcr90/Makefile.in
++++ b/dlls/msvcr90/Makefile.in
+@@ -18,6 +18,7 @@ C_SRCS = \
+ 	except_arm64.c \
+ 	except_i386.c \
+ 	except_x86_64.c \
++	exception_ptr.c \
+ 	exit.c \
+ 	file.c \
+ 	heap.c \
+diff --git a/dlls/msvcrt/concurrency.c b/dlls/msvcrt/concurrency.c
+index 3f0fbe6b62c..fbb2c8b4147 100644
+--- a/dlls/msvcrt/concurrency.c
++++ b/dlls/msvcrt/concurrency.c
+@@ -1900,13 +1900,56 @@ static ThreadScheduler *get_thread_scheduler_from_context(Context *context)
+     return NULL;
+ }
+ 
++struct execute_chore_data {
++    _UnrealizedChore *chore;
++    _StructuredTaskCollection *task_collection;
++};
++
++static LONG CALLBACK execute_chore_except(EXCEPTION_POINTERS *pexc, void *_data)
++{
++    struct execute_chore_data *data = _data;
++    void *prev_exception, *new_exception;
++    exception_ptr *ptr;
++
++    if (pexc->ExceptionRecord->ExceptionCode != CXX_EXCEPTION)
++        return EXCEPTION_CONTINUE_SEARCH;
++
++    ptr = operator_new(sizeof(*ptr));
++    __ExceptionPtrCreate(ptr);
++    exception_ptr_from_record(ptr, pexc->ExceptionRecord);
++
++    new_exception = data->task_collection->exception;
++    do {
++        if ((ULONG_PTR)new_exception & ~0x7) {
++            __ExceptionPtrDestroy(ptr);
++            operator_delete(ptr);
++            break;
++        }
++        prev_exception = new_exception;
++        new_exception = (void*)((ULONG_PTR)new_exception | (ULONG_PTR)ptr);
++    } while ((new_exception = InterlockedCompareExchangePointer(
++                    &data->task_collection->exception, new_exception,
++                    prev_exception)) != prev_exception);
++    data->task_collection->event = 0;
++    return EXCEPTION_EXECUTE_HANDLER;
++}
++
+ static void execute_chore(_UnrealizedChore *chore,
+         _StructuredTaskCollection *task_collection)
+ {
++    struct execute_chore_data data = { chore, task_collection };
++
+     TRACE("(%p %p)\n", chore, task_collection);
+ 
+-    if (chore->chore_proc)
+-        chore->chore_proc(chore);
++    __TRY
++    {
++        if (!((ULONG_PTR)task_collection->exception & ~0x7) && chore->chore_proc)
++            chore->chore_proc(chore);
++    }
++    __EXCEPT_CTX(execute_chore_except, &data)
++    {
++    }
++    __ENDTRY
+ }
+ 
+ static void CALLBACK chore_wrapper_finally(BOOL normal, void *data)
+@@ -2053,6 +2096,16 @@ void __thiscall _StructuredTaskCollection__Schedule(
+     }
+ }
+ 
++static void CALLBACK exception_ptr_rethrow_finally(BOOL normal, void *data)
++{
++    exception_ptr *ep = data;
++
++    TRACE("(%u %p)\n", normal, data);
++
++    __ExceptionPtrDestroy(ep);
++    operator_delete(ep);
++}
++
+ /* ?_RunAndWait@_StructuredTaskCollection@details@Concurrency@@QAA?AW4_TaskCollectionStatus@23@PAV_UnrealizedChore@23@@Z */
+ /* ?_RunAndWait@_StructuredTaskCollection@details@Concurrency@@QAG?AW4_TaskCollectionStatus@23@PAV_UnrealizedChore@23@@Z */
+ /* ?_RunAndWait@_StructuredTaskCollection@details@Concurrency@@QEAA?AW4_TaskCollectionStatus@23@PEAV_UnrealizedChore@23@@Z */
+@@ -2060,6 +2113,7 @@ void __thiscall _StructuredTaskCollection__Schedule(
+         _StructuredTaskCollection *this, _UnrealizedChore *chore)
+ {
+     LONG expected, val;
++    ULONG_PTR exception;
+ 
+     TRACE("(%p %p)\n", this, chore);
+ 
+@@ -2085,6 +2139,17 @@ void __thiscall _StructuredTaskCollection__Schedule(
+ 
+     this->finished = 0;
+     this->count = 0;
++
++    exception = (ULONG_PTR)this->exception;
++    if (exception & ~0x7) {
++        exception_ptr *ep = (exception_ptr*)(exception & ~0x7);
++        this->exception = 0;
++        __TRY
++        {
++            __ExceptionPtrRethrow(ep);
++        }
++        __FINALLY_CTX(exception_ptr_rethrow_finally, ep)
++    }
+     return 1;
+ }
+ 
+diff --git a/dlls/msvcrt/cxx.h b/dlls/msvcrt/cxx.h
+index 4051229c626..c2558974b73 100644
+--- a/dlls/msvcrt/cxx.h
++++ b/dlls/msvcrt/cxx.h
+@@ -316,3 +316,8 @@ typedef struct
+ } exception_ptr;
+ 
+ void throw_exception(const char*) DECLSPEC_HIDDEN;
++void exception_ptr_from_record(exception_ptr*,EXCEPTION_RECORD*) DECLSPEC_HIDDEN;
++
++void __cdecl __ExceptionPtrCreate(exception_ptr*);
++void __cdecl __ExceptionPtrDestroy(exception_ptr*);
++void __cdecl __ExceptionPtrRethrow(const exception_ptr*);
+diff --git a/dlls/msvcrt/except_i386.c b/dlls/msvcrt/except_i386.c
+index eb41af36d7e..662b4ebadb0 100644
+--- a/dlls/msvcrt/except_i386.c
++++ b/dlls/msvcrt/except_i386.c
+@@ -149,21 +149,6 @@ DWORD CDECL cxx_frame_handler( PEXCEPTION_RECORD rec, cxx_exception_frame* frame
+ /* call a copy constructor */
+ extern void call_copy_ctor( void *func, void *this, void *src, int has_vbase );
+ 
+-__ASM_GLOBAL_FUNC( call_copy_ctor,
+-                   "pushl %ebp\n\t"
+-                   __ASM_CFI(".cfi_adjust_cfa_offset 4\n\t")
+-                   __ASM_CFI(".cfi_rel_offset %ebp,0\n\t")
+-                   "movl %esp, %ebp\n\t"
+-                   __ASM_CFI(".cfi_def_cfa_register %ebp\n\t")
+-                   "pushl $1\n\t"
+-                   "movl 12(%ebp), %ecx\n\t"
+-                   "pushl 16(%ebp)\n\t"
+-                   "call *8(%ebp)\n\t"
+-                   "leave\n"
+-                   __ASM_CFI(".cfi_def_cfa %esp,4\n\t")
+-                   __ASM_CFI(".cfi_same_value %ebp\n\t")
+-                   "ret" );
+-
+ /* continue execution to the specified address after exception is caught */
+ extern void DECLSPEC_NORETURN continue_after_catch( cxx_exception_frame* frame, void *addr );
+ 
+diff --git a/dlls/msvcrt/exception_ptr.c b/dlls/msvcrt/exception_ptr.c
+index 8238baec548..bd341ac49a1 100644
+--- a/dlls/msvcrt/exception_ptr.c
++++ b/dlls/msvcrt/exception_ptr.c
+@@ -28,6 +28,37 @@
+ #include "msvcrt.h"
+ #include "cxx.h"
+ 
++#ifdef __i386__
++
++extern void call_copy_ctor( void *func, void *this, void *src, int has_vbase );
++
++__ASM_GLOBAL_FUNC( call_copy_ctor,
++                   "pushl %ebp\n\t"
++                   __ASM_CFI(".cfi_adjust_cfa_offset 4\n\t")
++                   __ASM_CFI(".cfi_rel_offset %ebp,0\n\t")
++                   "movl %esp, %ebp\n\t"
++                   __ASM_CFI(".cfi_def_cfa_register %ebp\n\t")
++                   "pushl $1\n\t"
++                   "movl 12(%ebp), %ecx\n\t"
++                   "pushl 16(%ebp)\n\t"
++                   "call *8(%ebp)\n\t"
++                   "leave\n"
++                   __ASM_CFI(".cfi_def_cfa %esp,4\n\t")
++                   __ASM_CFI(".cfi_same_value %ebp\n\t")
++                   "ret" );
++
++#elif _MSVCR_VER >= 100
++
++static inline void call_copy_ctor( void *func, void *this, void *src, int has_vbase )
++{
++    if (has_vbase)
++        ((void (__cdecl*)(void*, void*, BOOL))func)(this, src, 1);
++    else
++        ((void (__cdecl*)(void*, void*))func)(this, src);
++}
++
++#endif
++
+ #if _MSVCR_VER >= 100
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(msvcrt);
+@@ -89,6 +120,8 @@ void __cdecl __ExceptionPtrDestroy(exception_ptr *ep)
+     }
+ }
+ 
++#ifndef _CONCRT
++
+ /*********************************************************************
+  * ?__ExceptionPtrCopy@@YAXPAXPBX@Z
+  * ?__ExceptionPtrCopy@@YAXPEAXPEBX@Z
+@@ -120,6 +153,8 @@ void __cdecl __ExceptionPtrAssign(exception_ptr *ep, const exception_ptr *assign
+         InterlockedIncrement(ep->ref);
+ }
+ 
++#endif
++
+ /*********************************************************************
+  * ?__ExceptionPtrRethrow@@YAXPBX@Z
+  * ?__ExceptionPtrRethrow@@YAXPEBX@Z
+@@ -138,21 +173,8 @@ void __cdecl __ExceptionPtrRethrow(const exception_ptr *ep)
+             ep->rec->NumberParameters, ep->rec->ExceptionInformation);
+ }
+ 
+-#ifdef __i386__
+-extern void call_copy_ctor( void *func, void *this, void *src, int has_vbase );
+-#else
+-static inline void call_copy_ctor( void *func, void *this, void *src, int has_vbase )
+-{
+-    TRACE( "calling copy ctor %p object %p src %p\n", func, this, src );
+-    if (has_vbase)
+-        ((void (__cdecl*)(void*, void*, BOOL))func)(this, src, 1);
+-    else
+-        ((void (__cdecl*)(void*, void*))func)(this, src);
+-}
+-#endif
+-
+ #ifndef __x86_64__
+-static void exception_ptr_from_record(exception_ptr *ep, EXCEPTION_RECORD *rec)
++void exception_ptr_from_record(exception_ptr *ep, EXCEPTION_RECORD *rec)
+ {
+     TRACE("(%p)\n", ep);
+ 
+@@ -196,7 +218,7 @@ static void exception_ptr_from_record(exception_ptr *ep, EXCEPTION_RECORD *rec)
+     return;
+ }
+ #else
+-static void exception_ptr_from_record(exception_ptr *ep, EXCEPTION_RECORD *rec)
++void exception_ptr_from_record(exception_ptr *ep, EXCEPTION_RECORD *rec)
+ {
+     TRACE("(%p)\n", ep);
+ 
+@@ -242,6 +264,8 @@ static void exception_ptr_from_record(exception_ptr *ep, EXCEPTION_RECORD *rec)
+ }
+ #endif
+ 
++#ifndef _CONCRT
++
+ /*********************************************************************
+  * ?__ExceptionPtrCurrentException@@YAXPAX@Z
+  * ?__ExceptionPtrCurrentException@@YAXPEAX@Z
+@@ -349,4 +373,6 @@ bool __cdecl __ExceptionPtrCompare(const exception_ptr *ep1, const exception_ptr
+     return ep1->rec == ep2->rec;
+ }
+ 
++#endif
++
+ #endif /* _MSVCR_VER >= 100 */
+diff --git a/dlls/msvcrtd/Makefile.in b/dlls/msvcrtd/Makefile.in
+index 97743e99062..95f0bca93b4 100644
+--- a/dlls/msvcrtd/Makefile.in
++++ b/dlls/msvcrtd/Makefile.in
+@@ -19,6 +19,7 @@ C_SRCS = \
+ 	except_arm64.c \
+ 	except_i386.c \
+ 	except_x86_64.c \
++	exception_ptr.c \
+ 	exit.c \
+ 	file.c \
+ 	heap.c \
+diff --git a/dlls/ucrtbase/Makefile.in b/dlls/ucrtbase/Makefile.in
+index bf7f62ada8a..4e7cfc03b5c 100644
+--- a/dlls/ucrtbase/Makefile.in
++++ b/dlls/ucrtbase/Makefile.in
+@@ -23,6 +23,7 @@ C_SRCS = \
+ 	except_arm64.c \
+ 	except_i386.c \
+ 	except_x86_64.c \
++	exception_ptr.c \
+ 	exit.c \
+ 	file.c \
+ 	heap.c \
+-- 
+GitLab
+
+
+From d1468c2b609df6b278fb9f9357441995ffd58939 Mon Sep 17 00:00:00 2001
+From: Torge Matthies <tmatthies@codeweavers.com>
+Date: Mon, 26 Sep 2022 23:04:01 +0200
+Subject: [PATCH 5/7] msvcr110: Implement _StructuredTaskCollection
+ constructor.
+
+---
+ dlls/msvcr120/tests/msvcr120.c |  6 +++---
+ dlls/msvcrt/concurrency.c      | 10 ++++++++--
+ 2 files changed, 11 insertions(+), 5 deletions(-)
+
+diff --git a/dlls/msvcr120/tests/msvcr120.c b/dlls/msvcr120/tests/msvcr120.c
+index 91e9bae1cf8..0a4fb383e0e 100644
+--- a/dlls/msvcr120/tests/msvcr120.c
++++ b/dlls/msvcr120/tests/msvcr120.c
+@@ -1403,7 +1403,7 @@ static void __cdecl chore_proc(_UnrealizedChore *_this)
+         MSVCRT_bool canceling = call_func1(
+                 p__StructuredTaskCollection__IsCanceling,
+                 chore->chore.task_collection);
+-        ok(canceling, "Task is not canceling\n");
++        todo_wine ok(canceling, "Task is not canceling\n");
+     }
+ }
+ 
+@@ -1433,7 +1433,7 @@ static void test_StructuredTaskCollection(void)
+         skip("_StructuredTaskCollection constructor not implemented\n");
+         return;
+     }
+-    ok(task_coll.unk2 == 0x1fffffff,
++    todo_wine ok(task_coll.unk2 == 0x1fffffff,
+             "_StructuredTaskCollection ctor set wrong unk2: 0x%x != 0x1fffffff\n", task_coll.unk2);
+     ok(task_coll.unk3 == NULL,
+             "_StructuredTaskCollection ctor set wrong unk3: %p != NULL\n", task_coll.unk3);
+@@ -1587,7 +1587,7 @@ static void test_StructuredTaskCollection(void)
+     ok(b, "SetEvent failed\n");
+ 
+     status = p__StructuredTaskCollection__RunAndWait(&task_coll, NULL);
+-    ok(status == 2, "_StructuredTaskCollection::_RunAndWait failed: %d\n", status);
++    todo_wine ok(status == 2, "_StructuredTaskCollection::_RunAndWait failed: %d\n", status);
+     call_func1(p__StructuredTaskCollection_dtor, &task_coll);
+ 
+     CloseHandle(chore_start_evt);
+diff --git a/dlls/msvcrt/concurrency.c b/dlls/msvcrt/concurrency.c
+index fbb2c8b4147..5a6bbec5452 100644
+--- a/dlls/msvcrt/concurrency.c
++++ b/dlls/msvcrt/concurrency.c
+@@ -1873,8 +1873,14 @@ DEFINE_THISCALL_WRAPPER(_StructuredTaskCollection_ctor, 8)
+ _StructuredTaskCollection* __thiscall _StructuredTaskCollection_ctor(
+         _StructuredTaskCollection *this, /*_CancellationTokenState*/void *token)
+ {
+-    FIXME("(%p): stub\n", this);
+-    return NULL;
++    TRACE("(%p)\n", this);
++
++    if (token)
++        FIXME("_StructuredTaskCollection with cancellation token not implemented!\n");
++
++    memset(this, 0, sizeof(*this));
++    this->finished = FINISHED_INITIAL;
++    return this;
+ }
+ 
+ #endif /* _MSVCR_VER >= 110 */
+-- 
+GitLab
+
+
+From cef3dcbddd1fc86d5ea82017548022fbe949d633 Mon Sep 17 00:00:00 2001
+From: Torge Matthies <tmatthies@codeweavers.com>
+Date: Mon, 26 Sep 2022 23:04:01 +0200
+Subject: [PATCH 6/7] msvcr100: Implement missing_wait exception.
+
+---
+ dlls/concrt140/concrt140.spec       | 12 +++++-----
+ dlls/msvcr100/msvcr100.spec         |  8 +++----
+ dlls/msvcr110/msvcr110.spec         | 12 +++++-----
+ dlls/msvcr120/msvcr120.spec         | 12 +++++-----
+ dlls/msvcr120_app/msvcr120_app.spec | 12 +++++-----
+ dlls/msvcrt/concurrency.c           | 37 +++++++++++++++++++++++++++++
+ 6 files changed, 65 insertions(+), 28 deletions(-)
+
+diff --git a/dlls/concrt140/concrt140.spec b/dlls/concrt140/concrt140.spec
+index 64da684f415..8ddf2255f31 100644
+--- a/dlls/concrt140/concrt140.spec
++++ b/dlls/concrt140/concrt140.spec
+@@ -180,12 +180,12 @@
+ @ stub -arch=arm ??0message_not_found@Concurrency@@QAA@XZ
+ @ stub -arch=i386 ??0message_not_found@Concurrency@@QAE@XZ
+ @ stub -arch=win64 ??0message_not_found@Concurrency@@QEAA@XZ
+-@ stub -arch=arm ??0missing_wait@Concurrency@@QAA@PBD@Z
+-@ stub -arch=i386 ??0missing_wait@Concurrency@@QAE@PBD@Z
+-@ stub -arch=win64 ??0missing_wait@Concurrency@@QEAA@PEBD@Z
+-@ stub -arch=arm ??0missing_wait@Concurrency@@QAA@XZ
+-@ stub -arch=i386 ??0missing_wait@Concurrency@@QAE@XZ
+-@ stub -arch=win64 ??0missing_wait@Concurrency@@QEAA@XZ
++@ cdecl -arch=arm ??0missing_wait@Concurrency@@QAA@PBD@Z(ptr str) missing_wait_ctor_str
++@ thiscall -arch=i386 ??0missing_wait@Concurrency@@QAE@PBD@Z(ptr str) missing_wait_ctor_str
++@ cdecl -arch=win64 ??0missing_wait@Concurrency@@QEAA@PEBD@Z(ptr str) missing_wait_ctor_str
++@ cdecl -arch=arm ??0missing_wait@Concurrency@@QAA@XZ(ptr) missing_wait_ctor
++@ thiscall -arch=i386 ??0missing_wait@Concurrency@@QAE@XZ(ptr) missing_wait_ctor
++@ cdecl -arch=win64 ??0missing_wait@Concurrency@@QEAA@XZ(ptr) missing_wait_ctor
+ @ stub -arch=arm ??0nested_scheduler_missing_detach@Concurrency@@QAA@PBD@Z
+ @ stub -arch=i386 ??0nested_scheduler_missing_detach@Concurrency@@QAE@PBD@Z
+ @ stub -arch=win64 ??0nested_scheduler_missing_detach@Concurrency@@QEAA@PEBD@Z
+diff --git a/dlls/msvcr100/msvcr100.spec b/dlls/msvcr100/msvcr100.spec
+index 1d80726ee3a..e2107055c24 100644
+--- a/dlls/msvcr100/msvcr100.spec
++++ b/dlls/msvcr100/msvcr100.spec
+@@ -122,10 +122,10 @@
+ @ stub -arch=win64 ??0message_not_found@Concurrency@@QEAA@PEBD@Z
+ @ stub -arch=win32 ??0message_not_found@Concurrency@@QAE@XZ
+ @ stub -arch=win64 ??0message_not_found@Concurrency@@QEAA@XZ
+-@ stub -arch=win32 ??0missing_wait@Concurrency@@QAE@PBD@Z
+-@ stub -arch=win64 ??0missing_wait@Concurrency@@QEAA@PEBD@Z
+-@ stub -arch=win32 ??0missing_wait@Concurrency@@QAE@XZ
+-@ stub -arch=win64 ??0missing_wait@Concurrency@@QEAA@XZ
++@ thiscall -arch=win32 ??0missing_wait@Concurrency@@QAE@PBD@Z(ptr str) missing_wait_ctor_str
++@ cdecl -arch=win64 ??0missing_wait@Concurrency@@QEAA@PEBD@Z(ptr str) missing_wait_ctor_str
++@ thiscall -arch=win32 ??0missing_wait@Concurrency@@QAE@XZ(ptr) missing_wait_ctor
++@ cdecl -arch=win64 ??0missing_wait@Concurrency@@QEAA@XZ(ptr) missing_wait_ctor
+ @ stub -arch=win32 ??0nested_scheduler_missing_detach@Concurrency@@QAE@PBD@Z
+ @ stub -arch=win64 ??0nested_scheduler_missing_detach@Concurrency@@QEAA@PEBD@Z
+ @ stub -arch=win32 ??0nested_scheduler_missing_detach@Concurrency@@QAE@XZ
+diff --git a/dlls/msvcr110/msvcr110.spec b/dlls/msvcr110/msvcr110.spec
+index 7f255a9414b..4fc5a069fbb 100644
+--- a/dlls/msvcr110/msvcr110.spec
++++ b/dlls/msvcr110/msvcr110.spec
+@@ -209,12 +209,12 @@
+ @ stub -arch=arm ??0message_not_found@Concurrency@@QAA@XZ
+ @ stub -arch=i386 ??0message_not_found@Concurrency@@QAE@XZ
+ @ stub -arch=win64 ??0message_not_found@Concurrency@@QEAA@XZ
+-@ stub -arch=arm ??0missing_wait@Concurrency@@QAA@PBD@Z
+-@ stub -arch=i386 ??0missing_wait@Concurrency@@QAE@PBD@Z
+-@ stub -arch=win64 ??0missing_wait@Concurrency@@QEAA@PEBD@Z
+-@ stub -arch=arm ??0missing_wait@Concurrency@@QAA@XZ
+-@ stub -arch=i386 ??0missing_wait@Concurrency@@QAE@XZ
+-@ stub -arch=win64 ??0missing_wait@Concurrency@@QEAA@XZ
++@ cdecl -arch=arm ??0missing_wait@Concurrency@@QAA@PBD@Z(ptr str) missing_wait_ctor_str
++@ thiscall -arch=i386 ??0missing_wait@Concurrency@@QAE@PBD@Z(ptr str) missing_wait_ctor_str
++@ cdecl -arch=win64 ??0missing_wait@Concurrency@@QEAA@PEBD@Z(ptr str) missing_wait_ctor_str
++@ cdecl -arch=arm ??0missing_wait@Concurrency@@QAA@XZ(ptr) missing_wait_ctor
++@ thiscall -arch=i386 ??0missing_wait@Concurrency@@QAE@XZ(ptr) missing_wait_ctor
++@ cdecl -arch=win64 ??0missing_wait@Concurrency@@QEAA@XZ(ptr) missing_wait_ctor
+ @ stub -arch=arm ??0nested_scheduler_missing_detach@Concurrency@@QAA@PBD@Z
+ @ stub -arch=i386 ??0nested_scheduler_missing_detach@Concurrency@@QAE@PBD@Z
+ @ stub -arch=win64 ??0nested_scheduler_missing_detach@Concurrency@@QEAA@PEBD@Z
+diff --git a/dlls/msvcr120/msvcr120.spec b/dlls/msvcr120/msvcr120.spec
+index 3c606ebf391..7b379830d4b 100644
+--- a/dlls/msvcr120/msvcr120.spec
++++ b/dlls/msvcr120/msvcr120.spec
+@@ -206,12 +206,12 @@
+ @ stub -arch=arm ??0message_not_found@Concurrency@@QAA@XZ
+ @ stub -arch=i386 ??0message_not_found@Concurrency@@QAE@XZ
+ @ stub -arch=win64 ??0message_not_found@Concurrency@@QEAA@XZ
+-@ stub -arch=arm ??0missing_wait@Concurrency@@QAA@PBD@Z
+-@ stub -arch=i386 ??0missing_wait@Concurrency@@QAE@PBD@Z
+-@ stub -arch=win64 ??0missing_wait@Concurrency@@QEAA@PEBD@Z
+-@ stub -arch=arm ??0missing_wait@Concurrency@@QAA@XZ
+-@ stub -arch=i386 ??0missing_wait@Concurrency@@QAE@XZ
+-@ stub -arch=win64 ??0missing_wait@Concurrency@@QEAA@XZ
++@ cdecl -arch=arm ??0missing_wait@Concurrency@@QAA@PBD@Z(ptr str) missing_wait_ctor_str
++@ thiscall -arch=i386 ??0missing_wait@Concurrency@@QAE@PBD@Z(ptr str) missing_wait_ctor_str
++@ cdecl -arch=win64 ??0missing_wait@Concurrency@@QEAA@PEBD@Z(ptr str) missing_wait_ctor_str
++@ cdecl -arch=arm ??0missing_wait@Concurrency@@QAA@XZ(ptr) missing_wait_ctor
++@ thiscall -arch=i386 ??0missing_wait@Concurrency@@QAE@XZ(ptr) missing_wait_ctor
++@ cdecl -arch=win64 ??0missing_wait@Concurrency@@QEAA@XZ(ptr) missing_wait_ctor
+ @ stub -arch=arm ??0nested_scheduler_missing_detach@Concurrency@@QAA@PBD@Z
+ @ stub -arch=i386 ??0nested_scheduler_missing_detach@Concurrency@@QAE@PBD@Z
+ @ stub -arch=win64 ??0nested_scheduler_missing_detach@Concurrency@@QEAA@PEBD@Z
+diff --git a/dlls/msvcr120_app/msvcr120_app.spec b/dlls/msvcr120_app/msvcr120_app.spec
+index 2580e89c8b4..37282fc54f8 100644
+--- a/dlls/msvcr120_app/msvcr120_app.spec
++++ b/dlls/msvcr120_app/msvcr120_app.spec
+@@ -204,12 +204,12 @@
+ @ stub -arch=arm ??0message_not_found@Concurrency@@QAA@XZ
+ @ stub -arch=i386 ??0message_not_found@Concurrency@@QAE@XZ
+ @ stub -arch=win64 ??0message_not_found@Concurrency@@QEAA@XZ
+-@ stub -arch=arm ??0missing_wait@Concurrency@@QAA@PBD@Z
+-@ stub -arch=i386 ??0missing_wait@Concurrency@@QAE@PBD@Z
+-@ stub -arch=win64 ??0missing_wait@Concurrency@@QEAA@PEBD@Z
+-@ stub -arch=arm ??0missing_wait@Concurrency@@QAA@XZ
+-@ stub -arch=i386 ??0missing_wait@Concurrency@@QAE@XZ
+-@ stub -arch=win64 ??0missing_wait@Concurrency@@QEAA@XZ
++@ cdecl -arch=arm ??0missing_wait@Concurrency@@QAA@PBD@Z(ptr str) msvcr120.??0missing_wait@Concurrency@@QAA@PBD@Z
++@ thiscall -arch=i386 ??0missing_wait@Concurrency@@QAE@PBD@Z(ptr str) msvcr120.??0missing_wait@Concurrency@@QAE@PBD@Z
++@ cdecl -arch=win64 ??0missing_wait@Concurrency@@QEAA@PEBD@Z(ptr str) msvcr120.??0missing_wait@Concurrency@@QEAA@PEBD@Z
++@ cdecl -arch=arm ??0missing_wait@Concurrency@@QAA@XZ(ptr) msvcr120.??0missing_wait@Concurrency@@QAA@XZ
++@ thiscall -arch=i386 ??0missing_wait@Concurrency@@QAE@XZ(ptr) msvcr120.??0missing_wait@Concurrency@@QAE@XZ
++@ cdecl -arch=win64 ??0missing_wait@Concurrency@@QEAA@XZ(ptr) msvcr120.??0missing_wait@Concurrency@@QEAA@XZ
+ @ stub -arch=arm ??0nested_scheduler_missing_detach@Concurrency@@QAA@PBD@Z
+ @ stub -arch=i386 ??0nested_scheduler_missing_detach@Concurrency@@QAE@PBD@Z
+ @ stub -arch=win64 ??0nested_scheduler_missing_detach@Concurrency@@QEAA@PEBD@Z
+diff --git a/dlls/msvcrt/concurrency.c b/dlls/msvcrt/concurrency.c
+index 5a6bbec5452..6d7e9f18d63 100644
+--- a/dlls/msvcrt/concurrency.c
++++ b/dlls/msvcrt/concurrency.c
+@@ -361,6 +361,9 @@ extern const vtable_ptr invalid_scheduler_policy_thread_specification_vtable;
+ typedef exception invalid_scheduler_policy_value;
+ extern const vtable_ptr invalid_scheduler_policy_value_vtable;
+ 
++typedef exception missing_wait;
++extern const vtable_ptr missing_wait_vtable;
++
+ typedef struct {
+     exception e;
+     HRESULT hr;
+@@ -584,6 +587,34 @@ invalid_scheduler_policy_value * __thiscall invalid_scheduler_policy_value_copy_
+     return __exception_copy_ctor(_this, rhs, &invalid_scheduler_policy_value_vtable);
+ }
+ 
++/* ??0missing_wait@Concurrency@@QAA@PBD@Z */
++/* ??0missing_wait@Concurrency@@QAE@PBD@Z */
++/* ??0missing_wait@Concurrency@@QEAA@PEBD@Z */
++DEFINE_THISCALL_WRAPPER(missing_wait_ctor_str, 8)
++missing_wait* __thiscall missing_wait_ctor_str(
++        missing_wait *this, const char *str)
++{
++    TRACE("(%p %p)\n", this, str);
++    return __exception_ctor(this, str, &missing_wait_vtable);
++}
++
++/* ??0missing_wait@Concurrency@@QAA@XZ */
++/* ??0missing_wait@Concurrency@@QAE@XZ */
++/* ??0missing_wait@Concurrency@@QEAA@XZ */
++DEFINE_THISCALL_WRAPPER(missing_wait_ctor, 4)
++missing_wait* __thiscall missing_wait_ctor(missing_wait *this)
++{
++    return missing_wait_ctor_str(this, NULL);
++}
++
++DEFINE_THISCALL_WRAPPER(missing_wait_copy_ctor,8)
++missing_wait * __thiscall missing_wait_copy_ctor(
++        missing_wait * _this, const missing_wait * rhs)
++{
++    TRACE("(%p %p)\n", _this, rhs);
++    return __exception_copy_ctor(_this, rhs, &missing_wait_vtable);
++}
++
+ /* ??0scheduler_resource_allocation_error@Concurrency@@QAE@PBDJ@Z */
+ /* ??0scheduler_resource_allocation_error@Concurrency@@QEAA@PEBDJ@Z */
+ DEFINE_THISCALL_WRAPPER(scheduler_resource_allocation_error_ctor_name, 12)
+@@ -643,6 +674,8 @@ DEFINE_RTTI_DATA1(invalid_scheduler_policy_thread_specification, 0, &cexception_
+         ".?AVinvalid_scheduler_policy_thread_specification@Concurrency@@")
+ DEFINE_RTTI_DATA1(invalid_scheduler_policy_value, 0, &cexception_rtti_base_descriptor,
+         ".?AVinvalid_scheduler_policy_value@Concurrency@@")
++DEFINE_RTTI_DATA1(missing_wait, 0, &cexception_rtti_base_descriptor,
++        ".?AVmissing_wait@Concurrency@@")
+ DEFINE_RTTI_DATA1(scheduler_resource_allocation_error, 0, &cexception_rtti_base_descriptor,
+         ".?AVscheduler_resource_allocation_error@Concurrency@@")
+ 
+@@ -677,6 +710,9 @@ __ASM_BLOCK_BEGIN(concurrency_exception_vtables)
+     __ASM_VTABLE(invalid_scheduler_policy_value,
+             VTABLE_ADD_FUNC(cexception_vector_dtor)
+             VTABLE_ADD_FUNC(cexception_what));
++    __ASM_VTABLE(missing_wait,
++            VTABLE_ADD_FUNC(cexception_vector_dtor)
++            VTABLE_ADD_FUNC(cexception_what));
+     __ASM_VTABLE(scheduler_resource_allocation_error,
+             VTABLE_ADD_FUNC(cexception_vector_dtor)
+             VTABLE_ADD_FUNC(cexception_what));
+@@ -3391,6 +3427,7 @@ void msvcrt_init_concurrency(void *base)
+     init_invalid_scheduler_policy_key_rtti(base);
+     init_invalid_scheduler_policy_thread_specification_rtti(base);
+     init_invalid_scheduler_policy_value_rtti(base);
++    init_missing_wait_rtti(base);
+     init_scheduler_resource_allocation_error_rtti(base);
+     init_Context_rtti(base);
+     init_ContextBase_rtti(base);
+-- 
+GitLab
+
+
+From a261c043ebc74d39462a31a0dfcacf055f4b6c4c Mon Sep 17 00:00:00 2001
+From: Torge Matthies <tmatthies@codeweavers.com>
+Date: Mon, 26 Sep 2022 23:04:01 +0200
+Subject: [PATCH 7/7] msvcr120: Throw exception in ~_StructuredTaskCollection
+ if _RunAndWait was not called.
+
+---
+ dlls/msvcrt/concurrency.c | 11 +++++++++++
+ dlls/msvcrt/cxx.h         |  2 ++
+ 2 files changed, 13 insertions(+)
+
+diff --git a/dlls/msvcrt/concurrency.c b/dlls/msvcrt/concurrency.c
+index 6d7e9f18d63..fe156938e3a 100644
+--- a/dlls/msvcrt/concurrency.c
++++ b/dlls/msvcrt/concurrency.c
+@@ -686,6 +686,9 @@ DEFINE_CXX_DATA1(invalid_multiple_scheduling, &cexception_cxx_type_info, cexcept
+ DEFINE_CXX_DATA1(invalid_scheduler_policy_key, &cexception_cxx_type_info, cexception_dtor)
+ DEFINE_CXX_DATA1(invalid_scheduler_policy_thread_specification, &cexception_cxx_type_info, cexception_dtor)
+ DEFINE_CXX_DATA1(invalid_scheduler_policy_value, &cexception_cxx_type_info, cexception_dtor)
++#if _MSVCR_VER >= 120
++DEFINE_CXX_DATA1(missing_wait, &cexception_cxx_type_info, cexception_dtor)
++#endif
+ DEFINE_CXX_DATA1(scheduler_resource_allocation_error, &cexception_cxx_type_info, cexception_dtor)
+ 
+ __ASM_BLOCK_BEGIN(concurrency_exception_vtables)
+@@ -1930,6 +1933,11 @@ DEFINE_THISCALL_WRAPPER(_StructuredTaskCollection_dtor, 4)
+ void __thiscall _StructuredTaskCollection_dtor(_StructuredTaskCollection *this)
+ {
+     FIXME("(%p): stub!\n", this);
++    if (this->count && !__uncaught_exception()) {
++        missing_wait e;
++        missing_wait_ctor_str(&e, "Missing call to _RunAndWait");
++        _CxxThrowException(&e, &missing_wait_exception_type);
++    }
+ }
+ 
+ #endif /* _MSVCR_VER >= 120 */
+@@ -3445,6 +3453,9 @@ void msvcrt_init_concurrency(void *base)
+     init_invalid_scheduler_policy_key_cxx(base);
+     init_invalid_scheduler_policy_thread_specification_cxx(base);
+     init_invalid_scheduler_policy_value_cxx(base);
++#if _MSVCR_VER >= 120
++    init_missing_wait_cxx(base);
++#endif
+     init_scheduler_resource_allocation_error_cxx(base);
+ #endif
+ }
+diff --git a/dlls/msvcrt/cxx.h b/dlls/msvcrt/cxx.h
+index c2558974b73..aa73aabf797 100644
+--- a/dlls/msvcrt/cxx.h
++++ b/dlls/msvcrt/cxx.h
+@@ -321,3 +321,5 @@ void exception_ptr_from_record(exception_ptr*,EXCEPTION_RECORD*) DECLSPEC_HIDDEN
+ void __cdecl __ExceptionPtrCreate(exception_ptr*);
+ void __cdecl __ExceptionPtrDestroy(exception_ptr*);
+ void __cdecl __ExceptionPtrRethrow(const exception_ptr*);
++
++BOOL __cdecl __uncaught_exception(void);
+-- 
+GitLab
+
