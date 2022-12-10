@@ -1,0 +1,184 @@
+From 4d2efad687b27a5e15c9c72e2bd53bcc327808c6 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Sat, 13 Nov 2021 14:59:50 +0100
+Subject: [PATCH 3/8] services: Send shutdown control messages from
+ services.exe.
+
+Instead of handling them internally from individual services whenever
+the system shutdown event is set. This allows services.exe to shutdown
+processes in the reverse order they were started.
+---
+ dlls/sechost/service.c       | 80 +++++-------------------------------
+ programs/services/services.c | 27 +++++++++++-
+ 2 files changed, 36 insertions(+), 71 deletions(-)
+
+diff --git a/dlls/sechost/service.c b/dlls/sechost/service.c
+index 11111111111..11111111111 100644
+--- a/dlls/sechost/service.c
++++ b/dlls/sechost/service.c
+@@ -1757,67 +1757,10 @@ static DWORD WINAPI service_control_dispatcher( void *arg )
+     return 1;
+ }
+ 
+-/* wait for services which accept this type of message to become STOPPED */
+-static void handle_shutdown_msg(DWORD msg, DWORD accept)
+-{
+-    SERVICE_STATUS st;
+-    SERVICE_PRESHUTDOWN_INFO spi;
+-    DWORD i, n = 0, sz, timeout = 2000;
+-    ULONGLONG stop_time;
+-    BOOL res, done = TRUE;
+-    SC_HANDLE *wait_handles = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(SC_HANDLE) * nb_services );
+-
+-    EnterCriticalSection( &service_cs );
+-    for (i = 0; i < nb_services; i++)
+-    {
+-        res = QueryServiceStatus( services[i]->full_access_handle, &st );
+-        if (!res || st.dwCurrentState == SERVICE_STOPPED || !(st.dwControlsAccepted & accept))
+-            continue;
+-
+-        done = FALSE;
+-
+-        if (accept == SERVICE_ACCEPT_PRESHUTDOWN)
+-        {
+-            res = QueryServiceConfig2W( services[i]->full_access_handle, SERVICE_CONFIG_PRESHUTDOWN_INFO,
+-                                        (BYTE *)&spi, sizeof(spi), &sz );
+-            if (res)
+-            {
+-                FIXME( "service should be able to delay shutdown\n" );
+-                timeout = max( spi.dwPreshutdownTimeout, timeout );
+-            }
+-        }
+-
+-        service_handle_control( services[i], msg, NULL, 0 );
+-        wait_handles[n++] = services[i]->full_access_handle;
+-    }
+-    LeaveCriticalSection( &service_cs );
+-
+-    /* FIXME: these timeouts should be more generous, but we can't currently delay prefix shutdown */
+-    timeout = min( timeout, 3000 );
+-    stop_time = GetTickCount64() + timeout;
+-
+-    while (!done && GetTickCount64() < stop_time)
+-    {
+-        done = TRUE;
+-        for (i = 0; i < n; i++)
+-        {
+-            res = QueryServiceStatus( wait_handles[i], &st );
+-            if (!res || st.dwCurrentState == SERVICE_STOPPED)
+-                continue;
+-
+-            done = FALSE;
+-            Sleep( 100 );
+-            break;
+-        }
+-    }
+-
+-    HeapFree( GetProcessHeap(), 0, wait_handles );
+-}
+-
+ static BOOL service_run_main_thread(void)
+ {
+     DWORD i, n, ret;
+-    HANDLE wait_handles[MAXIMUM_WAIT_OBJECTS];
++    HANDLE wait_handles[MAXIMUM_WAIT_OBJECTS], system_shutdown;
+     UINT wait_services[MAXIMUM_WAIT_OBJECTS];
+     struct dispatcher_data *disp = heap_alloc( sizeof(*disp) );
+ 
+@@ -1844,9 +1787,9 @@ static BOOL service_run_main_thread(void)
+ 
+     /* FIXME: service_control_dispatcher should be merged into the main thread */
+     NtSetInformationProcess( GetCurrentProcess(), ProcessWineMakeProcessSystem,
+-                             &wait_handles[0], sizeof(HANDLE *) );
+-    wait_handles[1] = CreateThread( NULL, 0, service_control_dispatcher, disp, 0, NULL );
+-    wait_handles[2] = service_event;
++                             &system_shutdown, sizeof(HANDLE *) );
++    wait_handles[0] = CreateThread( NULL, 0, service_control_dispatcher, disp, 0, NULL );
++    wait_handles[1] = service_event;
+ 
+     TRACE("Starting %d services running as process %ld\n",
+           nb_services, GetCurrentProcessId());
+@@ -1855,7 +1798,7 @@ static BOOL service_run_main_thread(void)
+     while (!stop_service)
+     {
+         EnterCriticalSection( &service_cs );
+-        for (i = 0, n = 3; i < nb_services && n < MAXIMUM_WAIT_OBJECTS; i++)
++        for (i = 0, n = 2; i < nb_services && n < MAXIMUM_WAIT_OBJECTS; i++)
+         {
+             if (!services[i]->thread) continue;
+             wait_services[n] = i;
+@@ -1863,20 +1806,17 @@ static BOOL service_run_main_thread(void)
+         }
+         LeaveCriticalSection( &service_cs );
+ 
+-        ret = WaitForMultipleObjects( n, wait_handles, FALSE, INFINITE );
+-        if (!ret)  /* system process event */
+-        {
+-            handle_shutdown_msg(SERVICE_CONTROL_PRESHUTDOWN, SERVICE_ACCEPT_PRESHUTDOWN);
+-            handle_shutdown_msg(SERVICE_CONTROL_SHUTDOWN, SERVICE_ACCEPT_SHUTDOWN);
++        if (n == 2 && !WaitForSingleObject(system_shutdown, 0))
+             ExitProcess(0);
+-        }
+-        else if (ret == 1)
++
++        ret = WaitForMultipleObjects( n, wait_handles, FALSE, INFINITE );
++        if (!ret)
+         {
+             TRACE( "control dispatcher exited, shutting down\n" );
+             /* FIXME: we should maybe send a shutdown control to running services */
+             ExitProcess(0);
+         }
+-        else if (ret == 2)
++        else if (ret == 1)
+         {
+             continue;  /* rebuild the list */
+         }
+diff --git a/programs/services/services.c b/programs/services/services.c
+index 11111111111..11111111111 100644
+--- a/programs/services/services.c
++++ b/programs/services/services.c
+@@ -509,6 +509,30 @@ static void scmdatabase_autostart_services(struct scmdatabase *db)
+     SetupDiDestroyDeviceInfoList(set);
+ }
+ 
++static void process_shutdown_message(struct scmdatabase *db, struct process_entry *process,
++                                     DWORD message, DWORD accept)
++{
++    DWORD process_accept = 0, result;
++    struct service_entry *service;
++
++    scmdatabase_lock(db);
++    LIST_FOR_EACH_ENTRY(service, &db->services, struct service_entry, entry)
++        if (service->process == process) process_accept |= service->status.dwControlsAccepted;
++    scmdatabase_unlock(db);
++    process_accept &= accept;
++
++    if (!process_accept)
++    {
++        TRACE("service process %04lx not accepting message %#lx.\n", process->process_id, message);
++        if (accept == SERVICE_ACCEPT_SHUTDOWN) process_terminate(process);
++    }
++    else if (!process_send_control(process, FALSE, L"", message, NULL, 0, &result))
++    {
++        WARN("shutdown message %#lx, process returned %#lx\n", message, result);
++        process_terminate(process);
++    }
++}
++
+ static void scmdatabase_wait_terminate(struct scmdatabase *db)
+ {
+     struct list pending = LIST_INIT(pending);
+@@ -520,8 +544,9 @@ static void scmdatabase_wait_terminate(struct scmdatabase *db)
+     {
+         struct process_entry *process = grab_process(LIST_ENTRY(ptr, struct process_entry, entry));
+ 
+-        process_terminate(process);
+         scmdatabase_unlock(db);
++        process_shutdown_message(db, process, SERVICE_CONTROL_PRESHUTDOWN, SERVICE_ACCEPT_PRESHUTDOWN);
++        process_shutdown_message(db, process, SERVICE_CONTROL_SHUTDOWN, SERVICE_ACCEPT_SHUTDOWN);
+         WaitForSingleObject(process->process, INFINITE);
+         scmdatabase_lock(db);
+ 
+-- 
+2.36.0
+
