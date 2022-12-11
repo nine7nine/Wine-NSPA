@@ -1,0 +1,33 @@
+From: "Rémi Bernon" <rbernon@codeweavers.com>
+Subject: [PATCH] ntdll: Only call wine exception handlers on the current stack.
+Message-Id: <20220131152416.548682-1-rbernon@codeweavers.com>
+Date: Mon, 31 Jan 2022 16:24:16 +0100
+
+MK11 creates an alternate stack and sometimes throws an exception which
+gets incorrectly handled by a Wine exception handler, causing the game
+to crash.
+
+Signed-off-by: Rémi Bernon <rbernon@codeweavers.com>
+---
+ dlls/ntdll/signal_x86_64.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/ntdll/signal_x86_64.c b/dlls/ntdll/signal_x86_64.c
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/signal_x86_64.c
++++ b/dlls/ntdll/signal_x86_64.c
+@@ -480,7 +480,9 @@ static NTSTATUS call_stack_handlers( EXCEPTION_RECORD *rec, CONTEXT *orig_contex
+             }
+         }
+         /* hack: call wine handlers registered in the tib list */
+-        else while ((ULONG64)teb_frame < context.Rsp)
++        else while ((ULONG64)teb_frame < context.Rsp &&
++                    (ULONG64)teb_frame >= (ULONG64)NtCurrentTeb()->Tib.StackLimit &&
++                    (ULONG64)teb_frame <= (ULONG64)NtCurrentTeb()->Tib.StackBase)
+         {
+             TRACE_(seh)( "found wine frame %p rsp %p handler %p\n",
+                          teb_frame, (void *)context.Rsp, teb_frame->Handler );
+
+-- 
+2.36.0
+

@@ -1,0 +1,727 @@
+From cf4be2d7e708730a6b26dedb3e02f6ecb5a77283 Mon Sep 17 00:00:00 2001
+From: Torge Matthies <openglfreak@googlemail.com>
+Date: Fri, 27 May 2022 00:51:49 +0200
+Subject: [PATCH 1/2] win32u: Factor out and export __wine_msg_wait_objects for
+ high-resolution waits.
+
+---
+ dlls/win32u/message.c | 35 +++++++++++++++++++++++------------
+ include/winuser.h     |  2 ++
+ 2 files changed, 25 insertions(+), 12 deletions(-)
+
+diff --git a/dlls/win32u/message.c b/dlls/win32u/message.c
+index 11111111111..11111111111 100644
+--- a/dlls/win32u/message.c
++++ b/dlls/win32u/message.c
+@@ -2042,9 +2042,9 @@ static inline LARGE_INTEGER *get_nt_timeout( LARGE_INTEGER *time, DWORD timeout
+ }
+ 
+ /* wait for message or signaled handle */
+-static DWORD wait_message( DWORD count, const HANDLE *handles, DWORD timeout, DWORD mask, DWORD flags )
++static DWORD wait_message( DWORD count, const HANDLE *handles,
++                           const LARGE_INTEGER *timeout, DWORD mask, DWORD flags )
+ {
+-    LARGE_INTEGER time;
+     DWORD ret, lock;
+     void *ret_ptr;
+     ULONG ret_len;
+@@ -2052,14 +2052,13 @@ static DWORD wait_message( DWORD count, const HANDLE *handles, DWORD timeout, DW
+     if (enable_thunk_lock)
+         lock = KeUserModeCallback( NtUserThunkLock, NULL, 0, &ret_ptr, &ret_len );
+ 
+-    ret = user_driver->pMsgWaitForMultipleObjectsEx( count, handles, get_nt_timeout( &time, timeout ),
+-                                                     mask, flags );
++    ret = user_driver->pMsgWaitForMultipleObjectsEx( count, handles, timeout, mask, flags );
+     if (HIWORD(ret))  /* is it an error code? */
+     {
+         RtlSetLastWin32Error( RtlNtStatusToDosError(ret) );
+         ret = WAIT_FAILED;
+     }
+-    if (ret == WAIT_TIMEOUT && !count && !timeout) NtYieldExecution();
++    if (ret == WAIT_TIMEOUT && !count && !timeout->QuadPart) NtYieldExecution();
+     if ((mask & QS_INPUT) == QS_INPUT) get_user_thread_info()->message_count = 0;
+ 
+     if (enable_thunk_lock)
+@@ -2073,7 +2072,7 @@ static DWORD wait_message( DWORD count, const HANDLE *handles, DWORD timeout, DW
+  *
+  * Wait for multiple objects including the server queue, with specific queue masks.
+  */
+-static DWORD wait_objects( DWORD count, const HANDLE *handles, DWORD timeout,
++static DWORD wait_objects( DWORD count, const HANDLE *handles, const LARGE_INTEGER *timeout,
+                            DWORD wake_mask, DWORD changed_mask, DWORD flags )
+ {
+     struct user_thread_info *thread_info = get_user_thread_info();
+@@ -2116,10 +2115,10 @@ static HANDLE normalize_std_handle( HANDLE handle )
+ }
+ 
+ /***********************************************************************
+- *           NtUserMsgWaitForMultipleObjectsEx   (win32u.@)
++ *           __wine_msg_wait_objects   (win32u.@)
+  */
+-DWORD WINAPI NtUserMsgWaitForMultipleObjectsEx( DWORD count, const HANDLE *handles,
+-                                                DWORD timeout, DWORD mask, DWORD flags )
++DWORD CDECL __wine_msg_wait_objects( DWORD count, const HANDLE *handles,
++                                     const LARGE_INTEGER *timeout, DWORD mask, DWORD flags )
+ {
+     HANDLE wait_handles[MAXIMUM_WAIT_OBJECTS];
+     DWORD i;
+@@ -2138,6 +2137,17 @@ DWORD WINAPI NtUserMsgWaitForMultipleObjectsEx( DWORD count, const HANDLE *handl
+                          (flags & MWMO_INPUTAVAILABLE) ? mask : 0, mask, flags );
+ }
+ 
++/***********************************************************************
++ *           NtUserMsgWaitForMultipleObjectsEx   (win32u.@)
++ */
++DWORD WINAPI NtUserMsgWaitForMultipleObjectsEx( DWORD count, const HANDLE *handles,
++                                                DWORD timeout, DWORD mask, DWORD flags )
++{
++    LARGE_INTEGER time;
++    return __wine_msg_wait_objects( count, handles, get_nt_timeout( &time, timeout ),
++                                    mask, flags );
++}
++
+ /***********************************************************************
+  *           NtUserWaitForInputIdle (win32u.@)
+  */
+@@ -2195,6 +2205,7 @@ DWORD WINAPI NtUserWaitForInputIdle( HANDLE process, DWORD timeout, BOOL wow )
+  */
+ BOOL WINAPI NtUserPeekMessage( MSG *msg_out, HWND hwnd, UINT first, UINT last, UINT flags )
+ {
++    static LARGE_INTEGER zero_timeout;
+     struct user_thread_info *thread_info = get_user_thread_info();
+     MSG msg;
+     int ret;
+@@ -2211,7 +2222,7 @@ BOOL WINAPI NtUserPeekMessage( MSG *msg_out, HWND hwnd, UINT first, UINT last, U
+         if (thread_info->last_driver_time == NtGetTickCount()) return FALSE;
+         thread_info->last_driver_time = NtGetTickCount();
+         flush_window_surfaces( TRUE );
+-        ret = wait_message( 0, NULL, 0, QS_ALLINPUT, 0 );
++        ret = wait_message( 0, NULL, &zero_timeout, QS_ALLINPUT, 0 );
+         /* if we received driver events, check again for a pending message */
+         if (ret == WAIT_TIMEOUT || peek_message( &msg, hwnd, first, last, flags, 0, TRUE ) <= 0) return FALSE;
+     }
+@@ -2257,7 +2268,7 @@ BOOL WINAPI NtUserGetMessage( MSG *msg, HWND hwnd, UINT first, UINT last )
+ 
+     while (!(ret = peek_message( msg, hwnd, first, last, PM_REMOVE | (mask << 16), mask, TRUE )))
+     {
+-        wait_objects( 1, &server_queue, INFINITE, mask & (QS_SENDMESSAGE | QS_SMRESULT), mask, 0 );
++        wait_objects( 1, &server_queue, NULL, mask & (QS_SENDMESSAGE | QS_SMRESULT), mask, 0 );
+     }
+     if (ret < 0) return -1;
+ 
+@@ -2387,7 +2398,7 @@ static void wait_message_reply( UINT flags )
+             continue;
+         }
+ 
+-        wait_message( 1, &server_queue, INFINITE, wake_mask, 0 );
++        wait_message( 1, &server_queue, NULL, wake_mask, 0 );
+     }
+ }
+ 
+diff --git a/include/winuser.h b/include/winuser.h
+index 11111111111..11111111111 100644
+--- a/include/winuser.h
++++ b/include/winuser.h
+@@ -4766,6 +4766,8 @@ WORD        WINAPI SYSTEM_KillSystemTime
+ 
+ #ifdef __WINESRC__
+ WINUSERAPI BOOL CDECL __wine_send_input( HWND hwnd, const INPUT *input, const RAWINPUT *rawinput );
++WINUSERAPI DWORD CDECL __wine_msg_wait_objects( DWORD count, const HANDLE *handles,
++                                                const LARGE_INTEGER *timeout, DWORD mask, DWORD flags );
+ 
+ /* Uxtheme hook functions and struct */
+ 
+-- 
+2.37.2
+
+From: Vijay Kiran Kamuju <infyquest@gmail.com>
+Subject: [PATCH] shell32: Partially implement ShellLink_AddDataBlock
+Message-Id: <20191212105857.1669-1-infyquest@gmail.com>
+Date: Thu, 12 Dec 2019 11:58:57 +0100
+
+Wine Bug: https://bugs.winehq.org/show_bug.cgi?id=38171
+Signed-off-by: Vijay Kiran Kamuju <infyquest@gmail.com>
+---
+ dlls/shell32/shelllink.c | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/shell32/shelllink.c b/dlls/shell32/shelllink.c
+index 11111111111..11111111111 100644
+--- a/dlls/shell32/shelllink.c
++++ b/dlls/shell32/shelllink.c
+@@ -2234,8 +2234,11 @@ ShellLink_DataList_Release( IShellLinkDataList* iface )
+ static HRESULT WINAPI
+ ShellLink_AddDataBlock( IShellLinkDataList* iface, void* pDataBlock )
+ {
+-    FIXME("(%p)->(%p): stub\n", iface, pDataBlock);
+-    return E_NOTIMPL;
++    DATABLOCK_HEADER *hdr = (DATABLOCK_HEADER *)pDataBlock;
++
++    FIXME("(%p)->(%p) (Size: %d - Signature: %08x): partially implemented.\n", iface, pDataBlock, hdr->cbSize, hdr->dwSignature);
++
++    return S_OK;
+ }
+ 
+ static HRESULT WINAPI
+
+From: Dmitry Timoshkov <dmitry@baikal.ru>
+Subject: [PATCH 2/2] server: Grant implicit DACL_SECURITY_INFORMATION permission to an object owner.
+Message-Id: <20210202174109.810b238c12a8632a4ea5e6b5@baikal.ru>
+Date: Tue, 2 Feb 2021 17:41:09 +0300
+
+Signed-off-by: Dmitry Timoshkov <dmitry@baikal.ru>
+---
+ server/handle.c                | 11 +++++++++++
+ 2 files changed, 11 insertions(+), 4 deletions(-)
+
+diff --git a/server/handle.c b/server/handle.c
+index 11111111111..11111111111 100644
+--- a/server/handle.c
++++ b/server/handle.c
+@@ -480,6 +480,17 @@ struct object *get_handle_obj( struct process *process, obj_handle_t handle,
+             set_error( STATUS_OBJECT_TYPE_MISMATCH );  /* not the right type */
+             return NULL;
+         }
++        if (access & (READ_CONTROL | WRITE_DAC))
++        {
++            const struct security_descriptor *sd = obj->ops->get_sd( obj );
++            if (sd)
++            {
++                struct token *token = current->token ? current->token : current->process->token;
++                const SID *owner = sd_get_owner( sd );
++                if (token_sid_present( token, owner, FALSE ))
++                    access &= ~(READ_CONTROL | WRITE_DAC);
++            }
++        }
+         if ((entry->access & access) != access)
+         {
+             set_error( STATUS_ACCESS_DENIED );
+
+-- 
+2.37.2
+
+From 3a6b022f3841a9760f362f092659fb4d440295fe Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Fri, 31 Jul 2020 15:32:01 +0200
+Subject: [PATCH] ntdll: Implement ThreadIsTerminated thread info query.
+
+---
+ dlls/ntdll/unix/thread.c | 14 +++++++++++
+ 2 files changed, 67 insertions(+)
+
+diff --git a/dlls/ntdll/unix/thread.c b/dlls/ntdll/unix/thread.c
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/unix/thread.c
++++ b/dlls/ntdll/unix/thread.c
+@@ -1925,6 +1925,20 @@ NTSTATUS WINAPI NtQueryInformationThread( HANDLE handle, THREADINFOCLASS class,
+         return status;
+     }
+ 
++    case ThreadIsTerminated:
++        if (length != sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
++        if (!data) return STATUS_ACCESS_VIOLATION;
++        SERVER_START_REQ( get_thread_info )
++        {
++            req->handle = wine_server_obj_handle( handle );
++            req->access = THREAD_QUERY_INFORMATION;
++            if ((status = wine_server_call( req ))) return status;
++            *(ULONG*)data = (reply->exit_code != STATUS_PENDING);
++        }
++        SERVER_END_REQ;
++        if (ret_len) *ret_len = sizeof(ULONG);
++        return STATUS_SUCCESS;
++
+     case ThreadAffinityMask:
+     {
+         const ULONG_PTR affinity_mask = get_system_affinity_mask();
+-- 
+2.37.2
+
+From: Haoyang Chen <chenhaoyang@uniontech.com>
+Subject: [PATCH v2] shell32: Avoid crashes caused by very long URLs.
+Message-Id: <20210528075548.17678-1-chenhaoyang@uniontech.com>
+Date: Fri, 28 May 2021 15:55:48 +0800
+
+Signed-off-by: Haoyang Chen <chenhaoyang@uniontech.com>
+---
+ dlls/shell32/shlexec.c       | 90 +++++++++++++++++++++---------------
+ dlls/shell32/tests/shlexec.c | 24 +++++++---
+ 2 files changed, 72 insertions(+), 42 deletions(-)
+
+diff --git a/dlls/shell32/shlexec.c b/dlls/shell32/shlexec.c
+index 11111111111..11111111111 100644
+--- a/dlls/shell32/shlexec.c
++++ b/dlls/shell32/shlexec.c
+@@ -444,12 +444,17 @@ static void *SHELL_BuildEnvW( const WCHAR *path )
+ static BOOL SHELL_TryAppPathW( LPCWSTR szName, LPWSTR lpResult, WCHAR **env)
+ {
+     HKEY hkApp = 0;
+-    WCHAR buffer[1024];
++    WCHAR *buffer;
+     LONG len;
+     LONG res;
+     BOOL found = FALSE;
++    LONG bufferlen = lstrlenW(szName) + ARRAYSIZE(L"Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\") + 1;
+ 
+     if (env) *env = NULL;
++    if (!(buffer = heap_alloc(bufferlen * sizeof(WCHAR))))
++    {
++        return FALSE;
++    }
+     lstrcpyW(buffer, L"Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\");
+     lstrcatW(buffer, szName);
+     res = RegOpenKeyExW(HKEY_LOCAL_MACHINE, buffer, 0, KEY_READ, &hkApp);
+@@ -465,13 +470,14 @@ static BOOL SHELL_TryAppPathW( LPCWSTR szName, LPWSTR lpResult, WCHAR **env)
+ 
+     if (env)
+     {
+-        DWORD count = sizeof(buffer);
++        DWORD count = bufferlen * sizeof(WCHAR);
+         if (!RegQueryValueExW(hkApp, L"Path", NULL, NULL, (LPBYTE)buffer, &count) && buffer[0])
+             *env = SHELL_BuildEnvW( buffer );
+     }
+ 
+ end:
+     if (hkApp) RegCloseKey(hkApp);
++    if (buffer) heap_free(buffer);
+     return found;
+ }
+ 
+@@ -984,16 +990,23 @@ static UINT_PTR execute_from_key(LPCWSTR key, LPCWSTR lpFile, WCHAR *env, LPCWST
+ 			     SHELL_ExecuteW32 execfunc,
+                              LPSHELLEXECUTEINFOW psei, LPSHELLEXECUTEINFOW psei_out)
+ {
+-    WCHAR cmd[256], param[1024], ddeexec[256];
++    WCHAR cmd[256], ddeexec[256];
++    WCHAR *param;
+     LONG cmdlen = sizeof(cmd), ddeexeclen = sizeof(ddeexec);
+     UINT_PTR retval = SE_ERR_NOASSOC;
+     DWORD resultLen;
+     LPWSTR tmp;
++    LONG paramlen = cmdlen + lstrlenW(lpFile) + 1;
+ 
+     TRACE("%s %s %s %s %s\n", debugstr_w(key), debugstr_w(lpFile), debugstr_w(env),
+            debugstr_w(szCommandline), debugstr_w(executable_name));
+ 
+     cmd[0] = '\0';
++    if (!(param = heap_alloc(paramlen * sizeof(WCHAR))))
++    {
++        return (UINT_PTR)NULL;
++    }
++
+     param[0] = '\0';
+ 
+     /* Get the application from the registry */
+@@ -1006,8 +1019,8 @@ static UINT_PTR execute_from_key(LPCWSTR key, LPCWSTR lpFile, WCHAR *env, LPCWST
+         if (cmdlen >= ARRAY_SIZE(cmd))
+             cmdlen = ARRAY_SIZE(cmd) - 1;
+         cmd[cmdlen] = '\0';
+-        SHELL_ArgifyW(param, ARRAY_SIZE(param), cmd, lpFile, psei->lpIDList, szCommandline, &resultLen);
+-        if (resultLen > ARRAY_SIZE(param))
++        SHELL_ArgifyW(param, paramlen, cmd, lpFile, psei->lpIDList, szCommandline, &resultLen);
++        if (resultLen > paramlen)
+             ERR("Argify buffer not large enough, truncating\n");
+     }
+ 
+@@ -1031,6 +1044,7 @@ static UINT_PTR execute_from_key(LPCWSTR key, LPCWSTR lpFile, WCHAR *env, LPCWST
+     else
+         WARN("Nothing appropriate found for %s\n", debugstr_w(key));
+ 
++    heap_free(param);
+     return retval;
+ }
+ 
+@@ -1570,11 +1584,11 @@ static BOOL SHELL_execute( LPSHELLEXECUTEINFOW sei, SHELL_ExecuteW32 execfunc )
+         SEE_MASK_CONNECTNETDRV | SEE_MASK_FLAG_DDEWAIT |
+         SEE_MASK_UNICODE       | SEE_MASK_ASYNCOK      | SEE_MASK_HMONITOR;
+ 
+-    WCHAR parametersBuffer[1024], dirBuffer[MAX_PATH], wcmdBuffer[1024];
+-    WCHAR *wszApplicationName, *wszParameters, *wszDir, *wcmd = NULL;
++    WCHAR dirBuffer[MAX_PATH];
++    WCHAR *wcmdBuffer = NULL, *wszApplicationName, *wszParameters, *wszDir, *wcmd = NULL;
+     DWORD dwApplicationNameLen = MAX_PATH+2;
+-    DWORD parametersLen = ARRAY_SIZE(parametersBuffer);
+-    DWORD wcmdLen = ARRAY_SIZE(wcmdBuffer);
++    DWORD parametersLen = 1024;
++    DWORD wcmdLen = 1024;
+     DWORD len;
+     SHELLEXECUTEINFOW sei_tmp;	/* modifiable copy of SHELLEXECUTEINFO struct */
+     WCHAR *env;
+@@ -1615,19 +1629,21 @@ static BOOL SHELL_execute( LPSHELLEXECUTEINFOW sei, SHELL_ExecuteW32 execfunc )
+         memcpy(wszApplicationName, sei_tmp.lpFile, l*sizeof(WCHAR));
+     }
+ 
+-    wszParameters = parametersBuffer;
+     if (sei_tmp.lpParameters)
+     {
+         len = lstrlenW(sei_tmp.lpParameters) + 1;
+         if (len > parametersLen)
+-        {
+-            wszParameters = heap_alloc(len * sizeof(WCHAR));
+             parametersLen = len;
+-        }
+-	lstrcpyW(wszParameters, sei_tmp.lpParameters);
++        wszParameters = heap_alloc(parametersLen * sizeof(WCHAR));
++	    lstrcpyW(wszParameters, sei_tmp.lpParameters);
+     }
+     else
+-	*wszParameters = '\0';
++    {
++        wszParameters = heap_alloc(parametersLen * sizeof(WCHAR));
++        if (!wszParameters)
++            return FALSE;
++        *wszParameters = '\0';
++    }
+ 
+     wszDir = dirBuffer;
+     if (sei_tmp.lpDirectory)
+@@ -1635,10 +1651,10 @@ static BOOL SHELL_execute( LPSHELLEXECUTEINFOW sei, SHELL_ExecuteW32 execfunc )
+         len = lstrlenW(sei_tmp.lpDirectory) + 1;
+         if (len > ARRAY_SIZE(dirBuffer))
+             wszDir = heap_alloc(len * sizeof(WCHAR));
+-	lstrcpyW(wszDir, sei_tmp.lpDirectory);
++        lstrcpyW(wszDir, sei_tmp.lpDirectory);
+     }
+     else
+-	*wszDir = '\0';
++        *wszDir = '\0';
+ 
+     /* adjust string pointers to point to the new buffers */
+     sei_tmp.lpFile = wszApplicationName;
+@@ -1653,25 +1669,24 @@ static BOOL SHELL_execute( LPSHELLEXECUTEINFOW sei, SHELL_ExecuteW32 execfunc )
+     /* process the IDList */
+     if (sei_tmp.fMask & SEE_MASK_IDLIST)
+     {
+-	IShellExecuteHookW* pSEH;
++        IShellExecuteHookW* pSEH;
+ 
+-	HRESULT hr = SHBindToParent(sei_tmp.lpIDList, &IID_IShellExecuteHookW, (LPVOID*)&pSEH, NULL);
++        HRESULT hr = SHBindToParent(sei_tmp.lpIDList, &IID_IShellExecuteHookW, (LPVOID*)&pSEH, NULL);
+ 
+-	if (SUCCEEDED(hr))
+-	{
+-	    hr = IShellExecuteHookW_Execute(pSEH, &sei_tmp);
++	    if (SUCCEEDED(hr))
++        {
++            hr = IShellExecuteHookW_Execute(pSEH, &sei_tmp);
+ 
+-	    IShellExecuteHookW_Release(pSEH);
++            IShellExecuteHookW_Release(pSEH);
+ 
+-	    if (hr == S_OK) {
++            if (hr == S_OK) {
+                 heap_free(wszApplicationName);
+-                if (wszParameters != parametersBuffer)
+-                    heap_free(wszParameters);
++                heap_free(wszParameters);
+                 if (wszDir != dirBuffer)
+                     heap_free(wszDir);
+-		return TRUE;
++                return TRUE;
+             }
+-	}
++        }
+ 
+         SHGetPathFromIDListW(sei_tmp.lpIDList, wszApplicationName);
+         TRACE("-- idlist=%p (%s)\n", sei_tmp.lpIDList, debugstr_w(wszApplicationName));
+@@ -1705,8 +1720,7 @@ static BOOL SHELL_execute( LPSHELLEXECUTEINFOW sei, SHELL_ExecuteW32 execfunc )
+     {
+         sei->hInstApp = (HINSTANCE) 33;
+         heap_free(wszApplicationName);
+-        if (wszParameters != parametersBuffer)
+-            heap_free(wszParameters);
++        heap_free(wszParameters);
+         if (wszDir != dirBuffer)
+             heap_free(wszDir);
+         return TRUE;
+@@ -1719,8 +1733,7 @@ static BOOL SHELL_execute( LPSHELLEXECUTEINFOW sei, SHELL_ExecuteW32 execfunc )
+         if (retval <= 32 && !(sei_tmp.fMask & SEE_MASK_FLAG_NO_UI))
+             do_error_dialog(retval, sei_tmp.hwnd);
+         heap_free(wszApplicationName);
+-        if (wszParameters != parametersBuffer)
+-            heap_free(wszParameters);
++        heap_free(wszParameters);
+         if (wszDir != dirBuffer)
+             heap_free(wszDir);
+         return retval > 32;
+@@ -1788,6 +1801,11 @@ static BOOL SHELL_execute( LPSHELLEXECUTEINFOW sei, SHELL_ExecuteW32 execfunc )
+     /* Else, try to execute the filename */
+     TRACE("execute:%s,%s,%s\n", debugstr_w(wszApplicationName), debugstr_w(wszParameters), debugstr_w(wszDir));
+     lpFile = sei_tmp.lpFile;
++    wcmdLen = (lstrlenW(wszApplicationName) > wcmdLen ? lstrlenW(wszApplicationName): wcmdLen) + 1;
++    wcmdBuffer = heap_alloc(wcmdLen * sizeof(WCHAR));
++    if (!wcmdBuffer)
++        return FALSE;
++
+     wcmd = wcmdBuffer;
+     lstrcpyW(wcmd, wszApplicationName);
+     if (sei_tmp.lpDirectory)
+@@ -1803,12 +1821,12 @@ static BOOL SHELL_execute( LPSHELLEXECUTEINFOW sei, SHELL_ExecuteW32 execfunc )
+                                       sei, execfunc );
+     if (retval > 32) {
+         heap_free(wszApplicationName);
+-        if (wszParameters != parametersBuffer)
+-            heap_free(wszParameters);
++        heap_free(wszParameters);
+         if (wszDir != dirBuffer)
+             heap_free(wszDir);
+         if (wcmd != wcmdBuffer)
+             heap_free(wcmd);
++        heap_free(wcmdBuffer);
+         return TRUE;
+     }
+ 
+@@ -1866,8 +1884,8 @@ end:
+     TRACE("retval %Iu\n", retval);
+ 
+     heap_free(wszApplicationName);
+-    if (wszParameters != parametersBuffer)
+-        heap_free(wszParameters);
++    heap_free(wcmdBuffer);
++    heap_free(wszParameters);
+     if (wszDir != dirBuffer)
+         heap_free(wszDir);
+     if (wcmd != wcmdBuffer)
+diff --git a/dlls/shell32/tests/shlexec.c b/dlls/shell32/tests/shlexec.c
+index 11111111111..11111111111 100644
+--- a/dlls/shell32/tests/shlexec.c
++++ b/dlls/shell32/tests/shlexec.c
+@@ -66,7 +66,7 @@ static BOOL is_elevated;
+ 
+ static const char* encodeA(const char* str)
+ {
+-    static char encoded[2*1024+1];
++    static char encoded[8*1024+1];
+     char*       ptr;
+     size_t      len,i;
+ 
+@@ -94,7 +94,7 @@ static unsigned decode_char(char c)
+ 
+ static char* decodeA(const char* str)
+ {
+-    static char decoded[1024];
++    static char decoded[4096];
+     char*       ptr;
+     size_t      len,i;
+ 
+@@ -115,7 +115,7 @@ static char* decodeA(const char* str)
+ static void WINAPIV __WINE_PRINTF_ATTR(2,3) childPrintf(HANDLE h, const char* fmt, ...)
+ {
+     va_list valist;
+-    char        buffer[1024];
++    char        buffer[8192];
+     DWORD       w;
+ 
+     va_start(valist, fmt);
+@@ -126,7 +126,7 @@ static void WINAPIV __WINE_PRINTF_ATTR(2,3) childPrintf(HANDLE h, const char* fm
+ 
+ static char* getChildString(const char* sect, const char* key)
+ {
+-    char        buf[1024];
++    char        buf[8192];
+     char*       ret;
+ 
+     GetPrivateProfileStringA(sect, key, "-", buf, sizeof(buf), child_file);
+@@ -345,11 +345,11 @@ static void dump_child_(const char* file, int line)
+  *
+  ***/
+ 
+-static char shell_call[2048];
++static char shell_call[4096];
+ static void WINAPIV __WINE_PRINTF_ATTR(2,3) _okShell(int condition, const char *msg, ...)
+ {
+     va_list valist;
+-    char buffer[2048];
++    char buffer[12288];
+ 
+     strcpy(buffer, shell_call);
+     strcat(buffer, " ");
+@@ -1878,6 +1878,7 @@ static void test_fileurls(void)
+ static void test_urls(void)
+ {
+     char url[MAX_PATH + 15];
++    char long_url[2048];
+     INT_PTR rc;
+ 
+     if (!create_test_class("fakeproto", FALSE))
+@@ -1950,6 +1951,17 @@ static void test_urls(void)
+     okChildString("argvA3", "URL");
+     okChildString("argvA4", "shlproto://foo/bar");
+ 
++    memset(long_url, 0, sizeof(long_url));
++    strcpy(long_url, "shlproto://foo/bar");
++    memset(long_url + strlen(long_url), 'r', sizeof(long_url) - strlen(long_url) - 5);
++    strcat(long_url, ".exe");
++
++    rc = shell_execute(NULL, long_url, NULL, NULL);
++    ok(rc > 32, "%s failed: rc=%lu\n", shell_call, rc);
++    okChildInt("argcA", 5);
++    okChildString("argvA3", "URL");
++    okChildString("argvA4", long_url);
++
+     /* Environment variables are expanded in URLs (but not in file URLs!) */
+     rc = shell_execute_ex(SEE_MASK_DOENVSUBST | SEE_MASK_FLAG_NO_UI,
+                           NULL, "shlproto://%TMPDIR%/bar", NULL, NULL, NULL);
+
+-- 
+2.37.2
+
+From: Jefferson Carpenter <jefferson@aoeu2code.com>
+#Subject: [PATCH] msxml3: Null check url in parseURL.
+Message-Id: <4530cb5e-ce6d-0a97-0d9f-da919bf3409d@aoeu2code.com>
+Date: Mon, 14 Jun 2021 23:07:07 +0000
+
+From 765e5f6725e1c41a6fe620cea5e52442fa0aa8f5 Mon Sep 17 00:00:00 2001
+From: Jefferson Carpenter <jeffersoncarpenter2@gmail.com>
+Date: Sun, 13 Jun 2021 06:20:19 +0000
+Subject: [PATCH] msxml3: Null check url in parseURL.
+
+Wine-Bug: https://bugs.winehq.org/show_bug.cgi?id=51267
+Signed-off-by: Jefferson Carpenter <jeffersoncarpenter2@gmail.com>
+---
+ dlls/msxml3/saxreader.c       | 2 ++
+ dlls/msxml3/tests/saxreader.c | 7 +++++++
+ 2 files changed, 9 insertions(+)
+
+diff --git a/dlls/msxml3/saxreader.c b/dlls/msxml3/saxreader.c
+index 11111111111..11111111111 100644
+--- a/dlls/msxml3/saxreader.c
++++ b/dlls/msxml3/saxreader.c
+@@ -2729,6 +2729,8 @@ static HRESULT internal_parseURL(saxreader *reader, const WCHAR *url, BOOL vbInt
+     if (!url && reader->version < MSXML4)
+         return E_INVALIDARG;
+ 
++    if (!url) return E_INVALIDARG;
++
+     hr = create_moniker_from_url(url, &mon);
+     if(FAILED(hr))
+         return hr;
+diff --git a/dlls/msxml3/tests/saxreader.c b/dlls/msxml3/tests/saxreader.c
+index 11111111111..11111111111 100644
+--- a/dlls/msxml3/tests/saxreader.c
++++ b/dlls/msxml3/tests/saxreader.c
+@@ -2303,6 +2303,13 @@ static void test_saxreader(void)
+         V_VT(&var) = VT_BSTR;
+         V_BSTR(&var) = SysAllocString(carriage_ret_test);
+ 
++        /* crashes on new versions */
++        if (IsEqualGUID(table->clsid, &CLSID_SAXXMLReader) ||
++            IsEqualGUID(table->clsid, &CLSID_SAXXMLReader30)) {
++            hr = ISAXXMLReader_parseURL(reader, NULL);
++            EXPECT_HR(hr, E_INVALIDARG);
++        }
++
+         if (IsEqualGUID(table->clsid, &CLSID_SAXXMLReader40) ||
+             IsEqualGUID(table->clsid, &CLSID_SAXXMLReader60))
+
+             test_seq = content_handler_test2_alternate;
+-- 
+2.37.2
+
+From: Fabian Maurer <dark.shadow4@web.de>
+Subject: [PATCH] user32: When converting strings from A->W, ignore handles/resources
+Message-Id: <20210809215524.448712-1-dark.shadow4@web.de>
+Date: Mon,  9 Aug 2021 23:55:24 +0200
+
+Wine-Bug: https://bugs.winehq.org/show_bug.cgi?id=51583
+Signed-off-by: Fabian Maurer <dark.shadow4@web.de>
+---
+ dlls/user32/tests/msg.c | 3 +++
+ dlls/user32/winproc.c   | 2 ++
+ 2 files changed, 5 insertions(+)
+
+diff --git a/dlls/user32/tests/msg.c b/dlls/user32/tests/msg.c
+index 11111111111..11111111111 100644
+--- a/dlls/user32/tests/msg.c
++++ b/dlls/user32/tests/msg.c
+@@ -5433,6 +5433,9 @@ static void test_sys_menu(void)
+     ok(!hmenu, "GetSystemMenu error %ld\n", GetLastError());
+ 
+     DestroyWindow(hwnd);
++
++    /* Test invalid text with WM_SETTEXT. This must not crash. */
++    SendMessageA(GetDesktopWindow(), WM_SETTEXT, 0, (LPARAM)55);
+ }
+ 
+ /* For shown WS_OVERLAPPEDWINDOW */
+diff --git a/dlls/user32/winproc.c b/dlls/user32/winproc.c
+index 11111111111..11111111111 100644
+--- a/dlls/user32/winproc.c
++++ b/dlls/user32/winproc.c
+@@ -338,6 +338,8 @@ LRESULT WINPROC_CallProcAtoW( winproc_callback_t callback, HWND hwnd, UINT msg,
+     case LB_ADDFILE:
+     case EM_REPLACESEL:
+         if (!lParam) ret = callback( hwnd, msg, wParam, lParam, result, arg );
++        else if (IS_INTRESOURCE(lParam)) /* Check for handles/IDs similar to DEFWND_SetTextA */
++            return 0;
+         else
+         {
+             WCHAR *ptr, buffer[512];
+-- 
+2.37.2
+
+From: Nikolay Sivov <nsivov@codeweavers.com>
+Subject: [PATCH 2/2] ntdll: Handle INVALID_HANDLE_VALUE explicitly in NtClose().
+Message-Id: <20210810165120.171726-2-nsivov@codeweavers.com>
+Date: Tue, 10 Aug 2021 19:51:20 +0300
+In-Reply-To: <20210810165120.171726-1-nsivov@codeweavers.com>
+References: <20210810165120.171726-1-nsivov@codeweavers.com>
+
+Signed-off-by: Nikolay Sivov <nsivov@codeweavers.com>
+---
+
+Reported by Sergey Bychkow as https://bugs.winehq.org/show_bug.cgi?id=51529.
+
+ dlls/ntdll/unix/server.c      | 2 ++
+ 3 files changed, 2 insertions(+), 3 deletions(-)
+
+diff --git a/dlls/ntdll/unix/server.c b/dlls/ntdll/unix/server.c
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/unix/server.c
++++ b/dlls/ntdll/unix/server.c
+@@ -1042,6 +1042,8 @@ int server_get_unix_fd( HANDLE handle, unsigned int wanted_access, int *unix_fd,
+     ret = get_cached_fd( handle, &fd, type, &access, options );
+     if (ret != STATUS_INVALID_HANDLE) goto done;
+ 
++    if (handle == INVALID_HANDLE_VALUE) return STATUS_SUCCESS;
++
+     server_enter_uninterrupted_section( &fd_cache_mutex, &sigset );
+
+     ret = get_cached_fd( handle, &fd, type, &access, options );
+     if (ret == STATUS_INVALID_HANDLE)
+-- 
+2.37.2
+
+From: "Rémi Bernon" <rbernon@codeweavers.com>
+Subject: [PATCH 5/5] ntoskrnl.exe: Make user shared data pointers volatile (GCC 11).
+Message-Id: <20210927085833.544992-5-rbernon@codeweavers.com>
+Date: Mon, 27 Sep 2021 10:58:33 +0200
+In-Reply-To: <20210927085833.544992-1-rbernon@codeweavers.com>
+References: <20210927085833.544992-1-rbernon@codeweavers.com>
+
+So that GCC 11 stops warning about reading from a 0-size memory region.
+
+Signed-off-by: Rémi Bernon <rbernon@codeweavers.com>
+---
+ dlls/ntoskrnl.exe/instr.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/ntoskrnl.exe/instr.c b/dlls/ntoskrnl.exe/instr.c
+index 11111111111..11111111111 100644
+--- a/dlls/ntoskrnl.exe/instr.c
++++ b/dlls/ntoskrnl.exe/instr.c
+@@ -497,8 +497,8 @@ WINE_DEFAULT_DEBUG_CHANNEL(int);
+ #define SIB_BASE( sib, rex )    (((sib) & 7) | (((rex) & REX_B) ? 8 : 0))
+ 
+ /* keep in sync with dlls/ntdll/thread.c:thread_init */
+-static const BYTE *wine_user_shared_data = (BYTE *)0x7ffe0000;
+-static const BYTE *user_shared_data      = (BYTE *)0xfffff78000000000;
++static const BYTE *const volatile wine_user_shared_data = (BYTE *)0x7ffe0000;
++static const BYTE *const volatile user_shared_data      = (BYTE *)0xfffff78000000000;
+ 
+ static inline DWORD64 *get_int_reg( CONTEXT *context, int index )
+ {
+
+-- 
+2.37.2
+

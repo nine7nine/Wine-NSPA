@@ -1,0 +1,987 @@
+From 6704b35ce017ad14d0a976eed567f8ba785e19e9 Mon Sep 17 00:00:00 2001
+From: Jinoh Kang <jinoh.kang.kr@gmail.com>
+Date: Sun, 17 Jul 2022 18:05:11 +0900
+Subject: [PATCH] server: Default the token owner to the token user.
+
+---
+ server/token.c | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+diff --git a/server/token.c b/server/token.c
+index f817c1114f8..7db65ca16f8 100644
+--- a/server/token.c
++++ b/server/token.c
+@@ -504,6 +504,7 @@ static struct token *create_token( unsigned int primary, unsigned int session_id
+             release_object( token );
+             return NULL;
+         }
++        token->owner = token->user;
+ 
+         /* copy groups */
+         for (i = 0; i < group_count; i++)
+@@ -522,7 +523,6 @@ static struct token *create_token( unsigned int primary, unsigned int session_id
+             /* Use first owner capable group as owner and primary group */
+             if (!token->primary_group && (group->attrs & SE_GROUP_OWNER))
+             {
+-                token->owner = &group->sid;
+                 token->primary_group = &group->sid;
+             }
+         }
+@@ -621,7 +621,6 @@ struct token *token_duplicate( struct token *src_token, unsigned primary,
+         list_add_tail( &token->groups, &newgroup->entry );
+         if (src_token->primary_group == &group->sid)
+         {
+-            token->owner = &newgroup->sid;
+             token->primary_group = &newgroup->sid;
+         }
+     }
+-- 
+GitLab
+
+From d4e68b1a868a1eed24446d98033388d5ef0537ca Mon Sep 17 00:00:00 2001
+From: Yuan Yao <yaoyuan.0553@bytedance.com>
+Date: Thu, 20 Oct 2022 11:58:54 +0800
+Subject: [PATCH] winhttp: Fix missing reference upcount
+
+The reference count of host is supposed to
+go up by one in netconn_create.
+The missing increment causes error handling paths
+where netconn_close or release_host is called
+to prematurely decrement the ref count of host to zero.
+---
+ dlls/winhttp/request.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/dlls/winhttp/request.c b/dlls/winhttp/request.c
+index 64f70b61a96..f6f6be38b7f 100644
+--- a/dlls/winhttp/request.c
++++ b/dlls/winhttp/request.c
+@@ -1635,6 +1635,9 @@ static DWORD open_connection( struct request *request )
+         len = lstrlenW( addressW ) + 1;
+         send_callback( &request->hdr, WINHTTP_CALLBACK_STATUS_CONNECTING_TO_SERVER, addressW, len );
+ 
++        EnterCriticalSection( &connection_pool_cs );
++        ++host->ref;
++        LeaveCriticalSection( &connection_pool_cs );
+         if ((ret = netconn_create( host, &connect->sockaddr, request->connect_timeout, &netconn )))
+         {
+             free( addressW );
+-- 
+GitLab
+
+From 0a4bc8d572d395e62e396fe454e02edd82b32776 Mon Sep 17 00:00:00 2001
+From: Etaash Mathamsetty <etaash.mathamsetty@gmail.com>
+Date: Sat, 19 Nov 2022 14:52:08 -0500
+Subject: [PATCH] kernel32: Implement various transacted file APIs
+
+---
+ dlls/kernel32/kernel32.spec |  22 ++++---
+ dlls/kernel32/path.c        | 123 ++++++++++++++++++++++++++++++++++++
+ 2 files changed, 135 insertions(+), 10 deletions(-)
+
+diff --git a/dlls/kernel32/kernel32.spec b/dlls/kernel32/kernel32.spec
+index 89c2511c3cf..2a8cb106e32 100644
+--- a/dlls/kernel32/kernel32.spec
++++ b/dlls/kernel32/kernel32.spec
+@@ -272,8 +272,8 @@
+ @ stdcall -import CreateDirectoryA(str ptr)
+ @ stdcall CreateDirectoryExA(str str ptr)
+ @ stdcall -import CreateDirectoryExW(wstr wstr ptr)
+-# @ stub CreateDirectoryTransactedA
+-# @ stub CreateDirectoryTransactedW
++@ stdcall CreateDirectoryTransactedA(str str ptr ptr)
++@ stdcall CreateDirectoryTransactedW(wstr wstr ptr ptr)
+ @ stdcall -import CreateDirectoryW(wstr ptr)
+ @ stdcall -import CreateEventA(ptr long long str)
+ @ stdcall -import CreateEventExA(ptr str long long)
+@@ -283,12 +283,14 @@
+ @ stdcall -import CreateFiberEx(long long long ptr ptr)
+ @ stdcall -import CreateFile2(wstr long long long ptr)
+ @ stdcall -import CreateFileA(str long long ptr long long long)
++@ stdcall CreateFileTransactedA(str long long ptr long long long ptr ptr ptr)
+ @ stdcall CreateFileMappingA(long ptr long long long str)
+ # @ stub CreateFileMappingNumaA
+ @ stdcall CreateFileMappingFromApp(long ptr long int64 wstr) kernelbase.CreateFileMappingFromApp
+ @ stdcall -import CreateFileMappingNumaW(long ptr long long long wstr long)
+ @ stdcall -import CreateFileMappingW(long ptr long long long wstr)
+ @ stdcall -import CreateFileW(wstr long long ptr long long long)
++@ stdcall CreateFileTransactedW(wstr long long ptr long long long ptr ptr ptr)
+ @ stdcall -import CreateHardLinkA(str str ptr)
+ @ stdcall CreateHardLinkTransactedA(str str ptr ptr)
+ @ stdcall CreateHardLinkTransactedW(wstr wstr ptr ptr)
+@@ -365,8 +367,8 @@
+ @ stdcall DeleteCriticalSection(ptr) NTDLL.RtlDeleteCriticalSection
+ @ stdcall -import DeleteFiber(ptr)
+ @ stdcall -import DeleteFileA(str)
+-# @ stub DeleteFileTransactedA
+-# @ stub DeleteFileTransactedW
++@ stdcall DeleteFileTransactedA(str ptr)
++@ stdcall DeleteFileTransactedW(wstr ptr)
+ @ stdcall -import DeleteFileW(wstr)
+ @ stdcall -import DeleteProcThreadAttributeList(ptr)
+ # @ stub DisableThreadProfiling
+@@ -487,8 +489,8 @@
+ @ stdcall -import FindFirstFileExW(wstr long ptr long ptr long)
+ # @ stub FindFirstFileNameTransactedW
+ # @ stub FindFirstFileNameW
+-# @ stub FindFirstFileTransactedA
+-# @ stub FindFirstFileTransactedW
++@ stdcall FindFirstFileTransactedA(str long ptr long ptr long ptr)
++@ stdcall FindFirstFileTransactedW(wstr long ptr long ptr long ptr)
+ @ stdcall -import FindFirstFileW(wstr ptr)
+ # @ stub FindFirstStreamTransactedW
+ @ stdcall -import FindFirstStreamW(wstr long ptr long)
+@@ -676,8 +678,8 @@
+ @ stdcall -import GetFileAttributesA(str)
+ @ stdcall -import GetFileAttributesExA(str long ptr)
+ @ stdcall -import GetFileAttributesExW(wstr long ptr)
+-# @ stub GetFileAttributesTransactedA
+-# @ stub GetFileAttributesTransactedW
++@ stdcall GetFileAttributesTransactedA(str long ptr ptr)
++@ stdcall GetFileAttributesTransactedW(wstr long ptr ptr)
+ @ stdcall -import GetFileAttributesW(wstr)
+ # @ stub GetFileBandwidthReservation
+ @ stdcall -import GetFileInformationByHandle(long ptr)
+@@ -1289,8 +1291,8 @@
+ @ stdcall -import ReplaceFile(wstr wstr wstr long ptr ptr) ReplaceFileW
+ @ stdcall ReplaceFileA(str str str long ptr ptr)
+ @ stdcall -import ReplaceFileW(wstr wstr wstr long ptr ptr)
+-# @ stub RemoveDirectoryTransactedA
+-# @ stub RemoveDirectoryTransactedW
++@ stdcall RemoveDirectoryTransactedA(str ptr)
++@ stdcall RemoveDirectoryTransactedW(wstr ptr)
+ @ stdcall -import RemoveDllDirectory(ptr)
+ # @ stub RemoveSecureMemoryCacheCallback
+ # @ stub ReplacePartitionUnit
+diff --git a/dlls/kernel32/path.c b/dlls/kernel32/path.c
+index 2dd3eac3c26..f916606ef13 100644
+--- a/dlls/kernel32/path.c
++++ b/dlls/kernel32/path.c
+@@ -158,6 +158,129 @@ BOOL WINAPI MoveFileTransactedW(const WCHAR *source, const WCHAR *dest, LPPROGRE
+     return FALSE;
+ }
+ 
++/*************************************************************************
++ *	CreateFileTransactedA   (KERNEL32.@)
++ */
++HANDLE WINAPI DECLSPEC_HOTPATCH CreateFileTransactedA( LPCSTR name, DWORD access, DWORD sharing,
++                                                       LPSECURITY_ATTRIBUTES sa, DWORD creation,
++                                                       DWORD attributes, HANDLE template,
++                                                       HANDLE transaction, PUSHORT pusMiniVersion,
++                                                       PVOID pExtendedParameter )
++{
++    FIXME( "(%s %lx %lx %p %lx %lx %p %p %p %p), semi-stub\n", debugstr_a(name), access, sharing, sa,
++           creation, attributes, template, transaction, pusMiniVersion, pExtendedParameter );
++
++    return CreateFileA( name, access, sharing, sa, creation, attributes, template );
++}
++
++/*************************************************************************
++ *	CreateFileTransactedW   (KERNEL32.@)
++ */
++HANDLE WINAPI DECLSPEC_HOTPATCH CreateFileTransactedW( LPCWSTR name, DWORD access, DWORD sharing,
++                                                       LPSECURITY_ATTRIBUTES sa, DWORD creation,
++                                                       DWORD attributes, HANDLE template, HANDLE transaction,
++                                                       PUSHORT pusMiniVersion, PVOID pExtendedParameter )
++{
++    FIXME( "(%s %lx %lx %p %lx %lx %p %p %p %p), semi-stub\n", debugstr_w(name), access, sharing, sa,
++           creation, attributes, template, transaction, pusMiniVersion, pExtendedParameter );
++
++    return CreateFileW( name, access, sharing, sa, creation, attributes, template );
++}
++
++/***********************************************************************
++ *	CreateDirectoryTransactedA   (KERNEL32.@)
++ */
++BOOL WINAPI DECLSPEC_HOTPATCH CreateDirectoryTransactedA(LPCSTR template, LPCSTR path, LPSECURITY_ATTRIBUTES sa, HANDLE hTransaction)
++{
++    FIXME("(%s %s %p %p), semi-stub\n", debugstr_a(template), debugstr_a(path), sa, hTransaction);
++    return CreateDirectoryExA(template, path, sa);
++}
++
++/***********************************************************************
++ *	CreateDirectoryTransactedW   (KERNEL32.@)
++ */
++BOOL WINAPI DECLSPEC_HOTPATCH CreateDirectoryTransactedW(LPCWSTR template, LPCWSTR path, LPSECURITY_ATTRIBUTES sa, HANDLE hTransaction)
++{
++    FIXME("(%s %s %p %p), semi-stub\n", debugstr_w(template), debugstr_w(path), sa, hTransaction);
++    return CreateDirectoryExW(template, path, sa);
++}
++
++/***********************************************************************
++ *	DeleteFileTransactedA   (KERNEL32.@)
++ */
++BOOL WINAPI DECLSPEC_HOTPATCH DeleteFileTransactedA(LPCSTR path, HANDLE hTransaction)
++{
++    FIXME("(%s %p): semi-stub\n", debugstr_a(path), hTransaction);
++    return DeleteFileA(path);
++}
++
++/***********************************************************************
++ *	DeleteFileTransactedW   (KERNEL32.@)
++ */
++BOOL WINAPI DECLSPEC_HOTPATCH DeleteFileTransactedW(LPCWSTR path, HANDLE hTransaction)
++{
++    FIXME("(%s %p): semi-stub\n", debugstr_w(path), hTransaction);
++    return DeleteFileW(path);
++}
++
++/******************************************************************************
++ *	FindFirstFileTransactedA   (KERNEL32.@)
++ */
++HANDLE WINAPI DECLSPEC_HOTPATCH FindFirstFileTransactedA(LPCSTR filename, FINDEX_INFO_LEVELS level,
++                                                  LPVOID data, FINDEX_SEARCH_OPS search_op,
++                                                  LPVOID filter, DWORD flags, HANDLE hTransaction)
++{
++    FIXME( "(%s %d %p %d %p %lx %p): semi-stub\n", debugstr_a(filename), level, data, search_op, filter, flags, hTransaction );
++    return FindFirstFileExA(filename, level, data, search_op, filter, flags);
++}
++
++/******************************************************************************
++ *	FindFirstFileTransactedW   (KERNEL32.@)
++ */
++HANDLE WINAPI DECLSPEC_HOTPATCH FindFirstFileTransactedW(LPCWSTR filename, FINDEX_INFO_LEVELS level,
++                                                  LPVOID data, FINDEX_SEARCH_OPS search_op,
++                                                  LPVOID filter, DWORD flags, HANDLE hTransaction)
++{
++    FIXME( "(%s %d %p %d %p %lx %p): semi-stub\n", debugstr_w(filename), level, data, search_op, filter, flags, hTransaction );
++    return FindFirstFileExW(filename, level, data, search_op, filter, flags);
++}
++
++/**************************************************************************
++ *	GetFileAttributesTransactedA   (KERNEL32.@)
++ */
++DWORD WINAPI DECLSPEC_HOTPATCH GetFileAttributesTransactedA(LPCSTR name, GET_FILEEX_INFO_LEVELS level, LPVOID ptr, HANDLE hTransaction)
++{
++    FIXME("(%s %p): semi-stub\n", debugstr_a(name), hTransaction);
++    return GetFileAttributesExA(name, level, ptr);
++}
++
++/**************************************************************************
++ *	GetFileAttributesTransactedW   (KERNEL32.@)
++ */
++DWORD WINAPI DECLSPEC_HOTPATCH GetFileAttributesTransactedW(LPCWSTR name, GET_FILEEX_INFO_LEVELS level, void *ptr, HANDLE hTransaction)
++{
++    FIXME("(%s %p): semi-stub\n", debugstr_w(name), hTransaction);
++    return GetFileAttributesExW(name, level, ptr);
++}
++
++/***********************************************************************
++ *	RemoveDirectoryTransactedA   (KERNEL32.@)
++ */
++BOOL WINAPI DECLSPEC_HOTPATCH RemoveDirectoryTransactedA( LPCSTR path, HANDLE hTransaction )
++{
++    FIXME("(%s %p), semi-stub\n", debugstr_a(path), hTransaction);
++    return RemoveDirectoryA(path);
++}
++
++/***********************************************************************
++ *	RemoveDirectoryTransactedW   (KERNEL32.@)
++ */
++BOOL WINAPI DECLSPEC_HOTPATCH RemoveDirectoryTransactedW( LPCWSTR path, HANDLE hTransaction )
++{
++    FIXME("(%s %p), semi-stub\n", debugstr_w(path), hTransaction);
++    return RemoveDirectoryW(path);
++}
++
+ /**************************************************************************
+  *           MoveFileWithProgressA   (KERNEL32.@)
+  */
+-- 
+GitLab
+
+From: "Bernhard Übelacker" <bernhardu@mailbox.org>
+Subject: ntoskrnl: Free memory before pointer gets set to NULL.
+Message-Id: <20220316100105.249851-1-bernhardu@mailbox.org>
+Date: Wed, 16 Mar 2022 11:01:05 +0100
+
+Wine-Bug: https://bugs.winehq.org/show_bug.cgi?id=52322
+Signed-off-by: Bernhard Übelacker <bernhardu@mailbox.org>
+---
+ dlls/ntoskrnl.exe/ntoskrnl.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl.c b/dlls/ntoskrnl.exe/ntoskrnl.c
+index 11111111111..11111111111 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl.c
++++ b/dlls/ntoskrnl.exe/ntoskrnl.c
+@@ -832,6 +832,7 @@ static NTSTATUS dispatch_volume( struct dispatch_context *context )
+     irp->Tail.Overlay.Thread = (PETHREAD)KeGetCurrentThread();
+     irp->Tail.Overlay.OriginalFileObject = file;
+     irp->RequestorMode = UserMode;
++    HeapFree( GetProcessHeap(), 0, context->in_buff );
+     context->in_buff = NULL;
+ 
+     irp->Flags |= IRP_DEALLOCATE_BUFFER;  /* deallocate out_buff */
+@@ -1044,6 +1045,7 @@ NTSTATUS CDECL wine_ntoskrnl_main_loop( HANDLE stop_event )
+                 if (ret == WAIT_OBJECT_0)
+                 {
+                     HeapFree( GetProcessHeap(), 0, context.in_buff );
++                    context.in_buff = NULL;
+                     status = STATUS_SUCCESS;
+                     goto done;
+                 }
+
+-- 
+2.37.2
+
+From dce43869b794bb4817a6866a6e0d1a280b73462f Mon Sep 17 00:00:00 2001
+From: Etaash Mathamsetty <etaash.mathamsetty@gmail.com>
+Date: Sun, 11 Sep 2022 21:18:15 -0400
+Subject: [PATCH] ntoskrnl: MmAllocateContiguousMemorySpecifyCache semi-stub
+
+---
+ dlls/ntoskrnl.exe/ntoskrnl.c | 18 ++++++++++++++++--
+ 1 file changed, 16 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl.c b/dlls/ntoskrnl.exe/ntoskrnl.c
+index 031e9900544..69b91961700 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl.c
++++ b/dlls/ntoskrnl.exe/ntoskrnl.c
+@@ -2777,8 +2777,22 @@ PVOID WINAPI MmAllocateContiguousMemorySpecifyCache( SIZE_T size,
+                                                      PHYSICAL_ADDRESS BoundaryAddressMultiple,
+                                                      MEMORY_CACHING_TYPE CacheType )
+ {
+-    FIXME(": stub\n");
+-    return NULL;
++    DWORD protect = PAGE_READWRITE;
++    FIXME( ": ( %Iu %s %s %s %x ) semi-stub\n", size, wine_dbgstr_longlong(lowest_valid_address.QuadPart),
++                                            wine_dbgstr_longlong(highest_valid_address.QuadPart),
++                                            wine_dbgstr_longlong(BoundaryAddressMultiple.QuadPart), CacheType );
++    switch (CacheType)
++    {
++        case MmNonCached:
++            protect |= PAGE_NOCACHE;
++            break;
++        case MmWriteCombined:
++            protect |= PAGE_WRITECOMBINE;
++            break;
++        default:
++            break;
++    }
++    return VirtualAlloc( NULL, size, MEM_RESERVE|MEM_COMMIT, protect );
+ }
+ 
+ /***********************************************************************
+-- 
+GitLab
+
+From c03bdc8c9cb38d7febcb955f2d1546b350195d94 Mon Sep 17 00:00:00 2001
+From: Etaash Mathamsetty <etaash.mathamsetty@gmail.com>
+Date: Tue, 13 Sep 2022 15:15:01 -0400
+Subject: [PATCH 1/2] ntoskrnl.exe: Add KeRegisterProcessorChangeCallback stub.
+
+---
+ dlls/ntoskrnl.exe/ntoskrnl.c        |  9 +++++++++
+ dlls/ntoskrnl.exe/ntoskrnl.exe.spec |  1 +
+ include/ddk/wdm.h                   | 16 ++++++++++++++++
+ 3 files changed, 26 insertions(+)
+
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl.c b/dlls/ntoskrnl.exe/ntoskrnl.c
+index 66c39996d59..b3fd6d2c274 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl.c
++++ b/dlls/ntoskrnl.exe/ntoskrnl.c
+@@ -3653,6 +3653,15 @@ NTSTATUS WINAPI CmUnRegisterCallback(LARGE_INTEGER cookie)
+     return STATUS_NOT_IMPLEMENTED;
+ }
+ 
++/***********************************************************************
++ *           KeRegisterProcessorChangeCallback  (NTOSKRNL.EXE.@)
++ */
++void * WINAPI KeRegisterProcessorChangeCallback(PROCESSOR_CALLBACK_FUNCTION *function, void *context, ULONG flags)
++{
++    FIXME("(%p %p %lu) stub\n", function, context, flags);
++    return (void *)0xdeadbeef;
++}
++
+ /***********************************************************************
+  *           IoAttachDevice  (NTOSKRNL.EXE.@)
+  */
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl.exe.spec b/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
+index 0a484829ca3..97004c4f1fc 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
++++ b/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
+@@ -620,6 +620,7 @@
+ @ stub KeReadStateTimer
+ @ stub KeRegisterBugCheckCallback
+ @ stub KeRegisterBugCheckReasonCallback
++@ stdcall KeRegisterProcessorChangeCallback(ptr ptr long)
+ @ stub KeReleaseInterruptSpinLock
+ @ stub KeReleaseMutant
+ @ stdcall KeReleaseMutex(ptr long)
+diff --git a/include/ddk/wdm.h b/include/ddk/wdm.h
+index 321b07b84fa..6e627f7b1f9 100644
+--- a/include/ddk/wdm.h
++++ b/include/ddk/wdm.h
+@@ -1599,6 +1599,22 @@ typedef enum _WORK_QUEUE_TYPE {
+ 
+ typedef void (WINAPI *PIO_WORKITEM_ROUTINE)(PDEVICE_OBJECT,void*);
+ 
++typedef enum _KE_PROCESSOR_CHANGE_NOTIFY_STATE {
++  KeProcessorAddStartNotify = 0,
++  KeProcessorAddCompleteNotify,
++  KeProcessorAddFailureNotify
++} KE_PROCESSOR_CHANGE_NOTIFY_STATE;
++
++typedef struct _KE_PROCESSOR_CHANGE_NOTIFY_CONTEXT {
++  KE_PROCESSOR_CHANGE_NOTIFY_STATE State;
++  ULONG                            NtNumber;
++  NTSTATUS                         Status;
++  PROCESSOR_NUMBER                 ProcNumber;
++} KE_PROCESSOR_CHANGE_NOTIFY_CONTEXT, *PKE_PROCESSOR_CHANGE_NOTIFY_CONTEXT;
++
++typedef void (WINAPI PROCESSOR_CALLBACK_FUNCTION)(PVOID,PKE_PROCESSOR_CHANGE_NOTIFY_CONTEXT,NTSTATUS *);
++typedef PROCESSOR_CALLBACK_FUNCTION *PPROCESSOR_CALLBACK_FUNCTION;
++
+ NTSTATUS WINAPI ObCloseHandle(IN HANDLE handle);
+ 
+ #ifdef NONAMELESSUNION
+-- 
+GitLab
+
+From df5e3df0748b61bb9a7ffca4b2ee8c9a5887476e Mon Sep 17 00:00:00 2001
+From: Etaash Mathamsetty <etaash.mathamsetty@gmail.com>
+Date: Fri, 21 Oct 2022 15:35:16 -0400
+Subject: [PATCH] ntoskrnl.exe: add KeNumberProcessors export.
+
+fix various issues with original implementation
+
+use winxp+ behavior
+
+add tests
+---
+ dlls/ntoskrnl.exe/ntoskrnl.c        | 3 +++
+ dlls/ntoskrnl.exe/ntoskrnl.exe.spec | 2 +-
+ dlls/ntoskrnl.exe/tests/driver.c    | 9 +++++++++
+ 3 files changed, 13 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl.c b/dlls/ntoskrnl.exe/ntoskrnl.c
+index 9320e02dca9..ae508a1a432 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl.c
++++ b/dlls/ntoskrnl.exe/ntoskrnl.c
+@@ -2595,6 +2595,8 @@ KAFFINITY WINAPI KeQueryActiveProcessors( void )
+     return affinity_mask;
+ }
+ 
++volatile CCHAR KeNumberProcessors = 0;
++
+ ULONG WINAPI KeQueryActiveProcessorCountEx(USHORT group_number)
+ {
+     TRACE("group_number %u.\n", group_number);
+@@ -4544,6 +4546,7 @@ BOOL WINAPI DllMain( HINSTANCE inst, DWORD reason, LPVOID reserved )
+         NtBuildNumber = NtCurrentTeb()->Peb->OSBuildNumber;
+         ntoskrnl_heap = HeapCreate( HEAP_CREATE_ENABLE_EXECUTE, 0, 0 );
+         dpc_call_tls_index = TlsAlloc();
++        KeNumberProcessors = (CCHAR)min( 64UL, KeQueryActiveProcessorCountEx(ALL_PROCESSOR_GROUPS) );
+         LdrRegisterDllNotification( 0, ldr_notify_callback, NULL, &ldr_notify_cookie );
+         break;
+     case DLL_PROCESS_DETACH:
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl.exe.spec b/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
+index 8f8edcac7a0..322ed5329de 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
++++ b/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
+@@ -593,7 +593,7 @@
+ @ stdcall KeLeaveCriticalRegion()
+ @ stub KeLoaderBlock
+ @ stdcall -arch=x86_64 KeLowerIrql(long)
+-@ stub KeNumberProcessors
++@ extern KeNumberProcessors
+ @ stub KeProfileInterrupt
+ @ stub KeProfileInterruptWithSource
+ @ stub KePulseEvent
+diff --git a/dlls/ntoskrnl.exe/tests/driver.c b/dlls/ntoskrnl.exe/tests/driver.c
+index d293889c823..a0a8741f744 100644
+--- a/dlls/ntoskrnl.exe/tests/driver.c
++++ b/dlls/ntoskrnl.exe/tests/driver.c
+@@ -2003,6 +2003,7 @@ static void test_affinity(void)
+     void (WINAPI *pKeRevertToUserAffinityThreadEx)(KAFFINITY affinity);
+     ULONG (WINAPI *pKeQueryActiveProcessorCountEx)(USHORT);
+     KAFFINITY (WINAPI *pKeQueryActiveProcessors)(void);
++    CCHAR *pKeNumberProcessors;
+     KAFFINITY mask, mask_all_cpus;
+     ULONG cpu_count, count;
+ 
+@@ -2022,6 +2023,9 @@ static void test_affinity(void)
+     pKeRevertToUserAffinityThreadEx = get_proc_address("KeRevertToUserAffinityThreadEx");
+     ok(!!pKeRevertToUserAffinityThreadEx, "KeRevertToUserAffinityThreadEx is not available.\n");
+ 
++    pKeNumberProcessors = get_proc_address("KeNumberProcessors");
++    ok(!!pKeNumberProcessors, "KeNumberProcessors is not available.\n");
++
+     count = pKeQueryActiveProcessorCountEx(1);
+     ok(!count, "Got unexpected count %lu.\n", count);
+ 
+@@ -2031,6 +2035,11 @@ static void test_affinity(void)
+     count = pKeQueryActiveProcessorCountEx(ALL_PROCESSOR_GROUPS);
+     ok(count == cpu_count, "Got unexpected count %lu.\n", count);
+ 
++    if(count >= 64)
++        ok(*pKeNumberProcessors == 64, "Got unexpected count %lu.\n", count);
++    else
++        ok(*pKeNumberProcessors == cpu_count, "Got unexpected count %lu.\n", count);
++
+     if (cpu_count >= 8 * sizeof(KAFFINITY))
+         mask_all_cpus = ~(KAFFINITY)0;
+     else
+-- 
+GitLab
+
+
+From 8bf0d4bee1ecf9ac43b0d9180ff83b2d6fcbfa5c Mon Sep 17 00:00:00 2001
+From: Etaash Mathamsetty <etaash.mathamsetty@gmail.com>
+Date: Tue, 13 Sep 2022 17:47:55 -0400
+Subject: [PATCH 2/2] ntoskrnl.exe: Add KeDeregisterProcessorChangeCallback
+ stub.
+
+---
+ dlls/ntoskrnl.exe/ntoskrnl.c        | 8 ++++++++
+ dlls/ntoskrnl.exe/ntoskrnl.exe.spec | 1 +
+ 2 files changed, 9 insertions(+)
+
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl.c b/dlls/ntoskrnl.exe/ntoskrnl.c
+index b3fd6d2c274..f01697ec242 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl.c
++++ b/dlls/ntoskrnl.exe/ntoskrnl.c
+@@ -3662,6 +3662,14 @@ void * WINAPI KeRegisterProcessorChangeCallback(PROCESSOR_CALLBACK_FUNCTION *fun
+     return (void *)0xdeadbeef;
+ }
+ 
++/***********************************************************************
++ *           KeDeregisterProcessorChangeCallback  (NTOSKRNL.EXE.@)
++ */
++void WINAPI KeDeregisterProcessorChangeCallback(void *handle)
++{
++    FIXME("%p stub\n", handle);
++}
++
+ /***********************************************************************
+  *           IoAttachDevice  (NTOSKRNL.EXE.@)
+  */
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl.exe.spec b/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
+index 97004c4f1fc..d670afcd081 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
++++ b/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
+@@ -621,6 +621,7 @@
+ @ stub KeRegisterBugCheckCallback
+ @ stub KeRegisterBugCheckReasonCallback
+ @ stdcall KeRegisterProcessorChangeCallback(ptr ptr long)
++@ stdcall KeDeregisterProcessorChangeCallback(ptr)
+ @ stub KeReleaseInterruptSpinLock
+ @ stub KeReleaseMutant
+ @ stdcall KeReleaseMutex(ptr long)
+-- 
+GitLab
+
+From cd69c35af191fcaf4a8dc69e062e673c4817829a Mon Sep 17 00:00:00 2001
+From: Etaash Mathamsetty <etaash.mathamsetty@gmail.com>
+Date: Wed, 16 Nov 2022 16:05:32 -0500
+Subject: [PATCH] ntoskrnl.exe: Add semi-stub for KeIpiGenericCall.
+
+---
+ dlls/ntoskrnl.exe/ntoskrnl.c        | 7 +++++++
+ dlls/ntoskrnl.exe/ntoskrnl.exe.spec | 1 +
+ include/ddk/wdm.h                   | 3 +++
+ 3 files changed, 11 insertions(+)
+
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl.c b/dlls/ntoskrnl.exe/ntoskrnl.c
+index 66c39996d59..a8329681522 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl.c
++++ b/dlls/ntoskrnl.exe/ntoskrnl.c
+@@ -4331,6 +4331,13 @@ BOOLEAN WINAPI KdRefreshDebuggerNotPresent(void)
+     return !KdDebuggerEnabled;
+ }
+ 
++ULONG_PTR WINAPI KeIpiGenericCall(KIPI_BROADCAST_WORKER *worker, ULONG_PTR context)
++{
++    FIXME("semi-stub: %p %Ix\n", worker, context);
++
++    return worker(context);
++}
++
+ struct generic_call_dpc_context
+ {
+     DEFERRED_REVERSE_BARRIER *reverse_barrier;
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl.exe.spec b/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
+index 0a484829ca3..89c275984c1 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
++++ b/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
+@@ -59,6 +59,7 @@
+ @ stub KeSetTimeUpdateNotifyRoutine
+ @ stub KefAcquireSpinLockAtDpcLevel
+ @ stub KefReleaseSpinLockFromDpcLevel
++@ stdcall KeIpiGenericCall(ptr long)
+ @ stdcall KeGenericCallDpc(ptr ptr)
+ @ stdcall KeSignalCallDpcDone(ptr)
+ @ stdcall KeSignalCallDpcSynchronize(ptr)
+diff --git a/include/ddk/wdm.h b/include/ddk/wdm.h
+index 321b07b84fa..aa2989074ac 100644
+--- a/include/ddk/wdm.h
++++ b/include/ddk/wdm.h
+@@ -1599,6 +1599,9 @@ typedef enum _WORK_QUEUE_TYPE {
+ 
+ typedef void (WINAPI *PIO_WORKITEM_ROUTINE)(PDEVICE_OBJECT,void*);
+ 
++typedef ULONG_PTR (WINAPI KIPI_BROADCAST_WORKER)(ULONG_PTR);
++typedef KIPI_BROADCAST_WORKER *PKIPI_BROADCAST_WORKER;
++
+ NTSTATUS WINAPI ObCloseHandle(IN HANDLE handle);
+ 
+ #ifdef NONAMELESSUNION
+-- 
+GitLab
+
+
+From f37c1d491d4da9f97a0634e0bb4944463d804d12 Mon Sep 17 00:00:00 2001
+From: Etaash Mathamsetty <etaash.mathamsetty@gmail.com>
+Date: Sun, 6 Nov 2022 19:37:33 -0500
+Subject: [PATCH] ntoskrnl.exe: Implement ExInterlockedInsertTailList.
+
+---
+ dlls/ntoskrnl.exe/ntoskrnl.exe.spec |  2 +-
+ dlls/ntoskrnl.exe/sync.c            | 28 ++++++++++++++++++++++++++++
+ 2 files changed, 29 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl.exe.spec b/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
+index 0a484829ca3..23770e54367 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
++++ b/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
+@@ -167,7 +167,7 @@
+ @ stub ExInterlockedExtendZone
+ @ stub ExInterlockedIncrementLong
+ @ stub ExInterlockedInsertHeadList
+-@ stub ExInterlockedInsertTailList
++@ stdcall ExInterlockedInsertTailList(ptr ptr ptr)
+ @ stub ExInterlockedPopEntryList
+ @ stub ExInterlockedPushEntryList
+ @ stdcall ExInterlockedRemoveHeadList(ptr ptr)
+diff --git a/dlls/ntoskrnl.exe/sync.c b/dlls/ntoskrnl.exe/sync.c
+index d9b5726b920..c83372401da 100644
+--- a/dlls/ntoskrnl.exe/sync.c
++++ b/dlls/ntoskrnl.exe/sync.c
+@@ -778,6 +778,34 @@ LIST_ENTRY * WINAPI ExInterlockedRemoveHeadList( LIST_ENTRY *list, KSPIN_LOCK *l
+     return ret;
+ }
+ 
++/***********************************************************************
++ *           ExInterlockedInsertTailList   (NTOSKRNL.EXE.@)
++ */
++LIST_ENTRY * WINAPI ExInterlockedInsertTailList( LIST_ENTRY *head, LIST_ENTRY *entry, KSPIN_LOCK *lock )
++{
++    LIST_ENTRY *ret;
++    KIRQL irql;
++
++    TRACE( "(%p %p %p)\n", head, entry, lock );
++
++    if ( !head || !entry || !lock )
++        return NULL;
++
++    KeAcquireSpinLock( lock, &irql );
++
++    if ( !head->Blink )
++    {
++        KeReleaseSpinLock( lock, irql );
++        return NULL;
++    }
++
++    ret = head->Blink;
++    InsertTailList( head, entry );
++
++    KeReleaseSpinLock( lock, irql );
++
++    return ret;
++}
+ 
+ /***********************************************************************
+  *           InterlockedPopEntrySList   (NTOSKRNL.EXE.@)
+-- 
+GitLab
+
+From f538edc417b57073576c33e3aa10e0dac3956c3b Mon Sep 17 00:00:00 2001
+From: Etaash Mathamsetty <etaash.mathamsetty@gmail.com>
+Date: Sat, 26 Nov 2022 10:12:35 -0500
+Subject: [PATCH] ntoskrnl.exe: Fake Success for MmMapIoSpace.
+
+---
+ dlls/ntoskrnl.exe/ntoskrnl.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl.c b/dlls/ntoskrnl.exe/ntoskrnl.c
+index ce92f6805ab..2e76ffebc48 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl.c
++++ b/dlls/ntoskrnl.exe/ntoskrnl.c
+@@ -2876,7 +2876,7 @@ PHYSICAL_ADDRESS WINAPI MmGetPhysicalAddress(void *virtual_address)
+ PVOID WINAPI MmMapIoSpace( PHYSICAL_ADDRESS PhysicalAddress, DWORD NumberOfBytes, DWORD CacheType )
+ {
+     FIXME( "stub: 0x%08lx%08lx, %ld, %ld\n", PhysicalAddress.u.HighPart, PhysicalAddress.u.LowPart, NumberOfBytes, CacheType );
+-    return NULL;
++    return (PVOID)PhysicalAddress.QuadPart;
+ }
+ 
+ 
+-- 
+GitLab
+
+From 9a61a0dfbd33a8117eba7925c49e1c702d8339a4 Mon Sep 17 00:00:00 2001
+From: Torge Matthies <tmatthies@codeweavers.com>
+Date: Sun, 11 Dec 2022 10:46:29 +0100
+Subject: [PATCH] ntdll: Make sure xmm6-xmm15 are always restored in unix call
+ dispatcher.
+
+Signed-off-by: Torge Matthies <tmatthies@codeweavers.com>
+---
+ dlls/ntdll/unix/signal_x86_64.c | 16 +++++++++-------
+ 1 file changed, 9 insertions(+), 7 deletions(-)
+
+diff --git a/dlls/ntdll/unix/signal_x86_64.c b/dlls/ntdll/unix/signal_x86_64.c
+index fa8660ca914..16124ac421f 100644
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -2913,14 +2913,8 @@ __ASM_GLOBAL_FUNC( __wine_unix_call_dispatcher,
+                    "movq %r8,%rdi\n\t"             /* args */
+                    "callq *(%r10,%rdx,8)\n\t"
+                    "movq %rsp,%rcx\n"
+-                   "testl $0xffff,0x94(%rcx)\n\t"  /* frame->restore_flags */
++                   "testl $0x8,0x94(%rcx)\n\t"     /* frame->restore_flags */
+                    "jnz .L__wine_syscall_dispatcher_return\n\t"
+-#ifdef __linux__
+-                   "testl $12,%r14d\n\t"           /* SYSCALL_HAVE_PTHREAD_TEB | SYSCALL_HAVE_WRFSGSBASE */
+-                   "jz 1f\n\t"
+-                   "movw 0x7e(%rcx),%fs\n"
+-                   "1:\n\t"
+-#endif
+                    "movdqa 0x1c0(%rcx),%xmm6\n\t"
+                    "movdqa 0x1d0(%rcx),%xmm7\n\t"
+                    "movdqa 0x1e0(%rcx),%xmm8\n\t"
+@@ -2931,6 +2925,14 @@ __ASM_GLOBAL_FUNC( __wine_unix_call_dispatcher,
+                    "movdqa 0x230(%rcx),%xmm13\n\t"
+                    "movdqa 0x240(%rcx),%xmm14\n\t"
+                    "movdqa 0x250(%rcx),%xmm15\n\t"
++                   "testl $0xffff,0x94(%rcx)\n\t"  /* frame->restore_flags */
++                   "jnz .L__wine_syscall_dispatcher_return\n\t"
++#ifdef __linux__
++                   "testl $12,%r14d\n\t"           /* SYSCALL_HAVE_PTHREAD_TEB | SYSCALL_HAVE_WRFSGSBASE */
++                   "jz 1f\n\t"
++                   "movw 0x7e(%rcx),%fs\n"
++                   "1:\n\t"
++#endif
+                    "movq 0x60(%rcx),%r14\n\t"
+                    __ASM_CFI(".cfi_same_value r14\n\t")
+                    "movq 0x28(%rcx),%rdi\n\t"
+-- 
+GitLab
+
+From: "Bernhard Übelacker" <bernhardu@mailbox.org>
+Subject: [PATCH v2] msxml3: Fix crash with property xmlns without prefix.
+Message-Id: <20210909094016.3840073-1-bernhardu@mailbox.org>
+Date: Thu,  9 Sep 2021 11:40:16 +0200
+
+Wine-Bug: https://bugs.winehq.org/show_bug.cgi?id=50475
+Signed-off-by: Bernhard Übelacker <bernhardu@mailbox.org>
+---
+Changes since v1:
+- Move test into existing function test_namespaces_as_attributes.
+---
+ dlls/msxml3/element.c      |  5 ++++-
+ dlls/msxml3/tests/domdoc.c | 21 +++++++++++++++++++++
+ 2 files changed, 25 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/msxml3/element.c b/dlls/msxml3/element.c
+index 11111111111..11111111111 100644
+--- a/dlls/msxml3/element.c
++++ b/dlls/msxml3/element.c
+@@ -1831,7 +1831,10 @@ static HRESULT domelem_get_item(const xmlNodePtr node, LONG index, IXMLDOMNode *
+     if (!xmlns)
+         return E_OUTOFMEMORY;
+ 
+-    curr = xmlNewNsProp(NULL, xmlns, ns->prefix, ns->href);
++    if (ns->prefix)
++        curr = xmlNewNsProp(NULL, xmlns, ns->prefix, ns->href);
++    else
++        curr = xmlNewProp(NULL, xmlns->prefix, ns->href);
+     if (!curr) {
+         xmlFreeNs(xmlns);
+         return E_OUTOFMEMORY;
+diff --git a/dlls/msxml3/tests/domdoc.c b/dlls/msxml3/tests/domdoc.c
+index 11111111111..11111111111 100644
+--- a/dlls/msxml3/tests/domdoc.c
++++ b/dlls/msxml3/tests/domdoc.c
+@@ -13700,6 +13700,15 @@ static void test_namespaces_as_attributes(void)
+             { "" },         /* namespaceURI */
+             { "nshref" },   /* text */
+         },
++        /* xmlns without prefix */
++        {
++            "<a xmlns=\"nshref\" />", 1,
++            { "xmlns" },    /* nodeName */
++            { NULL },       /* prefix */
++            { "xmlns" },    /* baseName */
++            { NULL },       /* namespaceURI */
++            { "nshref" },   /* text */
++        },
+         /* no properties or namespaces */
+         {
+             "<a />", 0,
+@@ -13736,6 +13745,18 @@ static void test_namespaces_as_attributes(void)
+             hr = IXMLDOMDocument_selectSingleNode(doc, _bstr_("a"), &node);
+             ok(SUCCEEDED(hr), "Failed to select a node, hr %#lx.\n", hr);
+ 
++            if (!node)
++            {
++                IXMLDOMNodeList *node_list;
++                hr = IXMLDOMDocument_get_childNodes(doc, &node_list);
++                ok(hr == S_OK, "Failed to get_childNodes, hr %#x.\n", hr);
++
++                hr = IXMLDOMNodeList_get_item(node_list, 0, &node);
++                ok(hr == S_OK, "Failed to get_item, hr %#x.\n", hr);
++
++                IXMLDOMNodeList_Release(node_list);
++            }
++
+             hr = IXMLDOMNode_get_attributes(node, &map);
+             ok(SUCCEEDED(hr), "Failed to get attributes, hr %#lx.\n", hr);
+ 
+
+-- 
+2.37.2
+
+                From: Brendan Shanks <bshanks@codeweavers.com>
+Subject: [PATCH] setupapi: Avoid race conditions with devnode_table.
+Message-Id: <20220208193303.63397-1-bshanks@codeweavers.com>
+Date: Tue,  8 Feb 2022 11:33:03 -0800
+
+Signed-off-by: Brendan Shanks <bshanks@codeweavers.com>
+---
+
+Fixes a crash where two threads calling SetupDiGetClassDevs() would end
+up in alloc_devnode() at the same time. One thread would start iterating
+through the table after devnode_table_size was set but before
+devnode_table was allocated, and crash.
+
+ dlls/setupapi/devinst.c | 28 +++++++++++++++++++++++++---
+ 1 file changed, 25 insertions(+), 3 deletions(-)
+
+diff --git a/dlls/setupapi/devinst.c b/dlls/setupapi/devinst.c
+index 11111111111..11111111111 100644
+--- a/dlls/setupapi/devinst.c
++++ b/dlls/setupapi/devinst.c
+@@ -234,11 +234,21 @@ static inline void copy_device_iface_data(SP_DEVICE_INTERFACE_DATA *data,
+ 
+ static struct device **devnode_table;
+ static unsigned int devnode_table_size;
++static CRITICAL_SECTION devnode_table_cs;
++static CRITICAL_SECTION_DEBUG critsect_debug =
++{
++    0, 0, &devnode_table_cs,
++    { &critsect_debug.ProcessLocksList, &critsect_debug.ProcessLocksList },
++    0, 0, { (DWORD_PTR)(__FILE__ ": devnode_table_cs") }
++};
++static CRITICAL_SECTION devnode_table_cs = { &critsect_debug, -1, 0, 0, 0, 0 };
+ 
+ static DEVINST alloc_devnode(struct device *device)
+ {
+     unsigned int i;
+ 
++    EnterCriticalSection(&devnode_table_cs);
++
+     for (i = 0; i < devnode_table_size; ++i)
+     {
+         if (!devnode_table[i])
+@@ -261,21 +271,33 @@ static DEVINST alloc_devnode(struct device *device)
+     }
+ 
+     devnode_table[i] = device;
++
++    LeaveCriticalSection(&devnode_table_cs);
++
+     return i;
+ }
+ 
+ static void free_devnode(DEVINST devnode)
+ {
++    EnterCriticalSection(&devnode_table_cs);
+     devnode_table[devnode] = NULL;
++    LeaveCriticalSection(&devnode_table_cs);
+ }
+ 
+ static struct device *get_devnode_device(DEVINST devnode)
+ {
++    struct device *device = NULL;
++
++    EnterCriticalSection(&devnode_table_cs);
++
+     if (devnode < devnode_table_size)
+-        return devnode_table[devnode];
++        device = devnode_table[devnode];
++    else
++        WARN("device node %lu not found\n", devnode);
+ 
+-    WARN("device node %lu not found\n", devnode);
+-    return NULL;
++    LeaveCriticalSection(&devnode_table_cs);
++
++    return device;
+ }
+ 
+ static void SETUPDI_GuidToString(const GUID *guid, LPWSTR guidStr)
+
+-- 
+2.37.2
+
+From: Jinoh Kang <jinoh.kang.kr@gmail.com>
+Subject: [PATCH] ntdll: Map ETXTBSY to STATUS_SHARING_VIOLATION.
+Message-Id: <88fe4a89-c262-bf66-5998-a9a3d0163e60@gmail.com>
+Date: Tue, 8 Feb 2022 20:57:44 +0900
+
+This complements commit c75edd04c2c (server: Map ETXTBSY to
+STATUS_SHARING_VIOLATION., 2007-09-11).
+
+Signed-off-by: Jinoh Kang <jinoh.kang.kr@gmail.com>
+---
+ dlls/ntdll/unix/file.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/dlls/ntdll/unix/file.c b/dlls/ntdll/unix/file.c
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/unix/file.c
++++ b/dlls/ntdll/unix/file.c
+@@ -362,6 +362,7 @@ NTSTATUS errno_to_status( int err )
+     TRACE( "errno = %d\n", err );
+     switch (err)
+     {
++    case ETXTBSY:
+     case EAGAIN:    return STATUS_SHARING_VIOLATION;
+     case EBADF:     return STATUS_INVALID_HANDLE;
+     case EBUSY:     return STATUS_DEVICE_BUSY;
+
+-- 
+2.37.2
+
+From: Yutao Meng <mengyutao@uniontech.com>
+Subject: [PATCH] winex11.drv: Fix crash when ctx is NULL in glxdrv_wglSwapBuffers().
+Message-Id: <20220308085704.12679-1-mengyutao@uniontech.com>
+Date: Tue,  8 Mar 2022 16:57:04 +0800
+
+The variable ctx can be NULL, and it is checked before every sync_context() function call. However, it is not checked in the ExtEscape() function call in which it is trying to get the hdc member variable of ctx.
+
+Signed-off-by: Yutao Meng <mengyutao@uniontech.com>
+---
+ dlls/winex11.drv/opengl.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/dlls/winex11.drv/opengl.c b/dlls/winex11.drv/opengl.c
+index 11111111111..11111111111 100644
+--- a/dlls/winex11.drv/opengl.c
++++ b/dlls/winex11.drv/opengl.c
+@@ -3516,7 +3516,7 @@ static BOOL WINAPI glxdrv_wglSwapBuffers( HDC hdc )
+     update_window_surface( gl, hwnd );
+     release_gl_drawable( gl );
+ 
+-    if (escape.drawable)
++    if (ctx && escape.drawable)
+         NtGdiExtEscape( ctx->hdc, NULL, 0, X11DRV_ESCAPE, sizeof(escape), (LPSTR)&escape, 0, NULL );
+     return TRUE;
+ }
+
+-- 
+2.37.2
+
