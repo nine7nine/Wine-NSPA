@@ -6,6 +6,12 @@
 __Wine-NSPA Wiki;__ https://github.com/nine7nine/Wine-NSPA/wiki
 _________________________
 
+### IMPORTANT:
+
+ - While I have begun Wine-NSPA-8.0 development: I Do NOT recommend using or building Wine-NSPA-devel. It's highly experiemental and there are some issues with Upstream Wine that need to be addressed (some really annoying bugs/instability caused by upstream). I expect now that the 'Feature Freeze' has begun, we should start seeing some of the bugs / regressions getting fixed, but it'll take a bit of time.
+
+ -  Please use Wine-NSPA-7.5, it is rather stable and works well. I will eventually promote / replace 7.5, when 8.0 is ready.
+
 ### Preface:
 
 Wine-NSPA focuses on the integration of performance enhancements and RT related features that help proaudio apps run better. Currently, Fsync/futex_waitv is the prefered method for improving synchronization primitives support, which requires kernel-level support (linux-5.16+). I have implemented improved Scheduling and RT support via out-of-tree patchwork, and my own modifications to Wine. This fork also integrates the out-of-tree Wineserver Shared Memory patchset, a Multi-threaded Wineserver implementation (shmem per Thread patch), the Wine Low Fragmentation Heap patchwork, and a number of other out-of-tree patchsets. Some of these other features do require kernel-level support. (but Wine-NSPA will work without them too).
