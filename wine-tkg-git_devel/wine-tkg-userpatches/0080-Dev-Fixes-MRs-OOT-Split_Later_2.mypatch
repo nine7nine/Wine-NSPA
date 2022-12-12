@@ -696,7 +696,8 @@ index d9b5726b920..c83372401da 100644
 -- 
 GitLab
 
-From f538edc417b57073576c33e3aa10e0dac3956c3b Mon Sep 17 00:00:00 2001
+
+From a4ae7fce925d7da3105610ad24f2ca709c8663fa Mon Sep 17 00:00:00 2001
 From: Etaash Mathamsetty <etaash.mathamsetty@gmail.com>
 Date: Sat, 26 Nov 2022 10:12:35 -0500
 Subject: [PATCH] ntoskrnl.exe: Fake Success for MmMapIoSpace.
@@ -706,7 +707,7 @@ Subject: [PATCH] ntoskrnl.exe: Fake Success for MmMapIoSpace.
  1 file changed, 1 insertion(+), 1 deletion(-)
 
 diff --git a/dlls/ntoskrnl.exe/ntoskrnl.c b/dlls/ntoskrnl.exe/ntoskrnl.c
-index ce92f6805ab..2e76ffebc48 100644
+index ce92f6805ab..9f158d514c0 100644
 --- a/dlls/ntoskrnl.exe/ntoskrnl.c
 +++ b/dlls/ntoskrnl.exe/ntoskrnl.c
 @@ -2876,7 +2876,7 @@ PHYSICAL_ADDRESS WINAPI MmGetPhysicalAddress(void *virtual_address)
@@ -714,12 +715,101 @@ index ce92f6805ab..2e76ffebc48 100644
  {
      FIXME( "stub: 0x%08lx%08lx, %ld, %ld\n", PhysicalAddress.u.HighPart, PhysicalAddress.u.LowPart, NumberOfBytes, CacheType );
 -    return NULL;
-+    return (PVOID)PhysicalAddress.QuadPart;
++    return (PVOID)(ULONG_PTR)(PhysicalAddress.QuadPart);
  }
  
  
 -- 
 GitLab
+
+
+From 33948747d5b11b2d61004632bf1038dc95060fd3 Mon Sep 17 00:00:00 2001
+From: Christian Costa <titan.costa@gmail.com>
+Date: Sun, 1 Feb 2015 12:53:09 +0100
+Subject: [PATCH] ntoskrnl.exe: Implement MmMapLockedPages and
+ MmUnmapLockedPages.
+
+---
+ dlls/ntoskrnl.exe/ntoskrnl.c        | 20 ++++++++++++++++++++
+ dlls/ntoskrnl.exe/ntoskrnl.exe.spec |  2 +-
+ 2 files changed, 21 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl.c b/dlls/ntoskrnl.exe/ntoskrnl.c
+index c1e6a9c..cca3066 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl.c
++++ b/dlls/ntoskrnl.exe/ntoskrnl.c
+@@ -2821,6 +2821,16 @@ VOID WINAPI MmLockPagableSectionByHandle(PVOID ImageSectionHandle)
+     FIXME("stub %p\n", ImageSectionHandle);
+ }
+ 
++ /***********************************************************************
++ *           MmMapLockedPages   (NTOSKRNL.EXE.@)
++ */
++PVOID WINAPI MmMapLockedPages(PMDL MemoryDescriptorList, KPROCESSOR_MODE AccessMode)
++{
++    TRACE("%p %d\n", MemoryDescriptorList, AccessMode);
++    return MemoryDescriptorList->MappedSystemVa;
++}
++
++
+ /***********************************************************************
+  *           MmMapLockedPagesSpecifyCache  (NTOSKRNL.EXE.@)
+  */
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl.exe.spec b/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
+index 633a8c4..cc74261 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
++++ b/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
+@@ -703,7 +703,7 @@
+ @ stub MmLockPagableImageSection
+ @ stdcall MmLockPagableSectionByHandle(ptr)
+ @ stdcall MmMapIoSpace(int64 long long)
+-@ stub MmMapLockedPages
++@ stdcall MmMapLockedPages(ptr long)
+ @ stdcall MmMapLockedPagesSpecifyCache(ptr long long ptr long long)
+ @ stub MmMapLockedPagesWithReservedMapping
+ @ stub MmMapMemoryDumpMdl
+-- 
+1.9.1
+
+From 388684b798b2d93d6c6ef3785eda9cd608a341a9 Mon Sep 17 00:00:00 2001
+From: Ivo Ivanov <logos128@gmail.com>
+Date: Thu, 18 Aug 2022 15:48:08 +0300
+Subject: [PATCH] ntoskrnl.exe: Prevent blocking if timer is reset in DPC.
+
+Fixes NaturalPoint's TrackIR5 app hanging indefinitely on exit,
+while waiting synchronously on an IRP to complete. The blocking
+happens in the app's npusbio_x64 driver, while it tries to reset
+a timer in its DPC.
+Probably fixes other drivers/apps in such situations.
+---
+ dlls/ntoskrnl.exe/sync.c | 10 +++++++---
+ 1 file changed, 7 insertions(+), 3 deletions(-)
+
+diff --git a/dlls/ntoskrnl.exe/sync.c b/dlls/ntoskrnl.exe/sync.c
+index d9b5726b920..0b101158eb6 100644
+--- a/dlls/ntoskrnl.exe/sync.c
++++ b/dlls/ntoskrnl.exe/sync.c
+@@ -493,10 +493,14 @@ BOOLEAN WINAPI KeSetTimerEx( KTIMER *timer, LARGE_INTEGER duetime, LONG period,
+ 
+     EnterCriticalSection( &sync_cs );
+ 
+-    if ((ret = timer->Header.Inserted))
+-        KeCancelTimer(timer);
+-
++    ret = timer->Header.Inserted;
+     timer->Header.Inserted = TRUE;
++    timer->Header.SignalState = FALSE;
++    if (timer->Header.WaitListHead.Blink && !*((ULONG_PTR *)&timer->Header.WaitListHead.Flink))
++    {
++        CloseHandle(timer->Header.WaitListHead.Blink);
++        timer->Header.WaitListHead.Blink = NULL;
++    }
+ 
+     if (!timer->TimerListEntry.Blink)
+         timer->TimerListEntry.Blink = (void *)CreateThreadpoolTimer(ke_timer_complete_proc, timer, NULL);
+-- 
+GitLab
+
 
 From 9a61a0dfbd33a8117eba7925c49e1c702d8339a4 Mon Sep 17 00:00:00 2001
 From: Torge Matthies <tmatthies@codeweavers.com>

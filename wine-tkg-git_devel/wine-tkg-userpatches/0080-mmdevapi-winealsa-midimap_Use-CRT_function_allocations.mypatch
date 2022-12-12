@@ -1,0 +1,357 @@
+--- a/dlls/mmdevapi/audiovolume.c	2022-06-16 17:13:10.870160000 -0500
++++ b/dlls/mmdevapi/audiovolume.c	2022-06-19 08:42:53.593570519 -0500
+@@ -53,7 +53,7 @@ static inline AEVImpl *impl_from_IAudioE
+ 
+ static void AudioEndpointVolume_Destroy(AEVImpl *This)
+ {
+-    HeapFree(GetProcessHeap(), 0, This);
++    free(This);
+ }
+ 
+ static HRESULT WINAPI AEV_QueryInterface(IAudioEndpointVolumeEx *iface, REFIID riid, void **ppv)
+@@ -309,7 +309,7 @@ HRESULT AudioEndpointVolume_Create(MMDev
+     AEVImpl *This;
+ 
+     *ppv = NULL;
+-    This = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*This));
++    This = calloc(1, sizeof(*This));
+     if (!This)
+         return E_OUTOFMEMORY;
+     This->IAudioEndpointVolumeEx_iface.lpVtbl = &AEVImpl_Vtbl;
+--- a/dlls/mmdevapi/devenum.c	2022-06-19 08:19:28.727290000 -0500
++++ b/dlls/mmdevapi/devenum.c	2022-06-19 08:43:49.669079574 -0500
+@@ -283,7 +283,7 @@ static MMDevice *MMDevice_Create(WCHAR *
+ 
+     if(!cur){
+         /* No device found, allocate new one */
+-        cur = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*cur));
++        cur = calloc(1, sizeof(*cur));
+         if (!cur)
+             return NULL;
+ 
+@@ -297,7 +297,7 @@ static MMDevice *MMDevice_Create(WCHAR *
+     }else if(cur->ref > 0)
+         WARN("Modifying an MMDevice with postitive reference count!\n");
+ 
+-    HeapFree(GetProcessHeap(), 0, cur->drv_id);
++    free(cur->drv_id);
+     cur->drv_id = name;
+ 
+     cur->flow = flow;
+@@ -417,7 +417,7 @@ HRESULT load_devices_from_reg(void)
+             && pv.vt == VT_LPWSTR)
+         {
+             DWORD size_bytes = (lstrlenW(pv.pwszVal) + 1) * sizeof(WCHAR);
+-            WCHAR *name = HeapAlloc(GetProcessHeap(), 0, size_bytes);
++            WCHAR *name = malloc(size_bytes);
+             memcpy(name, pv.pwszVal, size_bytes);
+             MMDevice_Create(name, &guid, curflow,
+                     DEVICE_STATE_NOTPRESENT, FALSE);
+@@ -480,8 +480,8 @@ HRESULT load_driver_devices(EDataFlow fl
+         set_format(dev);
+     }
+ 
+-    HeapFree(GetProcessHeap(), 0, guids);
+-    HeapFree(GetProcessHeap(), 0, ids);
++    free(guids);
++    free(ids);
+ 
+     return S_OK;
+ }
+@@ -492,8 +492,8 @@ static void MMDevice_Destroy(MMDevice *T
+     list_remove(&This->entry);
+     This->crst.DebugInfo->Spare[0] = 0;
+     DeleteCriticalSection(&This->crst);
+-    HeapFree(GetProcessHeap(), 0, This->drv_id);
+-    HeapFree(GetProcessHeap(), 0, This);
++    free(This->drv_id);
++    free(This);
+ }
+ 
+ static inline MMDevice *impl_from_IMMDevice(IMMDevice *iface)
+@@ -734,7 +734,7 @@ static HRESULT MMDevCol_Create(IMMDevice
+ {
+     MMDevColImpl *This;
+ 
+-    This = HeapAlloc(GetProcessHeap(), 0, sizeof(*This));
++    This = malloc(sizeof(*This));
+     *ppv = NULL;
+     if (!This)
+         return E_OUTOFMEMORY;
+@@ -748,7 +748,7 @@ static HRESULT MMDevCol_Create(IMMDevice
+ 
+ static void MMDevCol_Destroy(MMDevColImpl *This)
+ {
+-    HeapFree(GetProcessHeap(), 0, This);
++    free(This);
+ }
+ 
+ static HRESULT WINAPI MMDevCol_QueryInterface(IMMDeviceCollection *iface, REFIID riid, void **ppv)
+@@ -1192,7 +1192,7 @@ static HRESULT WINAPI MMDevEnum_Register
+     if(!client)
+         return E_POINTER;
+ 
+-    wrapper = HeapAlloc(GetProcessHeap(), 0, sizeof(*wrapper));
++    wrapper = malloc(sizeof(*wrapper));
+     if(!wrapper)
+         return E_OUTOFMEMORY;
+ 
+@@ -1228,7 +1228,7 @@ static HRESULT WINAPI MMDevEnum_Unregist
+     LIST_FOR_EACH_ENTRY(wrapper, &g_notif_clients, struct NotificationClientWrapper, entry){
+         if(wrapper->client == client){
+             list_remove(&wrapper->entry);
+-            HeapFree(GetProcessHeap(), 0, wrapper);
++            free(wrapper);
+             LeaveCriticalSection(&g_notif_lock);
+             return S_OK;
+         }
+@@ -1267,7 +1267,7 @@ static HRESULT MMDevPropStore_Create(MMD
+         WARN("Invalid access %08lx\n", access);
+         return E_INVALIDARG;
+     }
+-    This = HeapAlloc(GetProcessHeap(), 0, sizeof(*This));
++    This = malloc(sizeof(*This));
+     *ppv = &This->IPropertyStore_iface;
+     if (!This)
+         return E_OUTOFMEMORY;
+@@ -1280,7 +1280,7 @@ static HRESULT MMDevPropStore_Create(MMD
+ 
+ static void MMDevPropStore_Destroy(MMDevPropStore *This)
+ {
+-    HeapFree(GetProcessHeap(), 0, This);
++    free(This);
+ }
+ 
+ static HRESULT WINAPI MMDevPropStore_QueryInterface(IPropertyStore *iface, REFIID riid, void **ppv)
+diff -pur a/dlls/mmdevapi/main.c b/dlls/mmdevapi/main.c
+--- a/dlls/mmdevapi/main.c	2022-06-19 08:19:28.727290000 -0500
++++ b/dlls/mmdevapi/main.c	2022-06-19 08:44:58.243166762 -0500
+@@ -348,7 +348,7 @@ static ULONG WINAPI activate_async_op_Re
+         if(This->result_iface)
+             IUnknown_Release(This->result_iface);
+         IActivateAudioInterfaceCompletionHandler_Release(This->callback);
+-        HeapFree(GetProcessHeap(), 0, This);
++        free(This);
+     }
+     return ref;
+ }
+@@ -443,7 +443,7 @@ HRESULT WINAPI ActivateAudioInterfaceAsy
+     TRACE("(%s, %s, %p, %p, %p)\n", debugstr_w(path), debugstr_guid(riid),
+             params, done_handler, op_out);
+ 
+-    op = HeapAlloc(GetProcessHeap(), 0, sizeof(*op));
++    op = malloc(sizeof(*op));
+     if (!op)
+         return E_OUTOFMEMORY;
+ 
+--- a/dlls/mmdevapi/mmdevapi.h	2022-06-16 17:13:10.871160000 -0500
++++ b/dlls/mmdevapi/mmdevapi.h	2022-06-19 08:45:29.103562214 -0500
+@@ -45,7 +45,7 @@ typedef struct _DriverFuncs {
+      * keys gets an array of driver-specific stuff that is used
+      *   in GetAudioEndpoint to identify the endpoint
+      * it is the caller's responsibility to free both arrays, and
+-     *   all of the elements in both arrays with HeapFree() */
++     *   all of the elements in both arrays with free() */
+     HRESULT (WINAPI *pGetEndpointIDs)(EDataFlow flow, WCHAR ***ids,
+             GUID **guids, UINT *num, UINT *default_index);
+     HRESULT (WINAPI *pGetAudioEndpoint)(void *key, IMMDevice *dev,
+--- a/dlls/mmdevapi/tests/capture.c	2022-06-16 17:13:10.871160000 -0500
++++ b/dlls/mmdevapi/tests/capture.c	2022-06-19 08:38:19.439565553 -0500
+@@ -616,7 +616,7 @@ static void test_streamvolume(void)
+     hr = IAudioStreamVolume_GetAllVolumes(asv, fmt->nChannels, NULL);
+     ok(hr == E_POINTER, "GetAllVolumes gave wrong error: %08lx\n", hr);
+ 
+-    vols = HeapAlloc(GetProcessHeap(), 0, fmt->nChannels * sizeof(float));
++    vols = malloc(fmt->nChannels * sizeof(float));
+     ok(vols != NULL, "HeapAlloc failed\n");
+ 
+     hr = IAudioStreamVolume_GetAllVolumes(asv, fmt->nChannels - 1, vols);
+@@ -715,7 +715,7 @@ static void test_channelvolume(void)
+     hr = IChannelAudioVolume_GetAllVolumes(acv, fmt->nChannels, NULL);
+     ok(hr == NULL_PTR_ERR, "GetAllVolumes gave wrong error: %08lx\n", hr);
+ 
+-    vols = HeapAlloc(GetProcessHeap(), 0, fmt->nChannels * sizeof(float));
++    vols = malloc(fmt->nChannels * sizeof(float));
+     ok(vols != NULL, "HeapAlloc failed\n");
+ 
+     hr = IChannelAudioVolume_GetAllVolumes(acv, fmt->nChannels - 1, vols);
+--- a/dlls/mmdevapi/tests/render.c	2022-06-16 17:13:10.872160000 -0500
++++ b/dlls/mmdevapi/tests/render.c	2022-06-19 08:37:57.730638263 -0500
+@@ -1675,7 +1675,7 @@ static void test_streamvolume(void)
+     hr = IAudioStreamVolume_GetAllVolumes(asv, fmt->nChannels, NULL);
+     ok(hr == E_POINTER, "GetAllVolumes gave wrong error: %08lx\n", hr);
+ 
+-    vols = HeapAlloc(GetProcessHeap(), 0, fmt->nChannels * sizeof(float));
++    vols = malloc(fmt->nChannels * sizeof(float));
+     ok(vols != NULL, "HeapAlloc failed\n");
+ 
+     hr = IAudioStreamVolume_GetAllVolumes(asv, fmt->nChannels - 1, vols);
+@@ -1779,7 +1779,7 @@ static void test_channelvolume(void)
+     hr = IChannelAudioVolume_GetAllVolumes(acv, fmt->nChannels, NULL);
+     ok(hr == NULL_PTR_ERR, "GetAllVolumes gave wrong error: %08lx\n", hr);
+ 
+-    vols = HeapAlloc(GetProcessHeap(), 0, fmt->nChannels * sizeof(float));
++    vols = malloc(fmt->nChannels * sizeof(float));
+     ok(vols != NULL, "HeapAlloc failed\n");
+ 
+     hr = IChannelAudioVolume_GetAllVolumes(acv, fmt->nChannels - 1, vols);
+
+--- a/dlls/winealsa.drv/mmdevdrv.c	2022-06-19 08:16:20.527427418 -0500
++++ b/dlls/winealsa.drv/mmdevdrv.c	2022-06-19 08:15:41.264911518 -0500
+@@ -342,15 +342,15 @@ HRESULT WINAPI AUDDRV_GetEndpointIDs(EDa
+     params.size = 1000;
+     params.endpoints = NULL;
+     do{
+-        HeapFree(GetProcessHeap(), 0, params.endpoints);
+-        params.endpoints = HeapAlloc(GetProcessHeap(), 0, params.size);
++        free(params.endpoints);
++        params.endpoints = malloc(params.size);
+         ALSA_CALL(get_endpoint_ids, &params);
+     }while(params.result == HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER));
+ 
+     if(FAILED(params.result)) goto end;
+ 
+-    ids = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, params.num * sizeof(*ids));
+-    guids = HeapAlloc(GetProcessHeap(), 0, params.num * sizeof(*guids));
++    ids = calloc(1, params.num * sizeof(*ids));
++    guids = malloc(params.num * sizeof(*guids));
+     if(!ids || !guids){
+         params.result = E_OUTOFMEMORY;
+         goto end;
+@@ -361,7 +361,7 @@ HRESULT WINAPI AUDDRV_GetEndpointIDs(EDa
+         char *device = (char *)params.endpoints + params.endpoints[i].device;
+         unsigned int size = (wcslen(name) + 1) * sizeof(WCHAR);
+ 
+-        ids[i] = HeapAlloc(GetProcessHeap(), 0, size);
++        ids[i] = malloc(size);
+         if(!ids[i]){
+             params.result = E_OUTOFMEMORY;
+             goto end;
+@@ -372,13 +372,13 @@ HRESULT WINAPI AUDDRV_GetEndpointIDs(EDa
+     *def_index = params.default_idx;
+ 
+ end:
+-    HeapFree(GetProcessHeap(), 0, params.endpoints);
++    free(params.endpoints);
+     if(FAILED(params.result)){
+-        HeapFree(GetProcessHeap(), 0, guids);
++        free(guids);
+         if(ids){
+             for(i = 0; i < params.num; i++)
+-                HeapFree(GetProcessHeap(), 0, ids[i]);
+-            HeapFree(GetProcessHeap(), 0, ids);
++                free(ids[i]);
++            free(ids);
+         }
+     }else{
+         *ids_out = ids;
+@@ -467,7 +467,7 @@ HRESULT WINAPI AUDDRV_GetAudioEndpoint(G
+         return E_UNEXPECTED;
+ 
+     len = strlen(alsa_name);
+-    This = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, offsetof(ACImpl, alsa_name[len + 1]));
++    This = calloc(1, offsetof(ACImpl, alsa_name[len + 1]));
+     if(!This)
+         return E_OUTOFMEMORY;
+ 
+@@ -480,7 +480,7 @@ HRESULT WINAPI AUDDRV_GetAudioEndpoint(G
+ 
+     hr = CoCreateFreeThreadedMarshaler((IUnknown *)&This->IAudioClient3_iface, &This->pUnkFTMarshal);
+     if (FAILED(hr)) {
+-        HeapFree(GetProcessHeap(), 0, This);
++        free(This);
+         return hr;
+     }
+ 
+@@ -546,10 +546,10 @@ static ULONG WINAPI AudioClient_Release(
+             list_remove(&This->entry);
+             LeaveCriticalSection(&g_sessions_lock);
+         }
+-        HeapFree(GetProcessHeap(), 0, This->vols);
++        free(This->vols);
+         if (This->stream)
+             alsa_stream_release(This->stream, This->timer_thread);
+-        HeapFree(GetProcessHeap(), 0, This);
++        free(This);
+     }
+     return ref;
+ }
+@@ -594,11 +594,9 @@ static void session_init_vols(AudioSessi
+         UINT i;
+ 
+         if(session->channel_vols)
+-            session->channel_vols = HeapReAlloc(GetProcessHeap(), 0,
+-                    session->channel_vols, sizeof(float) * channels);
++            session->channel_vols = realloc(session->channel_vols, sizeof(float) * channels);
+         else
+-            session->channel_vols = HeapAlloc(GetProcessHeap(), 0,
+-                    sizeof(float) * channels);
++            session->channel_vols = malloc(sizeof(float) * channels);
+         if(!session->channel_vols)
+             return;
+ 
+@@ -614,7 +612,7 @@ static AudioSession *create_session(cons
+ {
+     AudioSession *ret;
+ 
+-    ret = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(AudioSession));
++    ret = calloc(1, sizeof(AudioSession));
+     if(!ret)
+         return NULL;
+ 
+@@ -755,7 +753,7 @@ static HRESULT WINAPI AudioClient_Initia
+     }
+ 
+     This->channel_count = fmt->nChannels;
+-    This->vols = HeapAlloc(GetProcessHeap(), 0, This->channel_count * sizeof(float));
++    This->vols = malloc(This->channel_count * sizeof(float));
+     if(!This->vols){
+         params.result = E_OUTOFMEMORY;
+         goto exit;
+@@ -773,7 +771,7 @@ static HRESULT WINAPI AudioClient_Initia
+ exit:
+     if(FAILED(params.result)){
+         alsa_stream_release(stream, NULL);
+-        HeapFree(GetProcessHeap(), 0, This->vols);
++        free(This->vols);
+         This->vols = NULL;
+     }else{
+         This->stream = stream;
+@@ -1548,8 +1546,7 @@ static AudioSessionWrapper *AudioSession
+ {
+     AudioSessionWrapper *ret;
+ 
+-    ret = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
+-            sizeof(AudioSessionWrapper));
++    ret = calloc(1, sizeof(AudioSessionWrapper));
+     if(!ret)
+         return NULL;
+ 
+@@ -1612,7 +1609,7 @@ static ULONG WINAPI AudioSessionControl_
+             LeaveCriticalSection(&g_sessions_lock);
+             AudioClient_Release(&This->client->IAudioClient3_iface);
+         }
+-        HeapFree(GetProcessHeap(), 0, This);
++        free(This);
+     }
+     return ref;
+ }
+@@ -2302,7 +2299,7 @@ static ULONG WINAPI AudioSessionManager_
+     ref = InterlockedDecrement(&This->ref);
+     TRACE("(%p) Refcount now %lu\n", This, ref);
+     if(!ref)
+-        HeapFree(GetProcessHeap(), 0, This);
++        free(This);
+     return ref;
+ }
+ 
+@@ -2421,7 +2418,7 @@ HRESULT WINAPI AUDDRV_GetAudioSessionMan
+ {
+     SessionMgr *This;
+ 
+-    This = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(SessionMgr));
++    This = calloc(1, sizeof(SessionMgr));
+     if(!This)
+         return E_OUTOFMEMORY;
+ 
+

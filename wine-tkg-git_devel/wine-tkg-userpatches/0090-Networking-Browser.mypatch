@@ -1,0 +1,996 @@
+From: Robin Ebert <ebertrobin2002@gmail.com>
+Subject: [PATCH v2] server: Derive protocol in create_socket if not given
+Message-Id: <20200718221733.32241-1-ebertrobin2002@gmail.com>
+Date: Sun, 19 Jul 2020 00:17:33 +0200
+
+The protocol entry of a sock structure should not be 0 if either SOCK_STREAM or SOCK_DGRAM are used
+because this leads to an invalid behaviour of
+ws2_32's WS_getsockopt(..., SOL_SOCKET, SO_PROTOCOL_INFOW, ..., ...)
+
+Signed-off-by: Robin Ebert <ebertrobin2002@gmail.com>
+---
+ server/sock.c | 18 +++++++++++++++++-
+ 1 file changed, 17 insertions(+), 1 deletion(-)
+
+diff --git a/server/sock.c b/server/sock.c
+index 11111111111..11111111111 100644
+--- a/server/sock.c
++++ b/server/sock.c
+@@ -43,6 +43,9 @@
+ #include <sys/time.h>
+ #include <sys/types.h>
+ #include <sys/socket.h>
++#ifdef HAVE_NETINET_IN_H
++# include <netinet/in.h>
++#endif
+ #include <sys/ioctl.h>
+ #ifdef HAVE_SYS_FILIO_H
+ # include <sys/filio.h>
+@@ -1646,6 +1649,7 @@ static int init_socket( struct sock *sock, int family, int type, int protocol )
+     unsigned int options = 0;
+     int sockfd, unix_type, unix_family, unix_protocol, value;
+     socklen_t len;
++    int proto, protolen;
+ 
+     unix_family = get_unix_family( family );
+     unix_type = get_unix_type( type );
+@@ -1737,7 +1741,19 @@ static int init_socket( struct sock *sock, int family, int type, int protocol )
+         sock->sndbuf = value;
+ 
+     sock->state  = (type == WS_SOCK_STREAM ? SOCK_UNCONNECTED : SOCK_CONNECTIONLESS);
+-    sock->proto  = protocol;
++    if(!protocol)
++    {
++        /* if protocol is 0 get it from the kernel */
++        protolen = sizeof(int);
++        if(getsockopt(sockfd, SOL_SOCKET, SO_PROTOCOL, &proto, &protolen))
++        {
++            release_object( sock );
++            return -1;
++        }
++        sock->proto = proto;
++    }
++    else
++        sock->proto  = protocol;
+     sock->type   = type;
+     sock->family = family;
+ 
+From 0339f5026bfda583da9ebab721bf740732fef776 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Thu, 3 Dec 2020 11:06:11 +0100
+Subject: [PATCH 08/12] winhttp: Move connect end checks out of the loop.
+
+This is only done when InitializeSecurityContextW returns SEC_E_OK,
+which will break out of the loop, and the checks forcefully break out
+of the loop if any failed.
+---
+ dlls/winhttp/net.c | 80 ++++++++++++++++++++++------------------------
+ 1 file changed, 39 insertions(+), 41 deletions(-)
+
+diff --git a/dlls/winhttp/net.c b/dlls/winhttp/net.c
+index 11111111111..11111111111 100644
+--- a/dlls/winhttp/net.c
++++ b/dlls/winhttp/net.c
+@@ -376,60 +376,58 @@ DWORD netconn_secure_connect( struct netconn *conn, WCHAR *hostname, DWORD secur
+         status = InitializeSecurityContextW(cred_handle, &ctx, hostname,  isc_req_flags, 0, 0, &in_desc,
+                 0, NULL, &out_desc, &attrs, NULL);
+         TRACE( "InitializeSecurityContext ret %#lx\n", status );
++        if(status == SEC_E_OK && in_bufs[1].BufferType == SECBUFFER_EXTRA)
++            FIXME("SECBUFFER_EXTRA not supported\n");
++    }
+ 
+-        if(status == SEC_E_OK) {
+-            if(in_bufs[1].BufferType == SECBUFFER_EXTRA)
+-                FIXME("SECBUFFER_EXTRA not supported\n");
+-
+-            status = QueryContextAttributesW(&ctx, SECPKG_ATTR_STREAM_SIZES, &conn->ssl_sizes);
+-            if(status != SEC_E_OK) {
+-                WARN("Could not get sizes\n");
+-                break;
+-            }
++    free(read_buf);
+ 
+-            status = QueryContextAttributesW(&ctx, SECPKG_ATTR_REMOTE_CERT_CONTEXT, (void*)&cert);
+-            if(status == SEC_E_OK) {
+-                res = netconn_verify_cert(cert, hostname, security_flags, check_revocation);
+-                CertFreeCertificateContext(cert);
+-                if(res != ERROR_SUCCESS) {
+-                    WARN( "cert verify failed: %lu\n", res );
+-                    break;
+-                }
+-            }else {
+-                WARN("Could not get cert\n");
+-                break;
+-            }
++    if(status != SEC_E_OK)
++        goto failed;
+ 
+-            conn->ssl_read_buf = malloc(conn->ssl_sizes.cbHeader + conn->ssl_sizes.cbMaximumMessage + conn->ssl_sizes.cbTrailer);
+-            if(!conn->ssl_read_buf) {
+-                res = ERROR_OUTOFMEMORY;
+-                break;
+-            }
+-            conn->ssl_write_buf = malloc(conn->ssl_sizes.cbHeader + conn->ssl_sizes.cbMaximumMessage + conn->ssl_sizes.cbTrailer);
+-            if(!conn->ssl_write_buf) {
+-                res = ERROR_OUTOFMEMORY;
+-                break;
+-            }
+-        }
++    status = QueryContextAttributesW(&ctx, SECPKG_ATTR_STREAM_SIZES, &conn->ssl_sizes);
++    if(status != SEC_E_OK) {
++        WARN("Could not get sizes\n");
++        goto failed;
+     }
+ 
+-    free(read_buf);
++    status = QueryContextAttributesW(&ctx, SECPKG_ATTR_REMOTE_CERT_CONTEXT, (void*)&cert);
++    if(status != SEC_E_OK) {
++        WARN("Could not get cert\n");
++        goto failed;
++    }
+ 
+-    if(status != SEC_E_OK || res != ERROR_SUCCESS) {
+-        WARN( "Failed to initialize security context: %#lx\n", status );
+-        free(conn->ssl_read_buf);
+-        conn->ssl_read_buf = NULL;
+-        free(conn->ssl_write_buf);
+-        conn->ssl_write_buf = NULL;
+-        DeleteSecurityContext(&ctx);
+-        return ERROR_WINHTTP_SECURE_CHANNEL_ERROR;
++    res = netconn_verify_cert(cert, hostname, security_flags, check_revocation);
++    CertFreeCertificateContext(cert);
++    if(res != ERROR_SUCCESS) {
++        WARN("cert verify failed: %u\n", res);
++        goto failed;
+     }
+ 
++    conn->ssl_read_buf = malloc(conn->ssl_sizes.cbHeader + conn->ssl_sizes.cbMaximumMessage + conn->ssl_sizes.cbTrailer);
++    if(!conn->ssl_read_buf) {
++        res = ERROR_OUTOFMEMORY;
++        goto failed;
++    }
++    conn->ssl_write_buf = malloc(conn->ssl_sizes.cbHeader + conn->ssl_sizes.cbMaximumMessage + conn->ssl_sizes.cbTrailer);
++    if(!conn->ssl_write_buf) {
++        res = ERROR_OUTOFMEMORY;
++        goto failed;
++    }
+ 
+     TRACE("established SSL connection\n");
+     conn->secure = TRUE;
+     conn->ssl_ctx = ctx;
+     return ERROR_SUCCESS;
++
++failed:
++    WARN("Failed to initialize security context: %08x\n", status);
++    free(conn->ssl_read_buf);
++    conn->ssl_read_buf = NULL;
++    free(conn->ssl_write_buf);
++    conn->ssl_write_buf = NULL;
++    DeleteSecurityContext(&ctx);
++    return ERROR_WINHTTP_SECURE_CHANNEL_ERROR;
+ }
+ 
+ static DWORD send_ssl_chunk( struct netconn *conn, const void *msg, size_t size, WSAOVERLAPPED *ovr )
+-- 
+2.37.2
+
+From e5257e8ea5596ba6b1d6156bb3316db102c6c3e5 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Thu, 3 Dec 2020 11:14:07 +0100
+Subject: [PATCH 09/12] winhttp: Introduce new netconn_negotiate helper.
+
+---
+ dlls/winhttp/net.c | 36 +++++++++++++++++++++++-------------
+ 1 file changed, 23 insertions(+), 13 deletions(-)
+
+diff --git a/dlls/winhttp/net.c b/dlls/winhttp/net.c
+index 11111111111..11111111111 100644
+--- a/dlls/winhttp/net.c
++++ b/dlls/winhttp/net.c
+@@ -295,28 +295,23 @@ void netconn_close( struct netconn *conn )
+     free(conn);
+ }
+ 
+-DWORD netconn_secure_connect( struct netconn *conn, WCHAR *hostname, DWORD security_flags, CredHandle *cred_handle,
+-                              BOOL check_revocation )
++static DWORD netconn_negotiate(struct netconn *conn, CredHandle *cred_handle, CtxtHandle *ctx_handle, WCHAR *hostname,
++                               DWORD isc_req_flags, SecBufferDesc *init_desc, CtxtHandle *new_ctx_handle)
+ {
+     SecBuffer out_buf = {0, SECBUFFER_TOKEN, NULL}, in_bufs[2] = {{0, SECBUFFER_TOKEN}, {0, SECBUFFER_EMPTY}};
+     SecBufferDesc out_desc = {SECBUFFER_VERSION, 1, &out_buf}, in_desc = {SECBUFFER_VERSION, 2, in_bufs};
+     BYTE *read_buf;
+     SIZE_T read_buf_size = 2048;
+     ULONG attrs = 0;
+-    CtxtHandle ctx;
+     SSIZE_T size;
+-    const CERT_CONTEXT *cert;
+     SECURITY_STATUS status;
+-    DWORD res = ERROR_SUCCESS;
+-
+-    const DWORD isc_req_flags = ISC_REQ_ALLOCATE_MEMORY|ISC_REQ_USE_SESSION_KEY|ISC_REQ_CONFIDENTIALITY
+-        |ISC_REQ_SEQUENCE_DETECT|ISC_REQ_REPLAY_DETECT|ISC_REQ_MANUAL_CRED_VALIDATION;
+ 
+     if (!(read_buf = malloc( read_buf_size ))) return ERROR_OUTOFMEMORY;
+ 
+-    memset( &ctx, 0, sizeof(ctx) );
+-    status = InitializeSecurityContextW(cred_handle, NULL, hostname, isc_req_flags, 0, 0, NULL, 0,
+-            &ctx, &out_desc, &attrs, NULL);
++    memset( new_ctx_handle, 0, sizeof(*new_ctx_handle) );
++    status = InitializeSecurityContextW(cred_handle, ctx_handle, hostname, isc_req_flags, 0, 0, init_desc,
++            0, new_ctx_handle, &out_desc, &attrs, NULL);
++    if (!ctx_handle) ctx_handle = new_ctx_handle;
+ 
+     assert(status != SEC_E_OK);
+ 
+@@ -329,7 +324,7 @@ DWORD netconn_secure_connect( struct netconn *conn, WCHAR *hostname, DWORD secur
+             size = sock_send(conn->socket, out_buf.pvBuffer, out_buf.cbBuffer, NULL);
+             if(size != out_buf.cbBuffer) {
+                 ERR("send failed\n");
+-                res = ERROR_WINHTTP_SECURE_CHANNEL_ERROR;
++                status = ERROR_WINHTTP_SECURE_CHANNEL_ERROR;
+                 break;
+             }
+ 
+@@ -373,7 +368,7 @@ DWORD netconn_secure_connect( struct netconn *conn, WCHAR *hostname, DWORD secur
+ 
+         in_bufs[0].cbBuffer += size;
+         in_bufs[0].pvBuffer = read_buf;
+-        status = InitializeSecurityContextW(cred_handle, &ctx, hostname,  isc_req_flags, 0, 0, &in_desc,
++        status = InitializeSecurityContextW(cred_handle, ctx_handle, hostname, isc_req_flags, 0, 0, &in_desc,
+                 0, NULL, &out_desc, &attrs, NULL);
+         TRACE( "InitializeSecurityContext ret %#lx\n", status );
+         if(status == SEC_E_OK && in_bufs[1].BufferType == SECBUFFER_EXTRA)
+@@ -382,6 +377,21 @@ DWORD netconn_secure_connect( struct netconn *conn, WCHAR *hostname, DWORD secur
+ 
+     free(read_buf);
+ 
++    return status;
++}
++
++DWORD netconn_secure_connect( struct netconn *conn, WCHAR *hostname, DWORD security_flags, CredHandle *cred_handle,
++                              BOOL check_revocation )
++{
++    CtxtHandle ctx;
++    const CERT_CONTEXT *cert;
++    SECURITY_STATUS status;
++    DWORD res = ERROR_SUCCESS;
++
++    const DWORD isc_req_flags = ISC_REQ_ALLOCATE_MEMORY|ISC_REQ_USE_SESSION_KEY|ISC_REQ_CONFIDENTIALITY
++        |ISC_REQ_SEQUENCE_DETECT|ISC_REQ_REPLAY_DETECT|ISC_REQ_MANUAL_CRED_VALIDATION;
++
++    status = netconn_negotiate(conn, cred_handle, NULL, hostname, isc_req_flags, NULL, &ctx);
+     if(status != SEC_E_OK)
+         goto failed;
+ 
+-- 
+2.37.2
+
+From e8b525ad3b4f376b8c34242b26f517bcab41cf6a Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Thu, 3 Dec 2020 11:52:27 +0100
+Subject: [PATCH 10/12] winhttp: Handle SEC_I_RENEGOTIATE after DecryptMessage.
+
+By performing renegotiation as we should, instead of incorrectly
+returning ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED.
+
+MSDN says we should pass returned SECBUFFER_EXTRA as SECBUFFER_TOKEN,
+so we also do that, although it's usually empty.
+---
+ dlls/winhttp/net.c | 15 +++++++++++++--
+ 1 file changed, 13 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/winhttp/net.c b/dlls/winhttp/net.c
+index 11111111111..11111111111 100644
+--- a/dlls/winhttp/net.c
++++ b/dlls/winhttp/net.c
+@@ -511,8 +511,10 @@ DWORD netconn_send( struct netconn *conn, const void *msg, size_t len, int *sent
+ 
+ static DWORD read_ssl_chunk( struct netconn *conn, void *buf, SIZE_T buf_size, SIZE_T *ret_size, BOOL *eof )
+ {
++    const DWORD isc_req_flags = ISC_REQ_ALLOCATE_MEMORY|ISC_REQ_USE_SESSION_KEY|ISC_REQ_CONFIDENTIALITY
++        |ISC_REQ_SEQUENCE_DETECT|ISC_REQ_REPLAY_DETECT|ISC_REQ_USE_SUPPLIED_CREDS;
+     const SIZE_T ssl_buf_size = conn->ssl_sizes.cbHeader+conn->ssl_sizes.cbMaximumMessage+conn->ssl_sizes.cbTrailer;
+-    SecBuffer bufs[4];
++    SecBuffer bufs[4], tmp;
+     SecBufferDesc buf_desc = {SECBUFFER_VERSION, ARRAY_SIZE(bufs), bufs};
+     SSIZE_T size, buf_len;
+     unsigned int i;
+@@ -553,7 +555,16 @@ static DWORD read_ssl_chunk( struct netconn *conn, void *buf, SIZE_T buf_size, S
+ 
+         case SEC_I_RENEGOTIATE:
+             TRACE("renegotiate\n");
+-            return ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED;
++            memset(&tmp, 0, sizeof(tmp));
++            for(i = 0; i < ARRAY_SIZE(bufs); i++) {
++                if(bufs[i].BufferType == SECBUFFER_EXTRA) tmp = bufs[i];
++            }
++            memset(bufs, 0, sizeof(bufs));
++            bufs[0] = tmp;
++            bufs[0].BufferType = SECBUFFER_TOKEN;
++            res = netconn_negotiate(conn, NULL, &conn->ssl_ctx, conn->host->hostname, isc_req_flags, &buf_desc, NULL);
++            if (res != SEC_E_OK) return res;
++            break;
+ 
+         case SEC_I_CONTEXT_EXPIRED:
+             TRACE("context expired\n");
+-- 
+2.37.2
+
+From fe67fb9b91bc29fa9691de9ff177d9bc98f6717a Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Thu, 3 Dec 2020 11:26:56 +0100
+Subject: [PATCH 11/12] secur32: Perform TLS handshake even if input is empty.
+
+Instead of immediately returning even if we don't know how much.
+
+This may be the case if we received SEC_I_RENEGOTIATE status, and in any
+case the handshake will tell us if more data is needed.
+---
+ dlls/secur32/schannel.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/secur32/schannel.c b/dlls/secur32/schannel.c
+index 11111111111..11111111111 100644
+--- a/dlls/secur32/schannel.c
++++ b/dlls/secur32/schannel.c
+@@ -946,7 +946,7 @@ static SECURITY_STATUS SEC_ENTRY schan_InitializeSecurityContextW(
+                 ptr += record_size;
+             }
+ 
+-            if (!expected_size)
++            if (!expected_size && record_size)
+             {
+                 TRACE("Expected at least %Iu bytes, but buffer only contains %lu bytes.\n",
+                       max(ctx->header_size, record_size), buffer->cbBuffer);
+@@ -1015,6 +1015,8 @@ static SECURITY_STATUS SEC_ENTRY schan_InitializeSecurityContextW(
+     else
+     {
+         pOutput->pBuffers[0].cbBuffer = 0;
++        /* Nothing to read or to send, but we got SEC_I_CONTINUE_NEEDED, it means missing input */
++        if (!expected_size && ret == SEC_I_CONTINUE_NEEDED) ret = SEC_E_INCOMPLETE_MESSAGE;
+     }
+     RtlFreeHeap( GetProcessHeap(), 0, alloc_buffer.pvBuffer );
+ 
+-- 
+2.37.2
+
+From: "Alex Xu (Hello71)" <alex_y_xu@yahoo.ca>
+Subject: [PATCH] netprofm: set *ret=NULL if no more connections
+Message-Id: <20210123225155.69567-1-alex_y_xu@yahoo.ca>
+Date: Sat, 23 Jan 2021 17:51:55 -0500
+References: <20210123225155.69567-1-alex_y_xu.ref@yahoo.ca>
+
+Qt 5.14+ tries to check network connection suitability when any network
+connection is made. Unfortunately, this is done incorrectly. The return
+value of IEnumNetworkConnections::Next is only checked for failure, not
+for S_FALSE. Instead, !*ret is used to quit the loop.
+
+Apparently, Windows puts NULL in the output in this case. It is possible
+that all of the non-populated slots are actually set to NULL, but Qt
+only uses count=1. To work around the issue, make Wine set NULL too.
+
+Signed-off-by: Alex Xu (Hello71) <alex_y_xu@yahoo.ca>
+---
+ dlls/netprofm/list.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/dlls/netprofm/list.c b/dlls/netprofm/list.c
+index 11111111111..11111111111 100644
+--- a/dlls/netprofm/list.c
++++ b/dlls/netprofm/list.c
+@@ -1015,6 +1015,7 @@ static HRESULT WINAPI connections_enum_Next(
+         i++;
+     }
+     if (fetched) *fetched = i;
++    if (!i) ret[0] = NULL;
+ 
+     return i < count ? S_FALSE : S_OK;
+ }
+
+-- 
+2.37.2
+
+From: Gerald Pfeifer <gerald@pfeifer.com>
+Subject: [PATCH] nsiproxy.sys: Only use SIN_ROUTER when available
+Message-Id: <20210811235318.5315A33E83@hamza.pair.com>
+Date: Thu, 12 Aug 2021 01:53:15 +0200 (CEST)
+
+FreeBSD (and others) fall into the non-Linux case that is guarded by
+HAVE_SYS_SYSCTL_H. Alas not all such systems feature SIN_ROUTER which
+is used there, so tighten the guard.
+
+Signed-off-by: Gerald Pfeifer <gerald@pfeifer.com>
+---
+ dlls/nsiproxy.sys/ip.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/dlls/nsiproxy.sys/ip.c b/dlls/nsiproxy.sys/ip.c
+index 11111111111..11111111111 100644
+--- a/dlls/nsiproxy.sys/ip.c
++++ b/dlls/nsiproxy.sys/ip.c
+@@ -1131,7 +1131,7 @@ static NTSTATUS ipv4_neighbour_enumerate_all( void *key_data, UINT key_size, voi
+         }
+         fclose( fp );
+     }
+-#elif defined(HAVE_SYS_SYSCTL_H)
++#elif defined(HAVE_SYS_SYSCTL_H) && defined(SIN_ROUTER)
+     {
+         int mib[] = { CTL_NET, PF_ROUTE, 0, AF_INET, NET_RT_FLAGS, RTF_LLINFO }, sinarp_len;
+         size_t needed;
+
+-- 
+2.37.2
+
+From: Fabian Maurer <dark.shadow4@web.de>
+Subject: [PATCH] iphlpapi: In dns_info_alloc prevent usage of uninitialized variable
+Message-Id: <20210824182612.59507-1-dark.shadow4@web.de>
+Date: Tue, 24 Aug 2021 20:26:12 +0200
+
+This can happen when the GAA_FLAG_SKIP_DNS_SERVER flag is set.
+
+Wine-Bug: https://bugs.winehq.org/show_bug.cgi?id=51655
+Signed-off-by: Fabian Maurer <dark.shadow4@web.de>
+---
+ dlls/iphlpapi/iphlpapi_main.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/dlls/iphlpapi/iphlpapi_main.c b/dlls/iphlpapi/iphlpapi_main.c
+index 11111111111..11111111111 100644
+--- a/dlls/iphlpapi/iphlpapi_main.c
++++ b/dlls/iphlpapi/iphlpapi_main.c
+@@ -1135,7 +1135,7 @@ static DWORD dns_info_alloc( IP_ADAPTER_ADDRESSES *aa, ULONG family, ULONG flags
+     char buf[FIELD_OFFSET(DNS_ADDR_ARRAY, AddrArray[3])];
+     IP_ADAPTER_DNS_SERVER_ADDRESS *dns, **next;
+     DWORD query = dns_servers_query_code( family );
+-    DWORD err, i, size, attempt, sockaddr_len;
++    DWORD err = 0, i, size, attempt, sockaddr_len;
+     WCHAR name[MAX_ADAPTER_NAME_LENGTH + 1];
+     DNS_ADDR_ARRAY *servers;
+
+     WCHAR *search;
+-- 
+2.37.2
+
+From: Robert Wilhelm <robert.wilhelm@gmx.net>
+Subject: [PATCH] wininet: Do not call InternetUnlockRequestFile when locking failed.
+Message-Id: <162cef65ac4a0d32f7990717bb2d81a3144ca7ab.camel@gmx.net>
+Date: Wed, 29 Dec 2021 21:40:04 +0100
+
+This should fix crashes on W10L vms, when we pass NULL to InternetUnlockRequestFile after prior lock already failed.
+Crashes are here: https://test.winehq.org/data/tests/wininet:http.html
+Behavior after crash is here: https://testbot.winehq.org/JobDetails.pl?Key=104580
+
+Signed-off-by: Robert Wilhelm <robert.wilhelm@gmx.net>
+---
+ dlls/wininet/tests/http.c | 15 +++++++++++----
+ 1 file changed, 11 insertions(+), 4 deletions(-)
+
+diff --git a/dlls/wininet/tests/http.c b/dlls/wininet/tests/http.c
+index 11111111111..11111111111 100644
+--- a/dlls/wininet/tests/http.c
++++ b/dlls/wininet/tests/http.c
+@@ -1718,10 +1718,13 @@ static void InternetLockRequestFile_test(void)
+ 
+     ret = InternetLockRequestFile(req.request, &lock2);
+     ok(ret, "InternetLockRequestFile returned: %x(%lu)\n", ret, GetLastError());
++    ok(lock2 != NULL, "lock2 == NULL\n");
+     ok(lock == lock2, "lock != lock2\n");
+ 
+-    ret = InternetUnlockRequestFile(lock2);
+-    ok(ret, "InternetUnlockRequestFile failed: %lu\n", GetLastError());
++    if (lock2) {
++        ret = InternetUnlockRequestFile(lock2);
++        ok(ret, "InternetUnlockRequestFile failed: %lu\n", GetLastError());
++    }
+ 
+     ret = DeleteFileA(file_name);
+     ok(!ret && GetLastError() == ERROR_SHARING_VIOLATION, "Deleting file returned %x(%lu)\n", ret, GetLastError());
+@@ -1731,8 +1734,12 @@ static void InternetLockRequestFile_test(void)
+     ret = DeleteFileA(file_name);
+     ok(!ret && GetLastError() == ERROR_SHARING_VIOLATION, "Deleting file returned %x(%lu)\n", ret, GetLastError());
+ 
+-    ret = InternetUnlockRequestFile(lock);
+-    ok(ret, "InternetUnlockRequestFile failed: %lu\n", GetLastError());
++    ok(lock != NULL, "lock == 0\n");
++    if (lock)
++    {
++        ret = InternetUnlockRequestFile(lock);
++        ok(ret, "InternetUnlockRequestFile failed: %lu\n", GetLastError());
++    }
+ 
+     ret = DeleteFileA(file_name);
+     ok(ret, "Deleting file returned %x(%lu)\n", ret, GetLastError());
+-- 
+2.37.2
+
+From: Jinoh Kang <wine@gitlab.winehq.org>
+Subject: [PATCH 1/3] include: Add definition for GetBestRoute2.
+Message-Id: <wine-wine-mr263-v1-patch1@gitlab-mail-bridge>
+Date: Fri, 17 Jun 2022 14:00:13 +0000
+In-Reply-To: <wine-wine-mr263-v1@gitlab-mail-bridge>
+References: <merge_request_332@gitlab.winehq.org> <wine-wine-mr263-v1@gitlab-mail-bridge>
+
+From: Jinoh Kang <jinoh.kang.kr@gmail.com>
+
+Signed-off-by: Jinoh Kang <jinoh.kang.kr@gmail.com>
+---
+ include/netioapi.h | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/include/netioapi.h b/include/netioapi.h
+index 11111111111..11111111111 100644
+--- a/include/netioapi.h
++++ b/include/netioapi.h
+@@ -250,6 +250,7 @@ DWORD WINAPI ConvertInterfaceNameToLuidA(const char*,NET_LUID*);
+ DWORD WINAPI ConvertInterfaceNameToLuidW(const WCHAR*,NET_LUID*);
+ DWORD WINAPI ConvertLengthToIpv4Mask(ULONG,ULONG*);
+ void WINAPI FreeMibTable(void*);
++DWORD WINAPI GetBestRoute2(NET_LUID*,NET_IFINDEX,const SOCKADDR_INET*,const SOCKADDR_INET*,ULONG,PMIB_IPFORWARD_ROW2,SOCKADDR_INET*);
+ DWORD WINAPI GetIfEntry2(MIB_IF_ROW2*);
+ DWORD WINAPI GetIfEntry2Ex(MIB_IF_TABLE_LEVEL,MIB_IF_ROW2*);
+ DWORD WINAPI GetIfTable2(MIB_IF_TABLE2**);
+
+
+
+
+From: Jinoh Kang <wine@gitlab.winehq.org>
+Subject: [PATCH 2/3] iphlpapi/tests: Add tests for GetBestRoute2.
+Message-Id: <wine-wine-mr263-v1-patch2@gitlab-mail-bridge>
+Date: Fri, 17 Jun 2022 14:00:14 +0000
+In-Reply-To: <wine-wine-mr263-v1@gitlab-mail-bridge>
+References: <merge_request_332@gitlab.winehq.org> <wine-wine-mr263-v1@gitlab-mail-bridge>
+
+From: Jinoh Kang <jinoh.kang.kr@gmail.com>
+
+Signed-off-by: Jinoh Kang <jinoh.kang.kr@gmail.com>
+---
+ dlls/iphlpapi/tests/iphlpapi.c | 224 +++++++++++++++++++++++++++++++++
+ 1 file changed, 224 insertions(+)
+
+diff --git a/dlls/iphlpapi/tests/iphlpapi.c b/dlls/iphlpapi/tests/iphlpapi.c
+index 11111111111..11111111111 100644
+--- a/dlls/iphlpapi/tests/iphlpapi.c
++++ b/dlls/iphlpapi/tests/iphlpapi.c
+@@ -2603,6 +2603,229 @@ static void test_GetUnicastIpAddressTable(void)
+     FreeMibTable( table );
+ }
+ 
++static void test_GetBestRoute2(void)
++{
++    DWORD apiReturn;
++    SOCKADDR_INET source, destination, bestaddress, bestaddress_memory;
++    MIB_IPFORWARD_ROW2 bestroute, bestroute_memory;
++    int validmemflags = 0;
++    static const MIB_IPFORWARD_ROW2 route_zero;
++    static const NET_LUID zero_luid, ones_luid = { -1 };
++    static const SOCKADDR_INET unspecaddr;
++    static const SOCKADDR invalidaddr = { -1 };
++    static const SOCKADDR_IN in4any = { AF_INET };
++    static const SOCKADDR_IN in4loopback = { AF_INET, 0, {{{ 127, 0, 0, 1 }}} };
++    static const SOCKADDR_IN in4broadcast = { AF_INET, 0, {{{ 255, 255, 255, 255 }}} };
++    static const SOCKADDR_IN6 in6any = { AF_INET6 };
++    static const SOCKADDR_IN6 in6loopback = { AF_INET6, 0, 0, {{{
++        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
++    }}} };
++    static const SOCKADDR_IN6 in6broadcast = { AF_INET6, 0, 0, {{{
++        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
++    }}} };
++    struct sockaddr_ptrlen
++    {
++        const struct sockaddr *ptr;
++        size_t len;
++    };
++    static const struct getbestroute_test
++    {
++        int line;
++        const NET_LUID *luid;
++        NET_IFINDEX ifindex;
++        struct sockaddr_ptrlen source;
++        struct sockaddr_ptrlen destination;
++        ULONG options;
++        DWORD result;
++        BOOL todo;
++        int memload;
++        int memstore;
++    } getbestroute_tests[] = {
++#define SA_PL(x) { ((struct sockaddr *)&(x)), sizeof(x) }
++        { __LINE__, &zero_luid, 0,  { NULL },            SA_PL(in4loopback), 0, NO_ERROR },
++        { __LINE__, &zero_luid, -1, { NULL },            SA_PL(in4loopback), 0, NO_ERROR },
++        { __LINE__, &ones_luid, 0,  { NULL },            SA_PL(in4loopback), 0, ERROR_NOT_FOUND },
++        { __LINE__, NULL,       -1, { NULL },            SA_PL(in4loopback), 0, ERROR_FILE_NOT_FOUND },
++        { __LINE__, &zero_luid, 0,  SA_PL(unspecaddr),   SA_PL(in4loopback), 0, NO_ERROR },
++        { __LINE__, &ones_luid, 0,  SA_PL(unspecaddr),   SA_PL(in4loopback), 0, ERROR_NOT_FOUND },
++        { __LINE__, NULL,       0,  SA_PL(unspecaddr),   SA_PL(in4loopback), 0, NO_ERROR },
++        { __LINE__, NULL,       0,  SA_PL(in4any),       SA_PL(in4loopback), 0, NO_ERROR },
++        { __LINE__, NULL,       0,  SA_PL(in4loopback),  SA_PL(in4loopback), 0, NO_ERROR },
++        { __LINE__, NULL,       0,  SA_PL(in4broadcast), SA_PL(in4loopback), 0, ERROR_INVALID_PARAMETER, TRUE },
++        { __LINE__, NULL,       0,  SA_PL(in6any),       SA_PL(in4loopback), 0, NO_ERROR },
++        { __LINE__, NULL,       0,  SA_PL(in6loopback),  SA_PL(in4loopback), 0, NO_ERROR },
++        { __LINE__, NULL,       0,  SA_PL(in6broadcast), SA_PL(in4loopback), 0, NO_ERROR },
++        { __LINE__, NULL,       0,  { NULL },            SA_PL(in4loopback), 0, NO_ERROR, FALSE, 0, 0xc7 },
++        { __LINE__, NULL,       0,  { NULL },            SA_PL(in4loopback), 0, NO_ERROR, FALSE, 0xc0 },
++        { __LINE__, NULL,       0,  { NULL },            SA_PL(in4loopback), 0, NO_ERROR, FALSE, 0xc2 },
++        { __LINE__, NULL,       0,  { NULL },            SA_PL(in4loopback), 0, NO_ERROR, FALSE, 0xc4 },
++        { __LINE__, NULL,       0,  { NULL },            SA_PL(in4loopback), 0, NO_ERROR, FALSE, 0xc6 },
++#if 0 /* not reliable (fails spuriously) on Wine */
++        { __LINE__, NULL,       0,  { NULL },            SA_PL(in4loopback), 0, NO_ERROR, FALSE, 0xc1 },
++        { __LINE__, NULL,       0,  { NULL },            SA_PL(in4loopback), 0, NO_ERROR, FALSE, 0xc3 },
++        { __LINE__, NULL,       0,  { NULL },            SA_PL(in4loopback), 0, NO_ERROR, FALSE, 0xc5 },
++        { __LINE__, NULL,       0,  { NULL },            SA_PL(in4loopback), 0, NO_ERROR, FALSE, 0xc7 },
++#endif
++#undef SA_PL
++    };
++    UINT i;
++
++    memset( &destination, 0, sizeof(destination) );
++    destination.Ipv4.sin_family = AF_INET;
++    destination.Ipv4.sin_addr.S_un.S_addr = htonl( INADDR_ANY );
++    apiReturn = GetBestRoute2( NULL, 0, NULL, &destination, 0, &bestroute, &bestaddress );
++    trace( "GetBestRoute2(NULL, 0, NULL, [...], 0, [...], [...]) = %lu\n", apiReturn );
++    if (apiReturn == ERROR_NOT_SUPPORTED)
++    {
++        skip("GetBestRoute2 not supported\n");
++        return;
++    }
++
++    apiReturn = GetBestRoute2( NULL, 0, NULL, NULL, 0, NULL, NULL );
++    ok( apiReturn == ERROR_INVALID_PARAMETER,
++        "GetBestRoute2(NULL, 0, NULL, NULL, 0, NULL, NULL) returned %lu, expected %d\n",
++        apiReturn, ERROR_INVALID_PARAMETER );
++
++    apiReturn = GetBestRoute2( NULL, 0, NULL, NULL, 0, &bestroute, NULL );
++    ok( apiReturn == ERROR_INVALID_PARAMETER,
++        "GetBestRoute2(NULL, 0, NULL, NULL, 0, %p, NULL) returned %lu, expected %d\n",
++        &bestroute, apiReturn, ERROR_INVALID_PARAMETER );
++
++    apiReturn = GetBestRoute2( NULL, 0, NULL, NULL, 0, NULL, &bestaddress );
++    memcpy( &bestaddress, &invalidaddr, sizeof(invalidaddr) );
++    ok( apiReturn == ERROR_INVALID_PARAMETER,
++        "GetBestRoute2(NULL, 0, NULL, NULL, 0, NULL, %p) returned %lu, expected %d\n",
++        &bestaddress, apiReturn, ERROR_INVALID_PARAMETER );
++    ok( memcmp(&bestaddress, &invalidaddr, sizeof(invalidaddr)) == 0, "bestaddress(.si_family = %u) has changed\n", bestaddress.si_family );
++
++    apiReturn = GetBestRoute2( NULL, 0, NULL, NULL, 0, &bestroute, &bestaddress );
++    memcpy( &bestaddress, &invalidaddr, sizeof(invalidaddr) );
++    ok( apiReturn == ERROR_INVALID_PARAMETER,
++        "GetBestRoute2(NULL, 0, NULL, NULL, 0, %p, %p) returned %lu, expected %d\n",
++        &bestroute, &bestaddress, apiReturn, ERROR_INVALID_PARAMETER );
++    ok( memcmp(&bestaddress, &invalidaddr, sizeof(invalidaddr)) == 0, "bestaddress(.si_family = %u) has changed\n", bestaddress.si_family );
++
++    memset( &destination, 0, sizeof(destination) );
++    destination.Ipv4.sin_family = AF_INET;
++    destination.Ipv4.sin_addr.S_un.S_addr = htonl( INADDR_LOOPBACK );
++    memcpy( &bestaddress, &invalidaddr, sizeof(invalidaddr) );
++    apiReturn = GetBestRoute2( NULL, 0, NULL, &destination, 0, &bestroute, NULL );
++    ok( apiReturn == ERROR_INVALID_PARAMETER,
++        "GetBestRoute2(NULL, 0, NULL, [127.0.0.1], 0, %p, NULL) returned %lu, expected %d\n",
++        &bestroute, apiReturn, ERROR_INVALID_PARAMETER );
++    ok( memcmp(&bestaddress, &invalidaddr, sizeof(invalidaddr)) == 0, "bestaddress(.si_family = %u) has changed\n", bestaddress.si_family );
++
++    memset( &destination, 0, sizeof(destination) );
++    destination.Ipv4.sin_family = AF_INET;
++    destination.Ipv4.sin_addr.S_un.S_addr = htonl( INADDR_LOOPBACK );
++    memcpy( &bestaddress, &invalidaddr, sizeof(invalidaddr) );
++    apiReturn = GetBestRoute2( NULL, 0, NULL, &destination, 0, NULL, &bestaddress );
++    ok( apiReturn == ERROR_INVALID_PARAMETER,
++        "GetBestRoute2(NULL, 0, NULL, [127.0.0.1], 0, NULL, %p) returned %lu, expected %d\n",
++        &bestaddress, apiReturn, ERROR_INVALID_PARAMETER );
++    ok( memcmp(&bestaddress, &invalidaddr, sizeof(invalidaddr)) == 0, "bestaddress(.si_family = %u) has changed\n", bestaddress.si_family );
++
++    memset( &destination, 0, sizeof(destination) );
++    memcpy( &bestaddress, &invalidaddr, sizeof(invalidaddr) );
++    apiReturn = GetBestRoute2( NULL, 0, NULL, &destination, 0, NULL, &bestaddress );
++    ok( apiReturn == ERROR_INVALID_PARAMETER,
++        "GetBestRoute2(NULL, 0, NULL, <AF_UNSPEC>, 0, NULL, %p) returned %lu, expected %d\n",
++        &bestaddress, apiReturn, ERROR_INVALID_PARAMETER );
++    ok( memcmp(&bestaddress, &invalidaddr, sizeof(invalidaddr)) == 0, "bestaddress(.si_family = %u) has changed\n", bestaddress.si_family );
++
++    for (i = 0; i < ARRAY_SIZE(getbestroute_tests); i++)
++    {
++        const struct getbestroute_test *item = &getbestroute_tests[i];
++        int validflags = item->memload & validmemflags;
++        NET_LUID luid;
++        NET_IFINDEX ifindex = 0;
++
++        winetest_push_context("Subtest #%u (decl at line %d)", i, item->line);
++
++        ok( (item->memload & ~validmemflags) == 0,
++            "current subtest may be incomplete due to previous test failure (memload = %d, validmemflags = %d)\n",
++            item->memload, validmemflags );
++
++        if (item->luid)
++        {
++            memcpy(&luid, item->luid, sizeof(luid));
++            validflags |= 1;
++        }
++        else if (validflags & 1)
++        {
++            memcpy(&luid, &bestroute_memory.InterfaceLuid, sizeof(luid));
++        }
++
++        if (item->ifindex)
++        {
++            ifindex = item->ifindex;
++            validflags |= 2;
++        }
++        else if (validflags & 2)
++        {
++            ifindex = bestroute_memory.InterfaceIndex;
++        }
++
++        if (item->source.len > sizeof(source)) abort();  /* prevent memory corruption */
++        if (item->source.ptr)
++        {
++            memset( &source, 0, sizeof(source) );
++            memcpy( &source, item->source.ptr, item->source.len );
++            validflags |= 4;
++        }
++        else if (validflags & 4)
++        {
++            memcpy( &source, &bestaddress_memory, sizeof(source) );
++        }
++
++        if (item->destination.len > sizeof(destination)) abort();  /* prevent memory corruption */
++        memset( &destination, 0, sizeof(destination) );
++        memcpy( &destination, item->destination.ptr, item->destination.len );
++
++        apiReturn = GetBestRoute2( (validflags & 1) ? &luid : NULL,
++                                   (validflags & 2) ? ifindex : 0,
++                                   (validflags & 4) ? &source : NULL,
++                                   &destination,
++                                   item->options,
++                                   &bestroute, &bestaddress );
++        todo_wine_if( item->todo )
++        ok( apiReturn == item->result,
++            "GetBestRoute2 returned %lu, expected %lu\n", apiReturn, item->result );
++        if (apiReturn == NO_ERROR)
++        {
++            ok( bestaddress.si_family == destination.si_family,
++                "bestaddress.si_family (%u) shall equal destination.si_family (%u)\n",
++                bestaddress.si_family, destination.si_family );
++
++            if (validflags & 0x40)
++            {
++                ok( memcmp( &bestroute_memory, &bestroute, sizeof(bestroute) ) == 0,
++                    "returned bestroute does not match last cached value\n" );
++            }
++
++            if (validflags & 0x80)
++            {
++                ok( memcmp( &bestaddress_memory, &bestaddress, sizeof(bestaddress) ) == 0,
++                    "returned bestaddress does not match last cached value\n" );
++            }
++
++            if (item->memstore)
++            {
++                memcpy( &bestroute_memory, &bestroute, sizeof(bestroute_memory) );
++                memcpy( &bestaddress_memory, &bestaddress, sizeof(bestaddress_memory) );
++                validmemflags = item->memstore;
++            }
++        }
++        else
++        {
++            ok( memcmp( &bestaddress, &unspecaddr, sizeof(bestaddress) ) == 0, "bestaddress shall be zeroed by GetBestRoute2\n" );
++            ok( memcmp( &bestroute, &route_zero, sizeof(bestroute) ) == 0, "bestroute shall be zeroed by GetBestRoute2\n" );
++        }
++
++        winetest_pop_context();
++    }
++}
++
+ static void test_ConvertLengthToIpv4Mask(void)
+ {
+     DWORD ret;
+@@ -2916,6 +3139,7 @@ START_TEST(iphlpapi)
+     test_GetIfTable2Ex();
+     test_GetUnicastIpAddressEntry();
+     test_GetUnicastIpAddressTable();
++    test_GetBestRoute2();
+     test_ConvertLengthToIpv4Mask();
+     test_GetTcp6Table();
+     test_GetUdp6Table();
+
+
+
+
+From: Jinoh Kang <wine@gitlab.winehq.org>
+Subject: [PATCH 3/3] iphlpapi: Implement GetBestRoute2.
+Message-Id: <wine-wine-mr263-v1-patch3@gitlab-mail-bridge>
+Date: Fri, 17 Jun 2022 14:00:15 +0000
+In-Reply-To: <wine-wine-mr263-v1@gitlab-mail-bridge>
+References: <merge_request_332@gitlab.winehq.org> <wine-wine-mr263-v1@gitlab-mail-bridge>
+
+From: Jinoh Kang <jinoh.kang.kr@gmail.com>
+
+Signed-off-by: Jinoh Kang <jinoh.kang.kr@gmail.com>
+---
+ dlls/iphlpapi/iphlpapi_main.c | 137 +++++++++++++++++++++++++++++++++-
+ 1 file changed, 134 insertions(+), 3 deletions(-)
+
+diff --git a/dlls/iphlpapi/iphlpapi_main.c b/dlls/iphlpapi/iphlpapi_main.c
+index 11111111111..11111111111 100644
+--- a/dlls/iphlpapi/iphlpapi_main.c
++++ b/dlls/iphlpapi/iphlpapi_main.c
+@@ -4445,16 +4445,147 @@ DWORD WINAPI GetBestRoute2(NET_LUID *luid, NET_IFINDEX index,
+                            ULONG options, PMIB_IPFORWARD_ROW2 bestroute,
+                            SOCKADDR_INET *bestaddress)
+ {
+-    static int once;
++    MIB_IPFORWARD_TABLE2 *table;
++    MIB_UNICASTIPADDRESS_TABLE *table_ip;
++    const MIB_IPFORWARD_ROW2 *matched;
++    NET_LUID luid_match;
++    DWORD ndx, ndx_ip;
++    SOCKADDR_INET dest, matched_src;
++    UINT addr_bytes;
++    const BYTE *dest_prefix;
++    DWORD ret;
++    static unsigned int once;
+ 
+     if (!once++)
+-        FIXME("(%p, %ld, %p, %p, 0x%08lx, %p, %p): stub\n", luid, index, source,
++        FIXME("(%p, %ld, %p, %p, 0x%08lx, %p, %p): partial stub\n", luid, index, source,
+                 destination, options, bestroute, bestaddress);
+ 
+     if (!destination || !bestroute || !bestaddress)
+         return ERROR_INVALID_PARAMETER;
+ 
+-    return ERROR_NOT_SUPPORTED;
++    memcpy( &dest, destination, sizeof(dest) );
++    switch (dest.si_family)
++    {
++    case AF_INET:
++        addr_bytes = sizeof(dest.Ipv4.sin_addr);
++        dest_prefix = (const BYTE *)&dest.Ipv4.sin_addr;
++        break;
++    case AF_INET6:
++        addr_bytes = sizeof(dest.Ipv6.sin6_addr);
++        dest_prefix = (const BYTE *)&dest.Ipv6.sin6_addr;
++        break;
++    default:
++        return ERROR_INVALID_PARAMETER;
++    }
++
++    if (luid)
++    {
++        NET_IFINDEX unused;
++        memcpy( &luid_match, luid, sizeof(luid_match) );
++        if (luid_match.Value)
++        {
++            /* check LUID existence */
++            ret = ConvertInterfaceLuidToIndex( &luid_match, &unused );
++            if (ret)
++            {
++                if (ret == ERROR_FILE_NOT_FOUND) ret = ERROR_NOT_FOUND;
++                goto fail;
++            }
++        }
++    }
++    else if (index)
++    {
++        ret = ConvertInterfaceIndexToLuid( index, &luid_match );
++        if (ret) goto fail;
++    }
++    else
++    {
++        memset( &luid_match, 0, sizeof(luid_match) );
++    }
++
++    ret = GetIpForwardTable2( dest.si_family, &table );
++    if (ret) goto fail;
++
++    ret = GetUnicastIpAddressTable( dest.si_family, &table_ip );
++    if (ret) goto free_ipforwardtable2;
++
++    for (ndx = 0, matched = NULL; ndx < table->NumEntries; ndx++)
++    {
++        const MIB_IPFORWARD_ROW2 *row = &table->Table[ndx];
++        const BYTE *row_prefix;
++        const SOCKADDR_INET *forward_src;
++        UINT prefix_bytes, prefix_lastshr;
++
++        if (luid_match.Value && row->InterfaceLuid.Value != luid_match.Value) continue;
++        if (row->DestinationPrefix.Prefix.si_family != dest.si_family) continue;
++
++        if (row->DestinationPrefix.PrefixLength > addr_bytes * 8) continue;
++        switch (row->DestinationPrefix.Prefix.si_family)
++        {
++        case AF_INET:
++            row_prefix = (const BYTE *)&row->DestinationPrefix.Prefix.Ipv4.sin_addr;
++            break;
++        case AF_INET6:
++            row_prefix = (const BYTE *)&row->DestinationPrefix.Prefix.Ipv6.sin6_addr;
++            break;
++        default:
++            continue;
++        }
++
++        prefix_bytes = row->DestinationPrefix.PrefixLength >> 3;
++        prefix_lastshr = -row->DestinationPrefix.PrefixLength & 7;
++        if (memcmp(dest_prefix, row_prefix, prefix_bytes) != 0 ||
++            (prefix_lastshr && ((dest_prefix[prefix_bytes] ^ row_prefix[prefix_bytes]) >>
++                                 prefix_lastshr) != 0)) continue;
++
++        forward_src = NULL;
++        for (ndx_ip = 0; ndx_ip < table_ip->NumEntries; ndx_ip++)
++        {
++            if (row->InterfaceLuid.Value == table_ip->Table[ndx_ip].InterfaceLuid.Value)
++            {
++                forward_src = &table_ip->Table[ndx_ip].Address;
++                break;
++            }
++        }
++        if (!forward_src) continue;
++
++        if (!matched || row->DestinationPrefix.PrefixLength > matched->DestinationPrefix.PrefixLength ||
++            (row->DestinationPrefix.PrefixLength == matched->DestinationPrefix.PrefixLength &&
++             row->Metric < matched->Metric))
++        {
++            matched = row;
++            memcpy( &matched_src, forward_src, sizeof(matched_src) );
++        }
++    }
++
++    if (matched)
++    {
++        ret = NO_ERROR;
++    }
++    else
++    {
++        /* No route matches, which can happen if there's no default route. */
++        ret = ERROR_HOST_UNREACHABLE;
++    }
++
++    heap_free( table_ip );
++
++free_ipforwardtable2:
++    heap_free( table );
++
++fail:
++    if (ret == NO_ERROR && matched)
++    {
++        memcpy( bestroute, matched, sizeof(*bestroute) );
++        memcpy( bestaddress, &matched_src, sizeof(*bestaddress) );
++    }
++    else
++    {
++        memset( bestroute, 0, sizeof(*bestroute) );
++        memset( bestaddress, 0, sizeof(*bestaddress) );
++    }
++    TRACE("returning %lu\n", ret);
++    return ret;
+ }
+ 
+ /******************************************************************
+
+
+
+From b0a91fb9dd31fc9792e150dfd284515543c826cf Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Fri, 10 Jun 2022 20:32:19 -0500
+Subject: [PATCH] iphlpapi: Return ERROR_NO_DATA from GetIpNetTable() if no
+ entries are found.
+
+CW-Bug-Id: #20794
+---
+ dlls/iphlpapi/iphlpapi_main.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/dlls/iphlpapi/iphlpapi_main.c b/dlls/iphlpapi/iphlpapi_main.c
+index 11111111111..11111111111 100644
+--- a/dlls/iphlpapi/iphlpapi_main.c
++++ b/dlls/iphlpapi/iphlpapi_main.c
+@@ -2319,6 +2319,13 @@ DWORD WINAPI GetIpNetTable( MIB_IPNETTABLE *table, ULONG *size, BOOL sort )
+                                   NULL, 0, &count, 0 );
+     if (err) return err;
+ 
++    if (!count)
++    {
++        *size = 0;
++        err = ERROR_NO_DATA;
++        goto err;
++    }
++
+     needed = FIELD_OFFSET( MIB_IPNETTABLE, table[count] );
+ 
+     if (!table || *size < needed)
