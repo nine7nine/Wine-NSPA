@@ -1,0 +1,673 @@
+From: Paul Gofman <wine@gitlab.winehq.org>
+Subject: [PATCH v3 1/1] ntdll: Do not open directory file when setting the same directory path.
+Message-Id: <wine-wine-mr256-v3-patch1@gitlab-mail-bridge>
+Date: Thu, 16 Jun 2022 16:52:20 +0000
+In-Reply-To: <wine-wine-mr256-v3@gitlab-mail-bridge>
+References: <merge_request_325@gitlab.winehq.org> <wine-wine-mr256-v3@gitlab-mail-bridge>
+
+From: Paul Gofman <pgofman@codeweavers.com>
+
+Signed-off-by: Paul Gofman <pgofman@codeweavers.com>
+---
+ dlls/ntdll/path.c | 22 +++++++++++++++++-----
+ 1 file changed, 17 insertions(+), 5 deletions(-)
+
+diff --git a/dlls/ntdll/path.c b/dlls/ntdll/path.c
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/path.c
++++ b/dlls/ntdll/path.c
+@@ -939,13 +939,13 @@ ULONG WINAPI RtlGetCurrentDirectory_U(ULONG buflen, LPWSTR buf)
+ NTSTATUS WINAPI RtlSetCurrentDirectory_U(const UNICODE_STRING* dir)
+ {
+     FILE_FS_DEVICE_INFORMATION device_info;
++    ULONG size, compare_size;
+     OBJECT_ATTRIBUTES attr;
+     UNICODE_STRING newdir;
+     IO_STATUS_BLOCK io;
+     CURDIR *curdir;
+     HANDLE handle;
+     NTSTATUS nts;
+-    ULONG size;
+     PWSTR ptr;
+ 
+     newdir.Buffer = NULL;
+@@ -963,6 +963,22 @@ NTSTATUS WINAPI RtlSetCurrentDirectory_U(const UNICODE_STRING* dir)
+         goto out;
+     }
+ 
++    size = newdir.Length / sizeof(WCHAR);
++    ptr = newdir.Buffer;
++    ptr += 4;  /* skip \??\ prefix */
++    size -= 4;
++
++    if (size && ptr[size - 1] == '\\') compare_size = size - 1;
++    else                               compare_size = size;
++
++    if (curdir->DosPath.Length == (compare_size + 1) * sizeof(WCHAR)
++        && !wcsnicmp( curdir->DosPath.Buffer, ptr, compare_size ))
++    {
++        TRACE( "dir %s is the same as current.\n", debugstr_us(dir) );
++        nts = STATUS_SUCCESS;
++        goto out;
++    }
++
+     attr.Length = sizeof(attr);
+     attr.RootDirectory = 0;
+     attr.Attributes = OBJ_CASE_INSENSITIVE;
+@@ -987,10 +1003,6 @@ NTSTATUS WINAPI RtlSetCurrentDirectory_U(const UNICODE_STRING* dir)
+     curdir->Handle = handle;
+ 
+     /* append trailing \ if missing */
+-    size = newdir.Length / sizeof(WCHAR);
+-    ptr = newdir.Buffer;
+-    ptr += 4;  /* skip \??\ prefix */
+-    size -= 4;
+     if (size && ptr[size - 1] != '\\') ptr[size++] = '\\';
+ 
+     /* convert \??\UNC\ path to \\ prefix */
+
+From 69251fed50c969bf0eda57511726c0ec84ba75f2 Mon Sep 17 00:00:00 2001
+From: Jinoh Kang <jinoh.kang.kr@gmail.com>
+Date: Sun, 11 Sep 2022 03:04:16 +0900
+Subject: [PATCH 2/2] ntdll: Fix integer overflow in RtlUniform.
+
+The integer overflow bug in RtlUniform has been fixed since Windows
+Vista.  Synchronize Wine's version accordingly.
+---
+ dlls/ntdll/rtl.c       | 52 ++++++++++++++++++++++++------------------
+ dlls/ntdll/tests/rtl.c |  6 -----
+ 2 files changed, 30 insertions(+), 28 deletions(-)
+
+diff --git a/dlls/ntdll/rtl.c b/dlls/ntdll/rtl.c
+index 11067f44941..11b346796aa 100644
+--- a/dlls/ntdll/rtl.c
++++ b/dlls/ntdll/rtl.c
+@@ -706,7 +706,7 @@ __ASM_GLOBAL_FUNC(NTDLL_RtlUshortByteSwap,
+ /*************************************************************************
+  * RtlUniform   [NTDLL.@]
+  *
+- * Generates an uniform random number
++ * Generates a uniform random number
+  *
+  * PARAMS
+  *  seed [O] The seed of the Random function
+@@ -715,12 +715,7 @@ __ASM_GLOBAL_FUNC(NTDLL_RtlUshortByteSwap,
+  *  It returns a random number uniformly distributed over [0..MAXLONG-1].
+  *
+  * NOTES
+- *  Generates an uniform random number using D.H. Lehmer's 1948 algorithm.
+- *  In our case the algorithm is:
+- *
+- *|  result = (*seed * 0x7fffffed + 0x7fffffc3) % MAXLONG;
+- *|
+- *|  *seed = result;
++ *  Generates a uniform random number using a linear congruential generator.
+  *
+  * DIFFERENCES
+  *  The native documentation states that the random number is
+@@ -730,23 +725,36 @@ __ASM_GLOBAL_FUNC(NTDLL_RtlUshortByteSwap,
+  */
+ ULONG WINAPI RtlUniform (PULONG seed)
+ {
++    ULONGLONG product;
+     ULONG result;
+ 
+-   /*
+-    * Instead of the algorithm stated above, we use the algorithm
+-    * below, which is totally equivalent (see the tests), but does
+-    * not use a division and therefore is faster.
+-    */
+-    result = *seed * 0xffffffed + 0x7fffffc3;
+-    if (result == 0xffffffff || result == 0x7ffffffe) {
+-	result = (result + 2) & MAXLONG;
+-    } else if (result == 0x7fffffff) {
+-	result = 0;
+-    } else if ((result & 0x80000000) == 0) {
+-	result = result + (~result & 1);
+-    } else {
+-	result = (result + (result & 1)) & MAXLONG;
+-    } /* if */
++    product = (ULONGLONG)*seed * 0x7fffffed + 0x7fffffc3;
++
++    /*
++     * The following is equivalent to:
++     *
++     *   result = (product & ((1ui64 << 63) - 1)) % ((1u << 31) - 1);
++     *
++     * Since product is never greater than 2^63, it is the same as:
++     *
++     *   result = product % ((1u << 31) - 1);
++     *
++     * This is due to the following identity:
++     *
++     *   a * (2^31) + b = a + b  (mod 2^31 - 1)
++     *
++     * because 2^31 is congruent to 1 (mod 2^31 - 1).
++     */
++
++    /* The 1st iteration produces an integer in the range [0, 0xffffffff]. */
++    result = ((ULONG)product & 0x7fffffff) + (ULONG)(product >> 31);
++
++    /* The 2nd iteration produces an integer in the range [0, 0x80000000]. */
++    result = (result & 0x7fffffff) + (result >> 31);
++
++    /* The 3rd iteration produces an integer in the range [0, 0x7fffffff]. */
++    result = (result & 0x7fffffff) + (result >> 31);
++
+     *seed = result;
+     return result;
+ }
+
+From: Zebediah Figura <zfigura@codeweavers.com>
+Subject: [PATCH v3] ntdll: Implement reading multiple entries in NtQueryDirectoryObject.
+Message-Id: <20220416162619.1327143-1-zfigura@codeweavers.com>
+Date: Sat, 16 Apr 2022 11:26:19 -0500
+
+Wine-Bug: https://bugs.winehq.org/show_bug.cgi?id=52585
+Signed-off-by: Zebediah Figura <zfigura@codeweavers.com>
+---
+v3: fix a missing dereference in sizeof (thanks Jinoh Kang)
+
+ dlls/ntdll/tests/om.c  |  57 +++++++++-----------
+ dlls/ntdll/unix/sync.c | 118 +++++++++++++++++++++++++++--------------
+ server/directory.c     |  74 ++++++++++++++++++++------
+ server/object.c        |   1 -
+ server/protocol.def    |  20 ++++---
+ server/trace.c         |  34 ++++++++++++
+ 6 files changed, 209 insertions(+), 95 deletions(-)
+
+diff --git a/dlls/ntdll/tests/om.c b/dlls/ntdll/tests/om.c
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/tests/om.c
++++ b/dlls/ntdll/tests/om.c
+@@ -2540,9 +2540,9 @@ static void test_query_directory(void)
+     context = 0xdeadbeef;
+     size = 0xdeadbeef;
+     status = NtQueryDirectoryObject( dir, info, 0, FALSE, TRUE, &context, &size );
+-    todo_wine ok( status == STATUS_NO_MORE_ENTRIES, "got %#lx\n", status );
++    ok( status == STATUS_NO_MORE_ENTRIES, "got %#lx\n", status );
+     ok( context == 0xdeadbeef, "got context %#lx\n", context );
+-    todo_wine ok( size == sizeof(*info) || broken(!size) /* WoW64 */, "got size %lu\n", size );
++    ok( size == sizeof(*info) || broken(!size) /* WoW64 */, "got size %lu\n", size );
+ 
+     context = 0xdeadbeef;
+     size = 0xdeadbeef;
+@@ -2558,9 +2558,9 @@ static void test_query_directory(void)
+     size = 0xdeadbeef;
+     memset( buffer, 0xcc, sizeof(buffer) );
+     status = NtQueryDirectoryObject( dir, info, sizeof(buffer), FALSE, TRUE, &context, &size );
+-    todo_wine ok( status == STATUS_NO_MORE_ENTRIES, "got %#lx\n", status );
++    ok( status == STATUS_NO_MORE_ENTRIES, "got %#lx\n", status );
+     ok( context == 0xdeadbeef, "got context %#lx\n", context );
+-    todo_wine ok( size == sizeof(*info) || broken(!size) /* WoW64 */, "got size %lu\n", size );
++    ok( size == sizeof(*info) || broken(!size) /* WoW64 */, "got size %lu\n", size );
+     if (size == sizeof(*info))
+         ok( !memcmp( &info[0], &empty_info, sizeof(*info) ), "entry was not cleared\n" );
+ 
+@@ -2656,37 +2656,31 @@ static void test_query_directory(void)
+ 
+     memset( buffer, 0xcc, sizeof(buffer) );
+     status = NtQueryDirectoryObject( dir, info, sizeof(buffer), FALSE, TRUE, &context, &size );
+-    todo_wine ok( !status, "got %#lx\n", status );
+-    if (!status)
+-    {
+-        ok( context == 2, "got context %#lx\n", context );
+-        check_unicode_string( &info[0].ObjectName, name1 );
+-        check_unicode_string( &info[0].ObjectTypeName, L"Mutant" );
+-        check_unicode_string( &info[1].ObjectName, name2 );
+-        check_unicode_string( &info[1].ObjectTypeName, L"Mutant" );
+-        ok( !memcmp( &info[2], &empty_info, sizeof(*info) ), "entry was not cleared\n" );
+-    }
++    ok( !status, "got %#lx\n", status );
++    ok( context == 2, "got context %#lx\n", context );
++    check_unicode_string( &info[0].ObjectName, name1 );
++    check_unicode_string( &info[0].ObjectTypeName, L"Mutant" );
++    check_unicode_string( &info[1].ObjectName, name2 );
++    check_unicode_string( &info[1].ObjectTypeName, L"Mutant" );
++    ok( !memcmp( &info[2], &empty_info, sizeof(*info) ), "entry was not cleared\n" );
+ 
+     needed_size = size;
+     size = 0xdeadbeef;
+     context = 0xdeadbeef;
+     memset( buffer, 0xcc, sizeof(buffer) );
+     status = NtQueryDirectoryObject( dir, info, needed_size - 1, FALSE, TRUE, &context, &size );
+-    todo_wine ok( status == STATUS_MORE_ENTRIES, "got %#lx\n", status );
+-    if (status == STATUS_MORE_ENTRIES)
+-    {
+-        ok( context == 1, "got context %#lx\n", context );
+-        ok( size > 0 && size < needed_size, "got size %lu\n", size );
+-        check_unicode_string( &info[0].ObjectName, name1 );
+-        check_unicode_string( &info[0].ObjectTypeName, L"Mutant" );
+-        ok( !memcmp( &info[1], &empty_info, sizeof(*info) ), "entry was not cleared\n" );
+-    }
++    ok( status == STATUS_MORE_ENTRIES, "got %#lx\n", status );
++    ok( context == 1, "got context %#lx\n", context );
++    ok( size > 0 && size < needed_size, "got size %lu\n", size );
++    check_unicode_string( &info[0].ObjectName, name1 );
++    check_unicode_string( &info[0].ObjectTypeName, L"Mutant" );
++    ok( !memcmp( &info[1], &empty_info, sizeof(*info) ), "entry was not cleared\n" );
+ 
+     size = 0xdeadbeef;
+     context = 0xdeadbeef;
+     memset( buffer, 0xcc, sizeof(buffer) );
+     status = NtQueryDirectoryObject( dir, info, sizeof(*info), FALSE, TRUE, &context, &size );
+-    todo_wine ok( status == STATUS_MORE_ENTRIES
++    ok( status == STATUS_MORE_ENTRIES
+             || broken(status == STATUS_BUFFER_TOO_SMALL) /* wow64 */, "got %#lx\n", status );
+     if (status == STATUS_MORE_ENTRIES)
+     {
+@@ -2698,7 +2692,7 @@ static void test_query_directory(void)
+     size = 0xdeadbeef;
+     context = 0xdeadbeef;
+     status = NtQueryDirectoryObject( dir, info, 0, FALSE, TRUE, &context, &size );
+-    todo_wine ok( status == STATUS_MORE_ENTRIES
++    ok( status == STATUS_MORE_ENTRIES
+             || broken(status == STATUS_BUFFER_TOO_SMALL) /* wow64 */, "got %#lx\n", status );
+     if (status == STATUS_MORE_ENTRIES)
+     {
+@@ -2709,14 +2703,11 @@ static void test_query_directory(void)
+     context = 1;
+     memset( buffer, 0xcc, sizeof(buffer) );
+     status = NtQueryDirectoryObject( dir, info, sizeof(buffer), FALSE, FALSE, &context, &size );
+-    todo_wine ok( !status, "got %#lx\n", status );
+-    if (!status)
+-    {
+-        ok( context == 2, "got context %#lx\n", context );
+-        check_unicode_string( &info[0].ObjectName, name2 );
+-        check_unicode_string( &info[0].ObjectTypeName, L"Mutant" );
+-        ok( !memcmp( &info[1], &empty_info, sizeof(*info) ), "entry was not cleared\n" );
+-    }
++    ok( !status, "got %#lx\n", status );
++    ok( context == 2, "got context %#lx\n", context );
++    check_unicode_string( &info[0].ObjectName, name2 );
++    check_unicode_string( &info[0].ObjectTypeName, L"Mutant" );
++    ok( !memcmp( &info[1], &empty_info, sizeof(*info) ), "entry was not cleared\n" );
+ 
+     pNtClose( child1 );
+     pNtClose( child2 );
+diff --git a/dlls/ntdll/unix/sync.c b/dlls/ntdll/unix/sync.c
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/unix/sync.c
++++ b/dlls/ntdll/unix/sync.c
+@@ -1306,57 +1306,94 @@ NTSTATUS WINAPI NtOpenDirectoryObject( H
+ /**************************************************************************
+  *           NtQueryDirectoryObject   (NTDLL.@)
+  */
+-NTSTATUS WINAPI NtQueryDirectoryObject( HANDLE handle, DIRECTORY_BASIC_INFORMATION *buffer,
++NTSTATUS WINAPI NtQueryDirectoryObject( HANDLE handle, DIRECTORY_BASIC_INFORMATION *info,
+                                         ULONG size, BOOLEAN single_entry, BOOLEAN restart,
+                                         ULONG *context, ULONG *ret_size )
+ {
+     ULONG index = restart ? 0 : *context;
+-    unsigned int ret;
++    unsigned int i, count, total_len, pos, used_size, used_count;
++    struct directory_entry *buffer;
++    NTSTATUS status;
++    char *p;
+ 
+-    if (single_entry)
++    if (!(buffer = malloc( size ))) return STATUS_NO_MEMORY;
++    SERVER_START_REQ( get_directory_entries )
+     {
+-        SERVER_START_REQ( get_directory_entry )
+-        {
+-            req->handle = wine_server_obj_handle( handle );
+-            req->index = index;
+-            if (size >= 2 * sizeof(*buffer) + 2 * sizeof(WCHAR))
+-                wine_server_set_reply( req, buffer + 2, size - 2 * sizeof(*buffer) - 2 * sizeof(WCHAR) );
+-            if (!(ret = wine_server_call( req )))
+-            {
+-                buffer->ObjectName.Buffer = (WCHAR *)(buffer + 2);
+-                buffer->ObjectName.Length = reply->name_len;
+-                buffer->ObjectName.MaximumLength = reply->name_len + sizeof(WCHAR);
+-                buffer->ObjectTypeName.Buffer = (WCHAR *)(buffer + 2) + reply->name_len/sizeof(WCHAR) + 1;
+-                buffer->ObjectTypeName.Length = wine_server_reply_size( reply ) - reply->name_len;
+-                buffer->ObjectTypeName.MaximumLength = buffer->ObjectTypeName.Length + sizeof(WCHAR);
+-                /* make room for the terminating null */
+-                memmove( buffer->ObjectTypeName.Buffer, buffer->ObjectTypeName.Buffer - 1,
+-                         buffer->ObjectTypeName.Length );
+-                buffer->ObjectName.Buffer[buffer->ObjectName.Length/sizeof(WCHAR)] = 0;
+-                buffer->ObjectTypeName.Buffer[buffer->ObjectTypeName.Length/sizeof(WCHAR)] = 0;
+-
+-                memset( &buffer[1], 0, sizeof(buffer[1]) );
+-
+-                *context = index + 1;
+-            }
+-            else if (ret == STATUS_NO_MORE_ENTRIES)
+-            {
+-                if (size > sizeof(*buffer))
+-                    memset( buffer, 0, sizeof(*buffer) );
+-                if (ret_size) *ret_size = sizeof(*buffer);
+-            }
++        req->handle = wine_server_obj_handle( handle );
++        req->index = index;
++        req->max_count = single_entry ? 1 : UINT_MAX;
++        wine_server_set_reply( req, buffer, size );
++        status = wine_server_call( req );
++        count = reply->count;
++        total_len = reply->total_len;
++    }
++    SERVER_END_REQ;
++
++    if (status && status != STATUS_MORE_ENTRIES)
++    {
++        free( buffer );
++        return status; 
++    }
+ 
+-            if (ret_size && (!ret || ret == STATUS_BUFFER_TOO_SMALL))
+-                *ret_size = 2 * sizeof(*buffer) + reply->total_len + 2 * sizeof(WCHAR);
++    used_count = 0;
++    used_size = sizeof(*info); /* null terminator */
++    for (i = pos = 0; i < count; ++i)
++    {
++        const struct directory_entry *entry = (const struct directory_entry *)((char *)buffer + pos);
++        unsigned int entry_size = sizeof(*info) + entry->name_len + entry->type_len + 2 * sizeof(WCHAR);
++
++        if (used_size + entry_size > size)
++        {
++            status = STATUS_MORE_ENTRIES;
++            break;
+         }
+-        SERVER_END_REQ;
++        used_count++;
++        used_size += entry_size;
++        pos += sizeof(*entry) + ((entry->name_len + entry->type_len + 3) & ~3);
+     }
+-    else
++
++    p = (char *)&info[used_count + 1]; /* after the null terminator */
++    for (i = pos = 0; i < used_count; ++i)
+     {
+-        FIXME("multiple entries not implemented\n");
+-        ret = STATUS_NOT_IMPLEMENTED;
++        const struct directory_entry *entry = (const struct directory_entry *)((char *)buffer + pos);
++
++        info[i].ObjectName.Buffer = (WCHAR *)p;
++        info[i].ObjectName.Length = entry->name_len;
++        info[i].ObjectName.MaximumLength = entry->name_len + sizeof(WCHAR);
++        memcpy( p, (entry + 1), entry->name_len );
++        info[i].ObjectName.Buffer[entry->name_len / sizeof(WCHAR)] = 0;
++        p += entry->name_len + sizeof(WCHAR);
++
++        info[i].ObjectTypeName.Buffer = (WCHAR *)p;
++        info[i].ObjectTypeName.Length = entry->type_len;
++        info[i].ObjectTypeName.MaximumLength = entry->type_len + sizeof(WCHAR);
++        memcpy( p, (char *)(entry + 1) + entry->name_len, entry->type_len );
++        info[i].ObjectTypeName.Buffer[entry->type_len / sizeof(WCHAR)] = 0;
++        p += entry->type_len + sizeof(WCHAR);
++
++        pos += sizeof(*entry) + ((entry->name_len + entry->type_len + 3) & ~3);
++    }
++
++    if (size >= sizeof(*info))
++        memset( &info[used_count], 0, sizeof(info[used_count]) );
++
++    free( buffer );
++
++    if (!count && !status)
++    {
++        if (ret_size) *ret_size = sizeof(*info);
++        return STATUS_NO_MORE_ENTRIES;
+     }
+-    return ret;
++
++    if (single_entry && !used_count)
++    {
++        if (ret_size) *ret_size = 2 * sizeof(*info) + 2 * sizeof(WCHAR) + total_len;
++        return STATUS_BUFFER_TOO_SMALL;
++    }
++
++    *context = index + used_count;
++    if (ret_size) *ret_size = (char *)p - (char *)info;
++    return status;
+ }
+ 
+ 
+diff --git a/server/directory.c b/server/directory.c
+index 11111111111..11111111111 100644
+--- a/server/directory.c
++++ b/server/directory.c
+@@ -574,32 +574,76 @@ DECL_HANDLER(open_directory)
+ }
+ 
+ /* get a directory entry by index */
+-DECL_HANDLER(get_directory_entry)
++DECL_HANDLER(get_directory_entries)
+ {
+     struct directory *dir = (struct directory *)get_handle_obj( current->process, req->handle,
+                                                                 DIRECTORY_QUERY, &directory_ops );
+     if (dir)
+     {
+-        struct object *obj = find_object_index( dir->entries, req->index );
+-        if (obj)
++        struct directory_entry *entry;
++        struct object *obj;
++        data_size_t size;
++        unsigned int i;
++        char *buffer;
++
++        reply->total_len = 0;
++
++        size = 0;
++        for (i = 0; i < req->max_count; ++i)
+         {
++            const struct unicode_str *type_name;
+             data_size_t name_len;
+-            const struct unicode_str *type_name = &obj->ops->type->name;
+-            const WCHAR *name = get_object_name( obj, &name_len );
++            size_t entry_size;
++
++            if (!(obj = find_object_index( dir->entries, req->index + i )))
++                break;
++            type_name = &obj->ops->type->name;
++            get_object_name( obj, &name_len );
++            entry_size = (sizeof(*entry) + name_len + type_name->len + 3) & ~3;
++            reply->total_len += name_len + type_name->len;
++            release_object( obj );
++
++            if (size + entry_size > get_reply_max_size())
++            {
++                set_error( STATUS_MORE_ENTRIES );
++                break;
++            }
++            size += entry_size;
++        }
++        reply->count = i;
+ 
+-            reply->total_len = name_len + type_name->len;
++        if (!(buffer = set_reply_data_size( size )))
++        {
++            release_object( dir );
++            return;
++        }
+ 
+-            if (reply->total_len <= get_reply_max_size())
++        size = 0;
++        for (i = 0; i < reply->count; ++i)
++        {
++            const struct unicode_str *type_name;
++            data_size_t name_len;
++            const WCHAR *name;
++
++            obj = find_object_index( dir->entries, req->index + i );
++            assert( obj );
++            type_name = &obj->ops->type->name;
++            name = get_object_name( obj, &name_len );
++
++            entry = (struct directory_entry *)(buffer + size);
++            entry->name_len = name_len;
++            entry->type_len = type_name->len;
++
++            size += sizeof(*entry);
++            memcpy( buffer + size, name, name_len );
++            size += name_len;
++            memcpy( buffer + size, type_name->str, type_name->len );
++            size += type_name->len;
++            if (size & 3)
+             {
+-                void *ptr = set_reply_data_size( reply->total_len );
+-                if (ptr)
+-                {
+-                    reply->name_len = name_len;
+-                    memcpy( ptr, name, name_len );
+-                    memcpy( (char *)ptr + name_len, type_name->str, type_name->len );
+-                }
++                memset( buffer + size, 0, 4 - (size & 3) );
++                size += 4 - (size & 3);
+             }
+-            else set_error( STATUS_BUFFER_TOO_SMALL );
+ 
+             release_object( obj );
+         }
+diff --git a/server/object.c b/server/object.c
+index 11111111111..11111111111 100644
+--- a/server/object.c
++++ b/server/object.c
+@@ -499,7 +499,6 @@ struct object *find_object_index( const struct namespace *namespace, unsigned in
+             if (!index--) return grab_object( ptr->obj );
+         }
+     }
+-    set_error( STATUS_NO_MORE_ENTRIES );
+     return NULL;
+ }
+ 
+diff --git a/server/protocol.def b/server/protocol.def
+index 11111111111..11111111111 100644
+--- a/server/protocol.def
++++ b/server/protocol.def
+@@ -905,6 +905,14 @@ struct input_shared_memory
+ #define SEQUENCE_MASK_BITS  4
+ #define SEQUENCE_MASK ((1UL << SEQUENCE_MASK_BITS) - 1)
+ 
++struct directory_entry
++{
++    data_size_t name_len;
++    data_size_t type_len;
++    /* VARARG(name,unicode_str,name_len); */
++    /* VARARG(type,unicode_str,type_len); */
++};
++
+ /****************************************************************/
+ /* Request declarations */
+ 
+@@ -3385,15 +3393,15 @@ enum caret_state
+ @END
+ 
+ 
+-/* Get a directory entry by index */
+-@REQ(get_directory_entry)
++/* Get directory entries */
++@REQ(get_directory_entries)
+     obj_handle_t   handle;             /* handle to the directory */
+-    unsigned int   index;              /* entry index */
++    unsigned int   index;              /* index of first entry */
++    unsigned int   max_count;          /* maximum number of entries to return */
+ @REPLY
+     data_size_t    total_len;          /* total length needed for strings */
+-    data_size_t    name_len;           /* length of the entry name in bytes */
+-    VARARG(name,unicode_str,name_len); /* entry name */
+-    VARARG(type,unicode_str);          /* entry type */
++    unsigned int   count;              /* number of entries returned */
++    VARARG(entries,directory_entries);
+ @END
+ 
+ 
+diff --git a/server/trace.c b/server/trace.c
+index 11111111111..11111111111 100644
+--- a/server/trace.c
++++ b/server/trace.c
+@@ -1355,6 +1355,40 @@ static void dump_varargs_cpu_topology_override( const char *prefix, data_size_t
+     remove_data( size );
+ }
+ 
++static void dump_varargs_directory_entries( const char *prefix, data_size_t size )
++{
++    fprintf( stderr, "%s{", prefix );
++    while (size)
++    {
++        const struct directory_entry *entry = cur_data;
++        data_size_t entry_size;
++        const char *next;
++
++        if (size < sizeof(*entry) ||
++            (size - sizeof(*entry) < entry->name_len) ||
++            (size - sizeof(*entry) - entry->name_len < entry->type_len))
++        {
++            fprintf( stderr, "***invalid***}" );
++            remove_data( size );
++            return;
++        }
++
++        next = (const char *)(entry + 1);
++        fprintf( stderr, "{name=L\"" );
++        dump_strW( (const WCHAR *)next, entry->name_len, stderr, "\"\"" );
++        next += entry->name_len;
++        fprintf( stderr, "\",type=L\"" );
++        dump_strW( (const WCHAR *)next, entry->type_len, stderr, "\"\"" );
++        fprintf( stderr, "\"}" );
++
++        entry_size = min( size, (sizeof(*entry) + entry->name_len + entry->type_len + 3) & ~3 );
++        size -= entry_size;
++        remove_data( entry_size );
++        if (size) fputc( ',', stderr );
++    }
++    fputc( '}', stderr );
++}
++
+ typedef void (*dump_func)( const void *req );
+ 
+ /* Everything below this line is generated automatically by tools/make_requests */
+
+-- 
+2.37.2
+
+From: Eric Pouech <eric.pouech@gmail.com>
+Subject: [PATCH 1/3] server: fix some error detection
+Message-Id: <164675782433.1136992.1010538149260424037.stgit@euterpe>
+Date: Tue,  8 Mar 2022 17:43:44 +0100
+In-Reply-To: <164675757803.1136992.17034050630333482579.stgit@euterpe>
+References: <164675757803.1136992.17034050630333482579.stgit@euterpe>
+
+Signed-off-by: Eric Pouech <eric.pouech@gmail.com>
+
+---
+ server/mapping.c | 4 ++--
+ server/request.c | 3 ++-
+ 2 files changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/server/mapping.c b/server/mapping.c
+index 11111111111..11111111111 100644
+--- a/server/mapping.c
++++ b/server/mapping.c
+@@ -717,13 +717,13 @@ static unsigned int get_image_params( struct mapping *mapping, file_pos_t file_s
+ 
+     if (!file_size) return STATUS_INVALID_FILE_FOR_SECTION;
+     size = pread( unix_fd, &mz, sizeof(mz), 0 );
+-    if (size < sizeof(mz.dos)) return STATUS_INVALID_IMAGE_NOT_MZ;
++    if (size < 0 || size < sizeof(mz.dos)) return STATUS_INVALID_IMAGE_NOT_MZ;
+     if (mz.dos.e_magic != IMAGE_DOS_SIGNATURE) return STATUS_INVALID_IMAGE_NOT_MZ;
+     mz_size = size;
+     pos = mz.dos.e_lfanew;
+ 
+     size = pread( unix_fd, &nt, sizeof(nt), pos );
+-    if (size < sizeof(nt.Signature) + sizeof(nt.FileHeader)) return STATUS_INVALID_IMAGE_PROTECT;
++    if (size < 0 || size < sizeof(nt.Signature) + sizeof(nt.FileHeader)) return STATUS_INVALID_IMAGE_PROTECT;
+     /* zero out Optional header in the case it's not present or partial */
+     opt_size = max( nt.FileHeader.SizeOfOptionalHeader, offsetof( IMAGE_OPTIONAL_HEADER32, CheckSum ));
+     size = min( size, sizeof(nt.Signature) + sizeof(nt.FileHeader) + opt_size );
+diff --git a/server/request.c b/server/request.c
+index 11111111111..11111111111 100644
+--- a/server/request.c
++++ b/server/request.c
+@@ -273,7 +273,8 @@ void send_reply( union generic_reply *reply )
+     vec[1].iov_base = current->reply_data;
+     vec[1].iov_len  = current->reply_size;
+ 
+-    if ((ret = writev( get_unix_fd( current->reply_fd ), vec, 2 )) < sizeof(*reply)) goto error;
++    ret = writev( get_unix_fd( current->reply_fd ), vec, 2 );
++    if (ret < 0 || ret < sizeof(*reply)) goto error;
+ 
+     if ((current->reply_towrite = current->reply_size - (ret - sizeof(*reply))))
+     {
+
