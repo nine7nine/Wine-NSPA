@@ -1,0 +1,257 @@
+From 6a0f99d457c6c6c11ad34036739138a9bfe8c901 Mon Sep 17 00:00:00 2001
+From: Zebediah Figura <z.figura12@gmail.com>
+Date: Fri, 18 Dec 2020 14:19:00 -0600
+Subject: [PATCH 1/1] ntoskrnl: Stub MmLockPagableDataSection().
+
+Wine-Bug: https://bugs.winehq.org/show_bug.cgi?id=50353
+---
+ dlls/ntoskrnl.exe/ntoskrnl.c        | 6 ++++++
+ dlls/ntoskrnl.exe/ntoskrnl.exe.spec | 2 +-
+ include/ddk/wdm.h                   | 1 +
+ 3 files changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl.c b/dlls/ntoskrnl.exe/ntoskrnl.c
+index 11111111111..11111111111 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl.c
++++ b/dlls/ntoskrnl.exe/ntoskrnl.c
+@@ -4478,6 +4478,12 @@ void WINAPI KeLowerIrql(KIRQL new)
+ 
+ #endif
+ 
++void * WINAPI MmLockPagableDataSection(void *addr)
++{
++    FIXME("addr %p, stub!\n", addr);
++    return (void *)0xdeadbeef;
++}
++
+ /*****************************************************
+  *           DllMain
+  */
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl.exe.spec b/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
+index 11111111111..11111111111 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
++++ b/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
+@@ -717,7 +717,7 @@
+ @ stub MmIsRecursiveIoFault
+ @ stdcall MmIsThisAnNtAsSystem()
+ @ stub MmIsVerifierEnabled
+-@ stub MmLockPagableDataSection
++@ stdcall MmLockPagableDataSection(ptr)
+ @ stub MmLockPagableImageSection
+ @ stdcall MmLockPagableSectionByHandle(ptr)
+ @ stdcall MmMapIoSpace(int64 long long)
+diff --git a/include/ddk/wdm.h b/include/ddk/wdm.h
+index 11111111111..11111111111 100644
+--- a/include/ddk/wdm.h
++++ b/include/ddk/wdm.h
+@@ -1798,6 +1798,7 @@ PMDL      WINAPI MmAllocatePagesForMdl(PHYSICAL_ADDRESS,PHYSICAL_ADDRESS,PHYSICA
+ void      WINAPI MmBuildMdlForNonPagedPool(MDL*);
+ NTSTATUS  WINAPI MmCopyVirtualMemory(PEPROCESS,void*,PEPROCESS,void*,SIZE_T,KPROCESSOR_MODE,SIZE_T*);
+ void *    WINAPI MmGetSystemRoutineAddress(UNICODE_STRING*);
++void *    WINAPI MmLockPagableDataSection(void*);
+ PVOID     WINAPI MmMapLockedPagesSpecifyCache(PMDLX,KPROCESSOR_MODE,MEMORY_CACHING_TYPE,PVOID,ULONG,MM_PAGE_PRIORITY);
+ MM_SYSTEMSIZE WINAPI MmQuerySystemSize(void);
+ void      WINAPI MmProbeAndLockPages(PMDLX, KPROCESSOR_MODE, LOCK_OPERATION);
+-- 
+2.37.2
+
+From b1b01ff58241ef47e15b5bd8a04b39cd64d4953c Mon Sep 17 00:00:00 2001
+From: Torge Matthies <openglfreak@googlemail.com>
+Date: Tue, 9 Feb 2021 20:36:36 +0100
+Subject: [PATCH] ntoskrnl.exe: Implement KdChangeOption
+
+Signed-off-by: Torge Matthies <openglfreak@googlemail.com>
+---
+ dlls/ntoskrnl.exe/ntoskrnl.c        | 12 ++++++++++++
+ dlls/ntoskrnl.exe/ntoskrnl.exe.spec |  1 +
+ include/ddk/wdm.h                   |  5 +++++
+ 3 files changed, 18 insertions(+)
+
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl.c b/dlls/ntoskrnl.exe/ntoskrnl.c
+index 11111111111..11111111111 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl.c
++++ b/dlls/ntoskrnl.exe/ntoskrnl.c
+@@ -4452,6 +4452,18 @@ void WINAPI KeUnstackDetachProcess(KAPC_STATE *apc_state)
+     FIXME("apc_state %p stub.\n", apc_state);
+ }
+ 
++NTSTATUS WINAPI KdChangeOption(KD_OPTION option, ULONG in_buf_size, PVOID in_buf, ULONG out_buf_size, PVOID out_buf, PULONG out_buf_required)
++{
++    TRACE( "%u %lu %p %lu %p %p\n", option, in_buf_size, in_buf, out_buf_size, out_buf, out_buf_required );
++
++    if (option != KD_OPTION_SET_BLOCK_ENABLE)
++        return STATUS_INVALID_INFO_CLASS;
++    if (in_buf_size != sizeof(BOOLEAN) || out_buf_size != 0 || out_buf)
++        return STATUS_INVALID_PARAMETER;
++
++    return STATUS_DEBUGGER_INACTIVE;
++}
++
+ NTSTATUS WINAPI KdDisableDebugger(void)
+ {
+     FIXME(": stub.\n");
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl.exe.spec b/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
+index 11111111111..11111111111 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
++++ b/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
+@@ -517,6 +517,7 @@
+ @ stub IoWriteTransferCount
+ @ extern KdDebuggerEnabled
+ @ stub KdDebuggerNotPresent
++@ stdcall KdChangeOption(long long ptr long ptr long)
+ @ stdcall KdDisableDebugger()
+ @ stdcall KdEnableDebugger()
+ @ stub KdEnteredDebugger
+diff --git a/include/ddk/wdm.h b/include/ddk/wdm.h
+index 11111111111..11111111111 100644
+--- a/include/ddk/wdm.h
++++ b/include/ddk/wdm.h
+@@ -1163,6 +1163,10 @@ static inline void MmInitializeMdl(MDL *mdl, void *va, SIZE_T length)
+     mdl->ByteCount  = length;
+ }
+ 
++typedef enum _KD_OPTION {
++    KD_OPTION_SET_BLOCK_ENABLE
++} KD_OPTION;
++
+ typedef struct _KTIMER {
+     DISPATCHER_HEADER Header;
+     ULARGE_INTEGER DueTime;
+@@ -1736,6 +1740,7 @@ NTSTATUS  WINAPI IoSetDeviceInterfaceState(UNICODE_STRING*,BOOLEAN);
+ NTSTATUS  WINAPI IoSetDevicePropertyData(DEVICE_OBJECT*,const DEVPROPKEY*,LCID,ULONG,DEVPROPTYPE,ULONG,void*);
+ NTSTATUS  WINAPI IoWMIRegistrationControl(PDEVICE_OBJECT,ULONG);
+ 
++NTSTATUS  WINAPI KdChangeOption(KD_OPTION,ULONG,PVOID,ULONG,PVOID,PULONG);
+ void    FASTCALL KeAcquireInStackQueuedSpinLockAtDpcLevel(KSPIN_LOCK*,KLOCK_QUEUE_HANDLE*);
+ #ifdef __i386__
+ void      WINAPI KeAcquireSpinLock(KSPIN_LOCK*,KIRQL*);
+-- 
+2.37.2
+
+From e390b67fa52b0808b71bb4c7feb08ca12a3a7444 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Gabriel=20Iv=C4=83ncescu?= <gabrielopcode@gmail.com>
+Date: Mon, 21 Sep 2020 17:27:00 +0300
+Subject: [PATCH] server: Try to retrieve the unix name on handles created from
+ file descriptors.
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Wine-Bug: https://bugs.winehq.org/show_bug.cgi?id=46070
+Signed-off-by: Gabriel Ivăncescu <gabrielopcode@gmail.com>
+---
+ server/fd.c   | 39 +++++++++++++++++++++++++++++++++++++++
+ server/file.c |  1 +
+ server/file.h |  2 ++
+ 3 files changed, 42 insertions(+)
+
+diff --git a/server/fd.c b/server/fd.c
+index 11111111111..11111111111 100644
+--- a/server/fd.c
++++ b/server/fd.c
+@@ -2342,6 +2342,45 @@ struct fd *create_anonymous_fd( const struct fd_ops *fd_user_ops, int unix_fd, s
+     return NULL;
+ }
+ 
++void set_unix_name_of_fd( struct fd *fd, const struct stat *fd_st )
++{
++#ifdef __linux__
++    static const char procfs_fmt[] = "/proc/self/fd/%d";
++
++    char path[PATH_MAX], procfs_path[sizeof(procfs_fmt) - 2 /* %d */ + 11];
++    struct stat path_st;
++    ssize_t len;
++
++    sprintf( procfs_path, procfs_fmt, fd->unix_fd );
++    len = readlink( procfs_path, path, sizeof(path) );
++    if (len == -1 || len >= sizeof(path) )
++        return;
++    path[len] = '\0';
++
++    /* Make sure it's an absolute path, has at least one hardlink, and the same inode */
++    if (path[0] != '/' || stat( path, &path_st ) || path_st.st_nlink < 1 ||
++        path_st.st_dev != fd_st->st_dev || path_st.st_ino != fd_st->st_ino)
++        return;
++
++    if (!(fd->unix_name = mem_alloc( len + 1 )))
++        return;
++    memcpy( fd->unix_name, path, len + 1 );
++
++#elif defined(F_GETPATH)
++    char path[PATH_MAX];
++    size_t size;
++
++    if (fcntl( fd->unix_fd, F_GETPATH, path ) == -1 || path[0] != '/')
++        return;
++
++    size = strlen(path) + 1;
++    if (!(fd->unix_name = mem_alloc( size )))
++        return;
++    memcpy( fd->unix_name, path, size );
++
++#endif
++}
++
+ /* retrieve the object that is using an fd */
+ void *get_fd_user( struct fd *fd )
+ {
+diff --git a/server/file.c b/server/file.c
+index 11111111111..11111111111 100644
+--- a/server/file.c
++++ b/server/file.c
+@@ -187,6 +187,7 @@ struct file *create_file_for_fd( int fd, unsigned int access, unsigned int shari
+         release_object( file );
+         return NULL;
+     }
++    set_unix_name_of_fd( file->fd, &st );
+     allow_fd_caching( file->fd );
+     return file;
+ }
+diff --git a/server/file.h b/server/file.h
+index 11111111111..11111111111 100644
+--- a/server/file.h
++++ b/server/file.h
+@@ -22,6 +22,7 @@
+ #define __WINE_SERVER_FILE_H
+ 
+ #include <sys/types.h>
++#include <sys/stat.h>
+ 
+ #include "object.h"
+ 
+@@ -85,6 +86,7 @@ extern struct fd *open_fd( struct fd *root, const char *name, struct unicode_str
+                            unsigned int sharing, unsigned int options );
+ extern struct fd *create_anonymous_fd( const struct fd_ops *fd_user_ops,
+                                        int unix_fd, struct object *user, unsigned int options );
++extern void set_unix_name_of_fd( struct fd *fd, const struct stat *fd_st );
+ extern struct fd *dup_fd_object( struct fd *orig, unsigned int access, unsigned int sharing,
+                                  unsigned int options );
+ extern struct fd *get_fd_object_for_mapping( struct fd *fd, unsigned int access, unsigned int sharing );
+-- 
+2.37.2
+           
+From 847c666156a8bbf16782ecc9d702763d2115fb62 Mon Sep 17 00:00:00 2001
+From: Zebediah Figura <z.figura12@gmail.com>
+Date: Sun, 1 Nov 2020 15:04:43 -0600
+Subject: [PATCH 1/1] ntdll: Always use case-insensitive object name lookup in
+ NtCreateFile().
+
+---
+ dlls/ntdll/unix/file.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/dlls/ntdll/unix/file.c b/dlls/ntdll/unix/file.c
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/unix/file.c
++++ b/dlls/ntdll/unix/file.c
+@@ -4076,6 +4076,7 @@ NTSTATUS WINAPI NtCreateFile( HANDLE *handle, ACCESS_MASK access, OBJECT_ATTRIBU
+     if (alloc_size) FIXME( "alloc_size not supported\n" );
+ 
+     new_attr = *attr;
++    new_attr.Attributes |= OBJ_CASE_INSENSITIVE;
+     if (options & FILE_OPEN_BY_FILE_ID)
+     {
+         status = file_id_to_unix_file_name( &new_attr, &unix_name, &nt_name );
+-- 
+2.37.2
+

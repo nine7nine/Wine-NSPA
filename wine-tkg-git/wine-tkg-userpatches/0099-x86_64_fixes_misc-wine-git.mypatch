@@ -684,3 +684,143 @@ index 4c9faec9e26..8717384c2c6 100644
 -- 
 GitLab
 
+From: Vijay Kiran Kamuju <infyquest@gmail.com>
+Subject: [PATCH] shell32: Partially implement ShellLink_AddDataBlock
+Message-Id: <20191212105857.1669-1-infyquest@gmail.com>
+Date: Thu, 12 Dec 2019 11:58:57 +0100
+
+Wine Bug: https://bugs.winehq.org/show_bug.cgi?id=38171
+Signed-off-by: Vijay Kiran Kamuju <infyquest@gmail.com>
+---
+ dlls/shell32/shelllink.c | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/shell32/shelllink.c b/dlls/shell32/shelllink.c
+index 11111111111..11111111111 100644
+--- a/dlls/shell32/shelllink.c
++++ b/dlls/shell32/shelllink.c
+@@ -2234,8 +2234,11 @@ ShellLink_DataList_Release( IShellLinkDataList* iface )
+ static HRESULT WINAPI
+ ShellLink_AddDataBlock( IShellLinkDataList* iface, void* pDataBlock )
+ {
+-    FIXME("(%p)->(%p): stub\n", iface, pDataBlock);
+-    return E_NOTIMPL;
++    DATABLOCK_HEADER *hdr = (DATABLOCK_HEADER *)pDataBlock;
++
++    FIXME("(%p)->(%p) (Size: %d - Signature: %08x): partially implemented.\n", iface, pDataBlock, hdr->cbSize, hdr->dwSignature);
++
++    return S_OK;
+ }
+ 
+ static HRESULT WINAPI
+
+From: Dmitry Timoshkov <dmitry@baikal.ru>
+Subject: [PATCH 2/2] server: Grant implicit DACL_SECURITY_INFORMATION permission to an object owner.
+Message-Id: <20210202174109.810b238c12a8632a4ea5e6b5@baikal.ru>
+Date: Tue, 2 Feb 2021 17:41:09 +0300
+
+Signed-off-by: Dmitry Timoshkov <dmitry@baikal.ru>
+---
+ server/handle.c                | 11 +++++++++++
+ 2 files changed, 11 insertions(+), 4 deletions(-)
+
+diff --git a/server/handle.c b/server/handle.c
+index 11111111111..11111111111 100644
+--- a/server/handle.c
++++ b/server/handle.c
+@@ -480,6 +480,17 @@ struct object *get_handle_obj( struct process *process, obj_handle_t handle,
+             set_error( STATUS_OBJECT_TYPE_MISMATCH );  /* not the right type */
+             return NULL;
+         }
++        if (access & (READ_CONTROL | WRITE_DAC))
++        {
++            const struct security_descriptor *sd = obj->ops->get_sd( obj );
++            if (sd)
++            {
++                struct token *token = current->token ? current->token : current->process->token;
++                const SID *owner = sd_get_owner( sd );
++                if (token_sid_present( token, owner, FALSE ))
++                    access &= ~(READ_CONTROL | WRITE_DAC);
++            }
++        }
+         if ((entry->access & access) != access)
+         {
+             set_error( STATUS_ACCESS_DENIED );
+
+-- 
+2.37.2
+
+From: Fabian Maurer <dark.shadow4@web.de>
+Subject: [PATCH] user32: When converting strings from A->W, ignore handles/resources
+Message-Id: <20210809215524.448712-1-dark.shadow4@web.de>
+Date: Mon,  9 Aug 2021 23:55:24 +0200
+
+Wine-Bug: https://bugs.winehq.org/show_bug.cgi?id=51583
+Signed-off-by: Fabian Maurer <dark.shadow4@web.de>
+---
+ dlls/user32/tests/msg.c | 3 +++
+ dlls/user32/winproc.c   | 2 ++
+ 2 files changed, 5 insertions(+)
+
+diff --git a/dlls/user32/tests/msg.c b/dlls/user32/tests/msg.c
+index 11111111111..11111111111 100644
+--- a/dlls/user32/tests/msg.c
++++ b/dlls/user32/tests/msg.c
+@@ -5433,6 +5433,9 @@ static void test_sys_menu(void)
+     ok(!hmenu, "GetSystemMenu error %ld\n", GetLastError());
+ 
+     DestroyWindow(hwnd);
++
++    /* Test invalid text with WM_SETTEXT. This must not crash. */
++    SendMessageA(GetDesktopWindow(), WM_SETTEXT, 0, (LPARAM)55);
+ }
+ 
+ /* For shown WS_OVERLAPPEDWINDOW */
+diff --git a/dlls/user32/winproc.c b/dlls/user32/winproc.c
+index 11111111111..11111111111 100644
+--- a/dlls/user32/winproc.c
++++ b/dlls/user32/winproc.c
+@@ -338,6 +338,8 @@ LRESULT WINPROC_CallProcAtoW( winproc_callback_t callback, HWND hwnd, UINT msg,
+     case LB_ADDFILE:
+     case EM_REPLACESEL:
+         if (!lParam) ret = callback( hwnd, msg, wParam, lParam, result, arg );
++        else if (IS_INTRESOURCE(lParam)) /* Check for handles/IDs similar to DEFWND_SetTextA */
++            return 0;
+         else
+         {
+             WCHAR *ptr, buffer[512];
+-- 
+2.37.2
+
+From: Nikolay Sivov <nsivov@codeweavers.com>
+Subject: [PATCH 2/2] ntdll: Handle INVALID_HANDLE_VALUE explicitly in NtClose().
+Message-Id: <20210810165120.171726-2-nsivov@codeweavers.com>
+Date: Tue, 10 Aug 2021 19:51:20 +0300
+In-Reply-To: <20210810165120.171726-1-nsivov@codeweavers.com>
+References: <20210810165120.171726-1-nsivov@codeweavers.com>
+
+Signed-off-by: Nikolay Sivov <nsivov@codeweavers.com>
+---
+
+Reported by Sergey Bychkow as https://bugs.winehq.org/show_bug.cgi?id=51529.
+
+ dlls/ntdll/unix/server.c      | 2 ++
+ 3 files changed, 2 insertions(+), 3 deletions(-)
+
+diff --git a/dlls/ntdll/unix/server.c b/dlls/ntdll/unix/server.c
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/unix/server.c
++++ b/dlls/ntdll/unix/server.c
+@@ -1042,6 +1042,8 @@ int server_get_unix_fd( HANDLE handle, unsigned int wanted_access, int *unix_fd,
+     ret = get_cached_fd( handle, &fd, type, &access, options );
+     if (ret != STATUS_INVALID_HANDLE) goto done;
+ 
++    if (handle == INVALID_HANDLE_VALUE) return STATUS_SUCCESS;
++
+     server_enter_uninterrupted_section( &fd_cache_mutex, &sigset );
+
+     ret = get_cached_fd( handle, &fd, type, &access, options );
+     if (ret == STATUS_INVALID_HANDLE)
+-- 
+2.37.2
+

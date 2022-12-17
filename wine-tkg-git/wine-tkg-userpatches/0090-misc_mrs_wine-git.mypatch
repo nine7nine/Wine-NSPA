@@ -6760,6 +6760,56 @@ index 13e7aa05e11..d790daab2af 100644
 -- 
 GitLab
 
+From 8f06447075fda39858b0fa5bc867b210bec0dbf8 Mon Sep 17 00:00:00 2001
+From: Bartosz Kosiorek <gang65@poczta.onet.pl>
+Date: Sat, 3 Dec 2022 00:48:53 +0100
+Subject: [PATCH] gdiplus: improve performance of GdipTranslateMatrix
+
+Wine-Bug: https://bugs.winehq.org/show_bug.cgi?id=53947
+---
+ dlls/gdiplus/matrix.c       | 21 ++++++++++---------
+ dlls/gdiplus/tests/matrix.c | 40 +++++++++++++++++++++++++++++++++++++
+ 2 files changed, 50 insertions(+), 11 deletions(-)
+
+diff --git a/dlls/gdiplus/matrix.c b/dlls/gdiplus/matrix.c
+index d790daab2af..d69672bddcf 100644
+--- a/dlls/gdiplus/matrix.c
++++ b/dlls/gdiplus/matrix.c
+@@ -417,24 +417,23 @@ GpStatus WINGDIPAPI GdipTransformMatrixPointsI(GpMatrix *matrix, GpPoint *pts, I
+ GpStatus WINGDIPAPI GdipTranslateMatrix(GpMatrix *matrix, REAL offsetX,
+     REAL offsetY, GpMatrixOrder order)
+ {
+-    REAL translate[6];
+-
+     TRACE("(%p, %.2f, %.2f, %d)\n", matrix, offsetX, offsetY, order);
+ 
+     if(!matrix)
+         return InvalidParameter;
+ 
+-    translate[0] = 1.0;
+-    translate[1] = 0.0;
+-    translate[2] = 0.0;
+-    translate[3] = 1.0;
+-    translate[4] = offsetX;
+-    translate[5] = offsetY;
+-
+     if(order == MatrixOrderAppend)
+-        matrix_multiply(matrix->matrix, translate, matrix->matrix);
++    {
++        matrix->matrix[4] += offsetX;
++        matrix->matrix[5] += offsetY;
++    }
+     else if (order == MatrixOrderPrepend)
+-        matrix_multiply(translate, matrix->matrix, matrix->matrix);
++    {
++        matrix->matrix[4] = offsetX * matrix->matrix[0] + offsetY * matrix->matrix[2]
++            + matrix->matrix[4];
++        matrix->matrix[5] = offsetX * matrix->matrix[1] + offsetY * matrix->matrix[3]
++            + matrix->matrix[5];
++    }
+     else
+         return InvalidParameter;
+ 
 From e2c081a8ebc0722df08e85e32fc26bd42c23ae46 Mon Sep 17 00:00:00 2001
 From: Zebediah Figura <zfigura@codeweavers.com>
 Date: Fri, 18 Nov 2022 20:08:09 -0600
