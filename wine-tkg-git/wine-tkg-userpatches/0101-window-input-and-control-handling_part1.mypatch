@@ -1,0 +1,315 @@
+From: "Roman Pišl" <rpisl@seznam.cz>
+Subject: [PATCH 1/2] win32u: Clear validate flag if both internal paint and update now are present.
+Message-Id: <20220102163746.7994-1-rpisl@seznam.cz>
+Date: Sun,  2 Jan 2022 17:37:45 +0100
+
+Wine-Bug: https://bugs.winehq.org/show_bug.cgi?id=48761
+Signed-off-by: Roman Pišl <rpisl@seznam.cz>
+---
+ dlls/win32u/dce.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/dlls/win32u/dce.c b/dlls/win32u/dce.c
+index 11111111111..11111111111 100644
+--- a/dlls/win32u/dce.c
++++ b/dlls/win32u/dce.c
+@@ -1449,6 +1449,9 @@ BOOL WINAPI NtUserRedrawWindow( HWND hwnd, const RECT *rect, HRGN hrgn, UINT fla
+     /* process pending expose events before painting */
+     if (flags & RDW_UPDATENOW) user_driver->pMsgWaitForMultipleObjectsEx( 0, NULL, &zero, QS_PAINT, 0 );
+ 
++    if ((flags & (RDW_INTERNALPAINT | RDW_UPDATENOW | RDW_VALIDATE)) == (RDW_INTERNALPAINT | RDW_UPDATENOW | RDW_VALIDATE))
++        flags &= ~RDW_VALIDATE;
++
+     if (rect && !hrgn)
+     {
+
+         RECT ordered = *rect;
+-- 
+2.37.2
+
+From: "Gabriel Ivăncescu" <gabrielopcode@gmail.com>
+Subject: [PATCH resend 1/2] comctl32: Don't redraw the Combo Box when dropped down if it has an editbox.
+Message-Id: <6508e5f7d1bba3e86c98d9fbe329450a7725d4f7.1606394081.git.gabrielopcode@gmail.com>
+Date: Thu, 26 Nov 2020 14:35:38 +0200
+
+Some applications subclass the combo box and handle WM_ERASEBKGND themselves,
+without using WS_CLIPCHILDREN. This causes them to erase over the editbox
+child. There's no reason to redraw it in this case since the editbox is
+supposed to cover it, anyway.
+
+Wine-Bug: https://bugs.winehq.org/show_bug.cgi?id=22260
+Signed-off-by: Gabriel Ivăncescu <gabrielopcode@gmail.com>
+---
+ dlls/comctl32/combo.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/dlls/comctl32/combo.c b/dlls/comctl32/combo.c
+index 11111111111..11111111111 100644
+--- a/dlls/comctl32/combo.c
++++ b/dlls/comctl32/combo.c
+@@ -1002,7 +1002,7 @@ static void CBDropDown( LPHEADCOMBO lphc )
+                  SWP_NOACTIVATE | SWP_SHOWWINDOW );
+ 
+ 
+-   if( !(lphc->wState & CBF_NOREDRAW) )
++   if( !(lphc->wState & (CBF_NOREDRAW | CBF_EDIT)) )
+      RedrawWindow( lphc->self, NULL, 0, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW );
+ 
+    EnableWindow( lphc->hWndLBox, TRUE );
+-- 
+2.37.2
+
+From: Haoyang Chen <chenhaoyang@uniontech.com>
+#Subject: [PATCH] win32u: Send WM_NCCALCSIZE message, when a new window is displayed.
+Message-Id: <ffb60922-6174-902a-8de3-abaa117a3b81@uniontech.com>
+Date: Tue, 12 Jan 2021 10:14:33 +0800
+
+From 0ef95fe7663a0f35352d6ac1d66698de021b883e Mon Sep 17 00:00:00 2001
+From: Haoyang Chen <chenhaoyang@uniontech.com>
+Date: Mon, 11 Jan 2021 17:54:36 +0800
+Subject: [PATCH] win32u: Send WM_NCCALCSIZE message, when a new window is
+ displayed.
+
+Signed-off-by: Haoyang Chen <chenhaoyang@uniontech.com>
+---
+ dlls/win32u/window.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/dlls/win32u/window.c b/dlls/win32u/window.c
+index 11111111111..11111111111 100644
+--- a/dlls/win32u/window.c
++++ b/dlls/win32u/window.c
+@@ -4457,6 +4457,9 @@ static BOOL show_window( HWND hwnd, INT cmd )
+ 
+     if (!(win = get_win_ptr( hwnd )) || win == WND_OTHER_PROCESS) goto done;
+ 
++    if (show_flag && !was_visible && ((style & (WS_CAPTION | WS_MAXIMIZE | WS_MAXIMIZE)) == WS_CAPTION))
++        swp |= SWP_FRAMECHANGED;
++
+     if (win->flags & WIN_NEED_SIZE)
+     {
+         /* should happen only in CreateWindowEx() */
+
+-- 
+2.37.2
+
+From: Connor McAdams <cmcadams@codeweavers.com>
+Subject: [PATCH 1/2] win32u: Don't fire EVENT_OBJECT_CREATE for dialog and popup windows upon creation.
+Message-Id: <20210812152714.645422-1-cmcadams@codeweavers.com>
+Date: Thu, 12 Aug 2021 11:27:13 -0400
+
+Popup menu and dialog window classes don't have EVENT_OBJECT_CREATE
+winevents associated with their creation.
+
+Signed-off-by: Connor McAdams <cmcadams@codeweavers.com>
+---
+ dlls/win32u/window.c | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/win32u/window.c b/dlls/win32u/window.c
+index 11111111111..11111111111 100644
+--- a/dlls/win32u/window.c
++++ b/dlls/win32u/window.c
+@@ -5410,7 +5410,13 @@ HWND WINAPI NtUserCreateWindowEx( DWORD ex_style, UNICODE_STRING *class_name,
+     if (needs_cloak)
+         user_driver->pSetWindowCompositionAttribute( hwnd, WCA_CLOAK, &needs_cloak );
+ 
+-    NtUserNotifyWinEvent( EVENT_OBJECT_CREATE, hwnd, OBJID_WINDOW, 0 );
++    /*
++     * Popup menus and dialog windows don't get an EVENT_OBJECT_CREATE
++     * WinEvent on their creation.
++     */
++    if (get_class_long( hwnd, GCW_ATOM, FALSE ) != POPUPMENU_CLASS_ATOM &&
++            get_class_long( hwnd, GCW_ATOM, FALSE ) != DIALOG_CLASS_ATOM)
++        NtUserNotifyWinEvent( EVENT_OBJECT_CREATE, hwnd, OBJID_WINDOW, 0 );
+ 
+     /* send the size messages */
+ 
+
+-- 
+2.37.2
+
+From: "Jiangyi Chen" <cjy520lcy@163.com>
+#Subject: [PATCH v3] comdlg32: Fix the wrong popup when saving the same file again in the same directory.
+Message-Id: <1b751b8d.451d.174768cc5cf.Coremail.cjy520lcy@163.com>
+Date: Thu, 10 Sep 2020 13:46:11 +0800 (CST)
+
+From bb30355690365aa4621f5a15331619439e61dd11 Mon Sep 17 00:00:00 2001
+From: Jiangyi Chen <chenjiangyi@uniontech.com>
+Date: Wed, 9 Sep 2020 08:01:59 +0000
+Subject: [PATCH v3] comdlg32: Fix the wrong popup when saving the same file
+ again in the same directory.
+
+Signed-off-by: Jiangyi Chen <chenjiangyi@uniontech.com>
+---
+ dlls/comdlg32/itemdlg.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/dlls/comdlg32/itemdlg.c b/dlls/comdlg32/itemdlg.c
+index 11111111111..11111111111 100644
+--- a/dlls/comdlg32/itemdlg.c
++++ b/dlls/comdlg32/itemdlg.c
+@@ -645,7 +645,7 @@ static HRESULT on_default_action(FileDialogImpl *This)
+             if(FAILED(hr))
+                 break;
+ 
+-            if(This->options & FOS_PICKFOLDERS)
++            if((This->options & FOS_PICKFOLDERS) && This->dlg_type != ITEMDLG_TYPE_SAVE)
+             {
+                 SFGAOF attributes;
+                 hr = IShellItemArray_GetAttributes(This->psia_results, SIATTRIBFLAGS_AND, SFGAO_FOLDER, &attributes);
+-- 
+2.37.2
+
+From: Haoyang Chen <chenhaoyang@uniontech.com>
+Subject: [PATCH v2] win32u: No need to change the z-order of the foreground window.
+Message-Id: <02a5375e-bd42-7924-b620-67602094c815@uniontech.com>
+Date: Fri, 4 Dec 2020 17:46:26 +0800
+
+From 7ccc01f09f958ff5ceeffbd31e368fc4e8799995 Mon Sep 17 00:00:00 2001
+From: Haoyang Chen <chenhaoyang@uniontech.com>
+Date: Fri, 4 Dec 2020 17:25:15 +0800
+#Subject: [PATCH] win32u: No need to change the z-order of the foreground
+# window.
+
+Signed-off-by: Haoyang Chen <chenhaoyang@uniontech.com>
+---
+ dlls/win32u/window.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/win32u/window.c b/dlls/win32u/window.c
+index 11111111111..11111111111 100644
+--- a/dlls/win32u/window.c
++++ b/dlls/win32u/window.c
+@@ -3334,7 +3334,8 @@ static BOOL fixup_swp_flags( WINDOWPOS *winpos, const RECT *old_window_rect, int
+ 
+     if ((win->dwStyle & (WS_POPUP | WS_CHILD)) != WS_CHILD)
+     {
+-        if (!(winpos->flags & (SWP_NOACTIVATE|SWP_HIDEWINDOW)) && /* Bring to the top when activating */
++        if (NtUserGetForegroundWindow() != winpos->hwnd &&
++            !(winpos->flags & (SWP_NOACTIVATE|SWP_HIDEWINDOW)) && /* Bring to the top when activating */
+             (winpos->flags & SWP_NOZORDER ||
+              (winpos->hwndInsertAfter != HWND_TOPMOST && winpos->hwndInsertAfter != HWND_NOTOPMOST)))
+         {
+
+-- 
+2.37.2
+
+From: Paul Gofman <wine@gitlab.winehq.org>
+Subject: [PATCH 1/1] winex11.drv: Always call XSync() in destroy_whole_window() if there is client window.
+Message-Id: <wine-wine-mr264-v1-patch1@gitlab-mail-bridge>
+Date: Fri, 17 Jun 2022 15:30:20 +0000
+In-Reply-To: <wine-wine-mr264-v1@gitlab-mail-bridge>
+References: <merge_request_333@gitlab.winehq.org> <wine-wine-mr264-v1@gitlab-mail-bridge>
+
+From: Paul Gofman <pgofman@codeweavers.com>
+
+Signed-off-by: Paul Gofman <pgofman@codeweavers.com>
+---
+ dlls/winex11.drv/window.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/dlls/winex11.drv/window.c b/dlls/winex11.drv/window.c
+index 11111111111..11111111111 100644
+--- a/dlls/winex11.drv/window.c
++++ b/dlls/winex11.drv/window.c
+@@ -1889,6 +1889,8 @@ static void destroy_whole_window( struct x11drv_win_data *data, BOOL already_des
+             }
+             return;
+         }
++        if (data->client_window && !already_destroyed)
++            XSync( data->display, False );
+     }
+     else
+     {  
+-- 
+2.37.2
+
+From: Zhiyi Zhang <zzhang@codeweavers.com>
+Subject: [PATCH] winex11.drv: Maintain a backing store for layered windows.
+Message-Id: <79f69949-a3a7-e740-1f70-ba8a3a9daf5a@codeweavers.com>
+Date: Wed, 20 Oct 2021 10:08:42 +0800
+
+Copy the window content to a pixmap and set it as the background because
+the X server may discard the window content at any time, even when the
+backing store attribute is set to TRUE when creating a X11 window.
+Layered windows don't get repainted in X11DRV_Expose() like normal
+windows do and their content should always be kept. The window surface
+may be recreated when handling position and changes. So for most of the
+time, there is only one backing store for a window with this patch. It's
+possible that the we can reuse window surfaces but it's a much bigger
+change and risk breaking things.
+
+Fix Word 2016 frame window corruption after it's moved off-screen.
+
+Signed-off-by: Zhiyi Zhang <zzhang@codeweavers.com>
+---
+ dlls/winex11.drv/window.c | 28 ++++++++++++++++++++++++++--
+ 1 file changed, 26 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/winex11.drv/window.c b/dlls/winex11.drv/window.c
+index 11111111111..11111111111 100644
+--- a/dlls/winex11.drv/window.c
++++ b/dlls/winex11.drv/window.c
+@@ -3287,6 +3287,9 @@ BOOL X11DRV_UpdateLayeredWindow( HWND hwnd, const UPDATELAYEREDWINDOWINFO *info,
+     HDC hdc = 0;
+     HBITMAP dib;
+     BOOL mapped, ret = FALSE;
++    int width, height;
++    Pixmap pixmap;
++    GC gc;
+ 
+     if (!(data = get_win_data( hwnd ))) return FALSE;
+ 
+@@ -3312,7 +3315,6 @@ BOOL X11DRV_UpdateLayeredWindow( HWND hwnd, const UPDATELAYEREDWINDOWINFO *info,
+ 
+     if (surface) window_surface_add_ref( surface );
+     mapped = data->mapped;
+-    release_win_data( data );
+ 
+     /* layered windows are mapped only once their attributes are set */
+     if (!mapped)
+@@ -3323,9 +3325,14 @@ BOOL X11DRV_UpdateLayeredWindow( HWND hwnd, const UPDATELAYEREDWINDOWINFO *info,
+             map_window( hwnd, style );
+     }
+ 
+-    if (!surface) return FALSE;
++    if (!surface)
++    {
++        release_win_data( data );
++        return FALSE;
++    }
+     if (!info->hdcSrc)
+     {
++        release_win_data( data );
+         window_surface_release( surface );
+         return TRUE;
+     }
+@@ -3362,7 +3369,24 @@ BOOL X11DRV_UpdateLayeredWindow( HWND hwnd, const UPDATELAYEREDWINDOWINFO *info,
+     surface->funcs->unlock( surface );
+     surface->funcs->flush( surface );
+ 
++    /* Copy the window content to a pixmap and set it as the background because the X server may
++     * discard the window content at any time, even when the backing store attribute is set to TRUE
++     * when creating a X11 window. Layered windows don't get repainted in X11DRV_Expose() like
++     * normal windows do and their content should always be kept. */
++    width = data->whole_rect.right - data->whole_rect.left;
++    height = data->whole_rect.bottom - data->whole_rect.top;
++    if (width > 0 && height > 0)
++    {
++        pixmap = XCreatePixmap( data->display, data->whole_window, width, height, 32 );
++        gc = XCreateGC( data->display, pixmap, 0, NULL );
++        XCopyArea( data->display, data->whole_window, pixmap, gc, 0, 0, width, height, 0, 0 );
++        XFreeGC( data->display, gc );
++        XSetWindowBackgroundPixmap( data->display, data->whole_window, pixmap );
++        XFreePixmap( data->display, pixmap );
++    }
++
+ done:
++    release_win_data( data );
+     window_surface_release( surface );
+
+     if (hdc) NtGdiDeleteObjectApp( hdc );
+     if (dib) NtGdiDeleteObjectApp( dib );
+-- 
+2.37.2                 
