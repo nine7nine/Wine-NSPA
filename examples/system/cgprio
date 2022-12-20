@@ -1,0 +1,55 @@
+#!/bin/bash
+
+# This script is used to setup my environment for RT, Wine-NSPA and low-latency tasks
+#
+# - Cgroups for RT and Desktop tasks (todo: add batch/idle task groups)
+# - Utilize CFS latency.nice feature (requires Linux-NSPA / related patchwork)
+# - Prioritization of IRQs / Threaded Interrupts
+# - renice nd ionice tuning for specific tasks/groups
+
+# Setup RT related tasks/groups
+#
+# create cgroup (v2) for low latency / RT processes
+cgcreate -a ninez -t ninez -g cpu,cpuset,memory,io:audio_rt
+# move/add pids to new audio_rt cgroup
+cgclassify -g cpu,cpuset,memory,io:audio_rt `pgrep wineserver`
+# cgclassify -g cpu,cpuset,memory,io:audio_rt `pgrep "Ableton Live 11"`
+cgclassify -g cpu,cpuset,memory,io:audio_rt `pgrep yabridge`
+cgclassify -g cpu,cpuset,memory,io:audio_rt `pgrep carla`
+cgclassify -g cpu,cpuset,memory,io:audio_rt `pgrep jackd`
+cgclassify -g cpu,cpuset,memory,io:audio_rt `pgrep snd_hda_`
+cgclassify -g cpu,cpuset,memory,io:audio_rt `pgrep irq/40-xhci_`
+# set up RT cgroups attributes/values
+cgset -r cpu.weight.nice=-20 audio_rt
+cgset -r cpu.latency.nice=-20 audio_rt 
+cgset -r cpuset.cpus=0-7 audio_rt
+# ionice/renice for audio RT group
+# ionice -n 0 -c 1 -P `pgrep "Ableton Live 11"`
+ionice -n 0 -c 1 -P `pgrep wineserver`
+ionice -n 0 -c 1 -P `pgrep yabridge`
+ionice -n 0 -c 1 -P `pgrep carla`
+ionice -n 0 -c 1 -P `pgrep jackd`
+renice -n -20 -g `pgrep wineserver`
+
+# Setup DESKTOP related tasks/groups
+#
+# create cgroup (v2) for Interactive Desktop processes
+cgcreate -a ninez -t ninez -g cpu,cpuset,memory,io:desktop
+# move/add pids to new Desktop cgroup
+cgclassify -g cpu,cpuset,memory,io:desktop `pgrep gnome-shell`
+cgclassify -g cpu,cpuset,memory,io:desktop `pgrep Xorg`
+# set up Desktop cgroups attributes/values
+cgset -r cpu.weight.nice=-10 desktop
+cgset -r cpu.latency.nice=-10 desktop 
+cgset -r cpuset.cpus=0-7 desktop
+# ionice for Desktop group
+ionice -n 3 -c 2 -p `pgrep gnome-shell`
+ionice -n 0 -c 2 -p `pgrep Xorg`
+
+# quick chrt  use for setting up threaded irq priorities
+#
+# --> specific to my laptop
+for pid in $(pgrep irq/67-WCOM51C4); do chrt -f -p 45 $pid; done
+for pid in $(pgrep amdgpu); do chrt -f -p 51 $pid; done
+for pid in $(pgrep snd_hda_); do chrt -a -f -p 98 $pid; done
+for pid in $(pgrep irq/40-xhci_); do chrt -f -a -p 80 $pid; done
