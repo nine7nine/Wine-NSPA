@@ -8,9 +8,7 @@ _________________________
 
 ### IMPORTANT:
 
- - While I have begun Wine-NSPA-8.0 development: I Do NOT recommend using or building Wine-NSPA-devel. It's highly experiemental and there are some issues with Upstream Wine that need to be addressed (some really annoying bugs/instability caused by upstream). I expect now that the 'Feature Freeze' has begun, we should start seeing some of the bugs / regressions getting fixed, but it'll take a bit of time.
-
- -  Please use Wine-NSPA-7.5, it is rather stable and works well. I will eventually promote / replace 7.5, when 8.0 is ready.
+ - While I have begun Wine-NSPA-8.0 development: I Do NOT recommend using or building Wine-NSPA-devel. It's highly experiemental and there are some issues with Upstream Wine that need to be addressed (some really annoying bugs/instability caused by upstream). I expect now that the 'Feature Freeze' has begun, we should start seeing some of the bugs / regressions getting fixed, but it'll take a bit of time... Please use Wine-NSPA-7.5, it is rather stable and works well. I will eventually promote / replace 7.5, when 8.0 is ready.
 
 ### Preface:
 
@@ -20,40 +18,40 @@ Wine-NSPA focuses on the integration of performance enhancements and RT related 
 
 Wine-NSPA is currently based on Wine-7.5; due to newer versions having some regressions and bugs that affect some applications that I use (showstopping bugs). Wine-7.5 seems to be fairly solid and I don't have any desire to chase every development release. That said; I do pickup upstream bugfixes, MRs and the occasional patch from WineHQ Bugzilla. Additionally, Wine-TKG is used as a base; as it's a powerful build system, flexible, easy to use and significantly reduces maintenance burden. It also supports Archlinux / Makepkg, which makes building and packaging Wine a straightforward process.
 
-*note: Wine-NSPA will be rebased on Wine-8.0 in the near future*
-
-Dec/2022 Preview: Ableton Live 11 running in Wine-NSPA with multi-threaded wineserver & kernelbase RT hack.
+Dec/2022 Preview: Ableton Live 11 running in Wine-NSPA-7.5 with a number of patches/fixes to better support it.
 ![](https://github.com/nine7nine/Wine-NSPA/blob/main/examples/images/Live11.png)
 
-Currently, I'm working with some experimental patchwork to improve multithreading, scalability and my RT support. This should get heavy applications like Ableton Live 11 working nicely in Wine-NSPA. The hope is to fully support this kind of thing for Wine-NSPA-8.0 builds. ~ This should be possible, as is, Live 11 is running reasonably well, albeit with one or two issues to resolve. (Some of which will be solved with a rebase on wine-8.0).
+Currently, I'm working with some experimental patchwork to improve multithreading, scalability and my RT support. This should get heavy applications like Ableton Live 11 working nicely in Wine-NSPA. This work is partially complete, but I'm also tracking Ableton Live support/documentation here: https://github.com/nine7nine/Wine-NSPA/issues/4 ...
+
+*note: Wine-NSPA will be rebased on Wine-8.0 in the near future, but only when 8.0+ proves worthy. Atm, Wine-8.0-rc has problems/regressions, when compared to Wine-7.5... It's performance is lacking, there are some nasty bugs and overall it's lackluster.*
 
 _________________________
 
 ### Features (non-exhaustive)
 
-* **NSPA-Specific Wine-RT Implementation**: Almost all wine threads are real-time (RR and FIFO)
-* **Improved multi-threading / scheduling support**: plugins that support MT modes may run better.
-* **Wineserver Shared Memory support**: based on the 7.5 patchset with minor changes
-* **Wineserver SHMEM Per Thread (for server Requests/Replies)**: Multi-Threaded Wineserver
-* **Esync / Fsync**: based on Valve's Proton 7.0-expiremental implementation
-* **Wine Low Fragmentation Heap Patchwork**: Based on the 7.5 patchset with additional patches
-* **Winserver + Ntdll backports**: in some cases, sync'd with upstream.
-* **MSVCRT backports/updates**: sync'd to upstream, includes task scheduler changes
-* **Keyed Events Linux Futexes Implementation**: (includes MSVCRT concurrency hack/modifications)
-* **Significant backports and Bugfixes**: from Wine-Git, OpenGLFreak's wine patchwork and Proton
-* **Hacks to improve Wine for NSPA usage**: (eg: killing update window, no DND-spam for NI plugins, etc)
-* **Loader/vDSO performance )ptimizations**: (backported)
-* **Proton's CPU Topology Overrides**: (latest implementation)
+* **NSPA-Specific Wine-RT Implementation**
+* **Improved multi-threading / scheduling support**
 * **Various Locking, Atomics & Membarrier Optmizations/Improvements**
-* **Various Performance Optimizations**:in various areas of wine's codebase)
-* **Kernelbase RT hack**: RT thread hooking within GetThreadPriority() function (WIP). 
+* **Kernelbase linux-thread RT hooking for TIME_CRITICAL threads*** 
+* **Wineserver Shared Memory support**
+* **Wineserver SHMEM Per Thread (Server Requests/Replies)**
+* **Esync / Fsync Proton 7.0-experimental implementation**
+* **Wine Low Fragmentation Heap Patchwork**
+* **Keyed Events Linux Futexes Implementation**
+* **Numerous Performance Optimizations**
+* **Significant backports and Bugfixes**
+* **Winserver + Ntdll backports**
+* **MSVCRT backports/updates**
+* **Hacks to improve Wine for NSPA usage**
+* **Loader/vDSO performance Optimizations**
+* **Proton's CPU Topology Overrides**
 
 *note: too many other bits to list here*
 _________________________
 
 ### Linux-NSPA:
 
-As mentioned above, some features in Wine-NSPA do require kernel support. For that reason, I maintain my own linux kernel sources + Archlinux 
+As mentioned above, some features in Wine-NSPA do require kernel support. For that reason, I maintain my own Archlinux 
 PKGBUILDs. You can find my archlinux package (sources) and kernel sources repository linked below;
 
 * Linux-NSPA PKGBUILD - https://github.com/nine7nine/Linux-NSPA-pkgbuild
