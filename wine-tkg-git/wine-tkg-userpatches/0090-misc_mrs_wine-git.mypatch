@@ -6862,3 +6862,1125 @@ index f9f906df723..4f5ee820286 100644
 -- 
 GitLab
 
+From 750e5ee33cb85c1d95a2642919b87f7f4176097a Mon Sep 17 00:00:00 2001
+From: Jinoh Kang <jinoh.kang.kr@gmail.com>
+Date: Thu, 22 Dec 2022 01:20:59 +0900
+Subject: [PATCH 1/2] user32/tests: Add tests for CS_HREDRAW and CS_VREDRAW.
+
+---
+ dlls/user32/tests/msg.c | 130 ++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 130 insertions(+)
+
+diff --git a/dlls/user32/tests/msg.c b/dlls/user32/tests/msg.c
+index 50bfc9855dd..461d79d9a5d 100644
+--- a/dlls/user32/tests/msg.c
++++ b/dlls/user32/tests/msg.c
+@@ -9416,6 +9416,120 @@ static void test_swp_paint_regions(void)
+     subtest_swp_paint_regions( 0, "SimpleWindowClassWithParentDC", "SimpleWindowClass" );
+ }
+ 
++static void subtest_hvredraw(HWND hparent, const char *classname, DWORD style)
++{
++    static const struct movesize_test {
++        int dx, dy, dw, dh;
++    } movesize_tests[] = {
++        {   0,   0,   0,  50 },
++        {   0,   0,  50,   0 },
++        {   0,   0,  50,  50 },
++        {   0,   0, -50, -50 },
++        { -50, -50,   0,  50 }
++        { -50, -50,  50,   0 },
++        { -50, -50,  50,  50 },
++    };
++    HRGN hrgn_old_vis = CreateRectRgn( 0, 0, 0, 0 );
++    HRGN hrgn_new_vis = CreateRectRgn( 0, 0, 0, 0 );
++    HRGN hrgn_expect = CreateRectRgn( 0, 0, 0, 0 );
++    HRGN hrgn_actual = CreateRectRgn( 0, 0, 0, 0 );
++    const int x0 = 100, y0 = 100, w0 = 200, h0 = 200;
++    size_t i;
++    HWND hwnd;
++    UINT class_style;
++
++    hwnd = CreateWindowExA( 0, classname, "Test window", style, x0, y0, w0, h0, hparent, 0, 0, NULL );
++    ok(hwnd != NULL, "Failed to create the window\n");
++
++    class_style = GetClassLongA( hwnd, GCL_STYLE );
++
++    ShowWindow( hwnd, SW_SHOW );
++    UpdateWindow( hwnd );
++
++    for (i = 0; i < ARRAY_SIZE(movesize_tests); i++)
++    {
++        const struct movesize_test *test = &movesize_tests[i];
++        int is_redraw = (test->dw != 0 && (class_style & CS_HREDRAW)) ||
++                        (test->dh != 0 && (class_style & CS_VREDRAW));
++        RECT rect_old_vis, rect_new_vis;
++        BOOL rgn_ok;
++
++        winetest_push_context( "%s %08lx SetWindowPos redraw #%Id (%d, %d, %d, %d)",
++                               classname, style, i, test->dx, test->dy, test->dw, test->dh );
++
++        SetWindowPos( hwnd, HWND_TOP, x0, y0, w0, h0, SWP_NOACTIVATE );
++
++        GetClientRect( hwnd, &rect_old_vis );
++        SetRectRgn( hrgn_old_vis, rect_old_vis.left, rect_old_vis.top, rect_old_vis.right, rect_old_vis.bottom );
++
++        UpdateWindow( hparent );
++        flush_events();
++
++        SetWindowPos( hwnd, HWND_TOP,
++                      x0 + test->dx, y0 + test->dy,
++                      w0 + test->dw, h0 + test->dh, SWP_NOACTIVATE );
++        ok( GetUpdateRgn( hwnd, hrgn_actual, FALSE ) != ERROR, "GetUpdateRgn shall succeed\n" );
++
++        GetClientRect( hwnd, &rect_new_vis );
++        SetRectRgn( hrgn_new_vis, rect_new_vis.left, rect_new_vis.top, rect_new_vis.right, rect_new_vis.bottom );
++        CombineRgn( hrgn_expect, hrgn_new_vis, hrgn_old_vis, is_redraw ? RGN_COPY : RGN_DIFF );
++
++        rgn_ok = EqualRgn( hrgn_expect, hrgn_actual );
++        todo_wine_if( is_redraw )
++        ok( !!rgn_ok, "Update region shall match expected region\n" );
++
++        if (!rgn_ok && winetest_debug > 1)
++        {
++            trace( "Expected update region: " );
++            dump_region( hrgn_expect );
++            trace( "Actual update region: " );
++            dump_region( hrgn_actual );
++            trace( "Old window visible area: %s\n", wine_dbgstr_rect( &rect_old_vis ) );
++            trace( "New window visible area: %s\n", wine_dbgstr_rect( &rect_new_vis ) );
++        }
++
++        if (winetest_interactive)
++        {
++            if (!rgn_ok)
++            {
++                visualize_region_differences( hwnd, NULL, hrgn_expect, hrgn_actual );
++            }
++
++            /* Let the position change be visible to the user */
++            flush_events();
++        }
++
++        winetest_pop_context();
++    }
++
++    DestroyWindow( hwnd );
++    DeleteObject( hrgn_actual );
++    DeleteObject( hrgn_expect );
++    DeleteObject( hrgn_new_vis );
++    DeleteObject( hrgn_old_vis );
++}
++
++
++static void test_hvredraw(void)
++{
++    HWND htoplevel;
++
++    subtest_hvredraw( NULL, "SimpleWindowClassWithHRedraw", WS_OVERLAPPEDWINDOW );
++    subtest_hvredraw( NULL, "SimpleWindowClassWithVRedraw", WS_OVERLAPPEDWINDOW );
++    subtest_hvredraw( NULL, "SimpleWindowClassWithHVRedraw", WS_OVERLAPPEDWINDOW );
++
++    htoplevel = CreateWindowExA( 0, "SimpleWindowClass", "Test toplevel",
++                                 WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_VISIBLE,
++                                 100, 100, 400, 400, 0, 0, 0, NULL );
++    ok( htoplevel != 0, "Failed to create top-level window: %lu\n", GetLastError() );
++
++    subtest_hvredraw( htoplevel, "SimpleWindowClassWithHRedraw", WS_CHILD | WS_BORDER );
++    subtest_hvredraw( htoplevel, "SimpleWindowClassWithVRedraw", WS_CHILD | WS_BORDER );
++    subtest_hvredraw( htoplevel, "SimpleWindowClassWithHVRedraw", WS_CHILD | WS_BORDER );
++
++    DestroyWindow( htoplevel );
++}
++
+ struct wnd_event
+ {
+     HWND hwnd;
+@@ -10766,6 +10880,21 @@ static BOOL RegisterWindowClasses(void)
+     cls.lpszClassName = "SimpleWindowClassWithParentDC";
+     if(!RegisterClassA(&cls)) return FALSE;
+ 
++    cls.lpfnWndProc = DefWindowProcA;
++    cls.style = CS_HREDRAW;
++    cls.lpszClassName = "SimpleWindowClassWithHRedraw";
++    if(!RegisterClassA(&cls)) return FALSE;
++
++    cls.lpfnWndProc = DefWindowProcA;
++    cls.style = CS_VREDRAW;
++    cls.lpszClassName = "SimpleWindowClassWithVRedraw";
++    if(!RegisterClassA(&cls)) return FALSE;
++
++    cls.lpfnWndProc = DefWindowProcA;
++    cls.style = CS_HREDRAW | CS_VREDRAW;
++    cls.lpszClassName = "SimpleWindowClassWithHVRedraw";
++    if(!RegisterClassA(&cls)) return FALSE;
++
+     clsW.style = 0;
+     clsW.lpfnWndProc = MsgCheckProcW;
+     clsW.cbClsExtra = 0;
+@@ -19521,6 +19650,7 @@ START_TEST(msg)
+     test_wmime_keydown_message();
+     test_paint_messages();
+     test_swp_paint_regions();
++    test_hvredraw();
+     test_interthread_messages();
+     test_message_conversion();
+     test_accelerators();
+-- 
+GitLab
+
+
+From 3946d01eecd1658fca9968368b2da40ef5f47f6b Mon Sep 17 00:00:00 2001
+From: Jinoh Kang <jinoh.kang.kr@gmail.com>
+Date: Thu, 22 Dec 2022 01:21:48 +0900
+Subject: [PATCH 2/2] win32u: Honor CS_HREDRAW and CS_VREDRAW when resizing
+ window.
+
+Wine-Bug: https://bugs.winehq.org/show_bug.cgi?id=52903
+---
+ dlls/user32/tests/msg.c | 1 -
+ dlls/win32u/window.c    | 7 ++++++-
+ 2 files changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/user32/tests/msg.c b/dlls/user32/tests/msg.c
+index 461d79d9a5d..35e4f0dd1f8 100644
+--- a/dlls/user32/tests/msg.c
++++ b/dlls/user32/tests/msg.c
+@@ -9475,7 +9475,6 @@ static void subtest_hvredraw(HWND hparent, const char *classname, DWORD style)
+         CombineRgn( hrgn_expect, hrgn_new_vis, hrgn_old_vis, is_redraw ? RGN_COPY : RGN_DIFF );
+ 
+         rgn_ok = EqualRgn( hrgn_expect, hrgn_actual );
+-        todo_wine_if( is_redraw )
+         ok( !!rgn_ok, "Update region shall match expected region\n" );
+ 
+         if (!rgn_ok && winetest_debug > 1)
+diff --git a/dlls/win32u/window.c b/dlls/win32u/window.c
+index 19348338c46..a3ff0647dcd 100644
+--- a/dlls/win32u/window.c
++++ b/dlls/win32u/window.c
+@@ -3116,6 +3116,7 @@ static UINT calc_ncsize( WINDOWPOS *winpos, const RECT *old_window_rect, const R
+     {
+         NCCALCSIZE_PARAMS params;
+         WINDOWPOS winposCopy;
++        UINT class_style;
+ 
+         params.rgrc[0] = *new_window_rect;
+         params.rgrc[1] = *old_window_rect;
+@@ -3135,7 +3136,11 @@ static UINT calc_ncsize( WINDOWPOS *winpos, const RECT *old_window_rect, const R
+             winposCopy.cy = old_window_rect->bottom - old_window_rect->top;
+         }
+ 
+-        wvr_flags = send_message( winpos->hwnd, WM_NCCALCSIZE, TRUE, (LPARAM)&params );
++        class_style = get_class_long( winpos->hwnd, GCL_STYLE, FALSE );
++        if (class_style & CS_VREDRAW) wvr_flags |= WVR_VREDRAW;
++        if (class_style & CS_HREDRAW) wvr_flags |= WVR_HREDRAW;
++
++        wvr_flags |= send_message( winpos->hwnd, WM_NCCALCSIZE, TRUE, (LPARAM)&params );
+ 
+         *new_client_rect = params.rgrc[0];
+ 
+-- 
+GitLab
+
+From 354c9b2ad4ffaabaa2de5914b190baa0aa3d0a2c Mon Sep 17 00:00:00 2001
+From: Mohamad Al-Jaf <mohamadaljaf@gmail.com>
+Date: Fri, 18 Nov 2022 02:15:39 -0500
+Subject: [PATCH 1/5] include: Add
+ windows.system.profile.systemmanufacturers.idl file.
+
+---
+ include/Makefile.in                           |  1 +
+ ...ows.system.profile.systemmanufacturers.idl | 60 +++++++++++++++++++
+ 2 files changed, 61 insertions(+)
+ create mode 100644 include/windows.system.profile.systemmanufacturers.idl
+
+diff --git a/include/Makefile.in b/include/Makefile.in
+index 23a4265a437..c15c4db6f11 100644
+--- a/include/Makefile.in
++++ b/include/Makefile.in
+@@ -802,6 +802,7 @@ SOURCES = \
+ 	windows.storage.streams.idl \
+ 	windows.system.idl \
+ 	windows.system.power.idl \
++	windows.system.profile.systemmanufacturers.idl \
+ 	windows.system.userprofile.idl \
+ 	windowscontracts.idl \
+ 	windowsx.h \
+diff --git a/include/windows.system.profile.systemmanufacturers.idl b/include/windows.system.profile.systemmanufacturers.idl
+new file mode 100644
+index 00000000000..644a664020b
+--- /dev/null
++++ b/include/windows.system.profile.systemmanufacturers.idl
+@@ -0,0 +1,60 @@
++/*
++ * Copyright (C) 2022 Mohamad Al-Jaf
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++ */
++
++#ifdef __WIDL__
++#pragma winrt ns_prefix
++#endif
++
++import "inspectable.idl";
++import "asyncinfo.idl";
++import "eventtoken.idl";
++import "windowscontracts.idl";
++import "windows.foundation.idl";
++
++namespace Windows.System.Profile.SystemManufacturers
++{
++    apicontract SystemManufacturersContract;
++    interface ISmbiosInformationStatics;
++    runtimeclass SmbiosInformation;
++
++    [
++        contractversion(3.0)
++    ]
++    apicontract SystemManufacturersContract
++    {
++    }
++
++    [
++        contract(Windows.System.Profile.SystemManufacturers.SystemManufacturersContract, 1.0),
++        exclusiveto(Windows.System.Profile.SystemManufacturers.SmbiosInformation),
++        uuid(080cca7c-637c-48c4-b728-f9273812db8e)
++    ]
++    interface ISmbiosInformationStatics : IInspectable
++    {
++        [propget] HRESULT SerialNumber([out, retval] HSTRING *value);
++    }
++
++    [
++        contract(Windows.System.Profile.SystemManufacturers.SystemManufacturersContract, 1.0),
++        marshaling_behavior(agile),
++        static(Windows.System.Profile.SystemManufacturers.ISmbiosInformationStatics, Windows.System.Profile.SystemManufacturers.SystemManufacturersContract, 1.0)
++    ]
++    runtimeclass SmbiosInformation
++    {
++    }
++}
+-- 
+GitLab
+
+
+From 41bff7dfa360936494067284a2947e61f5ef6640 Mon Sep 17 00:00:00 2001
+From: Mohamad Al-Jaf <mohamadaljaf@gmail.com>
+Date: Sat, 19 Nov 2022 20:42:14 -0500
+Subject: [PATCH 2/5] windows.system.profile.systemmanufacturers: Add stub DLL.
+
+---
+ configure.ac                                  |   2 +
+ .../Makefile.in                               |   8 +
+ .../classes.idl                               |  23 +++
+ .../main.c                                    | 148 ++++++++++++++++++
+ .../private.h                                 |  31 ++++
+ .../tests/Makefile.in                         |   5 +
+ .../tests/smbios.c                            |  83 ++++++++++
+ ...ws.system.profile.systemmanufacturers.spec |   3 +
+ 8 files changed, 303 insertions(+)
+ create mode 100644 dlls/windows.system.profile.systemmanufacturers/Makefile.in
+ create mode 100644 dlls/windows.system.profile.systemmanufacturers/classes.idl
+ create mode 100644 dlls/windows.system.profile.systemmanufacturers/main.c
+ create mode 100644 dlls/windows.system.profile.systemmanufacturers/private.h
+ create mode 100644 dlls/windows.system.profile.systemmanufacturers/tests/Makefile.in
+ create mode 100644 dlls/windows.system.profile.systemmanufacturers/tests/smbios.c
+ create mode 100644 dlls/windows.system.profile.systemmanufacturers/windows.system.profile.systemmanufacturers.spec
+
+diff --git a/configure.ac b/configure.ac
+index 9115244cb78..80bd78678e6 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -3190,6 +3190,8 @@ WINE_CONFIG_MAKEFILE(dlls/windows.media.
+ WINE_CONFIG_MAKEFILE(dlls/windows.media.speech)
+ WINE_CONFIG_MAKEFILE(dlls/windows.media.speech/tests)
+ WINE_CONFIG_MAKEFILE(dlls/windows.networking.connectivity)
++WINE_CONFIG_MAKEFILE(dlls/windows.system.profile.systemmanufacturers)
++WINE_CONFIG_MAKEFILE(dlls/windows.system.profile.systemmanufacturers/tests)
+ WINE_CONFIG_MAKEFILE(dlls/windowscodecs)
+ WINE_CONFIG_MAKEFILE(dlls/windowscodecs/tests)
+ WINE_CONFIG_MAKEFILE(dlls/windowscodecsext)
+diff --git a/dlls/windows.system.profile.systemmanufacturers/Makefile.in b/dlls/windows.system.profile.systemmanufacturers/Makefile.in
+new file mode 100644
+index 00000000000..a2d6076740f
+--- /dev/null
++++ b/dlls/windows.system.profile.systemmanufacturers/Makefile.in
+@@ -0,0 +1,8 @@
++MODULE  = windows.system.profile.systemmanufacturers.dll
++IMPORTS = combase
++
++C_SRCS = \
++	main.c
++
++IDL_SRCS = \
++	classes.idl
+diff --git a/dlls/windows.system.profile.systemmanufacturers/classes.idl b/dlls/windows.system.profile.systemmanufacturers/classes.idl
+new file mode 100644
+index 00000000000..6072a782222
+--- /dev/null
++++ b/dlls/windows.system.profile.systemmanufacturers/classes.idl
+@@ -0,0 +1,23 @@
++/*
++ * Runtime Classes for windows.system.profile.systemmanufacturers.dll
++ *
++ * Copyright (C) 2022 Mohamad Al-Jaf
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++ */
++
++#pragma makedep register
++
++#include "windows.system.profile.systemmanufacturers.idl"
+diff --git a/dlls/windows.system.profile.systemmanufacturers/main.c b/dlls/windows.system.profile.systemmanufacturers/main.c
+new file mode 100644
+index 00000000000..3f5e937392e
+--- /dev/null
++++ b/dlls/windows.system.profile.systemmanufacturers/main.c
+@@ -0,0 +1,148 @@
++/* WinRT Windows.System.Profile.SystemManufacturers Implementation
++ *
++ * Copyright (C) 2022 Mohamad Al-Jaf
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++ */
++
++#include "initguid.h"
++#include "private.h"
++
++#include "wine/debug.h"
++
++WINE_DEFAULT_DEBUG_CHANNEL(smbios);
++
++static const char *debugstr_hstring( HSTRING hstr )
++{
++    const WCHAR *str;
++    UINT32 len;
++    if (hstr && !((ULONG_PTR)hstr >> 16)) return "(invalid)";
++    str = WindowsGetStringRawBuffer(hstr, &len);
++    return wine_dbgstr_wn(str, len);
++}
++
++struct smbios_statics
++{
++    IActivationFactory IActivationFactory_iface;
++    LONG ref;
++};
++
++static inline struct smbios_statics *impl_from_IActivationFactory( IActivationFactory *iface )
++{
++    return CONTAINING_RECORD( iface, struct smbios_statics, IActivationFactory_iface );
++}
++
++static HRESULT WINAPI factory_QueryInterface( IActivationFactory *iface, REFIID iid, void **out )
++{
++    struct smbios_statics *impl = impl_from_IActivationFactory( iface );
++
++    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
++
++    if (IsEqualGUID( iid, &IID_IUnknown ) ||
++        IsEqualGUID( iid, &IID_IInspectable ) ||
++        IsEqualGUID( iid, &IID_IAgileObject ) ||
++        IsEqualGUID( iid, &IID_IActivationFactory ))
++    {
++        *out = &impl->IActivationFactory_iface;
++        IInspectable_AddRef( *out );
++        return S_OK;
++    }
++
++    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
++    *out = NULL;
++    return E_NOINTERFACE;
++}
++
++static ULONG WINAPI factory_AddRef( IActivationFactory *iface )
++{
++    struct smbios_statics *impl = impl_from_IActivationFactory( iface );
++    ULONG ref = InterlockedIncrement( &impl->ref );
++    TRACE( "iface %p, ref %lu.\n", iface, ref );
++    return ref;
++}
++
++static ULONG WINAPI factory_Release( IActivationFactory *iface )
++{
++    struct smbios_statics *impl = impl_from_IActivationFactory( iface );
++    ULONG ref = InterlockedDecrement( &impl->ref );
++    TRACE( "iface %p, ref %lu.\n", iface, ref );
++    return ref;
++}
++
++static HRESULT WINAPI factory_GetIids( IActivationFactory *iface, ULONG *iid_count, IID **iids )
++{
++    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *class_name )
++{
++    FIXME( "iface %p, class_name %p stub!\n", iface, class_name );
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI factory_GetTrustLevel( IActivationFactory *iface, TrustLevel *trust_level )
++{
++    FIXME( "iface %p, trust_level %p stub!\n", iface, trust_level );
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
++{
++    FIXME( "iface %p, instance %p stub!\n", iface, instance );
++    return E_NOTIMPL;
++}
++
++static const struct IActivationFactoryVtbl factory_vtbl =
++{
++    factory_QueryInterface,
++    factory_AddRef,
++    factory_Release,
++    /* IInspectable methods */
++    factory_GetIids,
++    factory_GetRuntimeClassName,
++    factory_GetTrustLevel,
++    /* IActivationFactory methods */
++    factory_ActivateInstance,
++};
++
++static struct smbios_statics smbios_statics =
++{
++    {&factory_vtbl},
++    1,
++};
++
++static IActivationFactory *smbios_factory = &smbios_statics.IActivationFactory_iface;
++
++HRESULT WINAPI DllGetClassObject( REFCLSID clsid, REFIID riid, void **out )
++{
++    FIXME( "clsid %s, riid %s, out %p stub!\n", debugstr_guid(clsid), debugstr_guid(riid), out );
++    return CLASS_E_CLASSNOTAVAILABLE;
++}
++
++HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **factory )
++{
++    const WCHAR *name = WindowsGetStringRawBuffer( classid, NULL );
++
++    TRACE( "classid %s, factory %p.\n", debugstr_hstring(classid), factory );
++
++    *factory = NULL;
++
++    if (!wcscmp( name, RuntimeClass_Windows_System_Profile_SystemManufacturers_SmbiosInformation ))
++        IActivationFactory_QueryInterface( smbios_factory, &IID_IActivationFactory, (void **)factory );
++
++    if (*factory) return S_OK;
++    return CLASS_E_CLASSNOTAVAILABLE;
++}
+diff --git a/dlls/windows.system.profile.systemmanufacturers/private.h b/dlls/windows.system.profile.systemmanufacturers/private.h
+new file mode 100644
+index 00000000000..e3672c3aec5
+--- /dev/null
++++ b/dlls/windows.system.profile.systemmanufacturers/private.h
+@@ -0,0 +1,31 @@
++/* WinRT Windows.System.Profile.SystemManufacturers Implementation
++ *
++ * Copyright (C) 2022 Mohamad Al-Jaf
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++ */
++
++#include <stdarg.h>
++#include <stddef.h>
++
++#define COBJMACROS
++#include "windef.h"
++#include "winbase.h"
++#include "winstring.h"
++
++#include "activation.h"
++
++#define WIDL_using_Windows_System_Profile_SystemManufacturers
++#include "windows.system.profile.systemmanufacturers.h"
+diff --git a/dlls/windows.system.profile.systemmanufacturers/tests/Makefile.in b/dlls/windows.system.profile.systemmanufacturers/tests/Makefile.in
+new file mode 100644
+index 00000000000..ade0c6b12dd
+--- /dev/null
++++ b/dlls/windows.system.profile.systemmanufacturers/tests/Makefile.in
+@@ -0,0 +1,5 @@
++TESTDLL = windows.system.profile.systemmanufacturers.dll
++IMPORTS = combase
++
++C_SRCS = \
++	smbios.c
+diff --git a/dlls/windows.system.profile.systemmanufacturers/tests/smbios.c b/dlls/windows.system.profile.systemmanufacturers/tests/smbios.c
+new file mode 100644
+index 00000000000..fa3308f21ab
+--- /dev/null
++++ b/dlls/windows.system.profile.systemmanufacturers/tests/smbios.c
+@@ -0,0 +1,83 @@
++/*
++ * Copyright (C) 2022 Mohamad Al-Jaf
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++ */
++#define COBJMACROS
++#include "initguid.h"
++#include <stdarg.h>
++
++#include "windef.h"
++#include "winbase.h"
++#include "winstring.h"
++
++#include "roapi.h"
++
++#define WIDL_using_Windows_System_Profile_SystemManufacturers
++#include "windows.system.profile.systemmanufacturers.h"
++
++#include "wine/test.h"
++
++#define check_interface( obj, iid ) check_interface_( __LINE__, obj, iid )
++static void check_interface_( unsigned int line, void *obj, const IID *iid )
++{
++    IUnknown *iface = obj;
++    IUnknown *unk;
++    HRESULT hr;
++
++    hr = IUnknown_QueryInterface( iface, iid, (void **)&unk );
++    ok_(__FILE__, line)( hr == S_OK, "got hr %#lx.\n", hr );
++    IUnknown_Release( unk );
++}
++
++static void test_Smbios_Statics(void)
++{
++    static const WCHAR *smbios_statics_name = L"Windows.System.Profile.SystemManufacturers.SmbiosInformation";
++    IActivationFactory *factory;
++    HSTRING str;
++    HRESULT hr;
++    LONG ref;
++
++    hr = WindowsCreateString( smbios_statics_name, wcslen( smbios_statics_name ), &str );
++    ok( hr == S_OK, "got hr %#lx.\n", hr );
++
++    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&factory );
++    WindowsDeleteString( str );
++    ok( hr == S_OK || broken( hr == REGDB_E_CLASSNOTREG ), "got hr %#lx.\n", hr );
++    if (hr == REGDB_E_CLASSNOTREG)
++    {
++        win_skip( "%s runtimeclass not registered, skipping tests.\n", wine_dbgstr_w( smbios_statics_name ) );
++        return;
++    }
++
++    check_interface( factory, &IID_IUnknown );
++    check_interface( factory, &IID_IInspectable );
++    check_interface( factory, &IID_IAgileObject );
++
++    ref = IActivationFactory_Release( factory );
++    ok( ref == 1, "got ref %ld.\n", ref );
++}
++
++START_TEST(smbios)
++{
++    HRESULT hr;
++
++    hr = RoInitialize( RO_INIT_MULTITHREADED );
++    ok( hr == S_OK, "RoInitialize failed, hr %#lx\n", hr );
++
++    test_Smbios_Statics();
++
++    RoUninitialize();
++}
+diff --git a/dlls/windows.system.profile.systemmanufacturers/windows.system.profile.systemmanufacturers.spec b/dlls/windows.system.profile.systemmanufacturers/windows.system.profile.systemmanufacturers.spec
+new file mode 100644
+index 00000000000..31a5eafe950
+--- /dev/null
++++ b/dlls/windows.system.profile.systemmanufacturers/windows.system.profile.systemmanufacturers.spec
+@@ -0,0 +1,3 @@
++@ stdcall -private DllGetActivationFactory(ptr ptr)
++@ stdcall -private DllCanUnloadNow()
++@ stdcall -private DllGetClassObject(ptr ptr ptr)
+-- 
+GitLab
+
+
+From 9275a848fef628cf50eea34cadb8921055dfb4cc Mon Sep 17 00:00:00 2001
+From: Mohamad Al-Jaf <mohamadaljaf@gmail.com>
+Date: Mon, 28 Nov 2022 03:15:39 -0500
+Subject: [PATCH 3/5] windows.system.profile.systemmanufacturers: Stub
+ ISmbiosInformationStatics interface.
+
+---
+ .../main.c                                    | 30 +++++++++++++++
+ .../private.h                                 | 38 +++++++++++++++++++
+ .../tests/smbios.c                            |  7 ++++
+ 3 files changed, 75 insertions(+)
+
+diff --git a/dlls/windows.system.profile.systemmanufacturers/main.c b/dlls/windows.system.profile.systemmanufacturers/main.c
+index 3f5e937392e..35b4529ad7a 100644
+--- a/dlls/windows.system.profile.systemmanufacturers/main.c
++++ b/dlls/windows.system.profile.systemmanufacturers/main.c
+@@ -36,6 +36,7 @@ static const char *debugstr_hstring( HSTRING hstr )
+ struct smbios_statics
+ {
+     IActivationFactory IActivationFactory_iface;
++    ISmbiosInformationStatics ISmbiosInformationStatics_iface;
+     LONG ref;
+ };
+ 
+@@ -60,6 +61,13 @@ static HRESULT WINAPI factory_QueryInterface( IActivationFactory *iface, REFIID
+         return S_OK;
+     }
+ 
++    if (IsEqualGUID( iid, &IID_ISmbiosInformationStatics ))
++    {
++        *out = &impl->ISmbiosInformationStatics_iface;
++        IInspectable_AddRef( *out );
++        return S_OK;
++    }
++
+     FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+     *out = NULL;
+     return E_NOINTERFACE;
+@@ -118,9 +126,31 @@ static const struct IActivationFactoryVtbl factory_vtbl =
+     factory_ActivateInstance,
+ };
+ 
++DEFINE_IINSPECTABLE( statics, ISmbiosInformationStatics, struct smbios_statics, IActivationFactory_iface )
++
++static HRESULT WINAPI statics_get_SerialNumber( ISmbiosInformationStatics *iface, HSTRING *value )
++{
++    FIXME( "iface %p, value %p stub!\n", iface, value );
++    return E_NOTIMPL;
++}
++
++static const struct ISmbiosInformationStaticsVtbl statics_vtbl =
++{
++    statics_QueryInterface,
++    statics_AddRef,
++    statics_Release,
++    /* IInspectable methods */
++    statics_GetIids,
++    statics_GetRuntimeClassName,
++    statics_GetTrustLevel,
++    /* ISmbiosInformationStatics methods */
++    statics_get_SerialNumber,
++};
++
+ static struct smbios_statics smbios_statics =
+ {
+     {&factory_vtbl},
++    {&statics_vtbl},
+     1,
+ };
+ 
+diff --git a/dlls/windows.system.profile.systemmanufacturers/private.h b/dlls/windows.system.profile.systemmanufacturers/private.h
+index e3672c3aec5..42c19710dcb 100644
+--- a/dlls/windows.system.profile.systemmanufacturers/private.h
++++ b/dlls/windows.system.profile.systemmanufacturers/private.h
+@@ -29,3 +29,41 @@
+ 
+ #define WIDL_using_Windows_System_Profile_SystemManufacturers
+ #include "windows.system.profile.systemmanufacturers.h"
++
++#define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \
++    static inline impl_type *impl_from( iface_type *iface )                                        \
++    {                                                                                              \
++        return CONTAINING_RECORD( iface, impl_type, iface_mem );                                   \
++    }                                                                                              \
++    static HRESULT WINAPI pfx##_QueryInterface( iface_type *iface, REFIID iid, void **out )        \
++    {                                                                                              \
++        impl_type *impl = impl_from( iface );                                                      \
++        return IInspectable_QueryInterface( (IInspectable *)(expr), iid, out );                    \
++    }                                                                                              \
++    static ULONG WINAPI pfx##_AddRef( iface_type *iface )                                          \
++    {                                                                                              \
++        impl_type *impl = impl_from( iface );                                                      \
++        return IInspectable_AddRef( (IInspectable *)(expr) );                                      \
++    }                                                                                              \
++    static ULONG WINAPI pfx##_Release( iface_type *iface )                                         \
++    {                                                                                              \
++        impl_type *impl = impl_from( iface );                                                      \
++        return IInspectable_Release( (IInspectable *)(expr) );                                     \
++    }                                                                                              \
++    static HRESULT WINAPI pfx##_GetIids( iface_type *iface, ULONG *iid_count, IID **iids )         \
++    {                                                                                              \
++        impl_type *impl = impl_from( iface );                                                      \
++        return IInspectable_GetIids( (IInspectable *)(expr), iid_count, iids );                    \
++    }                                                                                              \
++    static HRESULT WINAPI pfx##_GetRuntimeClassName( iface_type *iface, HSTRING *class_name )      \
++    {                                                                                              \
++        impl_type *impl = impl_from( iface );                                                      \
++        return IInspectable_GetRuntimeClassName( (IInspectable *)(expr), class_name );             \
++    }                                                                                              \
++    static HRESULT WINAPI pfx##_GetTrustLevel( iface_type *iface, TrustLevel *trust_level )        \
++    {                                                                                              \
++        impl_type *impl = impl_from( iface );                                                      \
++        return IInspectable_GetTrustLevel( (IInspectable *)(expr), trust_level );                  \
++    }
++#define DEFINE_IINSPECTABLE( pfx, iface_type, impl_type, base_iface )                              \
++    DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from_##iface_type, iface_type##_iface, &impl->base_iface )
+diff --git a/dlls/windows.system.profile.systemmanufacturers/tests/smbios.c b/dlls/windows.system.profile.systemmanufacturers/tests/smbios.c
+index fa3308f21ab..e23a4d9adb7 100644
+--- a/dlls/windows.system.profile.systemmanufacturers/tests/smbios.c
++++ b/dlls/windows.system.profile.systemmanufacturers/tests/smbios.c
+@@ -45,6 +45,7 @@ static void check_interface_( unsigned int line, void *obj, const IID *iid )
+ static void test_Smbios_Statics(void)
+ {
+     static const WCHAR *smbios_statics_name = L"Windows.System.Profile.SystemManufacturers.SmbiosInformation";
++    ISmbiosInformationStatics *smbios_statics;
+     IActivationFactory *factory;
+     HSTRING str;
+     HRESULT hr;
+@@ -66,6 +67,12 @@ static void test_Smbios_Statics(void)
+     check_interface( factory, &IID_IInspectable );
+     check_interface( factory, &IID_IAgileObject );
+ 
++    hr = IActivationFactory_QueryInterface( factory, &IID_ISmbiosInformationStatics, (void **)&smbios_statics );
++    ok( hr == S_OK, "got hr %#lx.\n", hr );
++
++    ref = ISmbiosInformationStatics_Release( smbios_statics );
++    ok( ref == 2, "got ref %ld.\n", ref );
++
+     ref = IActivationFactory_Release( factory );
+     ok( ref == 1, "got ref %ld.\n", ref );
+ }
+-- 
+GitLab
+
+
+From ef1f8b7ff12a791b1f38dd05c07763d2a41524c5 Mon Sep 17 00:00:00 2001
+From: Mohamad Al-Jaf <mohamadaljaf@gmail.com>
+Date: Mon, 28 Nov 2022 23:20:30 -0500
+Subject: [PATCH 4/5] windows.system.profile.systemmanufacturers/tests: Add
+ ISmbiosInformationStatics_get_SerialNumber tests.
+
+---
+ .../tests/smbios.c                               | 16 +++++++++++++++-
+ 1 file changed, 15 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/windows.system.profile.systemmanufacturers/tests/smbios.c b/dlls/windows.system.profile.systemmanufacturers/tests/smbios.c
+index e23a4d9adb7..49e90216c42 100644
+--- a/dlls/windows.system.profile.systemmanufacturers/tests/smbios.c
++++ b/dlls/windows.system.profile.systemmanufacturers/tests/smbios.c
+@@ -47,8 +47,10 @@ static void test_Smbios_Statics(void)
+     static const WCHAR *smbios_statics_name = L"Windows.System.Profile.SystemManufacturers.SmbiosInformation";
+     ISmbiosInformationStatics *smbios_statics;
+     IActivationFactory *factory;
+-    HSTRING str;
++    HSTRING str, serial;
++    const WCHAR *buf;
+     HRESULT hr;
++    UINT32 len;
+     LONG ref;
+ 
+     hr = WindowsCreateString( smbios_statics_name, wcslen( smbios_statics_name ), &str );
+@@ -70,6 +72,18 @@ static void test_Smbios_Statics(void)
+     hr = IActivationFactory_QueryInterface( factory, &IID_ISmbiosInformationStatics, (void **)&smbios_statics );
+     ok( hr == S_OK, "got hr %#lx.\n", hr );
+ 
++    if (0) /* Win8 Crash */
++    {
++        hr = ISmbiosInformationStatics_get_SerialNumber( smbios_statics, &serial );
++        todo_wine ok( hr == S_OK || broken(hr == E_UNEXPECTED), "got hr %#lx.\n", hr );
++        if (hr == S_OK)
++        {
++            buf = WindowsGetStringRawBuffer( serial, &len );
++            todo_wine ok( buf != NULL && len > 0, "WindowsGetStringRawBuffer returned buf %p, len %u\n", buf, len );
++            WindowsDeleteString( serial );
++        }
++    }
++
+     ref = ISmbiosInformationStatics_Release( smbios_statics );
+     ok( ref == 2, "got ref %ld.\n", ref );
+ 
+-- 
+GitLab
+
+
+From a02795ffcc9470e603d64f0e90e644a32142b6a5 Mon Sep 17 00:00:00 2001
+From: Mohamad Al-Jaf <mohamadaljaf@gmail.com>
+Date: Mon, 28 Nov 2022 23:22:34 -0500
+Subject: [PATCH 5/5] windows.system.profile.systemmanufacturers: Implement
+ ISmbiosInformationStatics_get_SerialNumber.
+
+Wine-Bug: https://bugs.winehq.org/show_bug.cgi?id=53747
+---
+ .../Makefile.in                               |  2 +-
+ .../main.c                                    | 62 ++++++++++++++++++-
+ .../private.h                                 |  2 +
+ .../tests/smbios.c                            |  4 +-
+ 4 files changed, 65 insertions(+), 5 deletions(-)
+
+diff --git a/dlls/windows.system.profile.systemmanufacturers/Makefile.in b/dlls/windows.system.profile.systemmanufacturers/Makefile.in
+index a2d6076740f..9d07caa287c 100644
+--- a/dlls/windows.system.profile.systemmanufacturers/Makefile.in
++++ b/dlls/windows.system.profile.systemmanufacturers/Makefile.in
+@@ -1,5 +1,5 @@
+ MODULE  = windows.system.profile.systemmanufacturers.dll
+-IMPORTS = combase
++IMPORTS = combase oleaut32
+ 
+ C_SRCS = \
+ 	main.c
+diff --git a/dlls/windows.system.profile.systemmanufacturers/main.c b/dlls/windows.system.profile.systemmanufacturers/main.c
+index 35b4529ad7a..d2feb32054e 100644
+--- a/dlls/windows.system.profile.systemmanufacturers/main.c
++++ b/dlls/windows.system.profile.systemmanufacturers/main.c
+@@ -128,10 +128,68 @@ static const struct IActivationFactoryVtbl factory_vtbl =
+ 
+ DEFINE_IINSPECTABLE( statics, ISmbiosInformationStatics, struct smbios_statics, IActivationFactory_iface )
+ 
++static HRESULT get_bios_serialnumber( BSTR *value )
++{
++    const WCHAR *class = L"Win32_BIOS";
++    IEnumWbemClassObject *wbem_enum;
++    IWbemClassObject *wbem_class;
++    IWbemServices *wbem_service;
++    IWbemLocator *wbem_locator;
++    VARIANT serial;
++    ULONG count;
++    HRESULT hr;
++    BSTR bstr;
++
++    hr = CoCreateInstance( &CLSID_WbemLocator, NULL, CLSCTX_INPROC_SERVER, &IID_IWbemLocator, (void**)&wbem_locator );
++    if (FAILED(hr)) return hr;
++
++    bstr = SysAllocString( L"ROOT\\CIMV2" );
++    if (!bstr)
++    {
++        IWbemLocator_Release( wbem_locator );
++        return E_OUTOFMEMORY;
++    }
++    hr = IWbemLocator_ConnectServer( wbem_locator, bstr, NULL, NULL, NULL, 0, NULL, NULL, &wbem_service );
++    IWbemLocator_Release( wbem_locator );
++    SysFreeString( bstr );
++    if (FAILED(hr)) return hr;
++
++    bstr = SysAllocString( class );
++    if (!bstr)
++    {
++        IWbemServices_Release( wbem_service );
++        return E_OUTOFMEMORY;
++    }
++    hr = IWbemServices_CreateInstanceEnum( wbem_service, bstr, WBEM_FLAG_SYSTEM_ONLY, NULL, &wbem_enum );
++    IWbemServices_Release( wbem_service );
++    SysFreeString( bstr );
++    if (FAILED(hr)) return hr;
++
++    hr = IEnumWbemClassObject_Next( wbem_enum, 1000, 1, &wbem_class, &count );
++    IEnumWbemClassObject_Release( wbem_enum );
++    if (FAILED(hr)) return hr;
++
++    hr = IWbemClassObject_Get( wbem_class, L"SerialNumber", 0, &serial, NULL, NULL );
++    IWbemClassObject_Release( wbem_class );
++    if (FAILED(hr)) return hr;
++
++    *value = V_BSTR( &serial );
++    VariantClear( &serial );
++    return hr;
++}
++
+ static HRESULT WINAPI statics_get_SerialNumber( ISmbiosInformationStatics *iface, HSTRING *value )
+ {
+-    FIXME( "iface %p, value %p stub!\n", iface, value );
+-    return E_NOTIMPL;
++    BSTR serial;
++    HRESULT hr;
++
++    TRACE( "iface %p, value %p.\n", iface, value );
++
++    if (FAILED( hr = get_bios_serialnumber( &serial ) )) return hr;
++    if (FAILED( hr = WindowsCreateString( serial, wcslen(serial), value ) )) return hr;
++
++    TRACE( "Returning serial number: %s.\n", debugstr_w( serial ) );
++    return hr;
+ }
+ 
+ static const struct ISmbiosInformationStaticsVtbl statics_vtbl =
+diff --git a/dlls/windows.system.profile.systemmanufacturers/private.h b/dlls/windows.system.profile.systemmanufacturers/private.h
+index 42c19710dcb..374a2829130 100644
+--- a/dlls/windows.system.profile.systemmanufacturers/private.h
++++ b/dlls/windows.system.profile.systemmanufacturers/private.h
+@@ -30,6 +30,8 @@
+ #define WIDL_using_Windows_System_Profile_SystemManufacturers
+ #include "windows.system.profile.systemmanufacturers.h"
+ 
++#include "wbemcli.h"
++
+ #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \
+     static inline impl_type *impl_from( iface_type *iface )                                        \
+     {                                                                                              \
+diff --git a/dlls/windows.system.profile.systemmanufacturers/tests/smbios.c b/dlls/windows.system.profile.systemmanufacturers/tests/smbios.c
+index 49e90216c42..8d02b2c423a 100644
+--- a/dlls/windows.system.profile.systemmanufacturers/tests/smbios.c
++++ b/dlls/windows.system.profile.systemmanufacturers/tests/smbios.c
+@@ -75,11 +75,11 @@ static void test_Smbios_Statics(void)
+     if (0) /* Win8 Crash */
+     {
+         hr = ISmbiosInformationStatics_get_SerialNumber( smbios_statics, &serial );
+-        todo_wine ok( hr == S_OK || broken(hr == E_UNEXPECTED), "got hr %#lx.\n", hr );
++        ok( hr == S_OK || broken(hr == E_UNEXPECTED), "got hr %#lx.\n", hr );
+         if (hr == S_OK)
+         {
+             buf = WindowsGetStringRawBuffer( serial, &len );
+-            todo_wine ok( buf != NULL && len > 0, "WindowsGetStringRawBuffer returned buf %p, len %u\n", buf, len );
++            ok( buf != NULL && len > 0, "WindowsGetStringRawBuffer returned buf %p, len %u\n", buf, len );
+             WindowsDeleteString( serial );
+         }
+     }
+-- 
+GitLab
+
+From 82010317528d56c623a3c4f243f43a94ddfc6b9d Mon Sep 17 00:00:00 2001
+From: Zhiyi Zhang <zzhang@codeweavers.com>
+Date: Wed, 23 Nov 2022 15:03:06 +0800
+Subject: [PATCH] combase: Use SendMessageW() in
+ ClientRpcChannelBuffer_SendReceive() for STAs.
+
+An application has a thread 1 sending WM_DESTROY to windows in thread 2. When handling the message
+in thread 2, RevokeDragDrop() is called to release a COM object in thread 1. Then deadlock happens
+when using PostMessageW() because the DM_EXECUTERPC message will not be handled as thread 1 is still
+waiting for thread 2 to finish handling WM_DESTROY.
+---
+ dlls/combase/rpc.c | 11 +----------
+ 1 file changed, 1 insertion(+), 10 deletions(-)
+
+diff --git a/dlls/combase/rpc.c b/dlls/combase/rpc.c
+index c51b59de4bf..1862c8bddca 100644
+--- a/dlls/combase/rpc.c
++++ b/dlls/combase/rpc.c
+@@ -1416,16 +1416,7 @@ static HRESULT WINAPI ClientRpcChannelBuffer_SendReceive(LPRPCCHANNELBUFFER ifac
+ 
+         msg->ProcNum &= ~RPC_FLAGS_VALID_BIT;
+ 
+-        if (!PostMessageW(message_state->target_hwnd, DM_EXECUTERPC, 0,
+-                          (LPARAM)&message_state->params))
+-        {
+-            ERR("PostMessage failed with error %lu\n", GetLastError());
+-
+-            /* Note: message_state->params.iface doesn't have a reference and
+-             * so doesn't need to be released */
+-
+-            hr = HRESULT_FROM_WIN32(GetLastError());
+-        }
++        SendMessageW(message_state->target_hwnd, DM_EXECUTERPC, 0, (LPARAM)&message_state->params);
+     }
+     else
+     {
+-- 
+GitLab
+
+From e948fcce9ead52f955c1849c238040dce7cce250 Mon Sep 17 00:00:00 2001
+From: Vladislav Timonin <timoninvlad@yandex.ru>
+Date: Thu, 22 Dec 2022 02:41:17 +0700
+Subject: [PATCH] comctl32/listview: Draw border and background separately in
+ WM_NCPAINT.
+
+Depending on the theme, if there was a header,
+the border ends up painted lower than it should be,
+and clipped by the header.
+---
+ dlls/comctl32/listview.c | 18 +++++++++++++-----
+ 1 file changed, 13 insertions(+), 5 deletions(-)
+
+diff --git a/dlls/comctl32/listview.c b/dlls/comctl32/listview.c
+index 7c394d60273..13df8567c56 100644
+--- a/dlls/comctl32/listview.c
++++ b/dlls/comctl32/listview.c
+@@ -10701,6 +10701,7 @@ static LRESULT LISTVIEW_NCPaint(const LISTVIEW_INFO *infoPtr, HRGN region)
+     HRGN cliprgn;
+     int cxEdge = GetSystemMetrics (SM_CXEDGE),
+         cyEdge = GetSystemMetrics (SM_CYEDGE);
++    DTBGOPTS dtbg_opts;
+ 
+     if (!theme || !(exstyle & WS_EX_CLIENTEDGE))
+        return DefWindowProcW (infoPtr->hwndSelf, WM_NCPAINT, (WPARAM)region, 0);
+@@ -10713,17 +10714,24 @@ static LRESULT LISTVIEW_NCPaint(const LISTVIEW_INFO *infoPtr, HRGN region)
+         CombineRgn (cliprgn, cliprgn, region, RGN_AND);
+ 
+     OffsetRect(&r, -r.left, -r.top);
++
++    dc = GetDCEx(infoPtr->hwndSelf, region, DCX_WINDOW|DCX_INTERSECTRGN);
++
++    if (IsThemeBackgroundPartiallyTransparent (theme, 0, 0))
++        DrawThemeParentBackground(infoPtr->hwndSelf, dc, &r);
++
++    dtbg_opts.dwSize = sizeof(DTBGOPTS);
++    dtbg_opts.dwFlags = DTBG_OMITCONTENT;
++    DrawThemeBackgroundEx(theme, dc, 0, 0, &r, &dtbg_opts);
++
+     if (infoPtr->hwndHeader && LISTVIEW_IsHeaderEnabled(infoPtr))
+     {
+         GetWindowRect(infoPtr->hwndHeader, &window_rect);
+         r.top = min(r.bottom, r.top + window_rect.bottom - window_rect.top);
+     }
++    dtbg_opts.dwFlags = DTBG_OMITBORDER;
++    DrawThemeBackgroundEx(theme, dc, 0, 0, &r, &dtbg_opts);
+ 
+-    dc = GetDCEx(infoPtr->hwndSelf, region, DCX_WINDOW|DCX_INTERSECTRGN);
+-
+-    if (IsThemeBackgroundPartiallyTransparent (theme, 0, 0))
+-        DrawThemeParentBackground(infoPtr->hwndSelf, dc, &r);
+-    DrawThemeBackground (theme, dc, 0, 0, &r, 0);
+     ReleaseDC(infoPtr->hwndSelf, dc);
+ 
+     /* Call default proc to get the scrollbars etc. painted */
+-- 
+GitLab
+
