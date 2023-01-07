@@ -255,3 +255,46 @@ index 11111111111..11111111111 100644
 -- 
 2.37.2
 
+From: Chip Davis <cdavis@codeweavers.com>
+Subject: [PATCH] ntdll: Try mmap again without exec if it fails with it.
+Message-Id: <20190924004449.16473-1-cdavis@codeweavers.com>
+Date: Mon, 23 Sep 2019 19:44:49 -0500
+
+On some systems, mmap(2) with PROT_WRITE | PROT_EXEC can legitimately
+fail. If we added PROT_EXEC implicitly, try again without it.
+
+Signed-off-by: Chip Davis <cdavis@codeweavers.com>
+---
+ dlls/ntdll/unix/virtual.c | 12 +++++++++++-
+ 1 file changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -2103,6 +2103,7 @@ static NTSTATUS map_file_into_view( struct file_view *view, int fd, size_t start
+     /* only try mmap if media is not removable (or if we require write access) */
+     if (!removable || (flags & MAP_SHARED))
+     {
++try_again:
+         if (mmap( (char *)view->base + start, size, prot, flags, fd, offset ) != MAP_FAILED)
+             goto done;
+ 
+@@ -2123,7 +2124,16 @@ static NTSTATUS map_file_into_view( struct file_view *view, int fd, size_t start
+         case EPERM:  /* noexec filesystem, fall back to read() */
+             if (flags & MAP_SHARED)
+             {
+-                if (prot & PROT_EXEC) ERR( "failed to set PROT_EXEC on file map, noexec filesystem?\n" );
++                if (prot & PROT_EXEC)
++                {
++                    if (force_exec_prot && (vprot & (VPROT_WRITE|VPROT_EXEC)) == VPROT_WRITE)
++                    {
++                        /* exec + write may legitimately fail, in that case fall back to write only */
++                        prot &= ~PROT_EXEC;
++                        goto try_again;
++                    }
++                    ERR( "failed to set PROT_EXEC on file map, noexec filesystem?\n" );
++                }
+                 return STATUS_ACCESS_DENIED;
+             }
+             if (prot & PROT_EXEC) WARN( "failed to set PROT_EXEC on file map, noexec filesystem?\n" );

@@ -6888,7 +6888,7 @@ index 50bfc9855dd..461d79d9a5d 100644
 +        {   0,   0,  50,   0 },
 +        {   0,   0,  50,  50 },
 +        {   0,   0, -50, -50 },
-+        { -50, -50,   0,  50 }
++        { -50, -50,   0,  50 },
 +        { -50, -50,  50,   0 },
 +        { -50, -50,  50,  50 },
 +    };
@@ -7981,6 +7981,181 @@ index 7c394d60273..13df8567c56 100644
      ReleaseDC(infoPtr->hwndSelf, dc);
  
      /* Call default proc to get the scrollbars etc. painted */
+-- 
+GitLab
+
+From 051066e494dd2e97bff01a29b57376e6306e02db Mon Sep 17 00:00:00 2001
+From: dreamer <dreamer@puikheid.nl>
+Date: Fri, 30 Dec 2022 14:45:39 +0100
+Subject: [PATCH 1/2] increase number of midi ports to 64
+
+---
+ include/mmddk.h | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/include/mmddk.h b/include/mmddk.h
+index d4217f2ebef..02115754f1a 100644
+--- a/include/mmddk.h
++++ b/include/mmddk.h
+@@ -30,13 +30,13 @@
+ extern "C" {
+ #endif
+ 
+-#define MAX_MIDIINDRV 	(16)
++#define MAX_MIDIINDRV 	(64)
+ /* For now I'm making 16 the maximum number of midi devices one can
+  * have. This should be more than enough for everybody. But as a purist,
+  * I intend to make it unbounded in the future, as soon as I figure
+  * a good way to do so.
+  */
+-#define MAX_MIDIOUTDRV 	(16)
++#define MAX_MIDIOUTDRV 	(64)
+ 
+ /* ==================================
+  *   Multimedia DDK compatible part
+-- 
+GitLab
+
+
+From 208de7a04a6d5d78c6b29ca6ae06d3ce44b22943 Mon Sep 17 00:00:00 2001
+From: dreamer <dreamer@puikheid.nl>
+Date: Fri, 30 Dec 2022 15:20:49 +0100
+Subject: [PATCH 2/2] update comment
+
+---
+ include/mmddk.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/include/mmddk.h b/include/mmddk.h
+index 02115754f1a..e237683a164 100644
+--- a/include/mmddk.h
++++ b/include/mmddk.h
+@@ -31,7 +31,7 @@ extern "C" {
+ #endif
+ 
+ #define MAX_MIDIINDRV 	(64)
+-/* For now I'm making 16 the maximum number of midi devices one can
++/* For now I'm making 64 the maximum number of midi devices one can
+  * have. This should be more than enough for everybody. But as a purist,
+  * I intend to make it unbounded in the future, as soon as I figure
+  * a good way to do so.
+-- 
+GitLab
+
+From 7459e9d37dff05a3ed6e0345fa9eff6284191b8b Mon Sep 17 00:00:00 2001
+From: Sidney Kelley <memory.thrasher@gmail.com>
+Date: Sat, 24 Dec 2022 20:39:40 -0700
+Subject: [PATCH] Implements basic rpcrt4.dll.RpcServerUseAllProtseqsIf
+
+A very simple function. Normally rpc servers are handed endpoints one at a time, but the app has the option of associating one or more endpoints and protocol pairs to a given interface object, and then asking the rpc server to use them all. This replaces a stub that had caused the entire wineserver to crash (abort).
+---
+ AUTHORS                  |  1 +
+ dlls/rpcrt4/rpc_server.c | 14 ++++++++++++++
+ dlls/rpcrt4/rpcrt4.spec  |  2 +-
+ include/rpcdce.h         |  2 ++
+ 4 files changed, 18 insertions(+), 1 deletion(-)
+
+diff --git a/AUTHORS b/AUTHORS
+index 6639a165a5f..20871c3070e 100644
+--- a/AUTHORS
++++ b/AUTHORS
+@@ -1584,6 +1584,7 @@ Shi Quan He
+ Shuai Meng
+ Shunichi Fuji
+ Shu Yokoyama
++Sidney Kelley
+ Simen Zamecnik
+ Simeon Pilgrim
+ Simon Britnell
+diff --git a/dlls/rpcrt4/rpc_server.c b/dlls/rpcrt4/rpc_server.c
+index 41431ebca02..a86afc2f602 100644
+--- a/dlls/rpcrt4/rpc_server.c
++++ b/dlls/rpcrt4/rpc_server.c
+@@ -908,6 +908,20 @@ RPC_STATUS WINAPI RpcServerInqBindings( RPC_BINDING_VECTOR** BindingVector )
+   return status;
+ }
+ 
++RPC_STATUS WINAPI RpcServerUseAllProtseqsIf( unsigned int MaxCalls, RPC_IF_HANDLE IfSpec, void *SecurityDescriptor )
++{
++  PRPC_SERVER_INTERFACE iface = (PRPC_SERVER_INTERFACE)IfSpec;
++  /*don't really care if this is a client or server interface because the part of the ABI we care about is the same*/
++  TRACE("Binding RPC to %u endpoints\n", iface->RpcProtseqEndpointCount);
++  for(unsigned int i = 0;i < iface->RpcProtseqEndpointCount;i++) {
++    RPC_STATUS result = RpcServerUseProtseqEpA(iface->RpcProtseqEndpoint[i].RpcProtocolSequence, MaxCalls, iface->RpcProtseqEndpoint[i].Endpoint, SecurityDescriptor);
++    TRACE("Bound to RPC to proto: %s; endpoint: %s; with result: %ld\n", iface->RpcProtseqEndpoint[i].RpcProtocolSequence, iface->RpcProtseqEndpoint[i].Endpoint, result);
++    if(result != RPC_S_OK)
++      return result;
++  }
++  return RPC_S_OK;
++}
++
+ /***********************************************************************
+  *             RpcServerUseProtseqEpA (RPCRT4.@)
+  */
+diff --git a/dlls/rpcrt4/rpcrt4.spec b/dlls/rpcrt4/rpcrt4.spec
+index 21476714ae2..676164626f6 100644
+--- a/dlls/rpcrt4/rpcrt4.spec
++++ b/dlls/rpcrt4/rpcrt4.spec
+@@ -445,7 +445,7 @@
+ @ stdcall RpcServerUnregisterIfEx(ptr ptr long)
+ @ stub RpcServerUseAllProtseqs
+ @ stub RpcServerUseAllProtseqsEx
+-@ stub RpcServerUseAllProtseqsIf
++@ stdcall RpcServerUseAllProtseqsIf(long ptr ptr)
+ @ stub RpcServerUseAllProtseqsIfEx
+ @ stdcall RpcServerUseProtseqA(str long ptr)
+ @ stdcall RpcServerUseProtseqEpA(str  long str  ptr)
+diff --git a/include/rpcdce.h b/include/rpcdce.h
+index 79418f8084c..a97cc0d18b0 100644
+--- a/include/rpcdce.h
++++ b/include/rpcdce.h
+@@ -469,6 +469,8 @@ RPCRTAPI RPC_STATUS RPC_ENTRY
+ RPCRTAPI RPC_STATUS RPC_ENTRY
+   RpcServerUnregisterIfEx( RPC_IF_HANDLE IfSpec, UUID* MgrTypeUuid, int RundownContextHandles );
+ 
++RPCRTAPI RPC_STATUS RPC_ENTRY
++  RpcServerUseAllProtseqsIf( unsigned int MaxCalls, RPC_IF_HANDLE IfSpec, void *SecurityDescriptor );
+ 
+ RPCRTAPI RPC_STATUS RPC_ENTRY
+   RpcServerUseProtseqA(RPC_CSTR Protseq, unsigned int MaxCalls, void *SecurityDescriptor);
+-- 
+GitLab
+
+From d72061c10d38626e9febc93ecd9d89f8ba48610a Mon Sep 17 00:00:00 2001
+From: Hugh McMaster <hugh.mcmaster@outlook.com>
+Date: Fri, 23 Dec 2022 22:09:49 +1100
+Subject: [PATCH] conhost: Migrate from FontPitchFamily to FontFamily
+
+To ensure a seamless transition between value names, we try loading the
+registry value from FontFamily first and FontPitchFamily second.
+
+Any changes to the console font family are saved to the new value name.
+---
+ programs/conhost/window.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/programs/conhost/window.c b/programs/conhost/window.c
+index 3db4b159696..0a44186beb1 100644
+--- a/programs/conhost/window.c
++++ b/programs/conhost/window.c
+     RegQueryValueExW( key, L"FaceName", 0, &type, (BYTE *)&config->face_name, &count );
+ 
+     count = sizeof(val);
+-    if (!RegQueryValueExW( key, L"FontPitchFamily", 0, &type, (BYTE *)&val, &count ))
++    if (!RegQueryValueExW( key, L"FontFamily", 0, &type, (BYTE *)&val, &count ) ||
++        !RegQueryValueExW( key, L"FontPitchFamily", 0, &type, (BYTE *)&val, &count ))
+         config->font_pitch_family = val;
+ 
+     count = sizeof(val);
+@@ -307,7 +308,7 @@ static void save_registry_key( HKEY key,
+                     (lstrlenW(config->face_name) + 1) * sizeof(WCHAR) );
+ 
+     val = config->font_pitch_family;
+-    RegSetValueExW( key, L"FontPitchFamily", 0, REG_DWORD, (BYTE *)&val, sizeof(val) );
++    RegSetValueExW( key, L"FontFamily", 0, REG_DWORD, (BYTE *)&val, sizeof(val) );
+ 
+     width  = MulDiv( config->cell_width,  USER_DEFAULT_SCREEN_DPI, GetDpiForSystem() );
+     height = MulDiv( config->cell_height, USER_DEFAULT_SCREEN_DPI, GetDpiForSystem() );
 -- 
 GitLab
 
