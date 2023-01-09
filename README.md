@@ -18,13 +18,6 @@ Wine-NSPA focuses on the integration of performance enhancements and RT related 
 
 Wine-NSPA is currently based on Wine-7.5; due to newer versions having some regressions and bugs that affect some applications that I use (showstopping bugs). Wine-7.5 seems to be fairly solid and I don't have any desire to chase every development release. That said; I do pickup upstream bugfixes, MRs and the occasional patch from WineHQ Bugzilla. Additionally, Wine-TKG is used as a base; as it's a powerful build system, flexible, easy to use and significantly reduces maintenance burden. It also supports Archlinux / Makepkg, which makes building and packaging Wine a straightforward process.
 
-Dec/2022 Preview: Ableton Live 11 running in Wine-NSPA-7.5 with a number of patches/fixes to better support it.
-![](https://github.com/nine7nine/Wine-NSPA/blob/main/examples/images/Live11.png)
-
-Currently, I'm working with some experimental patchwork to improve multithreading, scalability and my RT support. This should get heavy applications like Ableton Live 11 working nicely in Wine-NSPA. This work is partially complete, but I'm also tracking Ableton Live support/documentation here: https://github.com/nine7nine/Wine-NSPA/issues/4 ...
-
-*note: Wine-NSPA will be rebased on Wine-8.0 in the near future, but only when 8.0+ proves worthy. Atm, Wine-8.0-rc has problems/regressions, when compared to Wine-7.5... It's performance is lacking, there are some nasty bugs and overall it's lackluster.*
-
 _________________________
 
 ### Features (non-exhaustive)
@@ -57,7 +50,28 @@ PKGBUILDs. You can find my archlinux package (sources) and kernel sources reposi
 * Linux-NSPA PKGBUILD - https://github.com/nine7nine/Linux-NSPA-pkgbuild
 
 _note: This is a Customized Realtime Linux kernel._
+
+I HIGHLY suggest that you use Linux-NSPA with Wine-NSPA over any other kernel. Vanilla distribution kernels are often not configured for optimal performance and more often than not: poorly configured for proaudio / realtime workloads. On top of that; I have patchwork that may not only improve performance, but actually resolve issues that may be wine-specific (such as the rwlock/rw_semaphore issues on RT that may crash some wine applications).
 _________________________
+
+### DPC Latency Checker
+
+DPC Latency Checker is used in older versions of Windows to verify if your system is suitable for realtime performance. Assuming you have decent hardware (higher specs, solid MOBO, etc) AND You've configured your system very well you can use DPC Latency Checker with Wine-NSPA:
+
+![](https://github.com/nine7nine/Wine-NSPA/blob/main/examples/images/Dpc_Latency_Test.png)
+
+NOTE: this isn't a substitute for rt-tests, hackbench, cyclictest and friend;: but will help indicate if your Wine-NSPA / system setup is actually usable for ProAudio.
+
+### Windows DAW / Heavy ProAudio Application Support
+
+![](https://github.com/nine7nine/Wine-NSPA/blob/main/examples/images/Live11.png)
+Preview: Ableton Live 11 running in Wine-NSPA-7.5 with a number of patches/fixes to better support it.
+
+Currently, I'm working with some experimental patchwork to improve multithreading, scalability and my RT support. This should get heavy applications like Ableton Live 11 working nicely in Wine-NSPA. This work is partially complete, but I'm also tracking Ableton Live support/documentation here: https://github.com/nine7nine/Wine-NSPA/issues/4 ...
+
+### Future Work && Plans
+
+Wine-NSPA will be rebased on Wine-8.0+ in the future, but only when 8.0+ becomes more suitable. Atm, Wine-8.0-rc has problems/regressions, when compared to Wine-7.5... The performance is lacking, there are some nasty bugs and overall it's just not good enough for me.* I prefer to have reliable builds that are usuable. Right now, my Wine-7.5 builds are just significatly better than newer versions of Wine (for a variety of reasons).
 
 ### Credits/Shoutouts:
 
@@ -77,4 +91,5 @@ _________________________
 * Linuxaudio: https://linuxaudio.org/
 
 _Other people of note: Jack Winter, Paul Davis and the whole Linuxaudio community._
+
 
