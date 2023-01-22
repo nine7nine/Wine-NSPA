@@ -1,12 +1,10 @@
-## Preface
+## Wine-NSPA
 
 Wine-NSPA uses Wine-tkg, which is a build-system aiming at easier custom wine builds creation.
 
 ## How-to:
 
-(for dependencies, see the [wiki page](https://github.com/Tk-Glitch/PKGBUILDS/wiki/wine-tkg-git) )
-
-**Independently of the distro used, you'll want MinGW compiler to build recent wine as it fails to build more often than not without it these days.**
+(for dependencies, see Wine-Tkg's [wiki page](https://github.com/Tk-Glitch/PKGBUILDS/wiki/wine-tkg-git) )
 
 ## Building:
 
