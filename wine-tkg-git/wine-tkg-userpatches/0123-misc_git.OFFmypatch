@@ -1,0 +1,466 @@
+From fc2fa4fb02983d1915e3b2713a2c40ee316955c5 Mon Sep 17 00:00:00 2001
+From: Torge Matthies <tmatthies@codeweavers.com>
+Date: Tue, 28 Mar 2023 17:24:38 +0200
+Subject: [PATCH 1/5] msvcr100: Only wake task collection waiters when finished
+ >= count.
+
+Signed-off-by: Torge Matthies <tmatthies@codeweavers.com>
+---
+ dlls/msvcrt/concurrency.c | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/msvcrt/concurrency.c b/dlls/msvcrt/concurrency.c
+index 01ba54308f0..a7447518302 100644
+--- a/dlls/msvcrt/concurrency.c
++++ b/dlls/msvcrt/concurrency.c
+@@ -2005,7 +2005,7 @@ static void execute_chore(_UnrealizedChore *chore,
+ static void CALLBACK chore_wrapper_finally(BOOL normal, void *data)
+ {
+     _UnrealizedChore *chore = data;
+-    LONG prev_finished, new_finished;
++    LONG count, prev_finished, new_finished;
+     volatile LONG *ptr;
+ 
+     TRACE("(%u %p)\n", normal, data);
+@@ -2013,6 +2013,7 @@ static void CALLBACK chore_wrapper_finally(BOOL normal, void *data)
+     if (!chore->task_collection)
+         return;
+     ptr = &chore->task_collection->finished;
++    count = chore->task_collection->count;
+     chore->task_collection = NULL;
+ 
+     do {
+@@ -2023,7 +2024,8 @@ static void CALLBACK chore_wrapper_finally(BOOL normal, void *data)
+             new_finished = prev_finished + 1;
+     } while (InterlockedCompareExchange(ptr, new_finished, prev_finished)
+              != prev_finished);
+-    RtlWakeAddressSingle((LONG*)ptr);
++    if (new_finished >= count)
++        RtlWakeAddressSingle((LONG*)ptr);
+ }
+ 
+ static void __cdecl chore_wrapper(_UnrealizedChore *chore)
+-- 
+GitLab
+
+
+From c71dca838ef47bb28cca634cde2ac25f8171c64f Mon Sep 17 00:00:00 2001
+From: Torge Matthies <tmatthies@codeweavers.com>
+Date: Tue, 28 Mar 2023 19:28:03 +0200
+Subject: [PATCH 2/5] msvcr100: Use enum for _StructuredTaskCollection return
+ value.
+
+Signed-off-by: Torge Matthies <tmatthies@codeweavers.com>
+---
+ dlls/msvcrt/concurrency.c | 10 ++++++++--
+ 1 file changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/msvcrt/concurrency.c b/dlls/msvcrt/concurrency.c
+index a7447518302..69551db3c8b 100644
+--- a/dlls/msvcrt/concurrency.c
++++ b/dlls/msvcrt/concurrency.c
+@@ -180,6 +180,12 @@ typedef struct
+     void *event;
+ } _StructuredTaskCollection;
+ 
++typedef enum
++{
++    TASK_COLLECTION_SUCCESS = 1,
++    TASK_COLLECTION_CANCELLED
++} _TaskCollectionStatus;
++
+ typedef struct _UnrealizedChore
+ {
+     const vtable_ptr *vtable;
+@@ -2161,7 +2167,7 @@ static void CALLBACK exception_ptr_rethrow_finally(BOOL normal, void *data)
+ /* ?_RunAndWait@_StructuredTaskCollection@details@Concurrency@@QAA?AW4_TaskCollectionStatus@23@PAV_UnrealizedChore@23@@Z */
+ /* ?_RunAndWait@_StructuredTaskCollection@details@Concurrency@@QAG?AW4_TaskCollectionStatus@23@PAV_UnrealizedChore@23@@Z */
+ /* ?_RunAndWait@_StructuredTaskCollection@details@Concurrency@@QEAA?AW4_TaskCollectionStatus@23@PEAV_UnrealizedChore@23@@Z */
+-/*_TaskCollectionStatus*/int __stdcall _StructuredTaskCollection__RunAndWait(
++_TaskCollectionStatus __stdcall _StructuredTaskCollection__RunAndWait(
+         _StructuredTaskCollection *this, _UnrealizedChore *chore)
+ {
+     LONG expected, val;
+@@ -2202,7 +2208,7 @@ static void CALLBACK exception_ptr_rethrow_finally(BOOL normal, void *data)
+         }
+         __FINALLY_CTX(exception_ptr_rethrow_finally, ep)
+     }
+-    return 1;
++    return TASK_COLLECTION_SUCCESS;
+ }
+ 
+ /* ?_Cancel@_StructuredTaskCollection@details@Concurrency@@QAAXXZ */
+-- 
+GitLab
+
+
+From a3fc7a423f20b929295a089594402031beddaad0 Mon Sep 17 00:00:00 2001
+From: Torge Matthies <tmatthies@codeweavers.com>
+Date: Tue, 28 Mar 2023 19:15:57 +0200
+Subject: [PATCH 3/5] msvcr100: Use enum for _StructuredTaskCollection status
+ bits.
+
+Signed-off-by: Torge Matthies <tmatthies@codeweavers.com>
+---
+ dlls/msvcrt/concurrency.c | 16 ++++++++++++----
+ 1 file changed, 12 insertions(+), 4 deletions(-)
+
+diff --git a/dlls/msvcrt/concurrency.c b/dlls/msvcrt/concurrency.c
+index 69551db3c8b..c8c6752deec 100644
+--- a/dlls/msvcrt/concurrency.c
++++ b/dlls/msvcrt/concurrency.c
+@@ -186,6 +186,12 @@ typedef enum
+     TASK_COLLECTION_CANCELLED
+ } _TaskCollectionStatus;
+ 
++typedef enum
++{
++    STRUCTURED_TASK_COLLECTION_CANCELLED   = 0x2,
++    STRUCTURED_TASK_COLLECTION_STATUS_MASK = 0x7
++} _StructuredTaskCollectionStatusBits;
++
+ typedef struct _UnrealizedChore
+ {
+     const vtable_ptr *vtable;
+@@ -1976,7 +1982,7 @@ static LONG CALLBACK execute_chore_except(EXCEPTION_POINTERS *pexc, void *_data)
+ 
+     new_exception = data->task_collection->exception;
+     do {
+-        if ((ULONG_PTR)new_exception & ~0x7) {
++        if ((ULONG_PTR)new_exception & ~STRUCTURED_TASK_COLLECTION_STATUS_MASK) {
+             __ExceptionPtrDestroy(ptr);
+             operator_delete(ptr);
+             break;
+@@ -1999,7 +2005,8 @@ static void execute_chore(_UnrealizedChore *chore,
+ 
+     __TRY
+     {
+-        if (!((ULONG_PTR)task_collection->exception & ~0x7) && chore->chore_proc)
++        if (!((ULONG_PTR)task_collection->exception & ~STRUCTURED_TASK_COLLECTION_STATUS_MASK) &&
++                chore->chore_proc)
+             chore->chore_proc(chore);
+     }
+     __EXCEPT_CTX(execute_chore_except, &data)
+@@ -2172,6 +2179,7 @@ _TaskCollectionStatus __stdcall _StructuredTaskCollection__RunAndWait(
+ {
+     LONG expected, val;
+     ULONG_PTR exception;
++    exception_ptr *ep;
+ 
+     TRACE("(%p %p)\n", this, chore);
+ 
+@@ -2199,8 +2207,8 @@ _TaskCollectionStatus __stdcall _StructuredTaskCollection__RunAndWait(
+     this->count = 0;
+ 
+     exception = (ULONG_PTR)this->exception;
+-    if (exception & ~0x7) {
+-        exception_ptr *ep = (exception_ptr*)(exception & ~0x7);
++    ep = (exception_ptr*)(exception & ~STRUCTURED_TASK_COLLECTION_STATUS_MASK);
++    if (ep) {
+         this->exception = 0;
+         __TRY
+         {
+-- 
+GitLab
+
+
+From 58d516f00f587e855c1476f926de81e3db698a75 Mon Sep 17 00:00:00 2001
+From: Torge Matthies <tmatthies@codeweavers.com>
+Date: Tue, 28 Mar 2023 19:32:01 +0200
+Subject: [PATCH 4/5] msvcr100: Implement _StructuredTaskCollection canceling.
+
+Signed-off-by: Torge Matthies <tmatthies@codeweavers.com>
+---
+ dlls/msvcr120/tests/msvcr120.c | 12 +++++-
+ dlls/msvcrt/concurrency.c      | 72 +++++++++++++++++++++++++++++-----
+ 2 files changed, 73 insertions(+), 11 deletions(-)
+
+diff --git a/dlls/msvcr120/tests/msvcr120.c b/dlls/msvcr120/tests/msvcr120.c
+index 0a4fb383e0e..607048ab9da 100644
+--- a/dlls/msvcr120/tests/msvcr120.c
++++ b/dlls/msvcr120/tests/msvcr120.c
+@@ -1587,7 +1587,17 @@ static void test_StructuredTaskCollection(void)
+     ok(b, "SetEvent failed\n");
+ 
+     status = p__StructuredTaskCollection__RunAndWait(&task_coll, NULL);
+-    todo_wine ok(status == 2, "_StructuredTaskCollection::_RunAndWait failed: %d\n", status);
++    ok(status == 2, "_StructuredTaskCollection::_RunAndWait failed: %d\n", status);
++    call_func1(p__StructuredTaskCollection_dtor, &task_coll);
++
++    /* cancel task collection without scheduled tasks */
++    call_func2(p__StructuredTaskCollection_ctor, &task_coll, NULL);
++    call_func1(p__StructuredTaskCollection__Cancel, &task_coll);
++    ok(task_coll.context == context, "Unexpected context: %p != %p\n", task_coll.context, context);
++    chore_ctor(&chore1);
++    status = p__StructuredTaskCollection__RunAndWait(&task_coll, NULL);
++    ok(status == 2, "_StructuredTaskCollection::_RunAndWait failed: %d\n", status);
++    ok(!chore1.executed, "Canceled collection executed chore\n");
+     call_func1(p__StructuredTaskCollection_dtor, &task_coll);
+ 
+     CloseHandle(chore_start_evt);
+diff --git a/dlls/msvcrt/concurrency.c b/dlls/msvcrt/concurrency.c
+index c8c6752deec..3606fe16482 100644
+--- a/dlls/msvcrt/concurrency.c
++++ b/dlls/msvcrt/concurrency.c
+@@ -1967,6 +1967,64 @@ struct execute_chore_data {
+     _StructuredTaskCollection *task_collection;
+ };
+ 
++/* ?_Cancel@_StructuredTaskCollection@details@Concurrency@@QAAXXZ */
++/* ?_Cancel@_StructuredTaskCollection@details@Concurrency@@QAEXXZ */
++/* ?_Cancel@_StructuredTaskCollection@details@Concurrency@@QEAAXXZ */
++DEFINE_THISCALL_WRAPPER(_StructuredTaskCollection__Cancel, 4)
++void __thiscall _StructuredTaskCollection__Cancel(
++        _StructuredTaskCollection *this)
++{
++    ThreadScheduler *scheduler;
++    void *prev_exception, *new_exception;
++    struct scheduled_chore *sc, *next;
++    LONG removed = 0;
++    LONG prev_finished, new_finished;
++
++    TRACE("(%p)\n", this);
++
++    if (!this->context)
++        this->context = get_current_context();
++    scheduler = get_thread_scheduler_from_context(this->context);
++    if (!scheduler)
++        return;
++
++    new_exception = this->exception;
++    do {
++        prev_exception = new_exception;
++        if ((ULONG_PTR)prev_exception & STRUCTURED_TASK_COLLECTION_CANCELLED)
++            return;
++        new_exception = (void*)((ULONG_PTR)prev_exception |
++                STRUCTURED_TASK_COLLECTION_CANCELLED);
++    } while ((new_exception = InterlockedCompareExchangePointer(
++                    &this->exception, new_exception, prev_exception))
++             != prev_exception);
++
++    EnterCriticalSection(&scheduler->cs);
++    LIST_FOR_EACH_ENTRY_SAFE(sc, next, &scheduler->scheduled_chores,
++                             struct scheduled_chore, entry) {
++        if (sc->chore->task_collection != this)
++            continue;
++        sc->chore->task_collection = NULL;
++        list_remove(&sc->entry);
++        removed++;
++        operator_delete(sc);
++    }
++    LeaveCriticalSection(&scheduler->cs);
++    if (!removed)
++        return;
++
++    new_finished = this->finished;
++    do {
++        prev_finished = new_finished;
++        if (prev_finished == FINISHED_INITIAL)
++            new_finished = removed;
++        else
++            new_finished = prev_finished + removed;
++    } while ((new_finished = InterlockedCompareExchange(&this->finished,
++                    new_finished, prev_finished)) != prev_finished);
++    RtlWakeAddressAll((LONG*)&this->finished);
++}
++
+ static LONG CALLBACK execute_chore_except(EXCEPTION_POINTERS *pexc, void *_data)
+ {
+     struct execute_chore_data *data = _data;
+@@ -1976,6 +2034,8 @@ static LONG CALLBACK execute_chore_except(EXCEPTION_POINTERS *pexc, void *_data)
+     if (pexc->ExceptionRecord->ExceptionCode != CXX_EXCEPTION)
+         return EXCEPTION_CONTINUE_SEARCH;
+ 
++    _StructuredTaskCollection__Cancel(data->task_collection);
++
+     ptr = operator_new(sizeof(*ptr));
+     __ExceptionPtrCreate(ptr);
+     exception_ptr_from_record(ptr, pexc->ExceptionRecord);
+@@ -2216,19 +2276,11 @@ _TaskCollectionStatus __stdcall _StructuredTaskCollection__RunAndWait(
+         }
+         __FINALLY_CTX(exception_ptr_rethrow_finally, ep)
+     }
++    if (exception & STRUCTURED_TASK_COLLECTION_CANCELLED)
++        return TASK_COLLECTION_CANCELLED;
+     return TASK_COLLECTION_SUCCESS;
+ }
+ 
+-/* ?_Cancel@_StructuredTaskCollection@details@Concurrency@@QAAXXZ */
+-/* ?_Cancel@_StructuredTaskCollection@details@Concurrency@@QAEXXZ */
+-/* ?_Cancel@_StructuredTaskCollection@details@Concurrency@@QEAAXXZ */
+-DEFINE_THISCALL_WRAPPER(_StructuredTaskCollection__Cancel, 4)
+-void __thiscall _StructuredTaskCollection__Cancel(
+-        _StructuredTaskCollection *this)
+-{
+-    FIXME("(%p): stub!\n", this);
+-}
+-
+ /* ?_IsCanceling@_StructuredTaskCollection@details@Concurrency@@QAA_NXZ */
+ /* ?_IsCanceling@_StructuredTaskCollection@details@Concurrency@@QAE_NXZ */
+ /* ?_IsCanceling@_StructuredTaskCollection@details@Concurrency@@QEAA_NXZ */
+-- 
+GitLab
+
+
+From 9e865967140f00680ffe2983ca4fa994ab6bf3d8 Mon Sep 17 00:00:00 2001
+From: Torge Matthies <tmatthies@codeweavers.com>
+Date: Tue, 28 Mar 2023 16:25:39 +0200
+Subject: [PATCH 5/5] msvcr100: Implement
+ _StructuredTaskCollection::_IsCanceling.
+
+Signed-off-by: Torge Matthies <tmatthies@codeweavers.com>
+---
+ dlls/msvcr120/tests/msvcr120.c | 2 +-
+ dlls/msvcrt/concurrency.c      | 4 ++--
+ 2 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/dlls/msvcr120/tests/msvcr120.c b/dlls/msvcr120/tests/msvcr120.c
+index 607048ab9da..fd8e42fd35d 100644
+--- a/dlls/msvcr120/tests/msvcr120.c
++++ b/dlls/msvcr120/tests/msvcr120.c
+@@ -1403,7 +1403,7 @@ static void __cdecl chore_proc(_UnrealizedChore *_this)
+         MSVCRT_bool canceling = call_func1(
+                 p__StructuredTaskCollection__IsCanceling,
+                 chore->chore.task_collection);
+-        todo_wine ok(canceling, "Task is not canceling\n");
++        ok(canceling, "Task is not canceling\n");
+     }
+ }
+ 
+diff --git a/dlls/msvcrt/concurrency.c b/dlls/msvcrt/concurrency.c
+index 3606fe16482..d148aadd13a 100644
+--- a/dlls/msvcrt/concurrency.c
++++ b/dlls/msvcrt/concurrency.c
+@@ -2288,8 +2288,8 @@ DEFINE_THISCALL_WRAPPER(_StructuredTaskCollection__IsCanceling, 4)
+ bool __thiscall _StructuredTaskCollection__IsCanceling(
+         _StructuredTaskCollection *this)
+ {
+-    FIXME("(%p): stub!\n", this);
+-    return FALSE;
++    TRACE("(%p)\n", this);
++    return !!((ULONG_PTR)this->exception & STRUCTURED_TASK_COLLECTION_CANCELLED);
+ }
+ 
+ /* ?_CheckTaskCollection@_UnrealizedChore@details@Concurrency@@IAEXXZ */
+-- 
+GitLab
+
+From 8426109a439c35334f72fbf12aa15948366b2fb4 Mon Sep 17 00:00:00 2001
+From: Vijay Kiran Kamuju <infyquest@gmail.com>
+Date: Fri, 17 Mar 2023 13:19:19 +0000
+Subject: [PATCH] msvcr100: Add _UnrealizedChore::_CheckTaskCollection stub.
+
+Wine-Bug: https://bugs.winehq.org/show_bug.cgi?id=53794
+---
+ dlls/concrt140/concrt140.spec       | 6 +++---
+ dlls/msvcr100/msvcr100.spec         | 4 ++--
+ dlls/msvcr110/msvcr110.spec         | 6 +++---
+ dlls/msvcr120/msvcr120.spec         | 6 +++---
+ dlls/msvcr120_app/msvcr120_app.spec | 6 +++---
+ dlls/msvcrt/concurrency.c           | 8 ++++++++
+ 6 files changed, 22 insertions(+), 14 deletions(-)
+
+diff --git a/dlls/concrt140/concrt140.spec b/dlls/concrt140/concrt140.spec
+index 8ddf2255f31..f2b2789a5e2 100644
+--- a/dlls/concrt140/concrt140.spec
++++ b/dlls/concrt140/concrt140.spec
+@@ -440,9 +440,9 @@
+ @ stub -arch=arm ?_Cancel@_TaskCollection@details@Concurrency@@QAAXXZ
+ @ stub -arch=i386 ?_Cancel@_TaskCollection@details@Concurrency@@QAEXXZ
+ @ stub -arch=win64 ?_Cancel@_TaskCollection@details@Concurrency@@QEAAXXZ
+-@ stub -arch=arm ?_CheckTaskCollection@_UnrealizedChore@details@Concurrency@@IAAXXZ
+-@ stub -arch=i386 ?_CheckTaskCollection@_UnrealizedChore@details@Concurrency@@IAEXXZ
+-@ stub -arch=win64 ?_CheckTaskCollection@_UnrealizedChore@details@Concurrency@@IEAAXXZ
++@ cdecl -arch=arm ?_CheckTaskCollection@_UnrealizedChore@details@Concurrency@@IAAXXZ(ptr) _UnrealizedChore__CheckTaskCollection
++@ thiscall -arch=i386 ?_CheckTaskCollection@_UnrealizedChore@details@Concurrency@@IAEXXZ(ptr) _UnrealizedChore__CheckTaskCollection
++@ cdecl -arch=win64 ?_CheckTaskCollection@_UnrealizedChore@details@Concurrency@@IEAAXXZ(ptr) _UnrealizedChore__CheckTaskCollection
+ @ stub -arch=arm ?_CleanupToken@_StructuredTaskCollection@details@Concurrency@@AAAXXZ
+ @ stub -arch=i386 ?_CleanupToken@_StructuredTaskCollection@details@Concurrency@@AAEXXZ
+ @ stub -arch=win64 ?_CleanupToken@_StructuredTaskCollection@details@Concurrency@@AEAAXXZ
+diff --git a/dlls/msvcr100/msvcr100.spec b/dlls/msvcr100/msvcr100.spec
+index e2107055c24..3e2839b3908 100644
+--- a/dlls/msvcr100/msvcr100.spec
++++ b/dlls/msvcr100/msvcr100.spec
+@@ -313,8 +313,8 @@
+ @ cdecl -arch=win64 ?_Cancel@_StructuredTaskCollection@details@Concurrency@@QEAAXXZ(ptr) _StructuredTaskCollection__Cancel
+ @ stub -arch=win32 ?_Cancel@_TaskCollection@details@Concurrency@@QAEXXZ
+ @ stub -arch=win64 ?_Cancel@_TaskCollection@details@Concurrency@@QEAAXXZ
+-@ stub -arch=win32 ?_CheckTaskCollection@_UnrealizedChore@details@Concurrency@@IAEXXZ
+-@ stub -arch=win64 ?_CheckTaskCollection@_UnrealizedChore@details@Concurrency@@IEAAXXZ
++@ thiscall -arch=win32 ?_CheckTaskCollection@_UnrealizedChore@details@Concurrency@@IAEXXZ(ptr) _UnrealizedChore__CheckTaskCollection
++@ cdecl -arch=win64 ?_CheckTaskCollection@_UnrealizedChore@details@Concurrency@@IEAAXXZ(ptr) _UnrealizedChore__CheckTaskCollection
+ @ stub -arch=win32 ?_ConcRT_Assert@details@Concurrency@@YAXPBD0H@Z
+ @ stub -arch=win64 ?_ConcRT_Assert@details@Concurrency@@YAXPEBD0H@Z
+ @ stub -arch=win32 ?_ConcRT_CoreAssert@details@Concurrency@@YAXPBD0H@Z
+diff --git a/dlls/msvcr110/msvcr110.spec b/dlls/msvcr110/msvcr110.spec
+index 4fc5a069fbb..c23293ea658 100644
+--- a/dlls/msvcr110/msvcr110.spec
++++ b/dlls/msvcr110/msvcr110.spec
+@@ -493,9 +493,9 @@
+ @ stub -arch=arm ?_Cancel@_TaskCollection@details@Concurrency@@QAAXXZ
+ @ stub -arch=i386 ?_Cancel@_TaskCollection@details@Concurrency@@QAEXXZ
+ @ stub -arch=win64 ?_Cancel@_TaskCollection@details@Concurrency@@QEAAXXZ
+-@ stub -arch=arm ?_CheckTaskCollection@_UnrealizedChore@details@Concurrency@@IAAXXZ
+-@ stub -arch=i386 ?_CheckTaskCollection@_UnrealizedChore@details@Concurrency@@IAEXXZ
+-@ stub -arch=win64 ?_CheckTaskCollection@_UnrealizedChore@details@Concurrency@@IEAAXXZ
++@ cdecl -arch=arm ?_CheckTaskCollection@_UnrealizedChore@details@Concurrency@@IAAXXZ(ptr) _UnrealizedChore__CheckTaskCollection
++@ thiscall -arch=i386 ?_CheckTaskCollection@_UnrealizedChore@details@Concurrency@@IAEXXZ(ptr) _UnrealizedChore__CheckTaskCollection
++@ cdecl -arch=win64 ?_CheckTaskCollection@_UnrealizedChore@details@Concurrency@@IEAAXXZ(ptr) _UnrealizedChore__CheckTaskCollection
+ @ stub -arch=arm ?_CleanupToken@_StructuredTaskCollection@details@Concurrency@@AAAXXZ
+ @ stub -arch=i386 ?_CleanupToken@_StructuredTaskCollection@details@Concurrency@@AAEXXZ
+ @ stub -arch=win64 ?_CleanupToken@_StructuredTaskCollection@details@Concurrency@@AEAAXXZ
+diff --git a/dlls/msvcr120/msvcr120.spec b/dlls/msvcr120/msvcr120.spec
+index 7b379830d4b..6eac1937227 100644
+--- a/dlls/msvcr120/msvcr120.spec
++++ b/dlls/msvcr120/msvcr120.spec
+@@ -490,9 +490,9 @@
+ @ stub -arch=arm ?_Cancel@_TaskCollection@details@Concurrency@@QAAXXZ
+ @ stub -arch=i386 ?_Cancel@_TaskCollection@details@Concurrency@@QAEXXZ
+ @ stub -arch=win64 ?_Cancel@_TaskCollection@details@Concurrency@@QEAAXXZ
+-@ stub -arch=arm ?_CheckTaskCollection@_UnrealizedChore@details@Concurrency@@IAAXXZ
+-@ stub -arch=i386 ?_CheckTaskCollection@_UnrealizedChore@details@Concurrency@@IAEXXZ
+-@ stub -arch=win64 ?_CheckTaskCollection@_UnrealizedChore@details@Concurrency@@IEAAXXZ
++@ cdecl -arch=arm ?_CheckTaskCollection@_UnrealizedChore@details@Concurrency@@IAAXXZ(ptr) _UnrealizedChore__CheckTaskCollection
++@ thiscall -arch=i386 ?_CheckTaskCollection@_UnrealizedChore@details@Concurrency@@IAEXXZ(ptr) _UnrealizedChore__CheckTaskCollection
++@ cdecl -arch=win64 ?_CheckTaskCollection@_UnrealizedChore@details@Concurrency@@IEAAXXZ(ptr) _UnrealizedChore__CheckTaskCollection
+ @ stub -arch=arm ?_CleanupToken@_StructuredTaskCollection@details@Concurrency@@AAAXXZ
+ @ stub -arch=i386 ?_CleanupToken@_StructuredTaskCollection@details@Concurrency@@AAEXXZ
+ @ stub -arch=win64 ?_CleanupToken@_StructuredTaskCollection@details@Concurrency@@AEAAXXZ
+diff --git a/dlls/msvcr120_app/msvcr120_app.spec b/dlls/msvcr120_app/msvcr120_app.spec
+index 37282fc54f8..aad6ece8acc 100644
+--- a/dlls/msvcr120_app/msvcr120_app.spec
++++ b/dlls/msvcr120_app/msvcr120_app.spec
+@@ -487,9 +487,9 @@
+ @ stub -arch=arm ?_Cancel@_TaskCollection@details@Concurrency@@QAAXXZ
+ @ stub -arch=i386 ?_Cancel@_TaskCollection@details@Concurrency@@QAEXXZ
+ @ stub -arch=win64 ?_Cancel@_TaskCollection@details@Concurrency@@QEAAXXZ
+-@ stub -arch=arm ?_CheckTaskCollection@_UnrealizedChore@details@Concurrency@@IAAXXZ
+-@ stub -arch=i386 ?_CheckTaskCollection@_UnrealizedChore@details@Concurrency@@IAEXXZ
+-@ stub -arch=win64 ?_CheckTaskCollection@_UnrealizedChore@details@Concurrency@@IEAAXXZ
++@ cdecl -arch=arm ?_CheckTaskCollection@_UnrealizedChore@details@Concurrency@@IAAXXZ(ptr) msvcr120.?_CheckTaskCollection@_UnrealizedChore@details@Concurrency@@IAAXXZ
++@ thiscall -arch=i386 ?_CheckTaskCollection@_UnrealizedChore@details@Concurrency@@IAEXXZ(ptr) msvcr120.?_CheckTaskCollection@_UnrealizedChore@details@Concurrency@@IAEXXZ
++@ cdecl -arch=win64 ?_CheckTaskCollection@_UnrealizedChore@details@Concurrency@@IEAAXXZ(ptr) msvcr120.?_CheckTaskCollection@_UnrealizedChore@details@Concurrency@@IEAAXXZ
+ @ stub -arch=arm ?_CleanupToken@_StructuredTaskCollection@details@Concurrency@@AAAXXZ
+ @ stub -arch=i386 ?_CleanupToken@_StructuredTaskCollection@details@Concurrency@@AAEXXZ
+ @ stub -arch=win64 ?_CleanupToken@_StructuredTaskCollection@details@Concurrency@@AEAAXXZ
+diff --git a/dlls/msvcrt/concurrency.c b/dlls/msvcrt/concurrency.c
+index fe156938e3a..01ba54308f0 100644
+--- a/dlls/msvcrt/concurrency.c
++++ b/dlls/msvcrt/concurrency.c
+@@ -2224,6 +2224,14 @@ bool __thiscall _StructuredTaskCollection__IsCanceling(
+     return FALSE;
+ }
+ 
++/* ?_CheckTaskCollection@_UnrealizedChore@details@Concurrency@@IAEXXZ */
++/* ?_CheckTaskCollection@_UnrealizedChore@details@Concurrency@@IEAAXXZ */
++DEFINE_THISCALL_WRAPPER(_UnrealizedChore__CheckTaskCollection, 4)
++void __thiscall _UnrealizedChore__CheckTaskCollection(_UnrealizedChore *this)
++{
++    FIXME("() stub\n");
++}
++
+ /* ??0critical_section@Concurrency@@QAE@XZ */
+ /* ??0critical_section@Concurrency@@QEAA@XZ */
+ DEFINE_THISCALL_WRAPPER(critical_section_ctor, 4)
+-- 
+GitLab
