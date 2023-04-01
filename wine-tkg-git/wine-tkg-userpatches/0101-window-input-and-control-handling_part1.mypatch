@@ -312,4 +312,233 @@ index 11111111111..11111111111 100644
      if (hdc) NtGdiDeleteObjectApp( hdc );
      if (dib) NtGdiDeleteObjectApp( dib );
 -- 
-2.37.2                 
+2.37.2
+
+From: "Chao Long" <longchao@uniontech.com>
+Subject: [PATCH] comctl32: Check is a safe window.
+Message-Id: <202010301532590115082@uniontech.com>
+Date: Fri, 30 Oct 2020 15:32:59 +0800
+
+014a:014b:trace:listview:notify_hdr   <= 0
+014a:014b:trace:listview:notify_dispinfoT  resulting code=-176
+014a:014b:trace:listview:EditLblWndProcT (hwnd=0005005C, uMsg=10, wParam=0, lParam=0, isW=1)
+014a:014b:trace:listview:LISTVIEW_WindowProc (hwnd=00020054 uMsg=210 wParam=2 lParam=5005c)
+014a:014b:trace:listview:EditLblWndProcT (hwnd=0005005C, uMsg=18, wParam=0, lParam=0, isW=1)
+014a:014b:trace:listview:EditLblWndProcT (hwnd=0005005C, uMsg=46, wParam=0, lParam=303ba4, isW=1)
+014a:014b:trace:listview:LISTVIEW_WindowProc (hwnd=00020054 uMsg=14 wParam=e0324 lParam=0)
+014a:014b:trace:listview:LISTVIEW_EraseBkgnd (hdc=000E0324)
+014a:014b:trace:listview:EditLblWndProcT (hwnd=0005005C, uMsg=47, wParam=0, lParam=303ba4, isW=1)
+014a:014b:trace:listview:EditLblWndProcT (hwnd=0005005C, uMsg=210, wParam=3ec0002, lParam=30050, isW=1)
+014a:014b:trace:listview:EditLblWndProcT (hwnd=0005005C, uMsg=2, wParam=0, lParam=0, isW=1)
+014a:014b:trace:listview:EditLblWndProcT (hwnd=0005005C, uMsg=8, wParam=20054, lParam=0, isW=1)
+014a:014b:trace:seh:raise_exception code=c0000005 flags=0 addr=0x7d0b2b18 ip=7d0b2b18 tid=014b
+014a:014b:trace:seh:raise_exception  info[0]=00000000
+014a:014b:trace:seh:raise_exception  info[1]=00000074
+014a:014b:trace:seh:raise_exception  eax=00000000 ebx=003047b4 ecx=00304220 edx=00000000 esi=00304eec edi=00000000
+014a:014b:trace:seh:raise_exception  ebp=003046a8 esp=00304680 cs=0023 ds=002b es=002b fs=0063 gs=006b flags=00010206
+
+
+The window is destroy. killfocus msg is not safe.
+
+014a:014b:trace:listview:EditLblWndProcT (hwnd=0005005C, uMsg=2, wParam=0, lParam=0, isW=1)
+014a:014b:trace:listview:EditLblWndProcT (hwnd=0005005C, uMsg=8, wParam=20054, lParam=0, isW=1)
+
+From 6460c5109303e0e4c227692074d0f47f4da29756 Mon Sep 17 00:00:00 2001
+From: Chao Long <longchao@uniontech.com>
+Date: Fri, 30 Oct 2020 15:26:00 +0800
+#Subject: [PATCH] comctl32: Check is a safe window.
+
+Signed-off-by: Chao Long <longchao@uniontech.com>
+---
+ dlls/comctl32/listview.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/dlls/comctl32/listview.c b/dlls/comctl32/listview.c
+index 11111111111..11111111111 100644
+--- a/dlls/comctl32/listview.c
++++ b/dlls/comctl32/listview.c
+@@ -6010,6 +6010,8 @@ static LRESULT EditLblWndProcT(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPara
+ 
+     TRACE("hwnd %p, uMsg %x, wParam %Ix, lParam %Ix, isW %d\n", hwnd, uMsg, wParam, lParam, isW);
+ 
++    if ( !IsWindow(hwnd) ) return 0;
++
+     switch (uMsg)
+     {
+ 	case WM_GETDLGCODE:
+
+-- 
+2.39.0
+
+From: Giovanni Mascellani <gmascellani@codeweavers.com>
+Subject: [PATCH] winex11.drv: Do not call old_error_handler if it is NULL.
+Message-Id: <20210212115800.3997498-1-gmascellani@codeweavers.com>
+Date: Fri, 12 Feb 2021 12:58:00 +0100
+
+Signed-off-by: Giovanni Mascellani <gmascellani@codeweavers.com>
+---
+ dlls/winex11.drv/x11drv_main.c | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/winex11.drv/x11drv_main.c b/dlls/winex11.drv/x11drv_main.c
+index 11111111111..11111111111 100644
+--- a/dlls/winex11.drv/x11drv_main.c
++++ b/dlls/winex11.drv/x11drv_main.c
+@@ -330,7 +330,10 @@ static int error_handler( Display *display, XErrorEvent *error_evt )
+              error_evt->serial, error_evt->request_code );
+         assert( 0 );
+     }
+-    old_error_handler( display, error_evt );
++    /* Xlib never returns a NULL previous error handler, but other
++       implementations, like Steam's overlay, do. */
++    if (old_error_handler)
++        old_error_handler( display, error_evt );
+     return 0;
+ }
+ 
+
+-- 
+2.39.0
+
+From f6d7b88f72f14d4e78511f89dda6435159ee40e9 Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Tue, 31 Mar 2020 20:07:49 +0300
+Subject: [PATCH 1/5] winex11.drv: Remove active client window from window data
+ before deleting it.
+
+CW-Bug-ID: #19216
+
+Fixes a crash with BadDrawable X error which happens when client window is used
+in windows.c:sync_client_position() after the GL drawable has been deleted.
+
+Wine-Bug: https://bugs.winehq.org/show_bug.cgi?id=49649
+---
+ dlls/winex11.drv/opengl.c | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+diff --git a/dlls/winex11.drv/opengl.c b/dlls/winex11.drv/opengl.c
+index 11111111111..11111111111 100644
+--- a/dlls/winex11.drv/opengl.c
++++ b/dlls/winex11.drv/opengl.c
+@@ -221,6 +221,7 @@ enum dc_gl_type
+ struct gl_drawable
+ {
+     LONG                           ref;          /* reference count */
++    HWND                           hwnd;
+     enum dc_gl_type                type;         /* type of GL surface */
+     GLXDrawable                    drawable;     /* drawable for rendering with GL */
+     Window                         window;       /* window if drawable is a GLXWindow */
+@@ -1159,10 +1160,23 @@ static void release_gl_drawable( struct gl_drawable *gl )
+     {
+     case DC_GL_WINDOW:
+     case DC_GL_CHILD_WIN:
++    {
++        struct x11drv_win_data *data = get_win_data( gl->hwnd );
++
+         TRACE( "destroying %lx drawable %lx\n", gl->window, gl->drawable );
++        if (data)
++        {
++            if (data->client_window == gl->window)
++            {
++                XDeleteContext( data->display, data->client_window, winContext );
++                data->client_window = 0;
++            }
++            release_win_data( data );
++        }
+         pglXDestroyWindow( gdi_display, gl->drawable );
+         XDestroyWindow( gdi_display, gl->window );
+         break;
++    }
+     case DC_GL_PIXMAP_WIN:
+         TRACE( "destroying pixmap %lx drawable %lx\n", gl->pixmap, gl->drawable );
+         pglXDestroyPixmap( gdi_display, gl->drawable );
+@@ -1323,6 +1337,7 @@ static struct gl_drawable *create_gl_drawable( HWND hwnd, const struct wgl_pixel
+     /* Default GLX and WGL swap interval is 1, but in case of glXSwapIntervalSGI
+      * there is no way to query it, so we have to store it here.
+      */
++    gl->hwnd = hwnd;
+     gl->swap_interval = 1;
+     gl->refresh_swap_interval = TRUE;
+     gl->format = format;
+-- 
+2.39.0
+
+
+From: "Haidong Yu" <yhd986@163.com>
+#Subject: [PATCH v2] user32: Fix the logical problem that the client window is  a Unicode window and still goes A->W.
+Message-Id: <52d016e.2aa4.17af6b5a23b.Coremail.yhd986@163.com>
+Date: Fri, 30 Jul 2021 17:18:56 +0800 (CST)
+
+From 15542455bd073662c738bee7c0fe75e243995a45 Mon Sep 17 00:00:00 2001
+From: Pengpeng Dong <dongpengpeng@uniontech.com>
+Date: Fri, 30 Jul 2021 16:53:11 +0800
+Subject: [PATCH v2] user32: Fix the logical problem that the client window is
+ a Unicode window and still goes A->W.
+
+When the server is a Unicode server, the judgment of the client window type encoding is omitted.
+
+Signed-off-by: Pengpeng Dong <dongpengpeng@uniontech.com>
+Change-Id: Ia0d6e800713eaefd2cfc9509bc0948ac345b538c
+---
+ dlls/user32/dde_server.c | 11 +++++++----
+ 1 file changed, 7 insertions(+), 4 deletions(-)
+
+diff --git a/dlls/user32/dde_server.c b/dlls/user32/dde_server.c
+index 11111111111..11111111111 100644
+--- a/dlls/user32/dde_server.c
++++ b/dlls/user32/dde_server.c
+@@ -810,10 +810,13 @@ static	WDML_QUEUE_STATE WDML_ServerHandleExecute(WDML_CONV* pConv, WDML_XACT* pX
+ 
+ 	if (ptr)
+ 	{
+-            if (pConv->instance->unicode)  /* Unicode server, try to map A->W */
+-                hDdeData = map_A_to_W( pConv->instance->instanceID, ptr, size );
+-            else if (!IsWindowUnicode( pConv->hwndClient )) /* ANSI server and client, try to map W->A */
+-                hDdeData = map_W_to_A( pConv->instance->instanceID, ptr, size );
++            if (pConv->instance->unicode != IsWindowUnicode( pConv->hwndClient ))
++            {
++                if (IsWindowUnicode( pConv->hwndClient ))
++                    hDdeData = map_A_to_W( pConv->instance->instanceID, ptr, size ); /* Unicode server, try to map A->W */
++                else
++                    hDdeData = map_W_to_A( pConv->instance->instanceID, ptr, size ); /* ASCII server and client, try to map W->A */
++            }
+             else
+                 hDdeData = DdeCreateDataHandle(pConv->instance->instanceID, ptr, size, 0, 0, CF_TEXT, 0);
+ 	    GlobalUnlock(pXAct->hMem);
+
+-- 
+2.39.0
+
+
+From: "longchao@uniontech.com" <longchao@uniontech.com>
+#Subject: [PATCH] comdlg32: The app might strcmp api filter.
+Message-Id: <202012240958067337794@uniontech.com>
+Date: Thu, 24 Dec 2020 09:58:06 +0800
+
+From 5d1a13884d58b07474d29f68c6d00fea2cf3e1f1 Mon Sep 17 00:00:00 2001
+From: Chao Long <longchao@uniontech.com>
+Date: Thu, 24 Dec 2020 09:44:54 +0800
+Subject: [PATCH] comdlg32: The app might strcmp api filter.
+
+Signed-off-by: Chao Long <longchao@uniontech.com>
+---
+ dlls/comdlg32/filedlg.c | 1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/dlls/comdlg32/filedlg.c b/dlls/comdlg32/filedlg.c
+index 11111111111..11111111111 100644
+--- a/dlls/comdlg32/filedlg.c
++++ b/dlls/comdlg32/filedlg.c
+@@ -3154,7 +3154,6 @@ static HRESULT FILEDLG95_FILETYPE_Init(HWND hwnd)
+     if(lpstrFilter)
+     {
+       DWORD len;
+-      CharLowerW(lpstrFilter); /* lowercase */
+       len = lstrlenW(lpstrFilter)+1;
+       fodInfos->ShellInfos.lpstrCurrentFilter = heap_alloc( len * sizeof(WCHAR) );
+       lstrcpyW(fodInfos->ShellInfos.lpstrCurrentFilter,lpstrFilter);
+
+-- 
+2.39.0
+
+
