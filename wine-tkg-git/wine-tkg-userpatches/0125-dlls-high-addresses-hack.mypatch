@@ -1,0 +1,69 @@
+From f839254b4c17d1a057a8cd53dce607f283a65b35 Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Fri, 27 Jan 2023 14:53:13 -0600
+Subject: [PATCH] ntdll: Add an option to load dlls to high addresses on 64
+ bit.
+
+CW-Bug-Id: #21841
+---
+ dlls/ntdll/unix/loader.c       | 8 ++++++++
+ dlls/ntdll/unix/unix_private.h | 1 +
+ dlls/ntdll/unix/virtual.c      | 6 ++++++
+ 3 files changed, 15 insertions(+)
+
+diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
+index b943e33c025..9dd822ef9ea 100644
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -2150,6 +2150,7 @@ static struct unix_funcs unix_funcs =
+ BOOL fsync_simulate_async_read_io;
+ BOOL fsync_simulate_sched_quantum;
+ BOOL alert_simulate_sched_quantum;
++BOOL high_dll_addresses;
+ 
+ static void hacks_init(void)
+ {
+@@ -2177,6 +2178,13 @@ static void hacks_init(void)
+     }    
+     if (fsync_simulate_sched_quantum)
+         ERR("HACK: Simulating sched quantum in fsync.\n");
++        
++#ifdef _WIN64
++    env_str = getenv("WINE_HIGH_DLL_ADDRESSES");
++    if (env_str)  high_dll_addresses = atoi(env_str);
++    if (high_dll_addresses)
++        ERR("HACK: moving dlls to high addresses.\n");
++#endif        
+ }
+ 
+ /***********************************************************************
+diff --git a/dlls/ntdll/unix/unix_private.h b/dlls/ntdll/unix/unix_private.h
+index 278a681d7b6..63c2a15a1f7 100644
+--- a/dlls/ntdll/unix/unix_private.h
++++ b/dlls/ntdll/unix/unix_private.h
+@@ -169,6 +169,7 @@ extern struct ldt_copy __wine_ldt_copy D
+ extern BOOL fsync_simulate_async_read_io DECLSPEC_HIDDEN;
+ extern BOOL fsync_simulate_sched_quantum DECLSPEC_HIDDEN;
+ extern BOOL alert_simulate_sched_quantum DECLSPEC_HIDDEN;
++extern BOOL high_dll_addresses DECLSPEC_HIDDEN;
+ 
+ extern void init_environment( int argc, char *argv[], char *envp[] ) DECLSPEC_HIDDEN;
+ extern void init_startup_info(void) DECLSPEC_HIDDEN;
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index e841d82bffb..21bf5434eef 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -2638,6 +2638,12 @@ static NTSTATUS virtual_map_image( HANDLE mapping, ACCESS_MASK access, void **ad
+     base = wine_server_get_ptr( image_info->base );
+     if ((ULONG_PTR)base != image_info->base) base = NULL;
+ 
++#ifdef _WIN64
++    if (high_dll_addresses && base && (ULONG_PTR)base > 0x100000000 && image_info->image_charact & IMAGE_FILE_DLL
++        && !(image_info->image_charact & IMAGE_FILE_RELOCS_STRIPPED))
++        base = (char *)base + 0x800000000;
++#endif
++
+     if ((char *)base >= (char *)address_space_start)  /* make sure the DOS area remains free */
+         status = map_view( &view, base, size, alloc_type & MEM_TOP_DOWN, vprot, get_zero_bits_mask( zero_bits ), 0 );
+ 
+

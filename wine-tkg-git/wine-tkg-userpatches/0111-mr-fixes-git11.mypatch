@@ -2657,4 +2657,234 @@ index 908a36e6514..1d9dbfdcbff 100644
  
  /* Process functions */
  
+From 92f73244d5a03bad1a92501b94f45c7f37ea7a24 Mon Sep 17 00:00:00 2001
+From: Tatsuyuki Ishi <ishitatsuyuki@gmail.com>
+Date: Thu, 29 Dec 2022 19:31:00 +0900
+Subject: [PATCH] Revert "HACK: proton: ntdll,server: Never use
+ CLOCK_MONOTONIC_RAW"
+
+This reverts commit aba1a41c5c5d430b40466d4f347aad47c5087663.
+
+Per [1], the performance disparity has been fixed in Linux 5.3.
+
+The hack also made vkGetCalibratedTimestampsEXT calibrate to the wrong
+clock, since the code to choose the time domain was designed to mirror
+upstream Wine behavior. A possible fix is to mirror the hack over to
+vkGetCalibratedTimestampsEXT, however since Linux 5.3 has been around
+for a while, removing the hack seems to be the better option.
+
+[1] https://lore.kernel.org/linux-arm-kernel/20190621095252.32307-1-vincenzo.frascino@arm.com/
+Link: https://github.com/ValveSoftware/wine/pull/171
+---
+ dlls/ntdll/unix/sync.c | 2 +-
+ server/request.c       | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/ntdll/unix/sync.c b/dlls/ntdll/unix/sync.c
+index e3ceb5ce4d1..7f4a78df50c 100644
+--- a/dlls/ntdll/unix/sync.c
++++ b/dlls/ntdll/unix/sync.c
+@@ -92,7 +92,7 @@ static inline ULONGLONG monotonic_counter(void)
+     return mach_absolute_time() * timebase.numer / timebase.denom / 100;
+ #elif defined(HAVE_CLOCK_GETTIME)
+     struct timespec ts;
+-#if 0
++#ifdef CLOCK_MONOTONIC_RAW
+     if (!clock_gettime( CLOCK_MONOTONIC_RAW, &ts ))
+         return ts.tv_sec * (ULONGLONG)TICKSPERSEC + ts.tv_nsec / 100;
+ #endif
+diff --git a/server/request.c b/server/request.c
+index 6e1820313d1..343e1a92e0e 100644
+--- a/server/request.c
++++ b/server/request.c
+@@ -533,7 +533,7 @@ timeout_t monotonic_counter(void)
+     return mach_absolute_time() * timebase.numer / timebase.denom / 100;
+ #elif defined(HAVE_CLOCK_GETTIME)
+     struct timespec ts;
+-#if 0
++#ifdef CLOCK_MONOTONIC_RAW
+     if (!clock_gettime( CLOCK_MONOTONIC_RAW, &ts ))
+         return (timeout_t)ts.tv_sec * TICKS_PER_SEC + ts.tv_nsec / 100;
+ #endif
+
+From 2747da53f789ed1e4b478e5e1beeaddf59c261ac Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Wed, 7 Dec 2022 12:08:43 -0600
+Subject: [PATCH] win32u, server: Support setting desktop close timeout.
+
+And use zero timeout by default.
+
+CW-Bug-Id: #19584
+CW-Bug-Id: #21645
+---
+ dlls/win32u/winstation.c | 27 ++++++++++++++++++++++++---
+ server/protocol.def      |  3 +++
+ server/user.h            |  1 +
+ server/winstation.c      |  4 +++-
+ 4 files changed, 31 insertions(+), 4 deletions(-)
+
+diff --git a/dlls/win32u/winstation.c b/dlls/win32u/winstation.c
+index c0fb0155f24..e8a7d83095e 100644
+--- a/dlls/win32u/winstation.c
++++ b/dlls/win32u/winstation.c
+@@ -355,6 +355,8 @@ BOOL WINAPI NtUserGetObjectInformation( HANDLE handle, INT index, void *info,
+     }
+ }
+ 
++#define TICKSPERSEC  10000000
++
+ /***********************************************************************
+  *           NtUserSetObjectInformation   (win32u.@)
+  */
+@@ -362,8 +364,19 @@ BOOL WINAPI NtUserSetObjectInformation( HANDLE handle, INT index, void *info, DW
+ {
+     BOOL ret;
+     const USEROBJECTFLAGS *obj_flags = info;
++    LONG64 close_timeout = 0;
+ 
+-    if (index != UOI_FLAGS || !info || len < sizeof(*obj_flags))
++    if (index == 1000)
++    {
++        /* Wine specific: set desktop close timeout. */
++        if (!info || len < sizeof(DWORD))
++        {
++            SetLastError( ERROR_INVALID_PARAMETER );
++            return FALSE;
++        }
++        close_timeout = -(*(DWORD *)info * (ULONG64)TICKSPERSEC / 1000);
++    }
++    else if (index != UOI_FLAGS || !info || len < sizeof(*obj_flags))
+     {
+         SetLastError( ERROR_INVALID_PARAMETER );
+         return FALSE;
+@@ -372,8 +385,16 @@ BOOL WINAPI NtUserSetObjectInformation( HANDLE handle, INT index, void *info, DW
+     SERVER_START_REQ( set_user_object_info )
+     {
+         req->handle    = wine_server_obj_handle( handle );
+-        req->flags     = SET_USER_OBJECT_SET_FLAGS;
+-        req->obj_flags = obj_flags->dwFlags;
++        if (index == 1000)
++        {
++            req->flags = SET_USER_OBJECT_SET_CLOSE_TIMEOUT;
++            req->close_timeout = close_timeout;
++        }
++        else
++        {
++            req->flags     = SET_USER_OBJECT_SET_FLAGS;
++            req->obj_flags = obj_flags->dwFlags;
++        }
+         ret = !wine_server_call_err( req );
+     }
+     SERVER_END_REQ;
+diff --git a/server/protocol.def b/server/protocol.def
+index d5519508243..f43d933128b 100644
+--- a/server/protocol.def
++++ b/server/protocol.def
+@@ -2779,6 +2779,7 @@ enum coords_relative
+     obj_handle_t handle;          /* handle to the object */
+     unsigned int flags;           /* information to set/get */
+     unsigned int obj_flags;       /* new object flags */
++    timeout_t    close_timeout;   /* desktop close timeout */
+ @REPLY
+     int          is_desktop;      /* is object a desktop? */
+     unsigned int old_obj_flags;   /* old object flags */
+@@ -2786,6 +2787,7 @@ enum coords_relative
+ @END
+ #define SET_USER_OBJECT_SET_FLAGS       1
+ #define SET_USER_OBJECT_GET_FULL_NAME   2
++#define SET_USER_OBJECT_SET_CLOSE_TIMEOUT 4
+ 
+ 
+ /* Register a hotkey */
+@@ -3532,6 +3534,7 @@ struct handle_info
+ /* Make the current process a system process */
+ @REQ(make_process_system)
+     obj_handle_t handle;          /* handle to the process */
++    timeout_t    desktop_close_timeout; /* set timeout for desktop close */
+ @REPLY
+     obj_handle_t event;           /* event signaled when all user processes have exited */
+ @END
+diff --git a/server/user.h b/server/user.h
+index 3f7341a120f..2462c02221c 100644
+--- a/server/user.h
++++ b/server/user.h
+@@ -63,6 +63,7 @@ struct desktop
+     struct hook_table                     *global_hooks;     /* table of global hooks on this desktop */
+     struct list                            hotkeys;          /* list of registered hotkeys */
+     struct timeout_user                   *close_timeout;    /* timeout before closing the desktop */
++    timeout_t                              close_timeout_val;/* timeout duration before closing desktop */
+     struct thread_input                   *foreground_input; /* thread input of foreground thread */
+     unsigned int                           users;            /* processes and threads using this desktop */
+     unsigned int                           cursor_clip_msg;  /* message to post for cursor clip changes */
+diff --git a/server/winstation.c b/server/winstation.c
+index 62a8cf002de..41eb93e401c 100644
+--- a/server/winstation.c
++++ b/server/winstation.c
+@@ -253,6 +253,7 @@ static struct desktop *create_desktop( const struct unicode_str *name, unsigned
+             desktop->msg_window = NULL;
+             desktop->global_hooks = NULL;
+             desktop->close_timeout = NULL;
++            desktop->close_timeout_val = 0;
+             desktop->foreground_input = NULL;
+             desktop->users = 0;
+             desktop->cursor_clip_msg = 0;
+@@ -360,7 +361,7 @@ static void remove_desktop_user( struct desktop *desktop )
+ 
+     /* if we have one remaining user, it has to be the manager of the desktop window */
+     if ((process = get_top_window_owner( desktop )) && desktop->users == process->running_threads && !desktop->close_timeout)
+-        desktop->close_timeout = add_timeout_user( -TICKS_PER_SEC, close_desktop_timeout, desktop );
++        desktop->close_timeout = add_timeout_user( desktop->close_timeout_val, close_desktop_timeout, desktop );
+ }
+ 
+ /* set the thread default desktop handle */
+@@ -699,6 +700,7 @@ DECL_HANDLER(set_user_object_info)
+         reply->is_desktop = 1;
+         reply->old_obj_flags = desktop->flags;
+         if (req->flags & SET_USER_OBJECT_SET_FLAGS) desktop->flags = req->obj_flags;
++        if (req->flags & SET_USER_OBJECT_SET_CLOSE_TIMEOUT) desktop->close_timeout_val = req->close_timeout;
+     }
+     else if (obj->ops == &winstation_ops)
+     {
+
+From 178c7108a7feaf1e1c643c5ca7c99a642618f150 Mon Sep 17 00:00:00 2001
+From: Zhiyi Zhang <zzhang@codeweavers.com>
+Date: Wed, 7 Dec 2022 10:17:25 +0800
+Subject: [PATCH] Revert "ntdll: Call usleep() instead of NtYieldExecution() in
+ NtDelayExecution().".
+
+Manual tests on Windows 10 show that calling Sleep(0) or NtDelayExecution() with zero timeout in a
+loop do consume 100% of a CPU core, which is closer to the behavior of NtYieldExecution() than
+usleep(0). usleep(0) gives up the remaining timeslices even if there are no other threads to switch
+to, causing low utilization of CPU and performance issues.
+
+The original patch is b1a79c6 and the idea is to use usleep(0) to avoid a thread taking 100% of a
+CPU core for StarCraft 2 and Shadow of the Tomb Raider. However with wine-7.22, reverting the
+usleep(0) patch causes no behavior changes. For Shadow of the Tomb Raider, the 100% CPU issue is
+gone with or without the patch. For StarCraft 2, there is always a thread taking 100% CPU even with
+the patch. After discussing with Matteo, we decided it's better to revert the patch.
+
+Fix Mortal Kombat X performance drop during tower selection and Ragnarok Online bad performance.
+
+This reverts commit e86b4015ff405d4c054b8a5bc855ee655e1a833c.
+
+Wine-Bug: https://bugs.winehq.org/show_bug.cgi?id=53327
+CW-Bug-Id: #21553
+(cherry picked from commit fc3b2ebaf4d92a77025f5c532a2415ada8de69c3)
+---
+ dlls/ntdll/unix/sync.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/dlls/ntdll/unix/sync.c b/dlls/ntdll/unix/sync.c
+index 7cb41c25480..e3ceb5ce4d1 100644
+--- a/dlls/ntdll/unix/sync.c
++++ b/dlls/ntdll/unix/sync.c
+@@ -1604,7 +1604,7 @@ NTSTATUS WINAPI NtDelayExecution( BOOLEAN alertable, const LARGE_INTEGER *timeou
+         }
+ 
+         /* Note that we yield after establishing the desired timeout */
+-        usleep(0);
++        NtYieldExecution();
+         if (!when) return STATUS_SUCCESS;
+ 
+         for (;;)
 
