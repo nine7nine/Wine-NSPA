@@ -2326,3 +2326,335 @@ index 8743e67927c..6728b832fa7 100644
          WIN32_MEMORY_INFORMATION_CLASS info_class, void *info, SIZE_T size, SIZE_T *ret_size);
 -- 
 GitLab
+
+From 6ce9058620d98fc9dfb3e32ec0070caee3523187 Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Wed, 15 Feb 2023 21:00:47 -0600
+Subject: [PATCH] kernelbase: Do not attempt to start winedbg if logging is
+ disabled.
+
+CW-Bug-Id: #20812
+---
+ dlls/kernelbase/debug.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/dlls/kernelbase/debug.c b/dlls/kernelbase/debug.c
+index fb0565ee1cc..59e33d70c10 100644
+--- a/dlls/kernelbase/debug.c
++++ b/dlls/kernelbase/debug.c
+@@ -547,6 +547,8 @@ static BOOL start_debugger_atomic( EXCEPTION_POINTERS *epointers )
+ {
+     static HANDLE once;
+ 
++    if (!ERR_ON(seh)) return FALSE;
++
+     if (once == 0)
+     {
+ 	OBJECT_ATTRIBUTES attr;
+
+From 1a30d59d3227cd9f0a0e5c00cdaf0039fbaca8ae Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Bernhard=20=C3=9Cbelacker?= <bernhardu@mailbox.org>
+Date: Tue, 11 Jan 2022 22:15:26 +0100
+Subject: [PATCH] ntoskrnl: Free memory before pointer gets set to NULL.
+
+Without this patch the memory pointed to by context->in_buff
+gets leaked on each call to GetVolumeInformationByHandleW
+and the memory usage of winedevice.exe grows.
+
+Wine-Bug: https://bugs.winehq.org/show_bug.cgi?id=52322
+---
+ dlls/ntoskrnl.exe/ntoskrnl.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl.c b/dlls/ntoskrnl.exe/ntoskrnl.c
+index 2d506402036..507521d5864 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl.c
++++ b/dlls/ntoskrnl.exe/ntoskrnl.c
+@@ -832,6 +832,7 @@ static NTSTATUS dispatch_volume( struct dispatch_context *context )
+     irp->Tail.Overlay.Thread = (PETHREAD)KeGetCurrentThread();
+     irp->Tail.Overlay.OriginalFileObject = file;
+     irp->RequestorMode = UserMode;
++    HeapFree( GetProcessHeap(), 0, context->in_buff );
+     context->in_buff = NULL;
+ 
+     irp->Flags |= IRP_DEALLOCATE_BUFFER;  /* deallocate out_buff */
+@@ -1044,6 +1045,7 @@ NTSTATUS CDECL wine_ntoskrnl_main_loop( HANDLE stop_event )
+                 if (ret == WAIT_OBJECT_0)
+                 {
+                     HeapFree( GetProcessHeap(), 0, context.in_buff );
++                    context.in_buff = NULL;
+                     status = STATUS_SUCCESS;
+                     goto done;
+                 }
+-- 
+GitLab
+
+From 466a86bc5460a3b1d9c253d3e82da2eb63b0775c Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Wed, 29 Mar 2023 18:17:58 -0600
+Subject: [PATCH 1/3] services: Create service processes in a job.
+
+---
+ programs/services/services.c | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/programs/services/services.c b/programs/services/services.c
+index 8a3ff754329..9efedab43d2 100644
+--- a/programs/services/services.c
++++ b/programs/services/services.c
+@@ -47,6 +47,7 @@ static DWORD default_preshutdown_timeout = 180000;
+ static DWORD autostart_delay = 120000;
+ static void *environment = NULL;
+ static HKEY service_current_key = NULL;
++static HANDLE job_object;
+ 
+ static const BOOL is_win64 = (sizeof(void *) > sizeof(int));
+ 
+@@ -1102,6 +1103,8 @@ found:
+         release_process(process);
+         return err;
+     }
++    if (!AssignProcessToJobObject(job_object, pi.hProcess))
++        WINE_ERR("Could not add object to job.\n");
+ 
+     process->process_id = pi.dwProcessId;
+     process->process = pi.hProcess;
+@@ -1284,9 +1287,18 @@ int __cdecl main(int argc, char *argv[])
+         'C','o','n','t','r','o','l','\\',
+         'S','e','r','v','i','c','e','C','u','r','r','e','n','t',0};
+     static const WCHAR svcctl_started_event[] = SVCCTL_STARTED_EVENT;
++    JOBOBJECT_EXTENDED_LIMIT_INFORMATION job_limit;
+     HANDLE started_event;
+     DWORD err;
+ 
++    job_object = CreateJobObjectW(NULL, NULL);
++    job_limit.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_BREAKAWAY_OK | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK;
++    if (!SetInformationJobObject(job_object, JobObjectExtendedLimitInformation, &job_limit, sizeof(job_limit)))
++    {
++        WINE_ERR("Failed to initialized job object, err %lu.\n", GetLastError());
++        return GetLastError();
++    }
++
+     started_event = CreateEventW(NULL, TRUE, FALSE, svcctl_started_event);
+ 
+     err = RegCreateKeyExW(HKEY_LOCAL_MACHINE, service_current_key_str, 0,
+-- 
+GitLab
+
+
+From 3580d466cc122729ed3825fa394cc4b0d4333c20 Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Wed, 29 Mar 2023 19:03:58 -0600
+Subject: [PATCH 2/3] services: Factor out notify_service_state() function.
+
+---
+ programs/services/rpc.c | 41 ++++++++++++++++++++++++-----------------
+ 1 file changed, 24 insertions(+), 17 deletions(-)
+
+diff --git a/programs/services/rpc.c b/programs/services/rpc.c
+index e56d25ea1af..863a605ef35 100644
+--- a/programs/services/rpc.c
++++ b/programs/services/rpc.c
+@@ -868,11 +868,32 @@ static void fill_notify(struct sc_notify_handle *notify, struct service_entry *s
+     SetEvent(notify->event);
+ }
+ 
++static void notify_service_state(struct service_entry *service)
++{
++    struct sc_service_handle *service_handle;
++    DWORD mask;
++
++    mask = 1 << (service->status.dwCurrentState - SERVICE_STOPPED);
++    LIST_FOR_EACH_ENTRY(service_handle, &service->handles, struct sc_service_handle, entry)
++    {
++        struct sc_notify_handle *notify = service_handle->notify;
++        if (notify && (notify->notify_mask & mask))
++        {
++            fill_notify(notify, service);
++            sc_notify_release(notify);
++            service_handle->notify = NULL;
++            service_handle->status_notified = TRUE;
++        }
++        else
++            service_handle->status_notified = FALSE;
++    }
++}
++
+ DWORD __cdecl svcctl_SetServiceStatus(SC_RPC_HANDLE handle, SERVICE_STATUS *status)
+ {
+-    struct sc_service_handle *service, *service_handle;
++    struct sc_service_handle *service;
+     struct process_entry *process;
+-    DWORD err, mask;
++    DWORD err;
+ 
+     WINE_TRACE("(%p, %p)\n", handle, status);
+ 
+@@ -902,21 +923,7 @@ DWORD __cdecl svcctl_SetServiceStatus(SC_RPC_HANDLE handle, SERVICE_STATUS *stat
+         release_process(process);
+     }
+ 
+-    mask = 1 << (service->service_entry->status.dwCurrentState - SERVICE_STOPPED);
+-    LIST_FOR_EACH_ENTRY(service_handle, &service->service_entry->handles, struct sc_service_handle, entry)
+-    {
+-        struct sc_notify_handle *notify = service_handle->notify;
+-        if (notify && (notify->notify_mask & mask))
+-        {
+-            fill_notify(notify, service->service_entry);
+-            sc_notify_release(notify);
+-            service_handle->notify = NULL;
+-            service_handle->status_notified = TRUE;
+-        }
+-        else
+-            service_handle->status_notified = FALSE;
+-    }
+-
++    notify_service_state(service->service_entry);
+     service_unlock(service->service_entry);
+ 
+     return ERROR_SUCCESS;
+-- 
+GitLab
+
+
+From c0c68ee83a42eb4fd8af661e55b89b56fb32e149 Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Wed, 29 Mar 2023 18:19:03 -0600
+Subject: [PATCH 3/3] services: Change running service state once its process
+ dies.
+
+---
+ programs/services/rpc.c           |   2 +-
+ programs/services/services.c      |  61 +++++++++++++++-
+ programs/services/services.h      |   1 +
+ programs/services/tests/service.c | 117 ++++++++++++++++++++++++++++++
+ 4 files changed, 178 insertions(+), 3 deletions(-)
+
+diff --git a/programs/services/rpc.c b/programs/services/rpc.c
+index 863a605ef35..b3d5c9403fe 100644
+--- a/programs/services/rpc.c
++++ b/programs/services/rpc.c
+@@ -868,7 +868,7 @@ static void fill_notify(struct sc_notify_handle *notify, struct service_entry *s
+     SetEvent(notify->event);
+ }
+ 
+-static void notify_service_state(struct service_entry *service)
++void notify_service_state(struct service_entry *service)
+ {
+     struct sc_service_handle *service_handle;
+     DWORD mask;
+diff --git a/programs/services/services.c b/programs/services/services.c
+index 9efedab43d2..2db74f99e0f 100644
+--- a/programs/services/services.c
++++ b/programs/services/services.c
+@@ -47,7 +47,7 @@ static DWORD default_preshutdown_timeout = 180000;
+ static DWORD autostart_delay = 120000;
+ static void *environment = NULL;
+ static HKEY service_current_key = NULL;
+-static HANDLE job_object;
++static HANDLE job_object, job_completion_port;
+ 
+ static const BOOL is_win64 = (sizeof(void *) > sizeof(int));
+ 
+@@ -1280,6 +1280,50 @@ static void load_registry_parameters(void)
+     RegCloseKey( key );
+ }
+ 
++static DWORD WINAPI process_monitor_thread_proc( void *arg )
++{
++    struct scmdatabase *db = active_database;
++    struct service_entry *service;
++    struct process_entry *process;
++    OVERLAPPED *overlapped;
++    ULONG_PTR value;
++    DWORD key, pid;
++
++    while (GetQueuedCompletionStatus(job_completion_port, &key, &value, &overlapped, INFINITE))
++    {
++        if (!key)
++            break;
++        if (key != JOB_OBJECT_MSG_EXIT_PROCESS)
++            continue;
++        pid = (ULONG_PTR)overlapped;
++        WINE_TRACE("pid %04lx exited.\n", pid);
++        scmdatabase_lock(db);
++        LIST_FOR_EACH_ENTRY(service, &db->services, struct service_entry, entry)
++        {
++            if (service->status.dwCurrentState != SERVICE_RUNNING || !service->process
++                    || service->process->process_id != pid) continue;
++
++            WINE_TRACE("Stopping service %s.\n", debugstr_w(service->config.lpBinaryPathName));
++            service->status.dwCurrentState = SERVICE_STOPPED;
++            service->status.dwControlsAccepted = 0;
++            service->status.dwWin32ExitCode = ERROR_PROCESS_ABORTED;
++            service->status.dwServiceSpecificExitCode = 0;
++            service->status.dwCheckPoint = 0;
++            service->status.dwWaitHint = 0;
++            SetEvent(service->status_changed_event);
++
++            process = service->process;
++            service->process = NULL;
++            process->use_count--;
++            release_process(process);
++            notify_service_state(service);
++        }
++        scmdatabase_unlock(db);
++    }
++    WINE_TRACE("Terminating.\n");
++    return 0;
++}
++
+ int __cdecl main(int argc, char *argv[])
+ {
+     static const WCHAR service_current_key_str[] = { 'S','Y','S','T','E','M','\\',
+@@ -1288,7 +1332,8 @@ int __cdecl main(int argc, char *argv[])
+         'S','e','r','v','i','c','e','C','u','r','r','e','n','t',0};
+     static const WCHAR svcctl_started_event[] = SVCCTL_STARTED_EVENT;
+     JOBOBJECT_EXTENDED_LIMIT_INFORMATION job_limit;
+-    HANDLE started_event;
++    JOBOBJECT_ASSOCIATE_COMPLETION_PORT port_info;
++    HANDLE started_event, process_monitor_thread;
+     DWORD err;
+ 
+     job_object = CreateJobObjectW(NULL, NULL);
+@@ -1298,6 +1343,15 @@ int __cdecl main(int argc, char *argv[])
+         WINE_ERR("Failed to initialized job object, err %lu.\n", GetLastError());
+         return GetLastError();
+     }
++    job_completion_port = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 1);
++    port_info.CompletionPort = job_completion_port;
++    port_info.CompletionKey = job_object;
++    if (!SetInformationJobObject(job_object, JobObjectAssociateCompletionPortInformation,
++            &port_info, sizeof(port_info)))
++    {
++        WINE_ERR("Failed to set completion port for job, err %lu.\n", GetLastError());
++        return GetLastError();
++    }
+ 
+     started_event = CreateEventW(NULL, TRUE, FALSE, svcctl_started_event);
+ 
+@@ -1316,8 +1370,11 @@ int __cdecl main(int argc, char *argv[])
+     if ((err = RPC_Init()) == ERROR_SUCCESS)
+     {
+         scmdatabase_autostart_services(active_database);
++        process_monitor_thread = CreateThread(NULL, 0, process_monitor_thread_proc, NULL, 0, NULL);
+         SetEvent(started_event);
+         WaitForSingleObject(exit_event, INFINITE);
++        PostQueuedCompletionStatus(job_completion_port, 0, 0, NULL);
++        WaitForSingleObject(process_monitor_thread, INFINITE);
+         scmdatabase_wait_terminate(active_database);
+         if (delayed_autostart_cleanup)
+         {
+diff --git a/programs/services/services.h b/programs/services/services.h
+index 908a36e6514..1d9dbfdcbff 100644
+--- a/programs/services/services.h
++++ b/programs/services/services.h
+@@ -93,6 +93,7 @@ void release_service(struct service_entry *service);
+ void service_lock(struct service_entry *service);
+ void service_unlock(struct service_entry *service);
+ DWORD service_start(struct service_entry *service, DWORD service_argc, LPCWSTR *service_argv);
++void notify_service_state(struct service_entry *service);
+ 
+ /* Process functions */
+ 
+
