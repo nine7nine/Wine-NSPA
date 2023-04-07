@@ -2888,3 +2888,153 @@ index 7cb41c25480..e3ceb5ce4d1 100644
  
          for (;;)
 
+From 454fa96b1f27087a7960eb8f4da68abe3a20fa2e Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Thu, 17 Nov 2022 20:00:24 -0600
+Subject: [PATCH] ntdll: Return FILE_DEVICE_DISK for Unix FIFOs and sockets
+ from get_device_info().
+
+CW-Bug-Id: #21570
+---
+ dlls/ntdll/unix/file.c | 15 ++++++++++++---
+ 1 file changed, 12 insertions(+), 3 deletions(-)
+
+diff --git a/dlls/ntdll/unix/file.c b/dlls/ntdll/unix/file.c
+index 850c70a6b2b..69ceaf2ed47 100644
+--- a/dlls/ntdll/unix/file.c
++++ b/dlls/ntdll/unix/file.c
+@@ -6707,7 +6707,7 @@ NTSTATUS get_device_info( int fd, FILE_FS_DEVICE_INFORMATION *info )
+     }
+     else if (S_ISFIFO( st.st_mode ) || S_ISSOCK( st.st_mode ))
+     {
+-        info->DeviceType = FILE_DEVICE_NAMED_PIPE;
++        info->DeviceType = FILE_DEVICE_DISK;
+     }
+     else if (is_device_placeholder( fd ))
+     {
+@@ -6816,11 +6816,12 @@ NTSTATUS WINAPI NtQueryVolumeInformationFile( HANDLE handle, IO_STATUS_BLOCK *io
+                                               void *buffer, ULONG length,
+                                               FS_INFORMATION_CLASS info_class )
+ {
++    enum server_fd_type fd_type;
+     int fd, needs_close;
+     struct stat st;
+     NTSTATUS status;
+ 
+-    status = server_get_unix_fd( handle, 0, &fd, &needs_close, NULL, NULL );
++    status = server_get_unix_fd( handle, 0, &fd, &needs_close, &fd_type, NULL );
+     if (status == STATUS_BAD_DEVICE_TYPE)
+     {
+         struct async_irp *async;
+@@ -6924,7 +6925,15 @@ NTSTATUS WINAPI NtQueryVolumeInformationFile( HANDLE handle, IO_STATUS_BLOCK *io
+         {
+             FILE_FS_DEVICE_INFORMATION *info = buffer;
+ 
+-            if ((status = get_device_info( fd, info )) == STATUS_SUCCESS)
++            if (fd_type == FD_TYPE_SOCKET || fd_type == FD_TYPE_PIPE)
++            {
++                info->Characteristics = 0;
++                info->DeviceType = FILE_DEVICE_NAMED_PIPE;
++                status = STATUS_SUCCESS;
++            }
++            else status = get_device_info( fd, info );
++
++            if (!status)
+                 io->Information = sizeof(*info);
+         }
+         break;
+
+From 30f00f85e4c39df10d2b86a1fe836554fe55ef64 Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Thu, 12 Jan 2023 12:21:19 -0600
+Subject: [PATCH] fixup! ntdll: Return FILE_DEVICE_DISK for Unix FIFOs and
+ sockets from get_device_info().
+
+CW-Bug-Id: #21788
+---
+ dlls/ntdll/unix/file.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/dlls/ntdll/unix/file.c b/dlls/ntdll/unix/file.c
+index 69ceaf2ed47..f127d7ec0a6 100644
+--- a/dlls/ntdll/unix/file.c
++++ b/dlls/ntdll/unix/file.c
+@@ -6707,7 +6707,7 @@ NTSTATUS get_device_info( int fd, FILE_FS_DEVICE_INFORMATION *info )
+     }
+     else if (S_ISFIFO( st.st_mode ) || S_ISSOCK( st.st_mode ))
+     {
+-        info->DeviceType = FILE_DEVICE_DISK;
++        info->DeviceType = FILE_DEVICE_UNKNOWN;
+     }
+     else if (is_device_placeholder( fd ))
+     {
+
+From 10bc0cebd9906a6c11cba0440b7bf85715b006fa Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Wed, 11 Jan 2023 18:42:15 +0100
+Subject: [PATCH] ntdll: Ignore unsupported Unix locales and initialize
+ regardless.
+
+We shouldn't rely very much on Unix locale anymore, and not having the
+Unix locale configured shouldn't prevent us from running applications
+in a localized Windows environment if they need it.
+
+CW-Bug-Id: #21346
+---
+ dlls/ntdll/unix/env.c | 24 ++++++++++++++++++------
+ 1 file changed, 18 insertions(+), 6 deletions(-)
+
+diff --git a/dlls/ntdll/unix/env.c b/dlls/ntdll/unix/env.c
+index fe14b48420d..0f806fcba99 100644
+--- a/dlls/ntdll/unix/env.c
++++ b/dlls/ntdll/unix/env.c
+@@ -58,6 +58,7 @@
+ #include "error.h"
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(environ);
++WINE_DECLARE_DEBUG_CHANNEL(nls);
+ 
+ PEB *peb = NULL;
+ USHORT *uctable = NULL, *lctable = NULL;
+@@ -471,13 +472,14 @@ static void init_unix_cptable( USHORT *ptr )
+ 
+ static void init_unix_codepage(void)
+ {
++    const char *name, *ctype;
+     char charset_name[16];
+-    const char *name;
+     size_t i, j;
+     int min = 0, max = ARRAY_SIZE(charset_names) - 1;
+ 
+-    setlocale( LC_CTYPE, "" );
+-    if (!(name = nl_langinfo( CODESET ))) return;
++    if (!(ctype = setlocale( LC_CTYPE, "" ))) name = "UTF-8";
++    else if (!(name = nl_langinfo( CODESET ))) return;
++    TRACE_(nls)( "Unix LC_CTYPE %s, using %s codeset\n", debugstr_a(ctype), debugstr_a(name) );
+ 
+     /* remove punctuation characters from charset name */
+     for (i = j = 0; name[i] && j < sizeof(charset_name)-1; i++)
+@@ -1089,9 +1091,19 @@ static BOOL unix_to_win_locale( const char *unix_name, char *win_name )
+  */
+ static void init_locale(void)
+ {
+-    setlocale( LC_ALL, "" );
+-    if (!unix_to_win_locale( setlocale( LC_CTYPE, NULL ), system_locale )) system_locale[0] = 0;
+-    if (!unix_to_win_locale( setlocale( LC_MESSAGES, NULL ), user_locale )) user_locale[0] = 0;
++    const char *all, *ctype, *messages;
++
++    if (!(all = setlocale( LC_ALL, "" )) && (all = getenv( "LC_ALL" )))
++        FIXME_(nls)( "Failed to set LC_ALL to %s, is the locale supported?\n", debugstr_a(all) );
++    if (!(ctype = setlocale( LC_CTYPE, "" )) && (ctype = getenv( "LC_CTYPE" )))
++        FIXME_(nls)( "Failed to set LC_CTYPE to %s, is the locale supported?\n", debugstr_a(ctype) );
++    if (!(messages = setlocale( LC_MESSAGES, "" )) && (messages = getenv( "LC_MESSAGES" )))
++        FIXME_(nls)( "Failed to set LC_MESSAGES to %s, is the locale supported?\n", debugstr_a(messages) );
++
++    if (!unix_to_win_locale( ctype, system_locale )) system_locale[0] = 0;
++    TRACE_(nls)( "Unix LC_CTYPE is %s, setting system locale to %s\n", debugstr_a(ctype), debugstr_a(user_locale) );
++    if (!unix_to_win_locale( messages, user_locale )) user_locale[0] = 0;
++    TRACE_(nls)( "Unix LC_MESSAGES is %s, user system locale to %s\n", debugstr_a(messages), debugstr_a(user_locale) );
+ 
+ #ifdef __APPLE__
+     if (!system_locale[0])
+
