@@ -1,0 +1,138 @@
+From b5e0db2fabb1b9635a1c39479c99d0da088ca300 Mon Sep 17 00:00:00 2001
+From: Joel Holdsworth <joel@airwebreathe.org.uk>
+Date: Sun, 1 Jan 2023 22:12:10 +0000
+Subject: [PATCH 2/3] server: Open code FILE_UNIX_{READ,WRITE}_ACCESS
+
+These defines are counter-productive for code clarity.
+
+Signed-off-by: Joel Holdsworth <joel@airwebreathe.org.uk>
+---
+ server/fd.c   | 11 +++++++----
+ server/file.h |  7 -------
+ 2 files changed, 7 insertions(+), 11 deletions(-)
+
+diff --git a/server/fd.c b/server/fd.c
+index 11111111111..11111111111 100644
+--- a/server/fd.c
++++ b/server/fd.c
+@@ -2230,9 +2230,10 @@ struct fd *open_fd( struct fd *root, const char *name, struct unicode_str nt_nam
+         flags &= ~(O_CREAT | O_EXCL | O_TRUNC);
+     }
+ 
+-    if ((access & FILE_UNIX_WRITE_ACCESS) && !(options & FILE_DIRECTORY_FILE))
++    if ((access & (FILE_WRITE_DATA|FILE_APPEND_DATA|FILE_WRITE_ATTRIBUTES|FILE_WRITE_EA)) &&
++        !(options & FILE_DIRECTORY_FILE))
+     {
+-        if (access & FILE_UNIX_READ_ACCESS) rw_mode = O_RDWR;
++        if (access & (FILE_READ_DATA|FILE_READ_ATTRIBUTES|FILE_READ_EA)) rw_mode = O_RDWR;
+         else rw_mode = O_WRONLY;
+     }
+     else rw_mode = O_RDONLY;
+@@ -2251,13 +2252,15 @@ struct fd *open_fd( struct fd *root, const char *name, struct unicode_str nt_nam
+         /* if we tried to open a directory for write access, retry read-only */
+         if (errno == EISDIR)
+         {
+-            if ((access & FILE_UNIX_WRITE_ACCESS) || (flags & O_CREAT))
++            if ((access & (FILE_WRITE_DATA|FILE_APPEND_DATA|FILE_WRITE_ATTRIBUTES|FILE_WRITE_EA)) ||
++                (flags & O_CREAT))
+                 fd->unix_fd = open( name, O_RDONLY | (flags & ~(O_TRUNC | O_CREAT | O_EXCL)), *mode );
+         }
+         else if (errno == EACCES)
+         {
+             /* try to change permissions temporarily to open a file descriptor */
+-            if (!(access & ((FILE_UNIX_WRITE_ACCESS | FILE_UNIX_READ_ACCESS | DELETE) & ~FILE_WRITE_ATTRIBUTES)) &&
++            if (!(access & ((FILE_WRITE_DATA|FILE_APPEND_DATA|FILE_WRITE_EA|FILE_READ_DATA|
++                             FILE_READ_ATTRIBUTES|FILE_READ_EA|DELETE) & ~FILE_WRITE_ATTRIBUTES)) &&
+                 !stat( name, &st ) && st.st_uid == getuid() &&
+                 !chmod( name, st.st_mode | S_IRUSR ))
+             {
+diff --git a/server/file.h b/server/file.h
+index 11111111111..11111111111 100644
+--- a/server/file.h
++++ b/server/file.h
+@@ -293,13 +293,6 @@ static inline int async_queued( struct async_queue *queue )
+     return !list_empty( &queue->queue );
+ }
+ 
+-
+-/* access rights that require Unix read permission */
+-#define FILE_UNIX_READ_ACCESS (FILE_READ_DATA|FILE_READ_ATTRIBUTES|FILE_READ_EA)
+-
+-/* access rights that require Unix write permission */
+-#define FILE_UNIX_WRITE_ACCESS (FILE_WRITE_DATA|FILE_APPEND_DATA|FILE_WRITE_ATTRIBUTES|FILE_WRITE_EA)
+-
+ /* magic file access rights for mappings */
+ #define FILE_MAPPING_IMAGE  0x80000000  /* set for SEC_IMAGE mappings */
+ #define FILE_MAPPING_WRITE  0x40000000  /* set for writable shared mappings */
+
+From 8d5a16dd8df4eee4739ce019f6e9899fbff411a1 Mon Sep 17 00:00:00 2001
+From: li wenzhe <584592187@qq.com>
+Date: Thu, 9 Mar 2023 10:27:42 +0000
+Subject: [PATCH] Update dlls/ntdll/wcstring.c
+
+---
+ dlls/ntdll/wcstring.c | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/ntdll/wcstring.c b/dlls/ntdll/wcstring.c
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/wcstring.c
++++ b/dlls/ntdll/wcstring.c
+@@ -353,7 +353,12 @@ int __cdecl wcsncmp( LPCWSTR str1, LPCWSTR str2, size_t n )
+ LPWSTR __cdecl wcsncpy( LPWSTR s1, LPCWSTR s2, size_t n )
+ {
+     WCHAR *ret = s1;
+-    for ( ; n; n--) if (!(*s1++ = *s2++)) break;
++    for ( ; n; n--) {
++        if (!(*s1++ = *s2++)) {
++            n--;
++            break;
++        }
++    }
+     for ( ; n; n--) *s1++ = 0;
+     return ret;
+ }
+-- 
+2.40.0
+
+diff --git a/dlls/win32u/window.c b/dlls/win32u/window.c
+index 11111111111..11111111111 100644
+--- a/dlls/win32u/window.c
++++ b/dlls/win32u/window.c
+@@ -3409,6 +3409,10 @@ BOOL set_window_pos( WINDOWPOS *winpos, int parent_x, int parent_y )
+             if (!insertafter_parent) return FALSE;
+             if (insertafter_parent != parent) return TRUE;
+         }
++
++        if ((get_window_long( winpos->hwnd, GWL_STYLE ) & WS_CHILD) &&
++            (winpos->hwndInsertAfter == HWND_TOPMOST || winpos->hwndInsertAfter == HWND_NOTOPMOST))
++            winpos->flags |= SWP_NOZORDER;
+     }
+ 
+     /* Make sure that coordinates are valid for WM_WINDOWPOSCHANGING */
+     
+From 5635f5f254292efaec0bf842018c1b7859a400a0 Mon Sep 17 00:00:00 2001
+From: Torge Matthies <openglfreak@googlemail.com>
+Date: Tue, 26 Apr 2022 03:58:10 +0200
+Subject: [PATCH] winex11.drv: Only send state changes for updated wm states.
+
+---
+ dlls/winex11.drv/window.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/dlls/winex11.drv/window.c b/dlls/winex11.drv/window.c
+index 11111111111..11111111111 100644
+--- a/dlls/winex11.drv/window.c
++++ b/dlls/winex11.drv/window.c
+@@ -1120,6 +1120,9 @@ void update_net_wm_states( struct x11drv_win_data *data )
+ 
+         for (i = 0; i < NB_NET_WM_STATES; i++)
+         {
++            if (!((new_state ^ data->net_wm_state) & (1 << i)))
++                continue;
++
+             TRACE( "setting wm state %u for window %p/%lx to %u prev %u\n",
+                    i, data->hwnd, data->whole_window,
+                    (new_state & (1 << i)) != 0, (data->net_wm_state & (1 << i)) != 0 );
+-- 
+2.40.0
