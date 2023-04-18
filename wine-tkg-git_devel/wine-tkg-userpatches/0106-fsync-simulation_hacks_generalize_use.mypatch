@@ -1,0 +1,181 @@
+--- a/dlls/ntdll/unix/file.c	2023-01-03 18:01:05.541178976 -0500
++++ b/dlls/ntdll/unix/file.c	2023-01-03 18:00:39.671908715 -0500
+@@ -5769,7 +5769,7 @@ NTSTATUS WINAPI NtReadFile( HANDLE handl
+             goto done;
+         }
+ 
+-        if (ac_odyssey && async_read && length && event && !apc)
++        if (fsync_simulate_async_read_io && async_read && length && event && !apc)
+         {
+             status = queue_async_file_read( handle, unix_handle, needs_close, event, io, buffer, length, offset );
+             needs_close = 0;
+@@ -7212,7 +7212,7 @@ NTSTATUS WINAPI NtCancelIoFile( HANDLE h
+ 
+     TRACE( "%p %p\n", handle, io_status );
+ 
+-    if (ac_odyssey && !cancel_async_file_read( handle, NULL ))
++    if (fsync_simulate_async_read_io && !cancel_async_file_read( handle, NULL ))
+         return (io_status->u.Status = STATUS_SUCCESS);
+ 
+     SERVER_START_REQ( cancel_async )
+@@ -7240,7 +7240,7 @@ NTSTATUS WINAPI NtCancelIoFileEx( HANDLE
+ 
+     TRACE( "%p %p %p\n", handle, io, io_status );
+ 
+-    if (ac_odyssey && !cancel_async_file_read( handle, io ))
++    if (fsync_simulate_async_read_io && !cancel_async_file_read( handle, io ))
+         return (io_status->u.Status = STATUS_SUCCESS);
+ 
+     SERVER_START_REQ( cancel_async )
+--- a/dlls/ntdll/unix/loader.c	2023-01-03 17:42:11.450486594 -0500
++++ b/dlls/ntdll/unix/loader.c	2023-01-03 17:40:07.006539457 -0500
+@@ -2147,32 +2147,36 @@ static struct unix_funcs unix_funcs =
+ #endif
+ };
+ 
+-BOOL ac_odyssey;
++BOOL fsync_simulate_async_read_io;
+ BOOL fsync_simulate_sched_quantum;
++BOOL alert_simulate_sched_quantum;
+ 
+ static void hacks_init(void)
+ {
+-    static const char upc_exe[] = "Ubisoft Game Launcher\\upc.exe";
+-    static const char ac_odyssey_exe[] = "ACOdyssey.exe";
+     const char *env_str;
+ 
+-    if (main_argc > 1 && strstr(main_argv[1], ac_odyssey_exe))
+-    {
+-        ERR("HACK: AC Odyssey sync tweak on.\n");
+-        ac_odyssey = TRUE;
+-        return;
+-    }
+-    env_str = getenv("WINE_FSYNC_SIMULATE_SCHED_QUANTUM");
++    env_str = getenv("FSYNC_SIMULATE_ASYNC_READ_IO");
+     if (env_str)
++        fsync_simulate_async_read_io = !!atoi(env_str);
++
++    if (fsync_simulate_async_read_io)
++        ERR("HACK: Simulating async read & IO completions.\n");       
++
++    env_str = getenv("FSYNC_SIMULATE_SCHED_QUANTUM");
++    if (env_str) 
++    {
+         fsync_simulate_sched_quantum = !!atoi(env_str);
+-    else if (main_argc > 1)
+-        fsync_simulate_sched_quantum = !!strstr(main_argv[1], upc_exe);
++    }    
+     if (fsync_simulate_sched_quantum)
+         ERR("HACK: Simulating sched quantum in fsync.\n");
+ 
+-    env_str = getenv("SteamGameId");
+-    if (env_str && !strcmp(env_str, "50130"))
+-        setenv("WINESTEAMNOEXEC", "1", 0);
++    env_str = getenv("ALERT_SIMULATE_SCHED_QUANTUM");
++    if (env_str) 
++    {
++        alert_simulate_sched_quantum = !!atoi(env_str);
++    }    
++    if (fsync_simulate_sched_quantum)
++        ERR("HACK: Simulating sched quantum in fsync.\n");
+ }
+ 
+ /***********************************************************************
+--- a/dlls/ntdll/unix/sync.c	2023-01-03 17:49:03.645233679 -0500
++++ b/dlls/ntdll/unix/sync.c	2023-01-03 17:48:41.030249758 -0500
+@@ -2765,6 +2765,7 @@ NTSTATUS WINAPI NtWaitForAlertByThreadId
+ NTSTATUS WINAPI NtWaitForAlertByThreadId( const void *address, const LARGE_INTEGER *timeout )
+ {
+     union tid_alert_entry *entry = get_tid_alert_entry( NtCurrentTeb()->ClientId.UniqueThread );
++    BOOL waited = FALSE;
+     NTSTATUS status;
+ 
+     TRACE( "%p %s\n", address, debugstr_timeout( timeout ) );
+@@ -2800,8 +2801,15 @@ NTSTATUS WINAPI NtWaitForAlertByThreadId
+             else
+                 ret = futex_wait( futex, 0, NULL );
+ 
++            if (!timeout || timeout->QuadPart)
++                waited = TRUE;
++
+             if (ret == -1 && errno == ETIMEDOUT) return STATUS_TIMEOUT;
+         }
++        
++        if (alert_simulate_sched_quantum && waited)
++            usleep(0);
++        
+         return STATUS_ALERTED;
+     }
+ #endif
+--- a/dlls/ntdll/unix/fsync.c	2023-01-03 17:44:21.224417780 -0500
++++ b/dlls/ntdll/unix/fsync.c	2023-01-03 17:44:09.323424586 -0500
+@@ -1034,7 +1034,7 @@ static NTSTATUS __fsync_wait_objects( DW
+ 
+                         if (__sync_val_compare_and_swap( &event->signaled, 1, 0 ))
+                         {
+-                            if (ac_odyssey && alertable)
++                            if (fsync_simulate_async_read_io && alertable)
+                                 usleep( 0 );
+ 
+                             TRACE("Woken up by handle %p [%d].\n", handles[i], i);
+@@ -1054,7 +1054,7 @@ static NTSTATUS __fsync_wait_objects( DW
+ 
+                         if (__atomic_load_n( &event->signaled, __ATOMIC_SEQ_CST ))
+                         {
+-                            if (ac_odyssey && alertable)
++                            if (fsync_simulate_async_read_io && alertable)
+                                 usleep( 0 );
+ 
+                             TRACE("Woken up by handle %p [%d].\n", handles[i], i);
+@@ -1088,7 +1088,7 @@ static NTSTATUS __fsync_wait_objects( DW
+ 
+             /* Looks like everything is contended, so wait. */
+ 
+-            if (ac_odyssey && alertable)
++            if (fsync_simulate_async_read_io && alertable)
+                 usleep( 0 );
+ 
+             if (timeout && !timeout->QuadPart)
+--- a/dlls/ntdll/unix/esync.c	2023-01-03 17:44:40.355406649 -0500
++++ b/dlls/ntdll/unix/esync.c	2023-01-03 17:44:25.683415206 -0500
+@@ -953,7 +953,7 @@ static NTSTATUS __esync_wait_objects( DW
+ 
+                     if (event->signaled)
+                     {
+-                        if (ac_odyssey && alertable)
++                        if (fsync_simulate_async_read_io && alertable)
+                             usleep( 0 );
+                         if ((size = read( obj->fd, &value, sizeof(value) )) == sizeof(value))
+                         {
+@@ -970,7 +970,7 @@ static NTSTATUS __esync_wait_objects( DW
+ 
+                     if (event->signaled)
+                     {
+-                        if (ac_odyssey && alertable)
++                        if (fsync_simulate_async_read_io && alertable)
+                         {
+                             usleep( 0 );
+                             if (!event->signaled)
+@@ -1004,7 +1004,7 @@ static NTSTATUS __esync_wait_objects( DW
+ 
+         while (1)
+         {
+-            if (ac_odyssey && alertable)
++            if (fsync_simulate_async_read_io && alertable)
+                 usleep( 0 );
+ 
+             ret = do_poll( fds, pollcount, timeout ? &end : NULL );
+--- a/dlls/ntdll/unix/unix_private.h	2023-01-03 17:47:39.217292669 -0500
++++ b/dlls/ntdll/unix/unix_private.h	2023-01-03 17:47:28.873299693 -0500
+@@ -166,8 +166,9 @@ extern BOOL is_wow64 DECLSPEC_HIDDEN;
+ extern struct ldt_copy __wine_ldt_copy DECLSPEC_HIDDEN;
+ #endif
+ 
+-extern BOOL ac_odyssey DECLSPEC_HIDDEN;
++extern BOOL fsync_simulate_async_read_io DECLSPEC_HIDDEN;
+ extern BOOL fsync_simulate_sched_quantum DECLSPEC_HIDDEN;
++extern BOOL alert_simulate_sched_quantum DECLSPEC_HIDDEN;
+ 
+ extern void init_environment( int argc, char *argv[], char *envp[] ) DECLSPEC_HIDDEN;
+ extern void init_startup_info(void) DECLSPEC_HIDDEN;
+

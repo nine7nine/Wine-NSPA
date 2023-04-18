@@ -1,0 +1,100 @@
+From b1a2ec3485868e0837a187772cbfacab96bfc418 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Wed, 28 Apr 2021 09:44:42 +0200
+Subject: [PATCH 8/9] server: Update QpcBias when updating the clock time.
+
+---
+ server/fd.c | 24 ++++++++++++++++++++++++
+ 1 file changed, 24 insertions(+)
+
+diff --git a/server/fd.c b/server/fd.c
+index 11111111111..11111111111 100644
+--- a/server/fd.c
++++ b/server/fd.c
+@@ -89,6 +89,9 @@
+ #ifdef HAVE_SYS_SYSCALL_H
+ #include <sys/syscall.h>
+ #endif
++#if defined(__i386__) || defined(__x86_64__)
++#include <x86intrin.h>
++#endif
+ 
+ #include "ntstatus.h"
+ #define WIN32_NO_STATUS
+@@ -425,6 +428,26 @@ static void set_user_shared_data_time(void)
+     timeout_t timezone_bias;
+     struct tm *tm;
+     time_t now;
++    unsigned __int64 tsc, qpc_bias, qpc_freq = user_shared_data->QpcFrequency;
++    unsigned int aux, qpc_shift = user_shared_data->QpcShift;
++    unsigned int qpc_bypass = user_shared_data->QpcBypassEnabled;
++
++    if (!(qpc_bypass & SHARED_GLOBAL_FLAGS_QPC_BYPASS_ENABLED))
++        tsc = 0;
++#if defined(__i386__) || defined(__x86_64__)
++    else if (qpc_bypass & SHARED_GLOBAL_FLAGS_QPC_BYPASS_USE_RDTSCP)
++        tsc = __rdtscp(&aux);
++    else
++    {
++        if (qpc_bypass & SHARED_GLOBAL_FLAGS_QPC_BYPASS_USE_MFENCE)
++            __asm__ __volatile__ ( "mfence" : : : "memory" );
++        if (qpc_bypass & SHARED_GLOBAL_FLAGS_QPC_BYPASS_USE_LFENCE)
++            __asm__ __volatile__ ( "lfence" : : : "memory" );
++        tsc = __rdtsc();
++    }
++#endif
++
++    qpc_bias = ((monotonic_time * qpc_freq / 10000000) << qpc_shift) - tsc;
+ 
+     if (monotonic_time - last_timezone_update > TICKS_PER_SEC)
+     {
+@@ -454,6 +477,7 @@ static void set_user_shared_data_time(void)
+     atomic_store_ulong(&user_shared_data->TickCount.LowPart, tick_count);
+     atomic_store_long(&user_shared_data->TickCount.High1Time, tick_count >> 32);
+     atomic_store_ulong(&user_shared_data->TickCountLowDeprecated, tick_count);
++    user_shared_data->QpcBias = qpc_bias;
+ }
+
+ 
+ void set_current_time(void)
+From 5af21c994fd138b05f3357870b19f69b7f15612f Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Thu, 4 Mar 2021 10:25:28 +0100
+Subject: [PATCH 1/9] ntdll: Read Qpc frequency from user shared data.
+
+---
+ dlls/ntdll/time.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/dlls/ntdll/time.c b/dlls/ntdll/time.c
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/time.c
++++ b/dlls/ntdll/time.c
+@@ -392,7 +392,7 @@ BOOL WINAPI DECLSPEC_HOTPATCH RtlQueryPerformanceCounter( LARGE_INTEGER *counter
+  */
+ BOOL WINAPI DECLSPEC_HOTPATCH RtlQueryPerformanceFrequency( LARGE_INTEGER *frequency )
+ {
+-    frequency->QuadPart = TICKSPERSEC;
++    frequency->QuadPart = user_shared_data->QpcFrequency;
+     return TRUE;
+ }
+ 
+diff --git a/dlls/ntdll/time.c b/dlls/ntdll/time.c
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/time.c
++++ b/dlls/ntdll/time.c
+@@ -392,12 +392,12 @@ static UINT64 multiply_tsc(UINT64 a, UINT64 b)
+  */
+ BOOL WINAPI DECLSPEC_HOTPATCH RtlQueryPerformanceCounter( LARGE_INTEGER *counter )
+ {
+-    if (user_shared_data->u3.QpcBypassEnabled & SHARED_GLOBAL_FLAGS_QPC_BYPASS_ENABLED)
++    if (1 || user_shared_data->u3.QpcBypassEnabled & SHARED_GLOBAL_FLAGS_QPC_BYPASS_ENABLED)
+     {
+         unsigned __int64 tsc;
+         unsigned int aux;
+ 
+-        if (user_shared_data->u3.QpcBypassEnabled & SHARED_GLOBAL_FLAGS_QPC_BYPASS_USE_RDTSCP)
++        if (1 || user_shared_data->u3.QpcBypassEnabled & SHARED_GLOBAL_FLAGS_QPC_BYPASS_USE_RDTSCP)
+             tsc = __rdtscp(&aux);
+         else
+         {

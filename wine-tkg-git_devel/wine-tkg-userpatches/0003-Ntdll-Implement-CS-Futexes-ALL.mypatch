@@ -340,7 +340,7 @@ index d830c9295d3..8ccdbe6017a 100644
 
 --- a/dlls/msvcrt/concurrency.c	2021-12-30 22:21:01.343853652 -0500
 +++ b/dlls/msvcrt/concurrency.c	2021-12-30 22:20:47.114767202 -0500
-@@ -359,8 +359,6 @@ static CRITICAL_SECTION default_schedule
+@@ -415,8 +415,6 @@ static CRITICAL_SECTION default_schedule
  static SchedulerPolicy default_scheduler_policy;
  static ThreadScheduler *default_scheduler;
  
@@ -349,7 +349,7 @@ index d830c9295d3..8ccdbe6017a 100644
  static void create_default_scheduler(void);
  
  /* ??0improper_lock@Concurrency@@QAE@PBD@Z */
-@@ -1713,14 +1711,6 @@ critical_section* __thiscall critical_se
+@@ -2417,14 +2415,6 @@ critical_section* __thiscall critical_se
  {
      TRACE("(%p)\n", this);
  
@@ -364,7 +364,7 @@ index d830c9295d3..8ccdbe6017a 100644
      this->unk_thread_id = 0;
      this->head = this->tail = NULL;
      return this;
-@@ -1773,7 +1763,7 @@ static inline void cs_lock(critical_sect
+@@ -2477,7 +2467,7 @@ static inline void cs_lock(critical_sect
      last = InterlockedExchangePointer(&cs->tail, q);
      if(last) {
          last->next = q;
@@ -373,7 +373,7 @@ index d830c9295d3..8ccdbe6017a 100644
      }
  
      cs_set_head(cs, q);
-@@ -1850,7 +1840,7 @@ void __thiscall critical_section_unlock(
+@@ -2554,7 +2544,7 @@ void __thiscall critical_section_unlock(
      }
  #endif
  
@@ -382,7 +382,7 @@ index d830c9295d3..8ccdbe6017a 100644
  }
  
  /* ?native_handle@critical_section@Concurrency@@QAEAAV12@XZ */
-@@ -2259,13 +2249,13 @@ bool __thiscall critical_section_try_loc
+@@ -2596,13 +2586,13 @@ bool __thiscall critical_section_try_loc
          GetSystemTimeAsFileTime(&ft);
          to.QuadPart = ((LONGLONG)ft.dwHighDateTime << 32) +
              ft.dwLowDateTime + (LONGLONG)timeout * TICKSPERMSEC;
@@ -398,7 +398,7 @@ index d830c9295d3..8ccdbe6017a 100644
          }
      }
  
-@@ -2144,10 +2134,10 @@ static size_t evt_wait(thread_wait *wait
+@@ -2848,10 +2838,10 @@ static size_t evt_wait(thread_wait *wait
      if(!evt_transition(&wait->signaled, EVT_RUNNING, EVT_WAITING))
          return evt_end_wait(wait, events, count);
  
@@ -411,7 +411,7 @@ index d830c9295d3..8ccdbe6017a 100644
  
      return evt_end_wait(wait, events, count);
  }
-@@ -2223,7 +2213,7 @@ void __thiscall event_set(event *this)
+@@ -2927,7 +2917,7 @@ void __thiscall event_set(event *this)
      for(entry=wakeup; entry; entry=next) {
          next = entry->next;
          entry->next = entry->prev = NULL;
@@ -420,83 +420,16 @@ index d830c9295d3..8ccdbe6017a 100644
      }
  }
  
-@@ -2428,14 +2418,6 @@ reader_writer_lock* __thiscall reader_wr
- {
-     TRACE("(%p)\n", this);
- 
--    if (!keyed_event) {
--        HANDLE event;
--
--        NtCreateKeyedEvent(&event, GENERIC_READ|GENERIC_WRITE, NULL, 0);
--        if (InterlockedCompareExchangePointer(&keyed_event, event, NULL) != NULL)
--            NtClose(event);
--    }
--
-     memset(this, 0, sizeof(*this));
-     return this;
- }
-@@ -2482,11 +2464,11 @@ void __thiscall reader_writer_lock_lock(
-     last = InterlockedExchangePointer((void**)&this->writer_tail, &q);
-     if (last) {
-         last->next = &q;
--        NtWaitForKeyedEvent(keyed_event, &q, 0, NULL);
-+        NtWaitForKeyedEvent(0, &q, 0, NULL);
-     } else {
-         this->writer_head = &q;
-         if (InterlockedOr(&this->count, WRITER_WAITING))
--            NtWaitForKeyedEvent(keyed_event, &q, 0, NULL);
-+            NtWaitForKeyedEvent(0, &q, 0, NULL);
-     }
- 
-     this->thread_id = GetCurrentThreadId();
-@@ -2525,17 +2507,17 @@ void __thiscall reader_writer_lock_lock_
-             if (InterlockedCompareExchange(&this->count, count+1, count) == count) break;
- 
-         if (count & WRITER_WAITING)
--            NtWaitForKeyedEvent(keyed_event, &q, 0, NULL);
-+            NtWaitForKeyedEvent(0, &q, 0, NULL);
- 
-         head = InterlockedExchangePointer((void**)&this->reader_head, NULL);
-         while(head && head != &q) {
-             rwl_queue *next = head->next;
-             InterlockedIncrement(&this->count);
--            NtReleaseKeyedEvent(keyed_event, head, 0, NULL);
-+            NtReleaseKeyedEvent( 0, head, 0, NULL);
-             head = next;
-         }
-     } else {
--        NtWaitForKeyedEvent(keyed_event, &q, 0, NULL);
-+        NtWaitForKeyedEvent(0, &q, 0, NULL);
-     }
- }
- 
-@@ -2606,14 +2588,14 @@ void __thiscall reader_writer_lock_unloc
+@@ -3302,7 +3292,7 @@ void __thiscall reader_writer_lock_unloc
          count = InterlockedDecrement(&this->count);
          if (count != WRITER_WAITING)
              return;
 -        NtReleaseKeyedEvent(keyed_event, this->writer_head, 0, NULL);
-+        NtReleaseKeyedEvent( 0, this->writer_head, 0, NULL);
++        NtReleaseKeyedEvent(0, this->writer_head, 0, NULL);
          return;
      }
  
-     this->thread_id = 0;
-     next = this->writer_head->next;
-     if (next) {
--        NtReleaseKeyedEvent(keyed_event, next, 0, NULL);
-+        NtReleaseKeyedEvent( 0, next, 0, NULL);
-         return;
-     }
-     InterlockedAnd(&this->count, ~WRITER_WAITING);
-@@ -2621,7 +2603,7 @@ void __thiscall reader_writer_lock_unloc
-     while (head) {
-         next = head->next;
-         InterlockedIncrement(&this->count);
--        NtReleaseKeyedEvent(keyed_event, head, 0, NULL);
-+        NtReleaseKeyedEvent( 0, head, 0, NULL);
-         head = next;
-     }
- 
-@@ -2947,8 +2929,6 @@ void msvcrt_free_concurrency(void)
+@@ -3661,8 +3651,6 @@ void msvcrt_free_concurrency(void)
          operator_delete(default_scheduler);
      }
  
@@ -505,4 +438,5 @@ index d830c9295d3..8ccdbe6017a 100644
  }
  
  void msvcrt_free_scheduler_thread(void)
+
 

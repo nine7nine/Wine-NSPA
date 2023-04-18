@@ -6,7 +6,7 @@ _exit_cleanup() {
   fi
 
   # Proton-tkg specifics to send to token
-  if [ -e "$_where"/BIG_UGLY_FROGMINER ] && [ "$_EXTERNAL_INSTALL" = "proton" ] && [ -n "$_proton_tkg_path" ]; then
+  if [ -e "$_where"/BIG_UGLY_FROGMINER ] && [ "$_EXTERNAL_INSTALL" = "proton" ] && [ -n "$_proton_tkg_path" ] && [ -d "${srcdir}"/"${_winesrcdir}" ]; then
     if [ -n "$_PROTON_NAME_ADDON" ]; then
       if [ "$_ispkgbuild" = "true" ]; then
         echo "_protontkg_version='makepkg.${_PROTON_NAME_ADDON}'" >> "$_proton_tkg_path"/proton_tkg_token
@@ -48,7 +48,6 @@ _exit_cleanup() {
     echo "_proton_force_LAA=${_proton_force_LAA}" >> "$_proton_tkg_path"/proton_tkg_token
     echo "_proton_shadercache_path=${_proton_shadercache_path}" >> "$_proton_tkg_path"/proton_tkg_token
     echo "_proton_winetricks=${_proton_winetricks}" >> "$_proton_tkg_path"/proton_tkg_token
-    echo "_proton_dxvk_async=${_proton_dxvk_async}" >> "$_proton_tkg_path"/proton_tkg_token
     echo "_proton_use_steamhelper=${_proton_use_steamhelper}" >> "$_proton_tkg_path"/proton_tkg_token
     echo "_proton_mf_hacks=${_proton_mf_hacks}" >> "$_proton_tkg_path"/proton_tkg_token
     echo "_dxvk_dxgi=${_dxvk_dxgi}" >> "$_proton_tkg_path"/proton_tkg_token
@@ -58,7 +57,6 @@ _exit_cleanup() {
     echo "_proton_pkgdest='${pkgdir}'" >> "$_proton_tkg_path"/proton_tkg_token
     echo "_proton_branch_exp='${_proton_branch_exp}'" >> "$_proton_tkg_path"/proton_tkg_token
     echo "_steamvr_support='${_steamvr_support}'" >> "$_proton_tkg_path"/proton_tkg_token
-    echo "_use_fastsync='${_use_fastsync}'" >> "$_proton_tkg_path"/proton_tkg_token
     echo "_NUKR='${_NUKR}'" >> "$_proton_tkg_path"/proton_tkg_token
     echo "_winesrcdir='${_winesrcdir}'" >> "$_proton_tkg_path"/proton_tkg_token
     echo "_standard_dlopen='${_standard_dlopen}'" >> "$_proton_tkg_path"/proton_tkg_token
@@ -78,6 +76,7 @@ _exit_cleanup() {
     fi
     echo "_reuse_built_gst='${_reuse_built_gst}'" >> "$_proton_tkg_path"/proton_tkg_token
     echo "_unfrog='${_unfrog}'" >> "$_proton_tkg_path"/proton_tkg_token
+    echo "_NOLIB32='${_NOLIB32}'" >> "$_proton_tkg_path"/proton_tkg_token
   fi
 
   rm -f "$_where"/BIG_UGLY_FROGMINER && msg2 'Removed BIG_UGLY_FROGMINER - Ribbit' # state tracker end
@@ -212,6 +211,10 @@ msg2 ''
     if [[ "$_LOCAL_PRESET" != valve* ]] && [ "$_LOCAL_PRESET" != "none" ]; then
       _LOCAL_PRESET=""
     fi
+    # makepkg proton pkgver loop hack
+    if [ "$_ispkgbuild" = "true" ] && [ -e "$_proton_tkg_path"/proton_tkg_tmp ]; then
+      source "$_proton_tkg_path"/proton_tkg_tmp
+    fi
     if [ -z "$_LOCAL_PRESET" ]; then
       msg2 "No _LOCAL_PRESET set in .cfg. Please select your desired base:"
       warning "With Valve trees, most wine-specific customization options will be ignored such as game-specific patches, esync/fsync/fastsync or Proton-specific features support. Those patches and features are for the most part already in, but some bits deemed useful such as FSR support for Proton's fshack are made available through community patches. Staging and GE patches are available through regular .cfg options."
@@ -226,12 +229,21 @@ msg2 ''
         _LOCAL_PRESET="valve-exp-bleeding"
       fi
       echo "_LOCAL_PRESET='$_LOCAL_PRESET'" > "$_where"/temp
+      # makepkg proton pkgver loop hack
+      if [ "$_ispkgbuild" = "true" ]; then
+        if [ -z "$_LOCAL_PRESET" ]; then
+          _LOCAL_PRESET="none"
+        fi
+        echo "_LOCAL_PRESET='$_LOCAL_PRESET'" >> "$_proton_tkg_path"/proton_tkg_tmp
+      fi
     fi
     _EXTERNAL_INSTALL="proton"
     _EXTERNAL_NOVER="false"
     _nomakepkg_nover="true"
-    _NOLIB32="false"
-    _NOLIB64="false"
+    if [[ "$_LOCAL_PRESET" = valve* ]]; then
+      _NOLIB32="false"
+      _NOLIB64="false"
+    fi
     _esync_version=""
     _use_faudio="true"
     _highcorecount_fix="true"
@@ -258,7 +270,9 @@ msg2 ''
   else
     if [ ! -e "$_where"/BIG_UGLY_FROGMINER ] && [ -z "$_LOCAL_PRESET" ]; then
       msg2 "No _LOCAL_PRESET set in .cfg. Please select your desired base (or hit enter for default) :"
-      warning "(mainline and staging options will make clean & untouched wine and wine-staging builds)"
+      warning "! \"mainline\" and \"staging\" options will make clean & untouched wine and wine-staging builds, ignoring your .cfg settings !"
+      warning "! \"valve\" profiles will use Valve proton wine trees instead of upstream, ignoring many incompatible .cfg settings !"
+      warning "! \"default-tkg\" profile will use the main customization.cfg and wine-tkg-profiles/advanced-customization.cfg files !"
 
       i=0
       for _profiles in "$_where/wine-tkg-profiles"/wine-tkg-*.cfg; do
@@ -318,6 +332,19 @@ msg2 ''
     error "Preset '$_LOCAL_PRESET' was not found anywhere! exiting..." && exit 1
   fi
 
+  # Load legacy options only when a custom commit is set
+  if [ "$_LOCAL_PRESET" != "valve" ] && [[ "$_LOCAL_PRESET" != valve-exp* ]]; then
+    if [ -n "$_plain_version" ] || [ -n "$_staging_version" ]; then
+      if [ -e "$_proton_tkg_path"/proton_tkg_token ]; then
+        msg2 "Loading legacy config file"
+        source "$_proton_tkg_path"/proton-tkg-profiles/legacy/legacy-options.cfg
+      else
+        msg2 "Loading legacy config file"
+        source "$_where"/wine-tkg-profiles/legacy/legacy-options.cfg
+      fi
+    fi
+  fi
+
   # Disable undesirable patchsets when using official proton wine source
   if [[ "$_custom_wine_source" = *"ValveSoftware"* ]]; then
     _clock_monotonic="false"
@@ -325,7 +352,6 @@ msg2 ''
     _use_esync="false"
     _use_fsync="false"
     _use_fastsync="false"
-    _fsync_futex_waitv="false"
 #    _use_staging="false"
     _proton_fs_hack="false"
     _proton_rawinput="false"
@@ -516,10 +542,12 @@ _prepare() {
     cd "${srcdir}"/"${_winesrcdir}"
     # change back to the wine upstream commit that this version of wine-staging is based in
     msg2 'Changing wine HEAD to the wine-staging base commit...'
-    if $( git merge-base "$( cat ../"$_stgsrcdir"/staging/upstream-commit )" --is-ancestor "$(../"$_stgsrcdir"/patches/patchinstall.sh --upstream-commit)" ); then
-      msg2 "Using patchinstall.sh --upstream-commit"
-      # Use patchinstall.sh --upstream-commit
-      git -c advice.detachedHead=false checkout "$(../"$_stgsrcdir"/patches/patchinstall.sh --upstream-commit)"
+    if [ -e "$_stgsrcdir"/patches/patchinstall.sh ]; then
+      if [ ! -e ../"$_stgsrcdir"/staging/upstream-commit ] || $( git merge-base "$( cat ../"$_stgsrcdir"/staging/upstream-commit )" --is-ancestor "$(../"$_stgsrcdir"/patches/patchinstall.sh --upstream-commit)" ); then
+        msg2 "Using patchinstall.sh --upstream-commit"
+        # Use patchinstall.sh --upstream-commit
+        git -c advice.detachedHead=false checkout "$(../"$_stgsrcdir"/patches/patchinstall.sh --upstream-commit)"
+      fi
     else
       msg2 "Using upstream-commit file"
       # Use upstream-commit file if patchinstall.sh --upstream-commit doesn't report the same upstream commit target
@@ -528,13 +556,19 @@ _prepare() {
   fi
 
   # Community patches
+  if [[ "$(realpath -Lm . 2>&1)" =~ -Lm ]]; then
+    warning "Detected non-GNU realpath (busybox?), please disable community patches in case of issues"
+  else
+    _realpath_arg="-Lm"
+  fi
+
   if [ -n "$_community_patches" ]
   then
     _community_patches_repo_roots=()
 
     for _p in "../.." ".." "."
     do
-      _new_path="$(realpath -Lm "${_where}/${_p}/community-patches")"
+      _new_path="$(realpath $_realpath_arg "${_where}/${_p}/community-patches")"
 
       if [[ ${#_community_patches_repo_roots[@]} -eq 0 ]] || [[ ! ${_new_path} == ${_community_patches_repo_roots[${#_community_patches_repo_roots[@]}-1]} ]]
       then
@@ -837,11 +871,19 @@ _prepare() {
 	  else
 	    _staging_args=$( printf "%s" "${_staging_args[*]}" )
 	  fi
-	  msg2 "Applying wine-staging patches... \n     Staging overrides used, if any: ${_staging_args}" && echo -e "\nStaging overrides, if any: ${_staging_args}\n" >> "$_where"/last_build_config.log && echo -e "\nApplying wine-staging patches..." >> "$_where"/prepare.log
-	  "${srcdir}"/"${_stgsrcdir}"/patches/patchinstall.sh DESTDIR="${srcdir}/${_winesrcdir}" --all $_staging_args >> "$_where"/prepare.log 2>&1 || (error "Patch application has failed. The error was logged to $_where/prepare.log for your convenience."; msg2 "To use the last known good mainline version, please set _plain_version=\"$_last_known_good_mainline\" in your .cfg"; msg2 "To use the last known good staging version, please set _staging_version=\"$_last_known_good_staging\" in your .cfg (requires _use_staging=\"true\")" && exit 1)
+	  # Not strictly necessary, but we haven't used the py script til now, so let's be conservative
+	  if ( cd "${srcdir}"/"${_stgsrcdir}" && ! git merge-base --is-ancestor f2f8b949b1ae1bedc2b3b16edc1d09a08110d2f6 HEAD ); then
+	    _staging_script="patches/patchinstall.sh"
+	  else
+	    _staging_script="staging/patchinstall.py"
+	  fi
+	  msg2 "Applying wine-staging patches using $_staging_script... \n     Staging overrides used, if any: ${_staging_args}" && echo -e "\nStaging overrides, if any: ${_staging_args}\n" >> "$_where"/last_build_config.log && echo -e "\nApplying wine-staging patches..." >> "$_where"/prepare.log
+	  "${srcdir}"/"${_stgsrcdir}"/$_staging_script DESTDIR="${srcdir}/${_winesrcdir}" --all $_staging_args >> "$_where"/prepare.log 2>&1 || (error "Patch application has failed. The error was logged to $_where/prepare.log for your convenience."; msg2 "To use the last known good mainline version, please set _plain_version=\"$_last_known_good_mainline\" in your .cfg"; msg2 "To use the last known good staging version, please set _staging_version=\"$_last_known_good_staging\" in your .cfg (requires _use_staging=\"true\")" && exit 1)
 
 	  # Remove staging version tag
-	  sed -i "s/  (Staging)//g" "${srcdir}"/"${_winesrcdir}"/libs/wine/Makefile.in
+	  if [ -e "${srcdir}"/"${_winesrcdir}"/libs/wine/Makefile.in ]; then
+	    sed -i "s/  (Staging)//g" "${srcdir}"/"${_winesrcdir}"/libs/wine/Makefile.in
+	  fi
 	  _commitmsg="03-staging" _committer
 	fi
 
@@ -1057,7 +1099,7 @@ _polish() {
 	  if [ "$_use_legacy_gallium_nine" = "true" ]; then
 	    _version_tags+=(Nine)
 	  fi
-	  if [ "$_use_vkd3dlib" = "false" ]; then
+	  if [ "$_use_vkd3dlib" != "true" ]; then
 	    if [ "$_dxvk_dxgi" != "true" ] && git merge-base --is-ancestor 74dc0c5df9c3094352caedda8ebe14ed2dfd615e HEAD; then
 	      _version_tags+=(Vkd3d DXVK-Compatible)
 	    fi

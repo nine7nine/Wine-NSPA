@@ -1,0 +1,1105 @@
+From d552e54dc4bc8cea60058aba95ca27d27ba2d796 Mon Sep 17 00:00:00 2001
+From: Andrew Eikum <aeikum@codeweavers.com>
+Date: Tue, 1 Mar 2022 10:27:30 +0100
+Subject: [PATCH 1/5] winegstreamer: Don't flip RGB for Media Foundation
+ clients
+
+---
+ dlls/winegstreamer/gst_private.h   |  2 +-
+ dlls/winegstreamer/main.c          |  3 +-
+ dlls/winegstreamer/media_source.c  |  2 +-
+ dlls/winegstreamer/quartz_parser.c |  2 +-
+ dlls/winegstreamer/unixlib.h       |  3 ++
+ dlls/winegstreamer/wg_parser.c     | 47 ++++++++++++++++--------------
+ dlls/winegstreamer/wm_reader.c     |  6 ++--
+ 7 files changed, 36 insertions(+), 29 deletions(-)
+
+diff --git a/dlls/winegstreamer/gst_private.h b/dlls/winegstreamer/gst_private.h
+index f9130d975ac..cc9f547b6fe 100644
+--- a/dlls/winegstreamer/gst_private.h
++++ b/dlls/winegstreamer/gst_private.h
+@@ -84,7 +84,7 @@ uint32_t wg_parser_get_stream_count(struct wg_parser *parser);
+ struct wg_parser_stream *wg_parser_get_stream(struct wg_parser *parser, uint32_t index);
+ 
+ void wg_parser_stream_get_preferred_format(struct wg_parser_stream *stream, struct wg_format *format);
+-void wg_parser_stream_enable(struct wg_parser_stream *stream, const struct wg_format *format);
++void wg_parser_stream_enable(struct wg_parser_stream *stream, const struct wg_format *format, uint32_t flags);
+ void wg_parser_stream_disable(struct wg_parser_stream *stream);
+ 
+ bool wg_parser_stream_get_buffer(struct wg_parser_stream *stream, struct wg_parser_buffer *buffer);
+diff --git a/dlls/winegstreamer/main.c b/dlls/winegstreamer/main.c
+index 519ee4062ca..d2e05246bfd 100644
+--- a/dlls/winegstreamer/main.c
++++ b/dlls/winegstreamer/main.c
+@@ -179,12 +179,13 @@ void wg_parser_stream_get_preferred_format(struct wg_parser_stream *stream, stru
+     __wine_unix_call(unix_handle, unix_wg_parser_stream_get_preferred_format, &params);
+ }
+ 
+-void wg_parser_stream_enable(struct wg_parser_stream *stream, const struct wg_format *format)
++void wg_parser_stream_enable(struct wg_parser_stream *stream, const struct wg_format *format, uint32_t flags)
+ {
+     struct wg_parser_stream_enable_params params =
+     {
+         .stream = stream,
+         .format = format,
++        .flags = flags,
+     };
+ 
+     TRACE("stream %p, format %p.\n", stream, format);
+diff --git a/dlls/winegstreamer/media_source.c b/dlls/winegstreamer/media_source.c
+index 537363c1cdf..68912f4235b 100644
+--- a/dlls/winegstreamer/media_source.c
++++ b/dlls/winegstreamer/media_source.c
+@@ -358,7 +358,7 @@ static void start_pipeline(struct media_source *source, struct source_async_comm
+             IMFMediaTypeHandler_GetCurrentMediaType(mth, &current_mt);
+ 
+             mf_media_type_to_wg_format(current_mt, &format);
+-            wg_parser_stream_enable(stream->wg_stream, &format);
++            wg_parser_stream_enable(stream->wg_stream, &format, 0);
+ 
+             IMFMediaType_Release(current_mt);
+             IMFMediaTypeHandler_Release(mth);
+diff --git a/dlls/winegstreamer/quartz_parser.c b/dlls/winegstreamer/quartz_parser.c
+index eb90875909d..23ec764df16 100644
+--- a/dlls/winegstreamer/quartz_parser.c
++++ b/dlls/winegstreamer/quartz_parser.c
+@@ -986,7 +986,7 @@ static HRESULT parser_init_stream(struct strmbase_filter *iface)
+         {
+             ret = amt_to_wg_format(&source->pin.pin.mt, &format);
+             assert(ret);
+-            wg_parser_stream_enable(source->wg_stream, &format);
++            wg_parser_stream_enable(source->wg_stream, &format, STREAM_ENABLE_FLAG_FLIP_RGB);
+         }
+         else
+         {
+diff --git a/dlls/winegstreamer/unixlib.h b/dlls/winegstreamer/unixlib.h
+index d976bedd7f5..1e5d61e3356 100644
+--- a/dlls/winegstreamer/unixlib.h
++++ b/dlls/winegstreamer/unixlib.h
+@@ -207,10 +207,13 @@ struct wg_parser_stream_get_preferred_format_params
+     struct wg_format *format;
+ };
+ 
++#define STREAM_ENABLE_FLAG_FLIP_RGB 0x1
++
+ struct wg_parser_stream_enable_params
+ {
+     struct wg_parser_stream *stream;
+     const struct wg_format *format;
++    uint32_t flags;
+ };
+ 
+ struct wg_parser_stream_get_buffer_params
+diff --git a/dlls/winegstreamer/wg_parser.c b/dlls/winegstreamer/wg_parser.c
+index 3cb4ae828a0..ea51fe33b13 100644
+--- a/dlls/winegstreamer/wg_parser.c
++++ b/dlls/winegstreamer/wg_parser.c
+@@ -219,30 +219,33 @@ static NTSTATUS wg_parser_stream_enable(void *args)
+ 
+     if (format->major_type == WG_MAJOR_TYPE_VIDEO)
+     {
+-        bool flip = (format->u.video.height < 0);
+-
+-        switch (format->u.video.format)
++        if (params->flags & STREAM_ENABLE_FLAG_FLIP_RGB)
+         {
+-            case WG_VIDEO_FORMAT_BGRA:
+-            case WG_VIDEO_FORMAT_BGRx:
+-            case WG_VIDEO_FORMAT_BGR:
+-            case WG_VIDEO_FORMAT_RGB15:
+-            case WG_VIDEO_FORMAT_RGB16:
+-                flip = !flip;
+-                break;
++            bool flip = (format->u.video.height < 0);
+ 
+-            case WG_VIDEO_FORMAT_AYUV:
+-            case WG_VIDEO_FORMAT_I420:
+-            case WG_VIDEO_FORMAT_NV12:
+-            case WG_VIDEO_FORMAT_UYVY:
+-            case WG_VIDEO_FORMAT_YUY2:
+-            case WG_VIDEO_FORMAT_YV12:
+-            case WG_VIDEO_FORMAT_YVYU:
+-            case WG_VIDEO_FORMAT_UNKNOWN:
+-                break;
+-        }
++            switch (format->u.video.format)
++            {
++                case WG_VIDEO_FORMAT_BGRA:
++                case WG_VIDEO_FORMAT_BGRx:
++                case WG_VIDEO_FORMAT_BGR:
++                case WG_VIDEO_FORMAT_RGB15:
++                case WG_VIDEO_FORMAT_RGB16:
++                    flip = !flip;
++                    break;
+ 
+-        gst_util_set_object_arg(G_OBJECT(stream->flip), "method", flip ? "vertical-flip" : "none");
++                case WG_VIDEO_FORMAT_AYUV:
++                case WG_VIDEO_FORMAT_I420:
++                case WG_VIDEO_FORMAT_NV12:
++                case WG_VIDEO_FORMAT_UYVY:
++                case WG_VIDEO_FORMAT_YUY2:
++                case WG_VIDEO_FORMAT_YV12:
++                case WG_VIDEO_FORMAT_YVYU:
++                case WG_VIDEO_FORMAT_UNKNOWN:
++                    break;
++            }
++
++            gst_util_set_object_arg(G_OBJECT(stream->flip), "method", flip ? "vertical-flip" : "none");
++        }
+     }
+ 
+     gst_pad_push_event(stream->my_sink, gst_event_new_reconfigure());
+diff --git a/dlls/winegstreamer/wm_reader.c b/dlls/winegstreamer/wm_reader.c
+index 169a3b19fdc..389bb3a915a 100644
+--- a/dlls/winegstreamer/wm_reader.c
++++ b/dlls/winegstreamer/wm_reader.c
+@@ -1520,7 +1520,7 @@ static HRESULT init_stream(struct wm_reader *reader, QWORD file_size)
+                     stream->format.u.video.format = WG_VIDEO_FORMAT_BGRx;
+             }
+         }
+-        wg_parser_stream_enable(stream->wg_stream, &stream->format);
++        wg_parser_stream_enable(stream->wg_stream, &stream->format, STREAM_ENABLE_FLAG_FLIP_RGB);
+     }
+ 
+     /* We probably discarded events because streams weren't enabled yet.
+@@ -1798,7 +1798,7 @@ HRESULT wm_reader_set_output_props(struct wm_reader *reader, DWORD output,
+     }
+ 
+     stream->format = format;
+-    wg_parser_stream_enable(stream->wg_stream, &format);
++    wg_parser_stream_enable(stream->wg_stream, &format, STREAM_ENABLE_FLAG_FLIP_RGB);
+ 
+     /* Re-decode any buffers that might have been generated with the old format.
+      *
+@@ -2069,7 +2069,7 @@ HRESULT wm_reader_set_streams_selected(struct wm_reader *reader, WORD count,
+                 FIXME("Ignoring selection %#x for stream %u; treating as enabled.\n",
+                         selections[i], stream_numbers[i]);
+             TRACE("Enabling stream %u.\n", stream_numbers[i]);
+-            wg_parser_stream_enable(stream->wg_stream, &stream->format);
++            wg_parser_stream_enable(stream->wg_stream, &stream->format, STREAM_ENABLE_FLAG_FLIP_RGB);
+         }
+     }
+ 
+-- 
+2.37.1
+
+From 4d84e993d6dd5c51d7db3e74de5e617e1df6067f Mon Sep 17 00:00:00 2001
+From: Derek Lesho <dlesho@codeweavers.com>
+Date: Thu, 14 Apr 2022 17:01:36 -0400
+Subject: [PATCH 2/5] include: Define MFVideoFormat_ABGR32.
+
+Signed-off-by: Derek Lesho <dlesho@codeweavers.com>
+---
+ include/mfapi.h | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/include/mfapi.h b/include/mfapi.h
+index 6926bd2cd2d..5edb99ab24f 100644
+--- a/include/mfapi.h
++++ b/include/mfapi.h
+@@ -72,6 +72,7 @@ DEFINE_MEDIATYPE_GUID(MFVideoFormat_RGB565,        D3DFMT_R5G6B5);
+ DEFINE_MEDIATYPE_GUID(MFVideoFormat_RGB24,         D3DFMT_R8G8B8);
+ DEFINE_MEDIATYPE_GUID(MFVideoFormat_RGB32,         D3DFMT_X8R8G8B8);
+ DEFINE_MEDIATYPE_GUID(MFVideoFormat_ARGB32,        D3DFMT_A8R8G8B8);
++DEFINE_MEDIATYPE_GUID(MFVideoFormat_ABGR32,        32);
+ DEFINE_MEDIATYPE_GUID(MFVideoFormat_A2R10G10B10,   D3DFMT_A2B10G10R10);
+ DEFINE_MEDIATYPE_GUID(MFVideoFormat_A16B16G16R16F, D3DFMT_A16B16G16R16F);
+ DEFINE_MEDIATYPE_GUID(MFVideoFormat_L8,            D3DFMT_L8);
+-- 
+2.37.1
+
+From 0cff02f20f0211263b70be137432829f5426bf29 Mon Sep 17 00:00:00 2001
+From: Derek Lesho <dlesho@codeweavers.com>
+Date: Thu, 14 Apr 2022 16:58:33 -0400
+Subject: [PATCH 3/5] mfplat: Add MFVideoFormat_ABGR32 format information.
+
+Signed-off-by: Derek Lesho <dlesho@codeweavers.com>
+---
+ dlls/mfplat/mediatype.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/dlls/mfplat/mediatype.c b/dlls/mfplat/mediatype.c
+index 984120c5414..2f9594a52b8 100644
+--- a/dlls/mfplat/mediatype.c
++++ b/dlls/mfplat/mediatype.c
+@@ -2633,6 +2633,7 @@ static const struct uncompressed_video_format video_formats[] =
+     { &MFVideoFormat_RGB565,        2, 3, 1, 0 },
+     { &MFVideoFormat_RGB555,        2, 3, 1, 0 },
+     { &MFVideoFormat_A2R10G10B10,   4, 3, 1, 0 },
++    { &MFVideoFormat_ABGR32,        4, 3, 1, 0 },
+     { &MFVideoFormat_RGB8,          1, 3, 1, 0 },
+     { &MFVideoFormat_L8,            1, 3, 1, 0 },
+     { &MFVideoFormat_AYUV,          4, 3, 0, 1 },
+@@ -3441,6 +3442,8 @@ DXGI_FORMAT WINAPI MFMapDX9FormatToDXGIFormat(DWORD format)
+             return DXGI_FORMAT_P8;
+         case D3DFMT_A8P8:
+             return DXGI_FORMAT_A8P8;
++        case D3DFMT_A8B8G8R8:
++            return DXGI_FORMAT_R8G8B8A8_UNORM;
+         default:
+             return DXGI_FORMAT_UNKNOWN;
+     }
+-- 
+2.37.1
+
+From 0c96f3b8cdf4262337d50b8d002af2a95196565a Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Fri, 24 Jun 2022 19:37:39 +0200
+Subject: [PATCH 4/5] winegstreamer: Add WG_VIDEO_FORMAT_RGBA format support.
+
+Signed-off-by: Derek Lesho <dlesho@codeweavers.com>
+---
+ dlls/winegstreamer/mfplat.c        | 1 +
+ dlls/winegstreamer/quartz_parser.c | 1 +
+ dlls/winegstreamer/unixlib.h       | 1 +
+ dlls/winegstreamer/wg_format.c     | 3 +++
+ dlls/winegstreamer/wg_parser.c     | 1 +
+ 5 files changed, 7 insertions(+)
+
+diff --git a/dlls/winegstreamer/mfplat.c b/dlls/winegstreamer/mfplat.c
+index 2916dfb3320..e4ed511ef4d 100644
+--- a/dlls/winegstreamer/mfplat.c
++++ b/dlls/winegstreamer/mfplat.c
+@@ -691,6 +691,7 @@ video_formats[] =
+     {&MFVideoFormat_RGB24,  WG_VIDEO_FORMAT_BGR},
+     {&MFVideoFormat_RGB555, WG_VIDEO_FORMAT_RGB15},
+     {&MFVideoFormat_RGB565, WG_VIDEO_FORMAT_RGB16},
++    {&MFVideoFormat_ABGR32, WG_VIDEO_FORMAT_RGBA},
+     {&MFVideoFormat_AYUV,   WG_VIDEO_FORMAT_AYUV},
+     {&MFVideoFormat_I420,   WG_VIDEO_FORMAT_I420},
+     {&MFVideoFormat_IYUV,   WG_VIDEO_FORMAT_I420},
+diff --git a/dlls/winegstreamer/quartz_parser.c b/dlls/winegstreamer/quartz_parser.c
+index 23ec764df16..0703e6045f7 100644
+--- a/dlls/winegstreamer/quartz_parser.c
++++ b/dlls/winegstreamer/quartz_parser.c
+@@ -262,6 +262,7 @@ unsigned int wg_format_get_max_size(const struct wg_format *format)
+ 
+             switch (format->u.video.format)
+             {
++                case WG_VIDEO_FORMAT_RGBA:
+                 case WG_VIDEO_FORMAT_BGRA:
+                 case WG_VIDEO_FORMAT_BGRx:
+                 case WG_VIDEO_FORMAT_AYUV:
+diff --git a/dlls/winegstreamer/unixlib.h b/dlls/winegstreamer/unixlib.h
+index 1e5d61e3356..99364618f9a 100644
+--- a/dlls/winegstreamer/unixlib.h
++++ b/dlls/winegstreamer/unixlib.h
+@@ -56,6 +56,7 @@ struct wg_format
+                 WG_VIDEO_FORMAT_BGR,
+                 WG_VIDEO_FORMAT_RGB15,
+                 WG_VIDEO_FORMAT_RGB16,
++                WG_VIDEO_FORMAT_RGBA,
+ 
+                 WG_VIDEO_FORMAT_AYUV,
+                 WG_VIDEO_FORMAT_I420,
+diff --git a/dlls/winegstreamer/wg_format.c b/dlls/winegstreamer/wg_format.c
+index 032b39bb799..862b4bd4378 100644
+--- a/dlls/winegstreamer/wg_format.c
++++ b/dlls/winegstreamer/wg_format.c
+@@ -138,6 +138,8 @@ static enum wg_video_format wg_video_format_from_gst(GstVideoFormat format)
+ {
+     switch (format)
+     {
++        case GST_VIDEO_FORMAT_RGBA:
++            return WG_VIDEO_FORMAT_RGBA;
+         case GST_VIDEO_FORMAT_BGRA:
+             return WG_VIDEO_FORMAT_BGRA;
+         case GST_VIDEO_FORMAT_BGRx:
+@@ -370,6 +372,7 @@ static GstVideoFormat wg_video_format_to_gst(enum wg_video_format format)
+         case WG_VIDEO_FORMAT_BGR:   return GST_VIDEO_FORMAT_BGR;
+         case WG_VIDEO_FORMAT_RGB15: return GST_VIDEO_FORMAT_RGB15;
+         case WG_VIDEO_FORMAT_RGB16: return GST_VIDEO_FORMAT_RGB16;
++        case WG_VIDEO_FORMAT_RGBA:  return GST_VIDEO_FORMAT_RGBA;
+         case WG_VIDEO_FORMAT_AYUV:  return GST_VIDEO_FORMAT_AYUV;
+         case WG_VIDEO_FORMAT_I420:  return GST_VIDEO_FORMAT_I420;
+         case WG_VIDEO_FORMAT_NV12:  return GST_VIDEO_FORMAT_NV12;
+diff --git a/dlls/winegstreamer/wg_parser.c b/dlls/winegstreamer/wg_parser.c
+index ea51fe33b13..a9bb29faf30 100644
+--- a/dlls/winegstreamer/wg_parser.c
++++ b/dlls/winegstreamer/wg_parser.c
+@@ -225,6 +225,7 @@ static NTSTATUS wg_parser_stream_enable(void *args)
+ 
+             switch (format->u.video.format)
+             {
++                case WG_VIDEO_FORMAT_RGBA:
+                 case WG_VIDEO_FORMAT_BGRA:
+                 case WG_VIDEO_FORMAT_BGRx:
+                 case WG_VIDEO_FORMAT_BGR:
+-- 
+2.37.1
+
+From 223ed2e0af0a380106876137972c21e5e88c7e35 Mon Sep 17 00:00:00 2001
+From: Andrew Eikum <aeikum@codeweavers.com>
+Date: Tue, 25 Jan 2022 10:21:28 -0600
+Subject: [PATCH] winegstreamer: Add MFVideoFormat_RGB32 output for the source.
+
+CW-Bug-Id: #19516
+CW-Bug-Id: #19859
+---
+ dlls/winegstreamer/media_source.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/winegstreamer/media_source.c b/dlls/winegstreamer/media_source.c
+index 7d28fb26636..ddb58ea0a3f 100644
+--- a/dlls/winegstreamer/media_source.c
++++ b/dlls/winegstreamer/media_source.c
+@@ -872,7 +872,7 @@ static HRESULT new_media_stream(struct media_source *source,
+ static HRESULT media_stream_init_desc(struct media_stream *stream)
+ {
+     IMFMediaTypeHandler *type_handler = NULL;
+-    IMFMediaType *stream_types[7];
++    IMFMediaType *stream_types[8];
+     struct wg_format format;
+     DWORD type_count = 0;
+     unsigned int i;
+@@ -892,6 +892,7 @@ static HRESULT media_stream_init_desc(struct media_stream *stream)
+             &MFVideoFormat_IYUV,
+             &MFVideoFormat_I420,
+             &MFVideoFormat_ARGB32,
++            &MFVideoFormat_RGB32,
+         };
+ 
+         IMFMediaType *base_type = mf_media_type_from_wg_format(&format);
+From b97f2ba066494ef86d7b45ec32ee897101e7592e Mon Sep 17 00:00:00 2001
+From: Derek Lesho <dlesho@codeweavers.com>
+Date: Thu, 14 Apr 2022 17:02:03 -0400
+Subject: [PATCH 5/5] winegstreamer: Add MFVideoFormat_ABGR32 media type to
+ media source video stream descriptor.
+
+Signed-off-by: Derek Lesho <dlesho@codeweavers.com>
+---
+ dlls/winegstreamer/media_source.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/winegstreamer/media_source.c b/dlls/winegstreamer/media_source.c
+index 68912f4235b..2191cfb0ded 100644
+--- a/dlls/winegstreamer/media_source.c
++++ b/dlls/winegstreamer/media_source.c
+@@ -855,7 +855,7 @@ static HRESULT new_media_stream(struct media_source *source,
+ static HRESULT media_stream_init_desc(struct media_stream *stream)
+ {
+     IMFMediaTypeHandler *type_handler = NULL;
+-    IMFMediaType *stream_types[8];
++    IMFMediaType *stream_types[9];
+     struct wg_format format;
+     DWORD type_count = 0;
+     unsigned int i;
+@@ -876,6 +876,7 @@ static HRESULT media_stream_init_desc(struct media_stream *stream)
+             &MFVideoFormat_I420,
+             &MFVideoFormat_ARGB32,
+             &MFVideoFormat_RGB32,
++            &MFVideoFormat_ABGR32,
+         };
+ 
+         IMFMediaType *base_type = mf_media_type_from_wg_format(&format);
+-- 
+2.37.1
+
+From 3f8767dfb0944c3dbe8f9f9c010cd75502dd86b3 Mon Sep 17 00:00:00 2001
+From: Giovanni Mascellani <gmascellani@codeweavers.com>
+Date: Thu, 4 Nov 2021 12:51:31 +0100
+Subject: [PATCH 1/3] mfreadwrite/reader: Add a passthrough transform.
+
+On Windows media sources typically produce compressed data, so
+the source reader automatically adds a transform to decompress it.
+On Wine media sources already care about decompressing data, so
+there is no need for a transform. However, some applications
+expect it anyway (e.g., to edit transform attributes) and fail
+if it's not present.
+
+Therefore, this patch adds a trivial passthrough transform
+implementation to please such programs.
+
+CW-Bug-Id: #19126
+---
+ dlls/mfreadwrite/reader.c | 487 ++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 487 insertions(+)
+
+diff --git a/dlls/mfreadwrite/reader.c b/dlls/mfreadwrite/reader.c
+index 20521ff09d7..b5e0c05b171 100644
+--- a/dlls/mfreadwrite/reader.c
++++ b/dlls/mfreadwrite/reader.c
+@@ -251,6 +251,461 @@ static ULONG source_reader_release(struct source_reader *reader)
+     return refcount;
+ }
+ 
++struct passthrough_transform
++{
++    IMFTransform IMFTransform_iface;
++    LONG refcount;
++    IMFMediaType *type;
++    IMFAttributes *attributes;
++    IMFAttributes *input_attributes;
++    IMFAttributes *output_attributes;
++    IMFSample *sample;
++};
++
++static inline struct passthrough_transform *impl_from_IMFTransform(IMFTransform *iface)
++{
++    return CONTAINING_RECORD(iface, struct passthrough_transform, IMFTransform_iface);
++}
++
++static HRESULT WINAPI passthrough_transform_QueryInterface(IMFTransform *iface, REFIID riid, void **out)
++{
++    struct passthrough_transform *transform = impl_from_IMFTransform(iface);
++
++    TRACE("%p, %s, %p.\n", iface, debugstr_guid(riid), out);
++
++    if (IsEqualIID(riid, &IID_IUnknown) ||
++        IsEqualIID(riid, &IID_IMFTransform))
++    {
++        *out = &transform->IMFTransform_iface;
++    }
++    else
++    {
++        FIXME("(%s, %p)\n", debugstr_guid(riid), out);
++        *out = NULL;
++        return E_NOINTERFACE;
++    }
++
++    IUnknown_AddRef(iface);
++    return S_OK;
++}
++
++static ULONG WINAPI passthrough_transform_AddRef(IMFTransform *iface)
++{
++    struct passthrough_transform *transform = impl_from_IMFTransform(iface);
++    ULONG refcount = InterlockedIncrement(&transform->refcount);
++
++    TRACE("%p, refcount %u.\n", iface, refcount);
++
++    return refcount;
++}
++
++static ULONG WINAPI passthrough_transform_Release(IMFTransform *iface)
++{
++    struct passthrough_transform *transform = impl_from_IMFTransform(iface);
++    ULONG refcount = InterlockedDecrement(&transform->refcount);
++
++    TRACE("%p, refcount %u.\n", iface, refcount);
++
++    if (!refcount)
++    {
++        if (transform->type)
++            IMFMediaType_Release(transform->type);
++        IMFAttributes_Release(transform->attributes);
++        IMFAttributes_Release(transform->input_attributes);
++        IMFAttributes_Release(transform->output_attributes);
++        if (transform->sample)
++            IMFSample_Release(transform->sample);
++    }
++
++    return refcount;
++}
++static HRESULT WINAPI passthrough_transform_GetStreamLimits(IMFTransform *iface,
++        DWORD *input_minimum, DWORD *input_maximum, DWORD *output_minimum, DWORD *output_maximum)
++{
++    TRACE("%p, %p, %p, %p, %p.\n", iface, input_minimum, input_maximum, output_minimum, output_maximum);
++
++    *input_minimum = 1;
++    *input_maximum = 1;
++    *output_minimum = 1;
++    *output_maximum = 1;
++
++    return S_OK;
++}
++
++static HRESULT WINAPI passthrough_transform_GetStreamCount(IMFTransform *iface, DWORD *inputs, DWORD *outputs)
++{
++    TRACE("%p, %p, %p.\n", iface, inputs, outputs);
++
++    *inputs = 1;
++    *outputs = 1;
++
++    return S_OK;
++}
++
++static HRESULT WINAPI passthrough_transform_GetStreamIDs(IMFTransform *iface,
++        DWORD input_size, DWORD *inputs, DWORD output_size, DWORD *outputs)
++{
++    TRACE("%p, %d, %p, %d, %p.\n", iface, input_size, inputs, output_size, outputs);
++
++    if (input_size < 1 || output_size < 1)
++        return MF_E_BUFFERTOOSMALL;
++
++    inputs[0] = 0;
++    outputs[0] = 0;
++
++    return S_OK;
++}
++
++static HRESULT WINAPI passthrough_transform_GetInputStreamInfo(IMFTransform *iface, DWORD id, MFT_INPUT_STREAM_INFO *info)
++{
++    TRACE("%p, %d, %p.\n", iface, id, info);
++
++    if (id != 0)
++        return MF_E_INVALIDSTREAMNUMBER;
++
++    info->hnsMaxLatency = 0;
++    info->dwFlags = MFT_INPUT_STREAM_PROCESSES_IN_PLACE;
++    info->cbSize = 0;
++    info->cbMaxLookahead = 0;
++    info->cbAlignment = 0;
++
++    return S_OK;
++}
++
++static HRESULT WINAPI passthrough_transform_GetOutputStreamInfo(IMFTransform *iface, DWORD id, MFT_OUTPUT_STREAM_INFO *info)
++{
++    TRACE("%p, %d, %p.\n", iface, id, info);
++
++    if (id != 0)
++        return MF_E_INVALIDSTREAMNUMBER;
++
++    info->dwFlags = MFT_OUTPUT_STREAM_PROVIDES_SAMPLES;
++    info->cbSize = 0;
++    info->cbAlignment = 0;
++
++    return S_OK;
++}
++
++static HRESULT WINAPI passthrough_transform_GetAttributes(IMFTransform *iface, IMFAttributes **attributes)
++{
++    struct passthrough_transform *transform = impl_from_IMFTransform(iface);
++
++    TRACE("%p, %p.\n", iface, attributes);
++
++    IMFAttributes_AddRef(transform->attributes);
++
++    *attributes = transform->attributes;
++
++    return S_OK;
++}
++
++static HRESULT WINAPI passthrough_transform_GetInputStreamAttributes(IMFTransform *iface, DWORD id, IMFAttributes **attributes)
++{
++    struct passthrough_transform *transform = impl_from_IMFTransform(iface);
++
++    TRACE("%p, %d, %p.\n", iface, id, attributes);
++
++    if (id != 0)
++        return MF_E_INVALIDSTREAMNUMBER;
++
++    IMFAttributes_AddRef(transform->input_attributes);
++
++    *attributes = transform->input_attributes;
++
++    return S_OK;
++}
++
++static HRESULT WINAPI passthrough_transform_GetOutputStreamAttributes(IMFTransform *iface, DWORD id, IMFAttributes **attributes)
++{
++    struct passthrough_transform *transform = impl_from_IMFTransform(iface);
++
++    TRACE("%p, %d, %p.\n", iface, id, attributes);
++
++    if (id != 0)
++        return MF_E_INVALIDSTREAMNUMBER;
++
++    IMFAttributes_AddRef(transform->output_attributes);
++
++    *attributes = transform->output_attributes;
++
++    return S_OK;
++}
++
++static HRESULT WINAPI passthrough_transform_DeleteInputStream(IMFTransform *iface, DWORD id)
++{
++    TRACE("%p, %d.\n", iface, id);
++
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI passthrough_transform_AddInputStreams(IMFTransform *iface, DWORD streams, DWORD *ids)
++{
++    TRACE("%p, %d, %p.\n", iface, streams, ids);
++
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI passthrough_transform_GetInputAvailableType(IMFTransform *iface, DWORD id, DWORD index, IMFMediaType **type)
++{
++    TRACE("%p, %d, %d, %p.\n", iface, id, index, type);
++
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI passthrough_transform_GetOutputAvailableType(IMFTransform *iface, DWORD id, DWORD index, IMFMediaType **type)
++{
++    struct passthrough_transform *transform = impl_from_IMFTransform(iface);
++
++    TRACE("%p, %d, %d, %p.\n", iface, id, index, type);
++
++    if (id != 0)
++        return MF_E_INVALIDSTREAMNUMBER;
++
++    if (index != 0)
++        return MF_E_NO_MORE_TYPES;
++
++    if (!transform->type)
++        return MF_E_TRANSFORM_TYPE_NOT_SET;
++
++    *type = transform->type;
++    IMFMediaType_AddRef(*type);
++
++    return S_OK;
++}
++
++static HRESULT WINAPI passthrough_transform_SetInputType(IMFTransform *iface, DWORD id, IMFMediaType *type, DWORD flags)
++{
++    struct passthrough_transform *transform = impl_from_IMFTransform(iface);
++
++    TRACE("%p, %d, %p, %d.\n", iface, id, type, flags);
++
++    if (id != 0)
++        return MF_E_INVALIDSTREAMNUMBER;
++
++    if (!(flags & MFT_SET_TYPE_TEST_ONLY))
++    {
++        if (transform->type)
++            IMFMediaType_Release(transform->type);
++        transform->type = type;
++        IMFMediaType_AddRef(type);
++    }
++
++    return S_OK;
++}
++
++static HRESULT WINAPI passthrough_transform_SetOutputType(IMFTransform *iface, DWORD id, IMFMediaType *type, DWORD flags)
++{
++    struct passthrough_transform *transform = impl_from_IMFTransform(iface);
++    DWORD cmp_flags;
++    HRESULT hr;
++
++    TRACE("%p, %d, %p, %d.\n", iface, id, type, flags);
++
++    if (id != 0)
++        return MF_E_INVALIDSTREAMNUMBER;
++
++    if (!transform->type)
++        return MF_E_TRANSFORM_TYPE_NOT_SET;
++
++    hr = IMFMediaType_IsEqual(transform->type, type, &cmp_flags);
++    if (FAILED(hr))
++        return hr;
++
++    if (!(cmp_flags & MF_MEDIATYPE_EQUAL_FORMAT_DATA))
++        return MF_E_INVALIDMEDIATYPE;
++
++    return S_OK;
++}
++
++static HRESULT WINAPI passthrough_transform_GetInputCurrentType(IMFTransform *iface, DWORD id, IMFMediaType **type)
++{
++    struct passthrough_transform *transform = impl_from_IMFTransform(iface);
++
++    TRACE("%p, %d, %p.\n", iface, id, type);
++
++    if (id != 0)
++        return MF_E_INVALIDSTREAMNUMBER;
++
++    if (!transform->type)
++        return MF_E_TRANSFORM_TYPE_NOT_SET;
++
++    *type = transform->type;
++    IMFMediaType_AddRef(*type);
++
++    return S_OK;
++}
++
++static HRESULT WINAPI passthrough_transform_GetOutputCurrentType(IMFTransform *iface, DWORD id, IMFMediaType **type)
++{
++    struct passthrough_transform *transform = impl_from_IMFTransform(iface);
++
++    TRACE("%p, %d, %p.\n", iface, id, type);
++
++    if (id != 0)
++        return MF_E_INVALIDSTREAMNUMBER;
++
++    if (!transform->type)
++        return MF_E_TRANSFORM_TYPE_NOT_SET;
++
++    *type = transform->type;
++    IMFMediaType_AddRef(*type);
++
++    return S_OK;
++}
++
++static HRESULT WINAPI passthrough_transform_GetInputStatus(IMFTransform *iface, DWORD id, DWORD *flags)
++{
++    struct passthrough_transform *transform = impl_from_IMFTransform(iface);
++
++    TRACE("%p, %d, %p.\n", iface, id, flags);
++
++    if (id != 0)
++        return MF_E_INVALIDSTREAMNUMBER;
++
++    *flags = transform->sample ? 0 : MFT_INPUT_STATUS_ACCEPT_DATA;
++
++    return S_OK;
++}
++
++static HRESULT WINAPI passthrough_transform_GetOutputStatus(IMFTransform *iface, DWORD *flags)
++{
++    struct passthrough_transform *transform = impl_from_IMFTransform(iface);
++
++    TRACE("%p, %p.\n", iface, flags);
++
++    *flags = transform->sample ? MFT_OUTPUT_STATUS_SAMPLE_READY : 0;
++
++    return S_OK;
++}
++
++static HRESULT WINAPI passthrough_transform_SetOutputBounds(IMFTransform *iface, LONGLONG lower, LONGLONG upper)
++{
++    FIXME("%p, %s, %s.\n", iface, wine_dbgstr_longlong(lower), wine_dbgstr_longlong(upper));
++
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI passthrough_transform_ProcessEvent(IMFTransform *iface, DWORD id, IMFMediaEvent *event)
++{
++    FIXME("%p, %d, %p.\n", iface, id, event);
++
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI passthrough_transform_ProcessMessage(IMFTransform *iface, MFT_MESSAGE_TYPE message, ULONG_PTR param)
++{
++    FIXME("%p, %u, %Iu.\n", iface, message, param);
++
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI passthrough_transform_ProcessInput(IMFTransform *iface, DWORD id, IMFSample *sample, DWORD flags)
++{
++    struct passthrough_transform *transform = impl_from_IMFTransform(iface);
++
++    TRACE("%p, %d, %p, %d.\n", iface, id, sample, flags);
++
++    if (id != 0)
++        return MF_E_INVALIDSTREAMNUMBER;
++
++    if (transform->sample)
++        return MF_E_NOTACCEPTING;
++
++    transform->sample = sample;
++    IMFSample_AddRef(sample);
++
++    return S_OK;
++}
++
++static HRESULT WINAPI passthrough_transform_ProcessOutput(IMFTransform *iface, DWORD flags, DWORD count,
++        MFT_OUTPUT_DATA_BUFFER *samples, DWORD *status)
++{
++    struct passthrough_transform *transform = impl_from_IMFTransform(iface);
++    unsigned int i;
++
++    TRACE("%p, %d, %d, %p, %p.\n", iface, flags, count, samples, status);
++
++    if (!transform->sample)
++        return MF_E_TRANSFORM_NEED_MORE_INPUT;
++
++    if (samples[0].dwStreamID != 0)
++        return MF_E_INVALIDSTREAMNUMBER;
++
++    samples[0].pSample = transform->sample;
++    transform->sample = NULL;
++
++    for (i = 1; i < count; ++i)
++        samples[i].dwStatus = MFT_OUTPUT_DATA_BUFFER_NO_SAMPLE;
++
++    *status = 0;
++
++    return S_OK;
++}
++
++static const IMFTransformVtbl passthrough_transform_vtbl = {
++    passthrough_transform_QueryInterface,
++    passthrough_transform_AddRef,
++    passthrough_transform_Release,
++    passthrough_transform_GetStreamLimits,
++    passthrough_transform_GetStreamCount,
++    passthrough_transform_GetStreamIDs,
++    passthrough_transform_GetInputStreamInfo,
++    passthrough_transform_GetOutputStreamInfo,
++    passthrough_transform_GetAttributes,
++    passthrough_transform_GetInputStreamAttributes,
++    passthrough_transform_GetOutputStreamAttributes,
++    passthrough_transform_DeleteInputStream,
++    passthrough_transform_AddInputStreams,
++    passthrough_transform_GetInputAvailableType,
++    passthrough_transform_GetOutputAvailableType,
++    passthrough_transform_SetInputType,
++    passthrough_transform_SetOutputType,
++    passthrough_transform_GetInputCurrentType,
++    passthrough_transform_GetOutputCurrentType,
++    passthrough_transform_GetInputStatus,
++    passthrough_transform_GetOutputStatus,
++    passthrough_transform_SetOutputBounds,
++    passthrough_transform_ProcessEvent,
++    passthrough_transform_ProcessMessage,
++    passthrough_transform_ProcessInput,
++    passthrough_transform_ProcessOutput,
++};
++
++static HRESULT create_passthrough_transform(IMFTransform **transform)
++{
++    struct passthrough_transform *obj;
++    HRESULT hr;
++
++    if (!(obj = calloc(1, sizeof(*obj))))
++        return E_OUTOFMEMORY;
++
++    obj->IMFTransform_iface.lpVtbl = &passthrough_transform_vtbl;
++    obj->refcount = 1;
++
++    hr = MFCreateAttributes(&obj->attributes, 0);
++    if (SUCCEEDED(hr))
++        hr = MFCreateAttributes(&obj->input_attributes, 0);
++    if (SUCCEEDED(hr))
++        hr = MFCreateAttributes(&obj->output_attributes, 0);
++
++    if (SUCCEEDED(hr))
++    {
++        *transform = &obj->IMFTransform_iface;
++    }
++    else
++    {
++        if (obj->attributes)
++            IMFAttributes_Release(obj->attributes);
++        if (obj->input_attributes)
++            IMFAttributes_Release(obj->input_attributes);
++        if (obj->output_attributes)
++            IMFAttributes_Release(obj->output_attributes);
++        free(obj);
++    }
++
++    return hr;
++}
++
+ static HRESULT WINAPI source_reader_async_command_QueryInterface(IUnknown *iface, REFIID riid, void **obj)
+ {
+     if (IsEqualIID(riid, &IID_IUnknown))
+@@ -1778,6 +2233,36 @@ static HRESULT source_reader_configure_decoder(struct source_reader *reader, DWO
+     return MF_E_TOPO_CODEC_NOT_FOUND;
+ }
+ 
++static HRESULT source_reader_add_passthrough_transform(struct source_reader *reader, DWORD index, IMFMediaType *type)
++{
++    IMFTransform *transform;
++    HRESULT hr;
++
++    if (FAILED(hr = create_passthrough_transform(&transform)))
++        return hr;
++
++    if (FAILED(hr = IMFTransform_SetInputType(transform, 0, type, 0)))
++    {
++        WARN("Failed to set decoder input type, hr %#x.\n", hr);
++        IMFTransform_Release(transform);
++        return hr;
++    }
++
++    if (FAILED(hr = IMFTransform_SetOutputType(transform, 0, type, 0)))
++    {
++        WARN("Failed to set decoder input type, hr %#x.\n", hr);
++        IMFTransform_Release(transform);
++        return hr;
++    }
++
++    if (reader->streams[index].decoder.transform)
++        IMFTransform_Release(reader->streams[index].decoder.transform);
++    reader->streams[index].decoder.transform = transform;
++    reader->streams[index].decoder.min_buffer_size = 0;
++
++    return S_OK;
++}
++
+ static HRESULT source_reader_create_decoder_for_stream(struct source_reader *reader, DWORD index, IMFMediaType *output_type)
+ {
+     MFT_REGISTER_TYPE_INFO in_type, out_type;
+@@ -1866,6 +2351,8 @@ static HRESULT WINAPI src_reader_SetCurrentMediaType(IMFSourceReader *iface, DWO
+     hr = source_reader_set_compatible_media_type(reader, index, type);
+     if (hr == S_FALSE)
+         hr = source_reader_create_decoder_for_stream(reader, index, type);
++    else if (hr == S_OK)
++        hr = source_reader_add_passthrough_transform(reader, index, reader->streams[index].current);
+     if (SUCCEEDED(hr))
+         hr = source_reader_setup_sample_allocator(reader, index);
+ 
+-- 
+2.37.1
+
+From 40041c494d569c416da23e57f90221b48ab9444e Mon Sep 17 00:00:00 2001
+From: Giovanni Mascellani <gmascellani@codeweavers.com>
+Date: Thu, 4 Nov 2021 16:36:06 +0100
+Subject: [PATCH 2/3] mfreadwrite/reader: Initialize the sample allocators
+ with attributes from both the reader and the transform.
+
+Some applications (e.g., Trailmakers) set the output attribute
+MF_SA_D3D11_SHARED_WITHOUT_MUTEX on the source reader's transform,
+seemingly expecting that it will be picked up by
+IMFVideoSampleAllocatorEx::InitializeSampleAllocator(), so that the
+generated samples will be shareable.
+
+The same happens with the reader's own attributes (e.g., Halo Infinite),
+so we collect attributes from there as well.
+
+CW-Bug-Id: #19126
+---
+ dlls/mfreadwrite/reader.c | 34 +++++++++++++++++++++++++++++++++-
+ 1 file changed, 33 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/mfreadwrite/reader.c b/dlls/mfreadwrite/reader.c
+index b5e0c05b171..61c8bfd3210 100644
+--- a/dlls/mfreadwrite/reader.c
++++ b/dlls/mfreadwrite/reader.c
+@@ -2151,6 +2152,29 @@ static HRESULT source_reader_setup_sample_allocator(struct source_reader *reader
+     if (FAILED(hr = source_reader_create_sample_allocator_attributes(reader, &attributes)))
+         WARN("Failed to create allocator attributes, hr %#lx.\n", hr);
+ 
++    if (reader->attributes)
++    {
++        if (FAILED(hr = IMFAttributes_CopyAllItems(reader->attributes, attributes)))
++            WARN("Failed to copy reader attributes, hr %#x.\n", hr);
++    }
++
++    if (stream->decoder.transform)
++    {
++        IMFAttributes *output_attributes;
++
++        if (FAILED(hr = IMFTransform_GetOutputStreamAttributes(stream->decoder.transform, 0, &output_attributes)))
++        {
++            WARN("Failed to get output stream attributes, hr %#x.\n", hr);
++        }
++        else
++        {
++            if (FAILED(hr = IMFAttributes_CopyAllItems(output_attributes, attributes)))
++                WARN("Failed to copy transform output attributes, hr %#x.\n", hr);
++
++            IMFAttributes_Release(output_attributes);
++        }
++    }
++
+     if (FAILED(hr = IMFVideoSampleAllocatorEx_InitializeSampleAllocatorEx(stream->allocator, 2, 8,
+             attributes, stream->current)))
+     {
+-- 
+2.37.1
+
+From 649717ad0a34e07886fd2568623b5e33b2a875f3 Mon Sep 17 00:00:00 2001
+From: Giovanni Mascellani <gmascellani@codeweavers.com>
+Date: Mon, 15 Nov 2021 13:06:10 +0100
+Subject: [PATCH 3/3] mfreadwrite/reader: Setup the sample allocator in
+ ReadSample.
+
+Currently the source reader creates a sample allocator as soon as
+SetCurrentMediaType() is called. However on Windows if the output
+attribute MF_SA_D3D11_SHARED_WITHOUT_MUTEX is set on the transform
+after SetCurrentMediaType() is called, but before ReadSample() is
+called, the sample allocator will generate shareable samples.
+
+In order to emulate the same behavior, we defer creating the sample
+allocator to the first ReadSample() call, so the most updated
+attributes are picked up.
+
+With this and the previous two patches, some video playback bugs
+are solved for some games (e.g. Trailmakers, Rustler, TOHU and
+others) when using DXVK (wined3d doesn't currently support
+shared resources, so there is no way to check with it).
+
+CW-Bug-Id: #19126
+---
+ dlls/mfreadwrite/reader.c | 30 ++++++++++++++++++++++++++----
+ 1 file changed, 26 insertions(+), 4 deletions(-)
+
+diff --git a/dlls/mfreadwrite/reader.c b/dlls/mfreadwrite/reader.c
+index 61c8bfd3210..78e72c05db2 100644
+--- a/dlls/mfreadwrite/reader.c
++++ b/dlls/mfreadwrite/reader.c
+@@ -1695,6 +1695,8 @@ static HRESULT source_reader_flush(struct source_reader *reader, unsigned int in
+     return hr;
+ }
+ 
++static HRESULT source_reader_setup_sample_allocator(struct source_reader *reader, unsigned int index);
++
+ static HRESULT WINAPI source_reader_async_commands_callback_Invoke(IMFAsyncCallback *iface, IMFAsyncResult *result)
+ {
+     struct source_reader *reader = impl_from_async_commands_callback_IMFAsyncCallback(iface);
+@@ -1724,7 +1726,15 @@ static HRESULT WINAPI source_reader_async_commands_callback_Invoke(IMFAsyncCallb
+                 {
+                     stream = &reader->streams[stream_index];
+ 
+-                    if (!(report_sample = source_reader_get_read_result(reader, stream, command->u.read.flags, &status,
++                    if (!stream->allocator)
++                    {
++                        hr = source_reader_setup_sample_allocator(reader, stream_index);
++
++                        if (FAILED(hr))
++                            WARN("Failed to setup the sample allocator, hr %#x.\n", hr);
++                    }
++
++                    if (SUCCEEDED(hr) && !(report_sample = source_reader_get_read_result(reader, stream, command->u.read.flags, &status,
+                             &stream_index, &stream_flags, &timestamp, &sample)))
+                     {
+                         stream->requests++;
+@@ -2385,8 +2395,12 @@ static HRESULT WINAPI src_reader_SetCurrentMediaType(IMFSourceReader *iface, DWO
+         hr = source_reader_create_decoder_for_stream(reader, index, type);
+     else if (hr == S_OK)
+         hr = source_reader_add_passthrough_transform(reader, index, reader->streams[index].current);
+-    if (SUCCEEDED(hr))
+-        hr = source_reader_setup_sample_allocator(reader, index);
++
++    if (reader->streams[index].allocator)
++    {
++        IMFVideoSampleAllocatorEx_Release(reader->streams[index].allocator);
++        reader->streams[index].allocator = NULL;
++    }
+ 
+     LeaveCriticalSection(&reader->cs);
+ 
+@@ -2484,7 +2498,15 @@ static HRESULT source_reader_read_sample(struct source_reader *reader, DWORD ind
+ 
+             stream = &reader->streams[stream_index];
+ 
+-            if (!source_reader_get_read_result(reader, stream, flags, &hr, actual_index, stream_flags,
++            if (!stream->allocator)
++            {
++                hr = source_reader_setup_sample_allocator(reader, stream_index);
++
++                if (FAILED(hr))
++                    WARN("Failed to setup the sample allocator, hr %#x.\n", hr);
++            }
++
++            if (SUCCEEDED(hr) && !source_reader_get_read_result(reader, stream, flags, &hr, actual_index, stream_flags,
+                    timestamp, sample))
+             {
+                 while (!source_reader_got_response_for_stream(reader, stream) && stream->state != STREAM_STATE_EOS)
+-- 
+2.37.1
+
+From ef1dedf4c9e1b8f415593a6bcf669f7f7d0ed168 Mon Sep 17 00:00:00 2001
+From: Derek Lesho <dlesho@codeweavers.com>
+Date: Fri, 15 Jul 2022 15:12:52 -0400
+Subject: [PATCH 11/14] winegstreamer: Add MF_MT_VIDEO_NOMINAL_RANGE attribute
+ to base video output type.
+
+---
+ dlls/winegstreamer/media_source.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/dlls/winegstreamer/media_source.c b/dlls/winegstreamer/media_source.c
+index eab85c29bed..63e61e84f44 100644
+--- a/dlls/winegstreamer/media_source.c
++++ b/dlls/winegstreamer/media_source.c
+@@ -882,6 +882,8 @@ static HRESULT media_stream_init_desc(struct media_stream *stream)
+         IMFMediaType *base_type = mf_media_type_from_wg_format(&format);
+         GUID base_subtype;
+ 
++        IMFMediaType_SetUINT32(base_type, &MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_Normal);
++
+         IMFMediaType_GetGUID(base_type, &MF_MT_SUBTYPE, &base_subtype);
+ 
+         stream_types[0] = base_type;
+-- 
+2.37.1

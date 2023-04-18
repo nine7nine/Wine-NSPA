@@ -1,0 +1,570 @@
+From 026d6a997e628295b0e860601dfc0863ae439f8a Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Tue, 7 Dec 2021 11:16:40 +0300
+Subject: [PATCH] server: Split waitable object off completion port.
+
+CW-Bug-Id: #19621
+---
+ server/completion.c | 120 +++++++++++++++++++++++++++++++++++---------
+ 1 file changed, 96 insertions(+), 24 deletions(-)
+
+diff --git a/server/completion.c b/server/completion.c
+index 33266c596da..915a083e642 100644
+--- a/server/completion.c
++++ b/server/completion.c
+@@ -56,15 +56,52 @@ struct type_descr completion_type =
+     },
+ };
+ 
+-struct completion
++struct completion_wait
+ {
+     struct object  obj;
+     struct list    queue;
+     unsigned int   depth;
+ };
+ 
++struct completion
++{
++    struct object           obj;
++    struct completion_wait *wait;
++};
++
++static void completion_wait_dump( struct object*, int );
++static int completion_wait_signaled( struct object *obj, struct wait_queue_entry *entry );
++static void completion_wait_destroy( struct object * );
++
++static const struct object_ops completion_wait_ops =
++{
++    sizeof(struct completion_wait), /* size */
++    &no_type,                       /* type */
++    completion_wait_dump,           /* dump */
++    add_queue,                      /* add_queue */
++    remove_queue,                   /* remove_queue */
++    completion_wait_signaled,       /* signaled */
++    NULL,                           /* get_esync_fd */
++    NULL,                           /* get_fsync_idx */
++    no_satisfied,                   /* satisfied */
++    no_signal,                      /* signal */
++    no_get_fd,                      /* get_fd */
++    default_map_access,             /* map_access */
++    default_get_sd,                 /* get_sd */
++    default_set_sd,                 /* set_sd */
++    no_get_full_name,               /* get_full_name */
++    no_lookup_name,                 /* lookup_name */
++    no_link_name,                   /* link_name */
++    NULL,                           /* unlink_name */
++    no_open_file,                   /* open_file */
++    no_kernel_obj_list,             /* get_kernel_obj_list */
++    no_close_handle,                /* close_handle */
++    completion_wait_destroy         /* destroy */
++};
++
+ static void completion_dump( struct object*, int );
+-static int completion_signaled( struct object *obj, struct wait_queue_entry *entry );
++static int completion_add_queue( struct object *obj, struct wait_queue_entry *entry );
++static void completion_remove_queue( struct object *obj, struct wait_queue_entry *entry );
+ static void completion_destroy( struct object * );
+ 
+ static const struct object_ops completion_ops =
+@@ -72,9 +109,9 @@ static const struct object_ops completion_ops =
+     sizeof(struct completion), /* size */
+     &completion_type,          /* type */
+     completion_dump,           /* dump */
+-    add_queue,                 /* add_queue */
+-    remove_queue,              /* remove_queue */
+-    completion_signaled,       /* signaled */
++    completion_add_queue,      /* add_queue */
++    completion_remove_queue,   /* remove_queue */
++    NULL,                      /* signaled */
+     NULL,                      /* get_esync_fd */
+     NULL,                      /* get_fsync_idx */
+     no_satisfied,              /* satisfied */
+@@ -102,30 +139,63 @@ struct comp_msg
+     unsigned int  status;
+ };
+ 
+-static void completion_destroy( struct object *obj)
++static void completion_wait_destroy( struct object *obj)
+ {
+-    struct completion *completion = (struct completion *) obj;
++    struct completion_wait *wait = (struct completion_wait *)obj;
+     struct comp_msg *tmp, *next;
+ 
+-    LIST_FOR_EACH_ENTRY_SAFE( tmp, next, &completion->queue, struct comp_msg, queue_entry )
++    LIST_FOR_EACH_ENTRY_SAFE( tmp, next, &wait->queue, struct comp_msg, queue_entry )
+     {
+         free( tmp );
+     }
+ }
+ 
++static void completion_wait_dump( struct object *obj, int verbose )
++{
++    struct completion_wait *wait = (struct completion_wait *)obj;
++
++    assert( obj->ops == &completion_wait_ops );
++    fprintf( stderr, "Completion depth=%u\n", wait->depth );
++}
++
++static int completion_wait_signaled( struct object *obj, struct wait_queue_entry *entry )
++{
++    struct completion_wait *wait = (struct completion_wait *)obj;
++
++    assert( obj->ops == &completion_wait_ops );
++    return !list_empty( &wait->queue );
++}
++
+ static void completion_dump( struct object *obj, int verbose )
+ {
+-    struct completion *completion = (struct completion *) obj;
++    struct completion *completion = (struct completion *)obj;
++
++    assert( obj->ops == &completion_ops );
++    completion->wait->obj.ops->dump( &completion->wait->obj, verbose );
++}
++
++static int completion_add_queue( struct object *obj, struct wait_queue_entry *entry )
++{
++    struct completion *completion = (struct completion *)obj;
++
++    assert( obj->ops == &completion_ops );
++    return completion->wait->obj.ops->add_queue( &completion->wait->obj, entry );
++}
++
++static void completion_remove_queue( struct object *obj, struct wait_queue_entry *entry )
++{
++    struct completion *completion = (struct completion *)obj;
+ 
+     assert( obj->ops == &completion_ops );
+-    fprintf( stderr, "Completion depth=%u\n", completion->depth );
++    completion->wait->obj.ops->remove_queue( &completion->wait->obj, entry );
+ }
+ 
+-static int completion_signaled( struct object *obj, struct wait_queue_entry *entry )
++static void completion_destroy( struct object *obj )
+ {
+     struct completion *completion = (struct completion *)obj;
+ 
+-    return !list_empty( &completion->queue );
++    assert( obj->ops == &completion_ops );
++    release_object( &completion->wait->obj );
+ }
+ 
+ static struct completion *create_completion( struct object *root, const struct unicode_str *name,
+@@ -134,15 +204,17 @@ static struct completion *create_completion( struct object *root, const struct u
+ {
+     struct completion *completion;
+ 
+-    if ((completion = create_named_object( root, &completion_ops, name, attr, sd )))
++    if (!(completion = create_named_object( root, &completion_ops, name, attr, sd ))) return NULL;
++    if (get_error() == STATUS_OBJECT_NAME_EXISTS) return completion;
++    if (!(completion->wait = alloc_object( &completion_wait_ops )))
+     {
+-        if (get_error() != STATUS_OBJECT_NAME_EXISTS)
+-        {
+-            list_init( &completion->queue );
+-            completion->depth = 0;
+-        }
++        release_object( completion );
++        set_error( STATUS_NO_MEMORY );
++        return NULL;
+     }
+ 
++    list_init( &completion->wait->queue );
++    completion->wait->depth = 0;
+     return completion;
+ }
+ 
+@@ -164,9 +236,9 @@ void add_completion( struct completion *completion, apc_param_t ckey, apc_param_
+     msg->status = status;
+     msg->information = information;
+ 
+-    list_add_tail( &completion->queue, &msg->queue_entry );
+-    completion->depth++;
+-    wake_up( &completion->obj, 1 );
++    list_add_tail( &completion->wait->queue, &msg->queue_entry );
++    completion->wait->depth++;
++    wake_up( &completion->wait->obj, 1 );
+ }
+ 
+ /* create a completion */
+@@ -220,13 +292,13 @@ DECL_HANDLER(remove_completion)
+ 
+     if (!completion) return;
+ 
+-    entry = list_head( &completion->queue );
++    entry = list_head( &completion->wait->queue );
+     if (!entry)
+         set_error( STATUS_PENDING );
+     else
+     {
+         list_remove( entry );
+-        completion->depth--;
++        completion->wait->depth--;
+         msg = LIST_ENTRY( entry, struct comp_msg, queue_entry );
+         reply->ckey = msg->ckey;
+         reply->cvalue = msg->cvalue;
+@@ -245,7 +317,7 @@ DECL_HANDLER(query_completion)
+ 
+     if (!completion) return;
+ 
+-    reply->depth = completion->depth;
++    reply->depth = completion->wait->depth;
+ 
+     release_object( completion );
+ }
+
+From 17fd5adb927ccded85add314da85330f1a1dd007 Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Tue, 7 Dec 2021 12:27:17 +0300
+Subject: [PATCH] server: Abandon wait when completion port is closed.
+
+CW-Bug-Id: #19621
+
+Based on patches by Alexey Prokhin.
+---
+ dlls/ntdll/tests/sync.c | 65 +++++++++++++++++++++++++++++++++++++++++
+ server/completion.c     | 25 ++++++++++++----
+ 2 files changed, 85 insertions(+), 5 deletions(-)
+
+diff --git a/dlls/ntdll/tests/sync.c b/dlls/ntdll/tests/sync.c
+index f930767a8b0..562df0f66b0 100644
+--- a/dlls/ntdll/tests/sync.c
++++ b/dlls/ntdll/tests/sync.c
+@@ -837,6 +837,70 @@ static void test_tid_alert( char **argv )
+     CloseHandle( pi.hThread );
+ }
+ 
++static HANDLE test_close_io_completion_port_ready, test_close_io_completion_test_ready;
++static HANDLE test_close_io_completion_port;
++
++static DWORD WINAPI test_close_io_completion_thread(void *param)
++{
++    FILE_IO_COMPLETION_INFORMATION info;
++    IO_STATUS_BLOCK iosb;
++    ULONG_PTR key, value;
++    NTSTATUS status;
++    ULONG count;
++    DWORD ret;
++
++    ret = WaitForSingleObject( test_close_io_completion_port_ready, INFINITE );
++    ok( ret == WAIT_OBJECT_0, "Got unexpected ret %#x.\n", ret );
++    SetEvent( test_close_io_completion_test_ready );
++    status = NtRemoveIoCompletion( test_close_io_completion_port, &key, &value, &iosb, NULL );
++    if (status == STATUS_INVALID_HANDLE)
++        skip( "Handle closed before wait started.\n" );
++    else
++        ok( status == STATUS_ABANDONED_WAIT_0, "Got unexpected status %#x.\n", status );
++
++    ret = WaitForSingleObject( test_close_io_completion_port_ready, INFINITE );
++    ok( ret == WAIT_OBJECT_0, "Got unexpected ret %#x.\n", ret );
++    SetEvent( test_close_io_completion_test_ready );
++    count = 0xdeadbeef;
++    status = NtRemoveIoCompletionEx( test_close_io_completion_port, &info, 1, &count, NULL, FALSE );
++    ok( count == 1, "Got unexpected count %u.\n", count );
++    if (status == STATUS_INVALID_HANDLE)
++        skip( "Handle closed before wait started.\n" );
++    else
++        ok( status == STATUS_ABANDONED_WAIT_0, "Got unexpected status %#x.\n", status );
++
++    return 0;
++}
++
++static void test_close_io_completion(void)
++{
++    NTSTATUS status;
++    unsigned int i;
++    HANDLE thread;
++    DWORD ret;
++
++    test_close_io_completion_port_ready = CreateEventA(NULL, FALSE, FALSE, NULL);
++    test_close_io_completion_test_ready = CreateEventA(NULL, FALSE, FALSE, NULL);
++
++    thread = CreateThread( NULL, 0, test_close_io_completion_thread, NULL, 0, NULL );
++    ok( !!thread, "Failed to create thread, error %u.\n", GetLastError() );
++
++    for (i = 0; i < 2; ++i)
++    {
++        status = NtCreateIoCompletion( &test_close_io_completion_port, IO_COMPLETION_ALL_ACCESS, NULL, 0 );
++        ok( !status, "Got unexpected status %#x.\n", status );
++        ret = SignalObjectAndWait( test_close_io_completion_port_ready, test_close_io_completion_test_ready,
++                                   INFINITE, FALSE );
++        ok( ret == WAIT_OBJECT_0, "Got unexpected ret %#x.\n", ret );
++        Sleep(10);
++        status = pNtClose( test_close_io_completion_port );
++        ok( !status, "Got unexpected status %#x.\n", status );
++    }
++
++    WaitForSingleObject( thread, INFINITE );
++    CloseHandle( thread );
++}
++
+ START_TEST(sync)
+ {
+     HMODULE module = GetModuleHandleA("ntdll.dll");
+@@ -884,4 +948,5 @@ START_TEST(sync)
+     test_keyed_events();
+     test_resource();
+     test_tid_alert( argv );
++    test_close_io_completion();
+ }
+diff --git a/server/completion.c b/server/completion.c
+index 915a083e642..1d70897db83 100644
+--- a/server/completion.c
++++ b/server/completion.c
+@@ -56,11 +56,14 @@ struct type_descr completion_type =
+     },
+ };
+ 
++struct completion;
++
+ struct completion_wait
+ {
+-    struct object  obj;
+-    struct list    queue;
+-    unsigned int   depth;
++    struct object      obj;
++    struct completion *completion;
++    struct list        queue;
++    unsigned int       depth;
+ };
+ 
+ struct completion
+@@ -71,6 +74,7 @@ struct completion
+ 
+ static void completion_wait_dump( struct object*, int );
+ static int completion_wait_signaled( struct object *obj, struct wait_queue_entry *entry );
++static void completion_wait_satisfied( struct object *obj, struct wait_queue_entry *entry );
+ static void completion_wait_destroy( struct object * );
+ 
+ static const struct object_ops completion_wait_ops =
+@@ -83,7 +87,7 @@ static const struct object_ops completion_wait_ops =
+     completion_wait_signaled,       /* signaled */
+     NULL,                           /* get_esync_fd */
+     NULL,                           /* get_fsync_idx */
+-    no_satisfied,                   /* satisfied */
++    completion_wait_satisfied,      /* satisfied */
+     no_signal,                      /* signal */
+     no_get_fd,                      /* get_fd */
+     default_map_access,             /* map_access */
+@@ -163,7 +167,15 @@ static int completion_wait_signaled( struct object *obj, struct wait_queue_entry
+     struct completion_wait *wait = (struct completion_wait *)obj;
+ 
+     assert( obj->ops == &completion_wait_ops );
+-    return !list_empty( &wait->queue );
++    return !wait->completion || !list_empty( &wait->queue );
++}
++
++static void completion_wait_satisfied( struct object *obj, struct wait_queue_entry *entry )
++{
++    struct completion_wait *wait = (struct completion_wait *)obj;
++
++    assert( obj->ops == &completion_wait_ops );
++    if (!wait->completion) make_wait_abandoned( entry );
+ }
+ 
+ static void completion_dump( struct object *obj, int verbose )
+@@ -195,6 +207,8 @@ static void completion_destroy( struct object *obj )
+     struct completion *completion = (struct completion *)obj;
+ 
+     assert( obj->ops == &completion_ops );
++    completion->wait->completion = NULL;
++    wake_up( &completion->wait->obj, 0 );
+     release_object( &completion->wait->obj );
+ }
+ 
+@@ -213,6 +227,7 @@ static struct completion *create_completion( struct object *root, const struct u
+         return NULL;
+     }
+ 
++    completion->wait->completion = completion;
+     list_init( &completion->wait->queue );
+     completion->wait->depth = 0;
+     return completion;
+
+From 6f4f6944a64d581e1a253faf97b5618ae898990f Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Tue, 7 Dec 2021 13:33:01 +0300
+Subject: [PATCH] server: Ensure completion port wait object exists after
+ successful wait.
+
+CW-Bug-Id: #19621
+
+Based on the problem analysis by Andrew Eikum.
+---
+ dlls/ntdll/unix/sync.c |  6 ++++++
+ server/completion.c    | 36 ++++++++++++++++++++++++++++++------
+ server/protocol.def    |  1 +
+ server/thread.c        |  2 ++
+ server/thread.h        |  1 +
+ 5 files changed, 40 insertions(+), 6 deletions(-)
+
+diff --git a/dlls/ntdll/unix/sync.c b/dlls/ntdll/unix/sync.c
+index 4cea4d07789..8aef63c95c4 100644
+--- a/dlls/ntdll/unix/sync.c
++++ b/dlls/ntdll/unix/sync.c
+@@ -1963,6 +1963,7 @@ NTSTATUS WINAPI NtRemoveIoCompletion( HANDLE handle, ULONG_PTR *key, ULONG_PTR *
+                                       IO_STATUS_BLOCK *io, LARGE_INTEGER *timeout )
+ {
+     unsigned int status;
++    int waited = 0;
+ 
+     TRACE( "(%p, %p, %p, %p, %p)\n", handle, key, value, io, timeout );
+ 
+@@ -1971,6 +1972,7 @@ NTSTATUS WINAPI NtRemoveIoCompletion( HANDLE handle, ULONG_PTR *key, ULONG_PTR *
+         SERVER_START_REQ( remove_completion )
+         {
+             req->handle = wine_server_obj_handle( handle );
++            req->waited = waited;
+             if (!(status = wine_server_call( req )))
+             {
+                 *key            = reply->ckey;
+@@ -1983,6 +1985,7 @@ NTSTATUS WINAPI NtRemoveIoCompletion( HANDLE handle, ULONG_PTR *key, ULONG_PTR *
+         if (status != STATUS_PENDING) return status;
+         status = NtWaitForSingleObject( handle, FALSE, timeout );
+         if (status != WAIT_OBJECT_0) return status;
++        waited = 1;
+     }
+ }
+ 
+@@ -1994,6 +1997,7 @@ NTSTATUS WINAPI NtRemoveIoCompletionEx( HANDLE handle, FILE_IO_COMPLETION_INFORM
+                                         ULONG *written, LARGE_INTEGER *timeout, BOOLEAN alertable )
+ {
+     unsigned int status;
++    int waited = 0;
+     ULONG i = 0;
+ 
+     TRACE( "%p %p %u %p %p %u\n", handle, info, (int)count, written, timeout, alertable );
+@@ -2005,6 +2009,7 @@ NTSTATUS WINAPI NtRemoveIoCompletionEx( HANDLE handle, FILE_IO_COMPLETION_INFORM
+             SERVER_START_REQ( remove_completion )
+             {
+                 req->handle = wine_server_obj_handle( handle );
++                req->waited = waited;
+                 if (!(status = wine_server_call( req )))
+                 {
+                     info[i].CompletionKey             = reply->ckey;
+@@ -2024,6 +2029,7 @@ NTSTATUS WINAPI NtRemoveIoCompletionEx( HANDLE handle, FILE_IO_COMPLETION_INFORM
+         }
+         status = NtWaitForSingleObject( handle, alertable, timeout );
+         if (status != WAIT_OBJECT_0) break;
++        waited = 1;
+     }
+     *written = i ? i : 1;
+     return status;
+diff --git a/server/completion.c b/server/completion.c
+index 1d70897db83..cbafe811796 100644
+--- a/server/completion.c
++++ b/server/completion.c
+@@ -173,9 +173,16 @@ static int completion_wait_signaled( struct object *obj, struct wait_queue_entry
+ static void completion_wait_satisfied( struct object *obj, struct wait_queue_entry *entry )
+ {
+     struct completion_wait *wait = (struct completion_wait *)obj;
++    struct thread *thread;
+ 
+     assert( obj->ops == &completion_wait_ops );
+-    if (!wait->completion) make_wait_abandoned( entry );
++    if (wait->completion)
++    {
++        thread = get_wait_queue_thread( entry );
++        if (thread->locked_completion) release_object( thread->locked_completion );
++        thread->locked_completion = grab_object( obj );
++    }
++    else make_wait_abandoned( entry );
+ }
+ 
+ static void completion_dump( struct object *obj, int verbose )
+@@ -301,19 +308,36 @@ DECL_HANDLER(add_completion)
+ /* get completion from completion port */
+ DECL_HANDLER(remove_completion)
+ {
+-    struct completion* completion = get_completion_obj( current->process, req->handle, IO_COMPLETION_MODIFY_STATE );
++    struct completion* completion;
++    struct completion_wait *wait;
+     struct list *entry;
+     struct comp_msg *msg;
+ 
+-    if (!completion) return;
++    if (req->waited && (wait = (struct completion_wait *)current->locked_completion))
++        current->locked_completion = NULL;
++    else
++    {
++        if (current->locked_completion)
++        {
++            release_object( current->locked_completion );
++            current->locked_completion = NULL;
++        }
++        completion = get_completion_obj( current->process, req->handle, IO_COMPLETION_MODIFY_STATE );
++        if (!completion) return;
++
++        wait = (struct completion_wait *)grab_object( completion->wait );
++        release_object( completion );
++    }
+ 
+-    entry = list_head( &completion->wait->queue );
++    assert( wait->obj.ops == &completion_wait_ops );
++
++    entry = list_head( &wait->queue );
+     if (!entry)
+         set_error( STATUS_PENDING );
+     else
+     {
+         list_remove( entry );
+-        completion->wait->depth--;
++        wait->depth--;
+         msg = LIST_ENTRY( entry, struct comp_msg, queue_entry );
+         reply->ckey = msg->ckey;
+         reply->cvalue = msg->cvalue;
+@@ -322,7 +346,7 @@ DECL_HANDLER(remove_completion)
+         free( msg );
+     }
+ 
+-    release_object( completion );
++    release_object( wait );
+ }
+ 
+ /* get queue depth for completion port */
+diff --git a/server/protocol.def b/server/protocol.def
+index 572aa593f96..3a2101b08df 100644
+--- a/server/protocol.def
++++ b/server/protocol.def
+@@ -3615,6 +3615,7 @@ struct handle_info
+ /* get completion from completion port queue */
+ @REQ(remove_completion)
+     obj_handle_t handle;          /* port handle */
++    int          waited;          /* port was just successfully waited on */
+ @REPLY
+     apc_param_t   ckey;           /* completion key */
+     apc_param_t   cvalue;         /* completion value */
+diff --git a/server/thread.c b/server/thread.c
+index 416746e389d..c82225fb050 100644
+--- a/server/thread.c
++++ b/server/thread.c
+@@ -300,6 +300,7 @@ static inline void init_thread_structure( struct thread *thread )
+ 
+     thread->creation_time = current_time;
+     thread->exit_time     = 0;
++    thread->locked_completion = NULL;
+ 
+     list_init( &thread->mutex_list );
+     list_init( &thread->system_apc );
+@@ -775,6 +776,7 @@ static void destroy_thread( struct objec
+     if (thread->exit_poll) remove_timeout_user( thread->exit_poll );
+     if (thread->id) free_ptid( thread->id );
+     if (thread->token) release_object( thread->token );
++    if (thread->locked_completion) release_object( thread->locked_completion );
+     if (mb->obj.refcount == 1)
+         memory_barrier_obj = NULL;
+     release_object( &mb->obj );
+diff --git a/server/thread.h b/server/thread.h
+index 023afba9e4d..067fea940cf 100644
+--- a/server/thread.h
++++ b/server/thread.h
+@@ -118,6 +118,7 @@ struct thread
+     WCHAR                 *desc;          /* thread description string */
+     int                    mb_apcs_pending; /* number of APCs left for the current memory barrier */
+     struct timeout_user   *exit_poll;     /* poll if the thread/process has exited already */
++    struct object         *locked_completion; /* completion port wait object successfully waited by the thread */
+     struct object         *queue_shared_mapping; /* thread queue shared memory mapping */
+     volatile struct queue_shared_memory *queue_shared;  /* thread queue shared memory ptr */
+     struct object         *input_shared_mapping; /* thread input shared memory mapping */
+
