@@ -86,43 +86,6 @@ diff -Npur a/dlls/avrt/main.c b/dlls/avrt/main.c
      return (HANDLE)0x12345678;
  }
  
-diff -Npur a/dlls/kernelbase/thread.c b/dlls/kernelbase/thread.c
---- a/dlls/kernelbase/thread.c	2022-12-03 21:15:28.945290867 -0500
-+++ b/dlls/kernelbase/thread.c	2022-12-03 21:09:00.188516070 -0500
-@@ -35,6 +35,12 @@
- #include "wine/asm.h"
- #include "wine/debug.h"
- #include "wine/heap.h"
-+#define NSPA_RT_SYNC 1
-+#if NSPA_RT_SYNC
-+    #include <sched.h>
-+    #include <pthread.h>
-+    #include <errno.h>  
-+#endif
- 
- WINE_DEFAULT_DEBUG_CHANNEL(thread);
- 
-@@ -271,10 +277,19 @@ LCID WINAPI /* DECLSPEC_HOTPATCH */ GetT
- INT WINAPI DECLSPEC_HOTPATCH GetThreadPriority( HANDLE thread )
- {
-     THREAD_BASIC_INFORMATION info;
--
-+  
-+#if NSPA_RT_SYNC
-+    struct sched_param param;
-+
-+    if (sched_getparam( 0, &param ) == 0)
-+        return(THREAD_PRIORITY_TIME_CRITICAL);
-+     set_ntstatus( NtQueryInformationThread( thread, ThreadBasicInformation,
-+                                       &info, sizeof(info), NULL ));
-+#else
-     if (!set_ntstatus( NtQueryInformationThread( thread, ThreadBasicInformation,
-                                                  &info, sizeof(info), NULL )))
-         return THREAD_PRIORITY_ERROR_RETURN;
-+#endif
-     return info.Priority;
- }
- 
 diff -Npur a/dlls/ntdll/unix/thread.c b/dlls/ntdll/unix/thread.c
 --- a/dlls/ntdll/unix/thread.c	2022-12-03 21:23:52.315015762 -0500
 +++ b/dlls/ntdll/unix/thread.c	2022-12-03 21:09:00.194516128 -0500
@@ -512,7 +475,7 @@ diff -Npur a/server/scheduler.c b/server/scheduler.c
 +    // Hardcoded to SCHED_FIFO just for TIME_CRITICAL threads.
 +    if (thread->priority >= THREAD_PRIORITY_TIME_CRITICAL )
 +    {
-+        //wine_rt_policy = SCHED_FIFO;
++        wine_rt_policy = SCHED_FIFO;
 +        param.sched_priority = thread_base_priority -2;
 +    }
 +    else if (thread->priority >= THREAD_PRIORITY_HIGHEST)
