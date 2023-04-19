@@ -1,0 +1,67 @@
+--- a/server/thread.c	2022-12-17 23:43:58.021097603 -0500
++++ b/server/thread.c	2022-12-17 23:43:49.521008185 -0500
+@@ -602,6 +602,42 @@ struct thread *create_thread( int fd, st
+     int request_pipe[2];
+ #ifdef __linux__
+     pthread_t pthread;
++    pthread_attr_t pthread_attr;
++    struct sched_param param;
++    int wine_rt_policy;
++    
++    // Get Wineserver RT policy
++    const char *policyStr = getenv("WINE_RT_POLICY");
++
++    // Set RT Priority min, max.
++    int min, max, priority;    
++    min = sched_get_priority_min( SCHED_FIFO );
++    max = sched_get_priority_max( SCHED_FIFO );
++    if (min == -1 || max == -1)
++        return;
++ 
++    // Set RT policy.
++    if (policyStr) {
++        if (strcmp(policyStr, "RR")==0)
++            wine_rt_policy = SCHED_RR;
++        if (strcmp(policyStr, "FF")==0)
++            wine_rt_policy = SCHED_FIFO;
++        else if (strcmp(policyStr, "TS")==0)
++            wine_rt_policy = SCHED_OTHER;
++    } 
++
++    if ((priority = get_priority( "WINE_RT_PRIO", min, max -1)) != -1)
++    {
++        memset( &param, 0, sizeof(param) );
++        param.sched_priority = priority -3;    
++
++        // Set pthread_attr, so they get for Wineserver threads
++        pthread_attr_init( &pthread_attr );
++        pthread_attr_setschedpolicy (&pthread_attr, wine_rt_policy | SCHED_RESET_ON_FORK);
++        pthread_attr_setschedparam (&pthread_attr, &param);
++        pthread_attr_setinheritsched (&pthread_attr, PTHREAD_EXPLICIT_SCHED);
++        pthread_attr_setscope( &pthread_attr, PTHREAD_SCOPE_SYSTEM ); 
++    }
+ #endif
+ 
+     if (memory_barrier_obj)
+@@ -690,7 +726,7 @@ struct thread *create_thread( int fd, st
+     }
+ 
+     grab_object( thread );
+-    if (pthread_create( &pthread, NULL, request_shm_thread, thread ))
++    if (pthread_create( &pthread, &pthread_attr, request_shm_thread, thread ))
+     {
+         release_object( thread );
+         release_object( thread );
+
+--- a/server/scheduler.c		2022-12-17 23:46:47.092846721 -0500
++++ b/server/scheduler.c	2022-12-17 23:46:36.975743470 -0500
+@@ -110,7 +110,7 @@ void init_scheduler( void )
+         pthread_attr_setinheritsched (&pthread_attr, PTHREAD_EXPLICIT_SCHED);
+         pthread_attr_setscope( &pthread_attr, PTHREAD_SCOPE_SYSTEM ); 
+         
+-        pthread_setschedparam (pthread_self(), srv_rt_policy, &param);
++        pthread_setschedparam (pthread_self(), srv_rt_policy | SCHED_RESET_ON_FORK, &param);
+     }    
+ 
+     /* determine base priority which will be used for all threads */
+
