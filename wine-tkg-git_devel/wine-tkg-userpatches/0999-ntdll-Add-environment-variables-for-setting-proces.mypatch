@@ -1,0 +1,97 @@
+From d2fdd742880c8847be1a6ff31c1ba9c3aca424c6 Mon Sep 17 00:00:00 2001
+From: Torge Matthies <openglfreak@googlemail.com>
+Date: Sun, 5 Feb 2023 22:11:02 +0100
+Subject: [PATCH] ntdll: Add environment variables for setting process
+ priority.
+
+---
+ dlls/ntdll/unix/server.c | 59 ++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 59 insertions(+)
+
+diff --git a/dlls/ntdll/unix/server.c b/dlls/ntdll/unix/server.c
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/unix/server.c
++++ b/dlls/ntdll/unix/server.c
+@@ -28,6 +28,8 @@
+ #include <ctype.h>
+ #include <errno.h>
+ #include <fcntl.h>
++#include <fnmatch.h>
++#include <limits.h>
+ #ifdef HAVE_LWP_H
+ #include <lwp.h>
+ #endif
+@@ -1829,6 +1831,62 @@ map_request_shm:
+ }
+ 
+ 
++static BOOL match_process_name( const char *pattern )
++{
++    char full_pattern[PATH_MAX];
++    if (snprintf( full_pattern, sizeof(full_pattern), "*[/\\]%s", pattern ) >= sizeof(full_pattern))
++        return FALSE;
++    return !fnmatch( full_pattern, main_argv[0], FNM_NOESCAPE );
++}
++
++
++static void set_process_priority_from_environ(void)
++{
++    char name[sizeof("STAGING_MATCH_PROCESS_4294967295")];
++    PROCESS_PRIORITY_CLASS ppc;
++    const char *pattern;
++    unsigned int i;
++
++    if (main_argc < 1)
++        return;
++
++    if (!(pattern = getenv( "STAGING_MATCH_PROCESS_0" )))
++        return;
++    if (match_process_name( pattern ))
++    {
++        ppc.Foreground = FALSE;
++        ppc.PriorityClass = atoi( getenv( "STAGING_PROCESS_PRIO_0" ) );
++        NtSetInformationProcess( GetCurrentProcess(), ProcessPriorityClass, &ppc, sizeof(ppc) );
++        return;
++    }
++
++    if (!(pattern = getenv( "STAGING_MATCH_PROCESS_1" )))
++        return;
++    if (match_process_name( pattern ))
++    {
++        ppc.Foreground = FALSE;
++        ppc.PriorityClass = atoi( getenv( "STAGING_PROCESS_PRIO_1" ) );
++        NtSetInformationProcess( GetCurrentProcess(), ProcessPriorityClass, &ppc, sizeof(ppc) );
++        return;
++    }
++
++    for (i = 2; i != 0; i++)
++    {
++        snprintf( name, sizeof(name), "STAGING_MATCH_PROCESS_%u", i );
++        if (!(pattern = getenv( name )))
++            return;
++        if (match_process_name( pattern ))
++        {
++            ppc.Foreground = FALSE;
++            snprintf( name, sizeof(name), "STAGING_PROCESS_PRIO_%u", i );
++            ppc.PriorityClass = atoi( getenv( name ) );
++            NtSetInformationProcess( GetCurrentProcess(), ProcessPriorityClass, &ppc, sizeof(ppc) );
++            return;
++        }
++    }
++}
++
++
+ /***********************************************************************
+  *           server_init_process_done
+  */
+@@ -1868,6 +1926,7 @@ void server_init_process_done(void)
+ 
+     assert( !status );
+     signal_start_thread( entry, peb, suspend, NtCurrentTeb() );
++    set_process_priority_from_environ();
+ }
+ 
+ 
+-- 
+2.40.0
+

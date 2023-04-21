@@ -1,13 +1,7 @@
- - Tweak hash_short_file_name() hash algorithm (with Remi's patchwork included)
- 
- This supposedly helped with avoiding hash collisions in the old wine-muse builds.
- 
- updated for wine-7.22+
- 
- johnstonljordan <AT> gmail <DOT> com
-
---- a/dlls/ntdll/unix/file.c	2021-12-07 11:04:56.412552038 -0500
-+++ b/dlls/ntdll/unix/file.c	2021-12-07 11:04:42.861379431 -0500
+diff --git a/dlls/ntdll/unix/file.c b/dlls/ntdll/unix/file.c
+index e2e2d0feaeb..cc6c8b6a737 100644
+--- a/dlls/ntdll/unix/file.c
++++ b/dlls/ntdll/unix/file.c
 @@ -177,9 +177,6 @@ typedef struct
  
  #define IS_SEPARATOR(ch)   ((ch) == '\\' || (ch) == '/')
@@ -60,46 +54,52 @@
  }
  
  /* check if the device can be a mounted volume */
-@@ -1497,7 +1523,7 @@ static ULONG hash_short_file_name( const
+@@ -1495,29 +1521,31 @@ static ULONG hash_short_file_name( const
+ {
+     static const char hash_chars[32] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ012345";
  
++    UINT64 hash_name[(MAX_DIR_ENTRY_LEN + 1) / 4];
++    WCHAR *hash_end = (WCHAR *)hash_name + length;
      LPCWSTR p, ext, end = name + length;
++    UINT64 hash, *tmp;
      LPWSTR dst;
 -    unsigned short hash;
-+    unsigned int hash;
      int i;
  
      /* Compute the hash code of the file name */
-@@ -1512,23 +1538,25 @@ static ULONG hash_short_file_name( const
-     else
-     {
-         for (p = name, hash = 0xbeef; p < end - 1; p++)
+     /* If you know something about hash functions, feel free to */
+     /* insert a better algorithm here... */
+-    if (!is_case_sensitive)
+-    {
+-        for (p = name, hash = 0xbeef; p < end - 1; p++)
+-            hash = (hash<<3) ^ (hash>>5) ^ towlower(*p) ^ (towlower(p[1]) << 8);
+-        hash = (hash<<3) ^ (hash>>5) ^ towlower(*p); /* Last character */
+-    }
+-    else
+-    {
+-        for (p = name, hash = 0xbeef; p < end - 1; p++)
 -            hash = (hash << 3) ^ (hash >> 5) ^ *p ^ (p[1] << 8);
-+            hash = (hash << 3) ^ (hash >> 5) ^ *p ^ (p[1] << 8) ^ (p[2] << 16);
-         hash = (hash << 3) ^ (hash >> 5) ^ *p;  /* Last character */
-     }
+-        hash = (hash << 3) ^ (hash >> 5) ^ *p;  /* Last character */
+-    }
++    if (is_case_sensitive)
++        memcpy( hash_name, name, length );
++    else for (p = name, dst = (WCHAR *)hash_name; p < end; p++, dst++)
++        *dst = towlower(*p);
++
++    memset( hash_end, 0, min( hash_name + ARRAY_SIZE(hash_name) - (UINT64 *)hash_end, 15 ) );
++    for (tmp = (UINT64 *)hash_name, hash = 0xbeef; tmp < (UINT64 *)(hash_end - 1); tmp++)
++        hash = (hash << 13) ^ (hash >> 19) ^ *tmp ^ (tmp[1] << 32);
++    hash = (hash << 13) ^ (hash >> 19) ^ *tmp;
++    hash = (hash >> 32) ^ (hash & 0xffffffff);
++    hash = (hash >> 16) ^ (hash & 0xffff);
  
      /* Find last dot for start of the extension */
 -    for (p = name + 1, ext = NULL; p < end - 1; p++) if (*p == '.') ext = p;
 +    for (ext = end - 2; ext > name; ext--) if (*ext == '.') break;
 +    if (ext == name) ext = NULL;
  
--    /* Copy first 4 chars, replacing invalid chars with '_' */
--    for (i = 4, p = name, dst = buffer; i > 0; i--, p++)
-+    /* Copy first 3 chars, replacing invalid chars with '_' */
-+    for (i = 3, p = name, dst = buffer; i > 0; i--, p++)
-     {
-         if (p == end || p == ext) break;
-         *dst++ = is_invalid_dos_char(*p) ? '_' : *p;
-     }
--    /* Pad to 5 chars with '~' */
-+    /* Pad to 4 chars with '~' */
-     while (i-- >= 0) *dst++ = '~';
- 
-     /* Insert hash code converted to 3 ASCII chars */
-+    *dst++ = hash_chars[(hash >> 15) & 0x1f];
-     *dst++ = hash_chars[(hash >> 10) & 0x1f];
-     *dst++ = hash_chars[(hash >> 5) & 0x1f];
-     *dst++ = hash_chars[hash & 0x1f];
+     /* Copy first 4 chars, replacing invalid chars with '_' */
+     for (i = 4, p = name, dst = buffer; i > 0; i--, p++)
 @@ -1634,7 +1662,6 @@ static BOOLEAN match_filename( const WCH
   */
  static BOOLEAN is_legal_8dot3_name( const WCHAR *name, int len )
@@ -118,7 +118,7 @@
          if (name[i] == '.')
          {
              if (dot != -1) return FALSE;
-@@ -4239,7 +4265,6 @@ static NTSTATUS lookup_unix_name( FILE_O
+@@ -4238,7 +4264,6 @@ static NTSTATUS lookup_unix_name( FILE_O
                                    char **buffer, int unix_len, int pos, UINT disposition,
                                    BOOL is_unix )
  {
@@ -126,7 +126,7 @@
      const WCHAR *fullname = fileobj->FileName.Buffer;
      NTSTATUS status;
      int ret;
-@@ -4267,7 +4292,7 @@ static NTSTATUS lookup_unix_name( FILE_O
+@@ -4266,7 +4291,7 @@ static NTSTATUS lookup_unix_name( FILE_O
          {
              if (!*ptr) return STATUS_OBJECT_NAME_INVALID;
              if (is_unix) continue;
@@ -135,7 +135,7 @@
          }
      }
  
-@@ -4385,7 +4410,6 @@ static NTSTATUS nt_to_unix_file_name_no_
+@@ -4384,7 +4409,6 @@ static NTSTATUS nt_to_unix_file_name_no_
                                                UINT disposition )
  {
      static const WCHAR unixW[] = {'u','n','i','x'};
@@ -143,7 +143,7 @@
      const UNICODE_STRING *nameW = &fileobj->FileName;
      NTSTATUS status = STATUS_SUCCESS;
      const WCHAR *name;
-@@ -4412,8 +4436,7 @@ static NTSTATUS nt_to_unix_file_name_no_
+@@ -4411,8 +4435,7 @@ static NTSTATUS nt_to_unix_file_name_no_
      for (pos = 0; pos < name_len && pos <= MAX_DIR_ENTRY_LEN; pos++)
      {
          if (name[pos] == '\\') break;
@@ -153,4 +153,3 @@
          prefix[pos] = (name[pos] >= 'A' && name[pos] <= 'Z') ? name[pos] + 'a' - 'A' : name[pos];
      }
      if (pos > MAX_DIR_ENTRY_LEN) return STATUS_OBJECT_NAME_INVALID;
-

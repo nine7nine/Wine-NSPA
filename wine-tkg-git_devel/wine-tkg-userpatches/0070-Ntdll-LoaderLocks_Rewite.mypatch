@@ -36,7 +36,7 @@ index 11111111111..11111111111 100644
      return status;
  }
  
-@@ -3405,12 +3402,10 @@ static NTSTATUS find_query_actctx( HANDLE *handle, DWORD flags, ULONG class )
+@@ -3406,12 +3403,10 @@ static NTSTATUS find_query_actctx( HANDLE *handle, DWORD flags, ULONG class )
      }
      else if (flags & (QUERY_ACTCTX_FLAG_ACTCTX_IS_ADDRESS|QUERY_ACTCTX_FLAG_ACTCTX_IS_HMODULE))
      {
@@ -49,7 +49,7 @@ index 11111111111..11111111111 100644
          if (!LdrFindEntryForAddress( *handle, &pldr ))
          {
              if ((flags & QUERY_ACTCTX_FLAG_ACTCTX_IS_HMODULE) && *handle != pldr->DllBase)
-@@ -3419,7 +3414,6 @@ static NTSTATUS find_query_actctx( HANDLE *handle, DWORD flags, ULONG class )
+@@ -3420,7 +3415,6 @@ static NTSTATUS find_query_actctx( HANDLE *handle, DWORD flags, ULONG class )
                  *handle = pldr->ActivationContext;
          }
          else status = STATUS_DLL_NOT_FOUND;
@@ -61,7 +61,7 @@ diff --git a/dlls/ntdll/loader.c b/dlls/ntdll/loader.c
 index 11111111111..11111111111 100644
 --- a/dlls/ntdll/loader.c
 +++ b/dlls/ntdll/loader.c
-@@ -181,6 +181,10 @@ static PEB_LDR_DATA ldr =
+@@ -184,6 +184,10 @@ static PEB_LDR_DATA ldr =
      { &ldr.InMemoryOrderModuleList, &ldr.InMemoryOrderModuleList },
      { &ldr.InInitializationOrderModuleList, &ldr.InInitializationOrderModuleList }
  };
@@ -72,7 +72,7 @@ index 11111111111..11111111111 100644
  
  static RTL_BITMAP tls_bitmap;
  static RTL_BITMAP tls_expansion_bitmap;
-@@ -1499,12 +1503,14 @@ static WINE_MODREF *alloc_module( HMODULE hModule, const UNICODE_STRING *nt_name
+@@ -1503,12 +1507,14 @@ static WINE_MODREF *alloc_module( HMODULE hModule, const UNICODE_STRING *nt_name
              wm->ldr.EntryPoint = (char *)hModule + nt->OptionalHeader.AddressOfEntryPoint;
      }
  
@@ -87,7 +87,7 @@ index 11111111111..11111111111 100644
  
      /* wait until init is called for inserting into InInitializationOrderModuleList */
      wm->ldr.InInitializationOrderLinks.Flink = NULL;
-@@ -1713,8 +1719,12 @@ static NTSTATUS process_attach( LDR_DDAG_NODE *node, LPVOID lpReserved )
+@@ -1714,8 +1720,12 @@ static NTSTATUS process_attach( LDR_DDAG_NODE *node, LPVOID lpReserved )
      status = walk_node_dependencies( node, lpReserved, process_attach );
  
      if (!wm->ldr.InInitializationOrderLinks.Flink)
@@ -100,7 +100,7 @@ index 11111111111..11111111111 100644
  
      /* Call DLL entry point */
      if (status == STATUS_SUCCESS)
-@@ -1837,13 +1847,14 @@ NTSTATUS WINAPI LdrDisableThreadCalloutsForDll(HMODULE hModule)
+@@ -1838,13 +1848,14 @@ NTSTATUS WINAPI LdrDisableThreadCalloutsForDll(HMODULE hModule)
  /******************************************************************
   *              LdrFindEntryForAddress (NTDLL.@)
   *
@@ -116,7 +116,7 @@ index 11111111111..11111111111 100644
      mark = &NtCurrentTeb()->Peb->LdrData->InMemoryOrderModuleList;
      for (entry = mark->Flink; entry != mark; entry = entry->Flink)
      {
-@@ -1852,10 +1863,12 @@ NTSTATUS WINAPI LdrFindEntryForAddress( const void *addr, PLDR_DATA_TABLE_ENTRY
+@@ -1853,10 +1864,12 @@ NTSTATUS WINAPI LdrFindEntryForAddress( const void *addr, PLDR_DATA_TABLE_ENTRY
              (const char *)addr < (char*)mod->DllBase + mod->SizeOfImage)
          {
              *pmod = mod;
@@ -131,7 +131,7 @@ index 11111111111..11111111111 100644
  }
  
  /******************************************************************
-@@ -3871,11 +3884,13 @@ static void free_modref( WINE_MODREF *wm )
+@@ -3932,11 +3945,13 @@ static void free_modref( WINE_MODREF *wm )
      SINGLE_LIST_ENTRY *entry;
      LDR_DEPENDENCY *dep;
  
@@ -147,7 +147,7 @@ index 11111111111..11111111111 100644
      {
 
 -- 
-2.37.2
+2.40.0
 
 From: Paul Gofman <pgofman@codeweavers.com>
 Subject: [PATCH v2 2/7] ntoskrnl: Don't take loader lock in find_ldr_module().
@@ -165,7 +165,7 @@ diff --git a/dlls/ntoskrnl.exe/ntoskrnl.c b/dlls/ntoskrnl.exe/ntoskrnl.c
 index 11111111111..11111111111 100644
 --- a/dlls/ntoskrnl.exe/ntoskrnl.c
 +++ b/dlls/ntoskrnl.exe/ntoskrnl.c
-@@ -3669,15 +3669,12 @@ error:
+@@ -3767,15 +3767,12 @@ error:
  static LDR_DATA_TABLE_ENTRY *find_ldr_module( HMODULE module )
  {
      LDR_DATA_TABLE_ENTRY *ldr;
@@ -183,7 +183,7 @@ index 11111111111..11111111111 100644
  }
 
 -- 
-2.37.2
+2.40.0
 
 From: Paul Gofman <pgofman@codeweavers.com>
 Subject: [PATCH v2 3/7] ntdll: Use helpers to lock and unlock loader_section.
@@ -201,7 +201,7 @@ diff --git a/dlls/ntdll/loader.c b/dlls/ntdll/loader.c
 index 11111111111..11111111111 100644
 --- a/dlls/ntdll/loader.c
 +++ b/dlls/ntdll/loader.c
-@@ -214,6 +214,26 @@ static inline BOOL contains_path( LPCWSTR name )
+@@ -217,6 +217,26 @@ static inline BOOL contains_path( LPCWSTR name )
      return ((*name && (name[1] == ':')) || wcschr(name, '/') || wcschr(name, '\\'));
  }
  
@@ -228,7 +228,7 @@ index 11111111111..11111111111 100644
  #define RTL_UNLOAD_EVENT_TRACE_NUMBER 64
  
  typedef struct _RTL_UNLOAD_EVENT_TRACE
-@@ -538,7 +558,7 @@ static ULONG hash_basename(const WCHAR *basename)
+@@ -541,7 +561,7 @@ static ULONG hash_basename(const WCHAR *basename)
   *		get_modref
   *
   * Looks for the referenced HMODULE in the current process
@@ -237,7 +237,7 @@ index 11111111111..11111111111 100644
   */
  static WINE_MODREF *get_modref( HMODULE hmod )
  {
-@@ -562,7 +582,7 @@ static WINE_MODREF *get_modref( HMODULE hmod )
+@@ -565,7 +585,7 @@ static WINE_MODREF *get_modref( HMODULE hmod )
   *	    find_basename_module
   *
   * Find a module from its base name.
@@ -246,7 +246,7 @@ index 11111111111..11111111111 100644
   */
  static WINE_MODREF *find_basename_module( LPCWSTR name )
  {
-@@ -592,7 +612,7 @@ static WINE_MODREF *find_basename_module( LPCWSTR name )
+@@ -595,7 +615,7 @@ static WINE_MODREF *find_basename_module( LPCWSTR name )
   *	    find_fullname_module
   *
   * Find a module from its full path name.
@@ -255,7 +255,7 @@ index 11111111111..11111111111 100644
   */
  static WINE_MODREF *find_fullname_module( const UNICODE_STRING *nt_name )
  {
-@@ -624,7 +644,7 @@ static WINE_MODREF *find_fullname_module( const UNICODE_STRING *nt_name )
+@@ -627,7 +647,7 @@ static WINE_MODREF *find_fullname_module( const UNICODE_STRING *nt_name )
   *	    find_fileid_module
   *
   * Find a module from its file id.
@@ -264,7 +264,7 @@ index 11111111111..11111111111 100644
   */
  static WINE_MODREF *find_fileid_module( const struct file_id *id )
  {
-@@ -890,7 +910,7 @@ static NTSTATUS walk_node_dependencies( LDR_DDAG_NODE *node, void *context,
+@@ -893,7 +913,7 @@ static NTSTATUS walk_node_dependencies( LDR_DDAG_NODE *node, void *context,
   *		find_forwarded_export
   *
   * Find the final function pointer for a forwarded function.
@@ -273,7 +273,7 @@ index 11111111111..11111111111 100644
   */
  static FARPROC find_forwarded_export( HMODULE module, const char *forward, LPCWSTR load_path )
  {
-@@ -957,7 +977,7 @@ static FARPROC find_forwarded_export( HMODULE module, const char *forward, LPCWS
+@@ -960,7 +980,7 @@ static FARPROC find_forwarded_export( HMODULE module, const char *forward, LPCWS
   *
   * Find an exported function by ordinal.
   * The exports base must have been subtracted from the ordinal already.
@@ -282,7 +282,7 @@ index 11111111111..11111111111 100644
   */
  static FARPROC find_ordinal_export( HMODULE module, const IMAGE_EXPORT_DIRECTORY *exports,
                                      DWORD exp_size, DWORD ordinal, LPCWSTR load_path )
-@@ -1020,7 +1040,7 @@ static int find_name_in_exports( HMODULE module, const IMAGE_EXPORT_DIRECTORY *e
+@@ -1023,7 +1043,7 @@ static int find_name_in_exports( HMODULE module, const IMAGE_EXPORT_DIRECTORY *e
   *		find_named_export
   *
   * Find an exported function by name.
@@ -291,7 +291,7 @@ index 11111111111..11111111111 100644
   */
  static FARPROC find_named_export( HMODULE module, const IMAGE_EXPORT_DIRECTORY *exports,
                                    DWORD exp_size, const char *name, int hint, LPCWSTR load_path )
-@@ -1069,7 +1089,7 @@ void * WINAPI RtlFindExportedRoutineByName( HMODULE module, const char *name )
+@@ -1072,7 +1092,7 @@ void * WINAPI RtlFindExportedRoutineByName( HMODULE module, const char *name )
   *		import_dll
   *
   * Import the dll specified by the given import descriptor.
@@ -300,16 +300,16 @@ index 11111111111..11111111111 100644
   */
  static BOOL import_dll( HMODULE module, const IMAGE_IMPORT_DESCRIPTOR *descr, LPCWSTR load_path, WINE_MODREF **pwm )
  {
-@@ -1257,7 +1277,7 @@ static BOOL is_dll_native_subsystem( LDR_DATA_TABLE_ENTRY *mod, const IMAGE_NT_H
+@@ -1260,7 +1280,7 @@ static BOOL is_dll_native_subsystem( LDR_DATA_TABLE_ENTRY *mod, const IMAGE_NT_H
   *		alloc_tls_slot
   *
   * Allocate a TLS slot for a newly-loaded module.
 - * The loader_section must be locked while calling this function.
 + * The loader must be locked while calling this function.
   */
- static SHORT alloc_tls_slot( LDR_DATA_TABLE_ENTRY *mod )
+ static BOOL alloc_tls_slot( LDR_DATA_TABLE_ENTRY *mod )
  {
-@@ -1341,7 +1361,7 @@ static SHORT alloc_tls_slot( LDR_DATA_TABLE_ENTRY *mod )
+@@ -1344,7 +1364,7 @@ static BOOL alloc_tls_slot( LDR_DATA_TABLE_ENTRY *mod )
   *		free_tls_slot
   *
   * Free the module TLS slot on unload.
@@ -318,7 +318,7 @@ index 11111111111..11111111111 100644
   */
  static void free_tls_slot( LDR_DATA_TABLE_ENTRY *mod )
  {
-@@ -1357,7 +1377,7 @@ static void free_tls_slot( LDR_DATA_TABLE_ENTRY *mod )
+@@ -1366,7 +1386,7 @@ static void free_tls_slot( LDR_DATA_TABLE_ENTRY *mod )
   *       fixup_imports_ilonly
   *
   * Fixup imports for an IL-only module. All we do is import mscoree.
@@ -327,7 +327,7 @@ index 11111111111..11111111111 100644
   */
  static NTSTATUS fixup_imports_ilonly( WINE_MODREF *wm, LPCWSTR load_path, void **entry )
  {
-@@ -1396,7 +1416,7 @@ static NTSTATUS fixup_imports_ilonly( WINE_MODREF *wm, LPCWSTR load_path, void *
+@@ -1405,7 +1425,7 @@ static NTSTATUS fixup_imports_ilonly( WINE_MODREF *wm, LPCWSTR load_path, void *
   *       fixup_imports
   *
   * Fixup all imports of a given module.
@@ -336,7 +336,7 @@ index 11111111111..11111111111 100644
   */
  static NTSTATUS fixup_imports( WINE_MODREF *wm, LPCWSTR load_path )
  {
-@@ -1454,7 +1474,7 @@ static NTSTATUS fixup_imports( WINE_MODREF *wm, LPCWSTR load_path )
+@@ -1458,7 +1478,7 @@ static NTSTATUS fixup_imports( WINE_MODREF *wm, LPCWSTR load_path )
   *		alloc_module
   *
   * Allocate a WINE_MODREF structure and add it to the process list
@@ -345,7 +345,7 @@ index 11111111111..11111111111 100644
   */
  static WINE_MODREF *alloc_module( HMODULE hModule, const UNICODE_STRING *nt_name, BOOL builtin )
  {
-@@ -1689,7 +1709,7 @@ static NTSTATUS MODULE_InitDLL( WINE_MODREF *wm, UINT reason, LPVOID lpReserved
+@@ -1690,7 +1710,7 @@ static NTSTATUS MODULE_InitDLL( WINE_MODREF *wm, UINT reason, LPVOID lpReserved
   * detach notifications are called in the reverse of the sequence the attach
   * notifications *returned*.
   *
@@ -354,7 +354,7 @@ index 11111111111..11111111111 100644
   */
  static NTSTATUS process_attach( LDR_DDAG_NODE *node, LPVOID lpReserved )
  {
-@@ -1801,7 +1821,7 @@ static void process_detach(void)
+@@ -1802,7 +1822,7 @@ static void process_detach(void)
   *
   * Send DLL thread attach notifications. These are sent in the
   * reverse sequence of process detach notification.
@@ -363,7 +363,7 @@ index 11111111111..11111111111 100644
   */
  static void thread_attach(void)
  {
-@@ -1831,7 +1851,7 @@ NTSTATUS WINAPI LdrDisableThreadCalloutsForDll(HMODULE hModule)
+@@ -1832,7 +1852,7 @@ NTSTATUS WINAPI LdrDisableThreadCalloutsForDll(HMODULE hModule)
      WINE_MODREF *wm;
      NTSTATUS    ret = STATUS_SUCCESS;
  
@@ -371,8 +371,8 @@ index 11111111111..11111111111 100644
 +    lock_loader_exclusive();
  
      wm = get_modref( hModule );
-     if (!wm || wm->ldr.TlsIndex != -1)
-@@ -1839,7 +1859,7 @@ NTSTATUS WINAPI LdrDisableThreadCalloutsForDll(HMODULE hModule)
+     if (!wm || wm->ldr.TlsIndex == -1)
+@@ -1840,7 +1860,7 @@ NTSTATUS WINAPI LdrDisableThreadCalloutsForDll(HMODULE hModule)
      else
          wm->ldr.Flags |= LDR_NO_DLL_CALLS;
  
@@ -381,7 +381,7 @@ index 11111111111..11111111111 100644
  
      return ret;
  }
-@@ -1885,7 +1905,7 @@ NTSTATUS WINAPI LdrEnumerateLoadedModules( void *unknown, LDRENUMPROC callback,
+@@ -1886,7 +1906,7 @@ NTSTATUS WINAPI LdrEnumerateLoadedModules( void *unknown, LDRENUMPROC callback,
      if (unknown || !callback)
          return STATUS_INVALID_PARAMETER;
  
@@ -390,7 +390,7 @@ index 11111111111..11111111111 100644
  
      mark = &NtCurrentTeb()->Peb->LdrData->InMemoryOrderModuleList;
      for (entry = mark->Flink; entry != mark; entry = entry->Flink)
-@@ -1895,7 +1915,7 @@ NTSTATUS WINAPI LdrEnumerateLoadedModules( void *unknown, LDRENUMPROC callback,
+@@ -1896,7 +1916,7 @@ NTSTATUS WINAPI LdrEnumerateLoadedModules( void *unknown, LDRENUMPROC callback,
          if (stop) break;
      }
  
@@ -399,7 +399,7 @@ index 11111111111..11111111111 100644
      return STATUS_SUCCESS;
  }
  
-@@ -1920,9 +1940,9 @@ NTSTATUS WINAPI LdrRegisterDllNotification(ULONG flags, PLDR_DLL_NOTIFICATION_FU
+@@ -1921,9 +1941,9 @@ NTSTATUS WINAPI LdrRegisterDllNotification(ULONG flags, PLDR_DLL_NOTIFICATION_FU
      notify->callback = callback;
      notify->context = context;
  
@@ -411,7 +411,7 @@ index 11111111111..11111111111 100644
  
      *cookie = notify;
      return STATUS_SUCCESS;
-@@ -1939,9 +1959,9 @@ NTSTATUS WINAPI LdrUnregisterDllNotification( void *cookie )
+@@ -1940,9 +1960,9 @@ NTSTATUS WINAPI LdrUnregisterDllNotification( void *cookie )
  
      if (!notify) return STATUS_INVALID_PARAMETER;
  
@@ -423,7 +423,7 @@ index 11111111111..11111111111 100644
  
      RtlFreeHeap( GetProcessHeap(), 0, notify );
      return STATUS_SUCCESS;
-@@ -2096,7 +2116,7 @@ NTSTATUS WINAPI LdrGetProcedureAddress(HMODULE module, const ANSI_STRING *name,
+@@ -2097,7 +2117,7 @@ NTSTATUS WINAPI LdrGetProcedureAddress(HMODULE module, const ANSI_STRING *name,
      DWORD exp_size;
      NTSTATUS ret = STATUS_PROCEDURE_NOT_FOUND;
  
@@ -432,7 +432,7 @@ index 11111111111..11111111111 100644
  
      /* check if the module itself is invalid to return the proper error */
      if (!get_modref( module )) ret = STATUS_DLL_NOT_FOUND;
-@@ -2112,7 +2132,7 @@ NTSTATUS WINAPI LdrGetProcedureAddress(HMODULE module, const ANSI_STRING *name,
+@@ -2113,7 +2133,7 @@ NTSTATUS WINAPI LdrGetProcedureAddress(HMODULE module, const ANSI_STRING *name,
          }
      }
  
@@ -441,7 +441,7 @@ index 11111111111..11111111111 100644
      return ret;
  }
  
-@@ -3249,7 +3269,7 @@ done:
+@@ -3247,7 +3267,7 @@ done:
   *	load_dll  (internal)
   *
   * Load a PE style module according to the load order.
@@ -450,7 +450,7 @@ index 11111111111..11111111111 100644
   */
  static NTSTATUS load_dll( const WCHAR *load_path, const WCHAR *libname, DWORD flags, WINE_MODREF** pwm, BOOL system )
  {
-@@ -3344,7 +3364,7 @@ NTSTATUS WINAPI DECLSPEC_HOTPATCH LdrLoadDll(LPCWSTR path_name, DWORD flags,
+@@ -3404,7 +3424,7 @@ NTSTATUS WINAPI DECLSPEC_HOTPATCH LdrLoadDll(LPCWSTR path_name, DWORD flags,
      NTSTATUS nts;
      WCHAR *dllname = append_dll_ext( libname->Buffer );
  
@@ -459,7 +459,7 @@ index 11111111111..11111111111 100644
  
      nts = load_dll( path_name, dllname ? dllname : libname->Buffer, flags, &wm, FALSE );
  
-@@ -3359,7 +3379,7 @@ NTSTATUS WINAPI DECLSPEC_HOTPATCH LdrLoadDll(LPCWSTR path_name, DWORD flags,
+@@ -3419,7 +3439,7 @@ NTSTATUS WINAPI DECLSPEC_HOTPATCH LdrLoadDll(LPCWSTR path_name, DWORD flags,
      }
      *hModule = (wm) ? wm->ldr.DllBase : NULL;
  
@@ -468,7 +468,7 @@ index 11111111111..11111111111 100644
      RtlFreeHeap( GetProcessHeap(), 0, dllname );
      return nts;
  }
-@@ -3377,7 +3397,7 @@ NTSTATUS WINAPI LdrGetDllFullName( HMODULE module, UNICODE_STRING *name )
+@@ -3437,7 +3457,7 @@ NTSTATUS WINAPI LdrGetDllFullName( HMODULE module, UNICODE_STRING *name )
  
      if (!module) module = NtCurrentTeb()->Peb->ImageBaseAddress;
  
@@ -477,7 +477,7 @@ index 11111111111..11111111111 100644
      wm = get_modref( module );
      if (wm)
      {
-@@ -3385,7 +3405,7 @@ NTSTATUS WINAPI LdrGetDllFullName( HMODULE module, UNICODE_STRING *name )
+@@ -3445,7 +3465,7 @@ NTSTATUS WINAPI LdrGetDllFullName( HMODULE module, UNICODE_STRING *name )
          if (name->MaximumLength < wm->ldr.FullDllName.Length + sizeof(WCHAR)) status = STATUS_BUFFER_TOO_SMALL;
          else status = STATUS_SUCCESS;
      } else status = STATUS_DLL_NOT_FOUND;
@@ -486,7 +486,7 @@ index 11111111111..11111111111 100644
  
      return status;
  }
-@@ -3423,7 +3443,7 @@ NTSTATUS WINAPI LdrGetDllHandleEx( ULONG flags, LPCWSTR load_path, ULONG *dll_ch
+@@ -3483,7 +3503,7 @@ NTSTATUS WINAPI LdrGetDllHandleEx( ULONG flags, LPCWSTR load_path, ULONG *dll_ch
  
      dllname = append_dll_ext( name->Buffer );
  
@@ -495,7 +495,7 @@ index 11111111111..11111111111 100644
  
      status = find_dll_file( load_path, dllname ? dllname : name->Buffer,
                              &nt_name, &wm, &mapping, &image_info, &id );
-@@ -3444,7 +3464,7 @@ NTSTATUS WINAPI LdrGetDllHandleEx( ULONG flags, LPCWSTR load_path, ULONG *dll_ch
+@@ -3504,7 +3524,7 @@ NTSTATUS WINAPI LdrGetDllHandleEx( ULONG flags, LPCWSTR load_path, ULONG *dll_ch
              LdrAddRefDll( 0, *base );
      }
  
@@ -504,16 +504,16 @@ index 11111111111..11111111111 100644
      RtlFreeHeap( GetProcessHeap(), 0, dllname );
      TRACE( "%s -> %p (load path %s)\n", debugstr_us(name), status ? NULL : *base, debugstr_w(load_path) );
      return status;
-@@ -3470,7 +3490,7 @@ NTSTATUS WINAPI LdrAddRefDll( ULONG flags, HMODULE module )
+@@ -3530,7 +3550,7 @@ NTSTATUS WINAPI LdrAddRefDll( ULONG flags, HMODULE module )
  
-     if (flags & ~LDR_ADDREF_DLL_PIN) FIXME( "%p flags %x not implemented\n", module, flags );
+     if (flags & ~LDR_ADDREF_DLL_PIN) FIXME( "%p flags %lx not implemented\n", module, flags );
  
 -    RtlEnterCriticalSection( &loader_section );
 +    lock_loader_exclusive();
  
      if ((wm = get_modref( module )))
      {
-@@ -3482,7 +3502,7 @@ NTSTATUS WINAPI LdrAddRefDll( ULONG flags, HMODULE module )
+@@ -3542,7 +3562,7 @@ NTSTATUS WINAPI LdrAddRefDll( ULONG flags, HMODULE module )
      }
      else ret = STATUS_INVALID_PARAMETER;
  
@@ -522,7 +522,7 @@ index 11111111111..11111111111 100644
      return ret;
  }
  
-@@ -3568,7 +3588,7 @@ NTSTATUS WINAPI LdrQueryProcessModuleInformation(RTL_PROCESS_MODULES *smi,
+@@ -3628,7 +3648,7 @@ NTSTATUS WINAPI LdrQueryProcessModuleInformation(RTL_PROCESS_MODULES *smi,
  
      smi->ModulesCount = 0;
  
@@ -531,7 +531,7 @@ index 11111111111..11111111111 100644
      mark = &NtCurrentTeb()->Peb->LdrData->InLoadOrderModuleList;
      for (entry = mark->Flink; entry != mark; entry = entry->Flink)
      {
-@@ -3596,7 +3616,7 @@ NTSTATUS WINAPI LdrQueryProcessModuleInformation(RTL_PROCESS_MODULES *smi,
+@@ -3656,7 +3676,7 @@ NTSTATUS WINAPI LdrQueryProcessModuleInformation(RTL_PROCESS_MODULES *smi,
          }
          else nts = STATUS_INFO_LENGTH_MISMATCH;
      }
@@ -540,7 +540,7 @@ index 11111111111..11111111111 100644
  
      if (req_size) *req_size = size;
  
-@@ -3809,7 +3829,7 @@ extern const char * CDECL wine_get_version(void);
+@@ -3869,7 +3889,7 @@ extern const char * CDECL wine_get_version(void);
   */
  void WINAPI RtlExitUserProcess( DWORD status )
  {
@@ -549,7 +549,7 @@ index 11111111111..11111111111 100644
      RtlAcquirePebLock();
      NtTerminateProcess( 0, status );
      LdrShutdownProcess();
-@@ -3836,7 +3856,7 @@ void WINAPI LdrShutdownThread(void)
+@@ -3895,7 +3915,7 @@ void WINAPI LdrShutdownThread(void)
  
      RtlProcessFlsData( NtCurrentTeb()->FlsSlots, 1 );
  
@@ -558,7 +558,7 @@ index 11111111111..11111111111 100644
      wm = get_modref( NtCurrentTeb()->Peb->ImageBaseAddress );
  
      mark = &NtCurrentTeb()->Peb->LdrData->InInitializationOrderModuleList;
-@@ -3868,7 +3888,7 @@ void WINAPI LdrShutdownThread(void)
+@@ -3927,7 +3947,7 @@ void WINAPI LdrShutdownThread(void)
      NtCurrentTeb()->TlsExpansionSlots = NULL;
      RtlReleasePebLock();
  
@@ -567,7 +567,7 @@ index 11111111111..11111111111 100644
      /* don't call DbgUiGetThreadDebugObject as some apps hook it and terminate if called */
      if (NtCurrentTeb()->DbgSsReserved[1]) NtClose( NtCurrentTeb()->DbgSsReserved[1] );
      RtlFreeThreadActivationContextStack();
-@@ -4011,7 +4031,7 @@ static void MODULE_FlushModrefs( void ***modules, unsigned int *num_modules )
+@@ -4072,7 +4092,7 @@ static void MODULE_FlushModrefs( void ***modules, unsigned int *num_modules )
  /***********************************************************************
   *           MODULE_DecRefCount
   *
@@ -585,7 +585,7 @@ index 11111111111..11111111111 100644
 #  */
 # static void MODULE_DecRefCount( WINE_MODREF *wm )
 # {
-@@ -4056,7 +4076,7 @@ NTSTATUS WINAPI LdrUnloadDll( HMODULE hModule )
+@@ -4117,7 +4137,7 @@ NTSTATUS WINAPI LdrUnloadDll( HMODULE hModule )
  
      TRACE("(%p)\n", hModule);
  
@@ -594,7 +594,7 @@ index 11111111111..11111111111 100644
  
      free_lib_count++;
      if ((wm = get_modref( hModule )) != NULL)
-@@ -4080,7 +4100,7 @@ NTSTATUS WINAPI LdrUnloadDll( HMODULE hModule )
+@@ -4141,7 +4161,7 @@ NTSTATUS WINAPI LdrUnloadDll( HMODULE hModule )
  
      free_lib_count--;
  
@@ -603,7 +603,7 @@ index 11111111111..11111111111 100644
  
      if (num_freed > 0)
      {
-@@ -4208,7 +4228,7 @@ static void init_wow64( CONTEXT *context )
+@@ -4271,7 +4291,7 @@ static void init_wow64( CONTEXT *context )
          imports_fixup_done = TRUE;
      }
  
@@ -612,7 +612,7 @@ index 11111111111..11111111111 100644
      pWow64LdrpInitialize( context );
  }
  
-@@ -4314,7 +4334,7 @@ void WINAPI LdrInitializeThunk( CONTEXT *context, ULONG_PTR unknown2, ULONG_PTR
+@@ -4376,7 +4396,7 @@ void WINAPI LdrInitializeThunk( CONTEXT *context, ULONG_PTR unknown2, ULONG_PTR
  
      if (process_detaching) NtTerminateThread( GetCurrentThread(), 0 );
  
@@ -621,8 +621,8 @@ index 11111111111..11111111111 100644
  
      if (!imports_fixup_done)
      {
-@@ -4451,7 +4471,7 @@ void WINAPI LdrInitializeThunk( CONTEXT *context, ULONG_PTR unknown2, ULONG_PTR
-         if (wm->ldr.TlsIndex != -1) call_tls_callbacks( wm->ldr.DllBase, DLL_THREAD_ATTACH );
+@@ -4514,7 +4534,7 @@ void WINAPI LdrInitializeThunk( CONTEXT *context, ULONG_PTR unknown2, ULONG_PTR
+         if (wm->ldr.TlsIndex == -1) call_tls_callbacks( wm->ldr.DllBase, DLL_THREAD_ATTACH );
      }
  
 -    RtlLeaveCriticalSection( &loader_section );
@@ -630,7 +630,7 @@ index 11111111111..11111111111 100644
      signal_start_thread( context );
  }
  
-@@ -4541,9 +4561,9 @@ PVOID WINAPI RtlPcToFileHeader( PVOID pc, PVOID *address )
+@@ -4613,9 +4633,9 @@ PVOID WINAPI RtlPcToFileHeader( PVOID pc, PVOID *address )
      LDR_DATA_TABLE_ENTRY *module;
      PVOID ret = NULL;
  
@@ -644,7 +644,7 @@ index 11111111111..11111111111 100644
  }
 
 -- 
-2.37.2
+2.40.0
 
 From: Paul Gofman <pgofman@codeweavers.com>
 Subject: [PATCH v2 4/7] ntdll: Use a critical section for guarding ldr_notifications list.
@@ -662,7 +662,7 @@ diff --git a/dlls/ntdll/loader.c b/dlls/ntdll/loader.c
 index 11111111111..11111111111 100644
 --- a/dlls/ntdll/loader.c
 +++ b/dlls/ntdll/loader.c
-@@ -118,6 +118,15 @@ struct ldr_notification
+@@ -121,6 +121,15 @@ struct ldr_notification
  
  static struct list ldr_notifications = LIST_INIT( ldr_notifications );
  
@@ -678,23 +678,23 @@ index 11111111111..11111111111 100644
  static const char * const reason_names[] =
  {
      "PROCESS_DETACH",
-@@ -515,6 +524,7 @@ static void call_ldr_notifications( ULONG reason, LDR_DATA_TABLE_ENTRY *module )
+@@ -518,6 +527,7 @@ static void call_ldr_notifications( ULONG reason, LDR_DATA_TABLE_ENTRY *module )
      data.Loaded.DllBase     = module->DllBase;
      data.Loaded.SizeOfImage = module->SizeOfImage;
  
 +    RtlEnterCriticalSection( &ldr_notifications_section );
      LIST_FOR_EACH_ENTRY_SAFE( notify, notify_next, &ldr_notifications, struct ldr_notification, entry )
      {
-         TRACE_(relay)("\1Call LDR notification callback (proc=%p,reason=%u,data=%p,context=%p)\n",
-@@ -525,6 +535,7 @@ static void call_ldr_notifications( ULONG reason, LDR_DATA_TABLE_ENTRY *module )
-         TRACE_(relay)("\1Ret  LDR notification callback (proc=%p,reason=%u,data=%p,context=%p)\n",
+         TRACE_(relay)("\1Call LDR notification callback (proc=%p,reason=%lu,data=%p,context=%p)\n",
+@@ -528,6 +538,7 @@ static void call_ldr_notifications( ULONG reason, LDR_DATA_TABLE_ENTRY *module )
+         TRACE_(relay)("\1Ret  LDR notification callback (proc=%p,reason=%lu,data=%p,context=%p)\n",
                  notify->callback, reason, &data, notify->context );
      }
 +    RtlLeaveCriticalSection( &ldr_notifications_section );
  }
  
  /*************************************************************************
-@@ -1940,9 +1951,9 @@ NTSTATUS WINAPI LdrRegisterDllNotification(ULONG flags, PLDR_DLL_NOTIFICATION_FU
+@@ -1941,9 +1952,9 @@ NTSTATUS WINAPI LdrRegisterDllNotification(ULONG flags, PLDR_DLL_NOTIFICATION_FU
      notify->callback = callback;
      notify->context = context;
  
@@ -706,7 +706,7 @@ index 11111111111..11111111111 100644
  
      *cookie = notify;
      return STATUS_SUCCESS;
-@@ -1959,9 +1970,9 @@ NTSTATUS WINAPI LdrUnregisterDllNotification( void *cookie )
+@@ -1960,9 +1971,9 @@ NTSTATUS WINAPI LdrUnregisterDllNotification( void *cookie )
  
      if (!notify) return STATUS_INVALID_PARAMETER;
  
@@ -720,7 +720,7 @@ index 11111111111..11111111111 100644
      return STATUS_SUCCESS;
 
 -- 
-2.37.2
+2.40.0
 
 From: Paul Gofman <pgofman@codeweavers.com>
 Subject: [PATCH v2 5/7] ntdll: Only lock loader_section when calling application callbacks().
@@ -742,7 +742,7 @@ diff --git a/dlls/ntdll/loader.c b/dlls/ntdll/loader.c
 index 11111111111..11111111111 100644
 --- a/dlls/ntdll/loader.c
 +++ b/dlls/ntdll/loader.c
-@@ -165,6 +165,8 @@ static RTL_CRITICAL_SECTION_DEBUG critsect_debug =
+@@ -168,6 +168,8 @@ static RTL_CRITICAL_SECTION_DEBUG critsect_debug =
  };
  static RTL_CRITICAL_SECTION loader_section = { &critsect_debug, -1, 0, 0, 0, 0 };
  
@@ -751,7 +751,7 @@ index 11111111111..11111111111 100644
  static CRITICAL_SECTION dlldir_section;
  static CRITICAL_SECTION_DEBUG dlldir_critsect_debug =
  {
-@@ -223,24 +225,58 @@ static inline BOOL contains_path( LPCWSTR name )
+@@ -226,24 +228,58 @@ static inline BOOL contains_path( LPCWSTR name )
      return ((*name && (name[1] == ':')) || wcschr(name, '/') || wcschr(name, '\\'));
  }
  
@@ -814,7 +814,7 @@ index 11111111111..11111111111 100644
  }
  
  #define RTL_UNLOAD_EVENT_TRACE_NUMBER 64
-@@ -524,6 +560,7 @@ static void call_ldr_notifications( ULONG reason, LDR_DATA_TABLE_ENTRY *module )
+@@ -527,6 +563,7 @@ static void call_ldr_notifications( ULONG reason, LDR_DATA_TABLE_ENTRY *module )
      data.Loaded.DllBase     = module->DllBase;
      data.Loaded.SizeOfImage = module->SizeOfImage;
  
@@ -822,7 +822,7 @@ index 11111111111..11111111111 100644
      RtlEnterCriticalSection( &ldr_notifications_section );
      LIST_FOR_EACH_ENTRY_SAFE( notify, notify_next, &ldr_notifications, struct ldr_notification, entry )
      {
-@@ -536,6 +573,7 @@ static void call_ldr_notifications( ULONG reason, LDR_DATA_TABLE_ENTRY *module )
+@@ -539,6 +576,7 @@ static void call_ldr_notifications( ULONG reason, LDR_DATA_TABLE_ENTRY *module )
                  notify->callback, reason, &data, notify->context );
      }
      RtlLeaveCriticalSection( &ldr_notifications_section );
@@ -830,7 +830,7 @@ index 11111111111..11111111111 100644
  }
  
  /*************************************************************************
-@@ -1614,6 +1652,8 @@ static void call_tls_callbacks( HMODULE module, UINT reason )
+@@ -1617,6 +1655,8 @@ static void call_tls_callbacks( HMODULE module, UINT reason )
      dir = RtlImageDirectoryEntryToData( module, TRUE, IMAGE_DIRECTORY_ENTRY_TLS, &dirsize );
      if (!dir || !dir->AddressOfCallBacks) return;
  
@@ -839,7 +839,7 @@ index 11111111111..11111111111 100644
      for (callback = (const PIMAGE_TLS_CALLBACK *)dir->AddressOfCallBacks; *callback; callback++)
      {
          TRACE_(relay)("\1Call TLS callback (proc=%p,module=%p,reason=%s,reserved=0)\n",
-@@ -1632,6 +1672,8 @@ static void call_tls_callbacks( HMODULE module, UINT reason )
+@@ -1635,6 +1675,8 @@ static void call_tls_callbacks( HMODULE module, UINT reason )
          TRACE_(relay)("\1Ret  TLS callback (proc=%p,module=%p,reason=%s,reserved=0)\n",
                        *callback, module, reason_names[reason] );
      }
@@ -848,7 +848,7 @@ index 11111111111..11111111111 100644
  }
  
  /*************************************************************************
-@@ -1664,6 +1706,8 @@ static NTSTATUS MODULE_InitDLL( WINE_MODREF *wm, UINT reason, LPVOID lpReserved
+@@ -1665,6 +1707,8 @@ static NTSTATUS MODULE_InitDLL( WINE_MODREF *wm, UINT reason, LPVOID lpReserved
      else TRACE("(%p %s,%s,%p) - CALL\n", module, debugstr_w(wm->ldr.BaseDllName.Buffer),
                 reason_names[reason], lpReserved );
  
@@ -857,7 +857,7 @@ index 11111111111..11111111111 100644
      __TRY
      {
          retv = call_dll_entry_point( entry, module, reason, lpReserved );
-@@ -1678,6 +1722,8 @@ static NTSTATUS MODULE_InitDLL( WINE_MODREF *wm, UINT reason, LPVOID lpReserved
+@@ -1679,6 +1723,8 @@ static NTSTATUS MODULE_InitDLL( WINE_MODREF *wm, UINT reason, LPVOID lpReserved
      }
      __ENDTRY
  
@@ -866,7 +866,7 @@ index 11111111111..11111111111 100644
      /* The state of the module list may have changed due to the call
         to the dll. We cannot assume that this module has not been
         deleted.  */
-@@ -1917,7 +1963,7 @@ NTSTATUS WINAPI LdrEnumerateLoadedModules( void *unknown, LDRENUMPROC callback,
+@@ -1918,7 +1964,7 @@ NTSTATUS WINAPI LdrEnumerateLoadedModules( void *unknown, LDRENUMPROC callback,
          return STATUS_INVALID_PARAMETER;
  
      lock_loader_exclusive();
@@ -875,7 +875,7 @@ index 11111111111..11111111111 100644
      mark = &NtCurrentTeb()->Peb->LdrData->InMemoryOrderModuleList;
      for (entry = mark->Flink; entry != mark; entry = entry->Flink)
      {
-@@ -1925,7 +1971,7 @@ NTSTATUS WINAPI LdrEnumerateLoadedModules( void *unknown, LDRENUMPROC callback,
+@@ -1926,7 +1972,7 @@ NTSTATUS WINAPI LdrEnumerateLoadedModules( void *unknown, LDRENUMPROC callback,
          callback( mod, context, &stop );
          if (stop) break;
      }
@@ -899,7 +899,7 @@ index 11111111111..11111111111 100644
      PVOID                        ReservedForOle;                    /* f80/1758 */
 
 -- 
-2.37.2
+2.40.0
 
 From: Paul Gofman <pgofman@codeweavers.com>
 Subject: [PATCH v2 6/7] ntdll: Use shared loader locking in LdrQueryProcessModuleInformation().
@@ -917,7 +917,7 @@ diff --git a/dlls/ntdll/loader.c b/dlls/ntdll/loader.c
 index 11111111111..11111111111 100644
 --- a/dlls/ntdll/loader.c
 +++ b/dlls/ntdll/loader.c
-@@ -166,6 +166,7 @@ static RTL_CRITICAL_SECTION_DEBUG critsect_debug =
+@@ -169,6 +169,7 @@ static RTL_CRITICAL_SECTION_DEBUG critsect_debug =
  static RTL_CRITICAL_SECTION loader_section = { &critsect_debug, -1, 0, 0, 0, 0 };
  
  static RTL_SRWLOCK loader_srw_lock = RTL_SRWLOCK_INIT;
@@ -925,7 +925,7 @@ index 11111111111..11111111111 100644
  
  static CRITICAL_SECTION dlldir_section;
  static CRITICAL_SECTION_DEBUG dlldir_critsect_debug =
-@@ -256,8 +257,32 @@ static void lock_loader_exclusive(void)
+@@ -259,8 +260,32 @@ static void lock_loader_exclusive(void)
      ULONG recursion_count = inc_recursion_count();
  
      TRACE( "recursion_count %u.\n", recursion_count );
@@ -959,7 +959,7 @@ index 11111111111..11111111111 100644
  }
  
  /*************************************************************************
-@@ -275,8 +300,14 @@ static void unlock_loader(void)
+@@ -278,8 +303,14 @@ static void unlock_loader(void)
  
      assert( recursion_count != ~0u );
  
@@ -975,7 +975,7 @@ index 11111111111..11111111111 100644
  }
  
  #define RTL_UNLOAD_EVENT_TRACE_NUMBER 64
-@@ -3645,7 +3676,7 @@ NTSTATUS WINAPI LdrQueryProcessModuleInformation(RTL_PROCESS_MODULES *smi,
+@@ -3705,7 +3736,7 @@ NTSTATUS WINAPI LdrQueryProcessModuleInformation(RTL_PROCESS_MODULES *smi,
  
      smi->ModulesCount = 0;
  
@@ -986,7 +986,7 @@ index 11111111111..11111111111 100644
      {
 
 -- 
-2.37.2
+2.40.0
 
 From: Paul Gofman <pgofman@codeweavers.com>
 Subject: [PATCH v2 7/7] ntdll: Do not lock loader in RtlPcToFileHeader().
@@ -1004,7 +1004,7 @@ diff --git a/dlls/ntdll/loader.c b/dlls/ntdll/loader.c
 index 11111111111..11111111111 100644
 --- a/dlls/ntdll/loader.c
 +++ b/dlls/ntdll/loader.c
-@@ -4649,9 +4649,7 @@ PVOID WINAPI RtlPcToFileHeader( PVOID pc, PVOID *address )
+@@ -4721,9 +4721,7 @@ PVOID WINAPI RtlPcToFileHeader( PVOID pc, PVOID *address )
      LDR_DATA_TABLE_ENTRY *module;
      PVOID ret = NULL;
  
@@ -1016,5 +1016,5 @@ index 11111111111..11111111111 100644
  }
 
 -- 
-2.37.2
+2.40.0
 
