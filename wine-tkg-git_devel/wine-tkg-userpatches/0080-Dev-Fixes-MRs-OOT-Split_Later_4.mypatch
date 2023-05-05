@@ -470,3 +470,337 @@ index 11111111111..11111111111 100644
      if ((current->reply_towrite = current->reply_size - (ret - sizeof(*reply))))
      {
 
+From: Jinoh Kang <jinoh.kang.kr@gmail.com>
+Subject: [PATCH 1/2] server: Always place compiler barrier before atomic memory stores.
+Message-Id: <43291f42-4fb9-3f5c-e8ad-c418475696c9@gmail.com>
+Date: Fri, 11 Feb 2022 02:18:46 +0900
+
+GCC, clang, and other compilers do not actually provide acquire/release
+semantics on volatile memory accesses.  This is also true on MSVC with
+the /volatile:iso (use strict ISO C semantics for volatile accesses)
+flag.
+
+Consider the following test program:
+
+    void func(int *foo, volatile int *bar)
+    {
+        *foo = 1;
+        *bar = 2;  /* NOTE: *not* immune to reordering! */
+        *foo = 3;
+    }
+
+After store reordering and dead code removal, the function above
+compiles into the following x86-64 assembly on GCC 11.2 (gcc -O2):
+
+    movl $2, (%rsi)
+    movl $3, (%rdi)
+    ret
+
+Note that the first write to "*foo" has been ellided; the compiler
+decided that it is safe to reorder writes to "*foo" around writes to the
+volatile variable "*bar", so it simply merged the first "*foo" write
+into the second one.
+
+Fix this by explicitly specifying a compiler memory barrier before the
+atomic store.  As a workaround for GCC bug #81316, we do this even for
+other architectures where we explicitly use the atomic memory access
+builtin.
+
+Signed-off-by: Jinoh Kang <jinoh.kang.kr@gmail.com>
+---
+ server/fd.c | 17 +++++++++++++----
+ 1 file changed, 13 insertions(+), 4 deletions(-)
+
+diff --git a/server/fd.c b/server/fd.c
+index 11111111111..11111111111 100644
+--- a/server/fd.c
++++ b/server/fd.c
+@@ -415,10 +415,15 @@ static UINT64 multiply_tsc(UINT64 a, UINT64 b)
+ 
+ static void atomic_store_ulong(volatile ULONG *ptr, ULONG value)
+ {
+-    /* on x86 there should be total store order guarantees, so volatile is
+-     * enough to ensure the stores aren't reordered by the compiler, and then
+-     * they will always be seen in-order from other CPUs. On other archs, we
+-     * need atomic intrinsics to guarantee that. */
++    /* on x86 there should be total store order guarantees, so a compiler
++     * barrier is enough to ensure the stores aren't reordered by the compiler;
++     * then, they will always be seen in-order from other CPUs. On other archs,
++     * we need atomic intrinsics to guarantee that.
++     *
++     * even when using atomic intrinsics, we explicitly place a memory barrier
++     * to work around GCC bug #81316 (affects all GCC versions prior to 7.x).
++     */
++    __asm__ __volatile__("" ::: "memory");
+ #if defined(__i386__) || defined(__x86_64__)
+     *ptr = value;
+ #else
+@@ -428,6 +433,10 @@ static void atomic_store_ulong(volatile ULONG *ptr, ULONG value)
+ 
+ static void atomic_store_long(volatile LONG *ptr, LONG value)
+ {
++    /* even when using atomic intrinsics, we explicitly place a memory barrier
++     * to work around GCC bug #81316 (affects all GCC versions prior to 7.x).
++     */
++    __asm__ __volatile__("" ::: "memory");
+ #if defined(__i386__) || defined(__x86_64__)
+     *ptr = value;
+ #else
+
+-- 
+2.40.0
+
+From: Jinoh Kang <jinoh.kang.kr@gmail.com>
+Subject: [PATCH 2/2] server: Relax memory order constraints in atomic_store_* functions.
+Message-Id: <4c5c1b87-df6d-5bdf-55ac-8b5e0104c26e@gmail.com>
+Date: Fri, 11 Feb 2022 02:19:50 +0900
+In-Reply-To: <43291f42-4fb9-3f5c-e8ad-c418475696c9@gmail.com>
+References: <43291f42-4fb9-3f5c-e8ad-c418475696c9@gmail.com>
+
+We only require stores to not be reordered with other stores, so the
+release semantics (load+store, store+store) would be enough.
+Note that sequentially consistent memory accesses usually involve
+an expensive memory barrier on most architectures.
+
+Signed-off-by: Jinoh Kang <jinoh.kang.kr@gmail.com>
+---
+ server/fd.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/server/fd.c b/server/fd.c
+index 11111111111..11111111111 100644
+--- a/server/fd.c
++++ b/server/fd.c
+@@ -427,7 +427,7 @@ static void atomic_store_ulong(volatile ULONG *ptr, ULONG value)
+ #if defined(__i386__) || defined(__x86_64__)
+     *ptr = value;
+ #else
+-    __atomic_store_n(ptr, value, __ATOMIC_SEQ_CST);
++    __atomic_store_n(ptr, value, __ATOMIC_RELEASE);
+ #endif
+ }
+ 
+@@ -440,7 +440,7 @@ static void atomic_store_long(volatile LONG *ptr, LONG value)
+ #if defined(__i386__) || defined(__x86_64__)
+     *ptr = value;
+ #else
+-    __atomic_store_n(ptr, value, __ATOMIC_SEQ_CST);
++    __atomic_store_n(ptr, value, __ATOMIC_RELEASE);
+ #endif
+ }
+ 
+
+-- 
+2.40.0
+
+From 8d5a16dd8df4eee4739ce019f6e9899fbff411a1 Mon Sep 17 00:00:00 2001
+From: li wenzhe <584592187@qq.com>
+Date: Thu, 9 Mar 2023 10:27:42 +0000
+Subject: [PATCH] Update dlls/ntdll/wcstring.c
+
+---
+ dlls/ntdll/wcstring.c | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/ntdll/wcstring.c b/dlls/ntdll/wcstring.c
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/wcstring.c
++++ b/dlls/ntdll/wcstring.c
+@@ -353,7 +353,12 @@ int __cdecl wcsncmp( LPCWSTR str1, LPCWSTR str2, size_t n )
+ LPWSTR __cdecl wcsncpy( LPWSTR s1, LPCWSTR s2, size_t n )
+ {
+     WCHAR *ret = s1;
+-    for ( ; n; n--) if (!(*s1++ = *s2++)) break;
++    for ( ; n; n--) {
++        if (!(*s1++ = *s2++)) {
++            n--;
++            break;
++        }
++    }
+     for ( ; n; n--) *s1++ = 0;
+     return ret;
+ }
+-- 
+2.40.0
+
+From 1777861cae08f9915c1b8ea2535ada6e3aa911db Mon Sep 17 00:00:00 2001
+From: Zebediah Figura <z.figura12@gmail.com>
+Date: Wed, 20 Jan 2021 11:28:46 -0600
+Subject: [PATCH] ntdll: Use clock_gettime64 if supported.
+
+---
+ dlls/ntdll/unix/sync.c | 61 ++++++++++++++++++++++++++++++++++--------
+ server/request.c       | 54 +++++++++++++++++++++++++++++++++----
+ 2 files changed, 99 insertions(+), 16 deletions(-)
+
+diff --git a/dlls/ntdll/unix/sync.c b/dlls/ntdll/unix/sync.c
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/unix/sync.c
++++ b/dlls/ntdll/unix/sync.c
+@@ -30,6 +30,9 @@
+ #include <assert.h>
+ #include <errno.h>
+ #include <fcntl.h>
++#ifdef __linux__
++#include <linux/types.h>
++#endif
+ #include <limits.h>
+ #include <signal.h>
+ #include <sys/types.h>
+@@ -135,6 +138,48 @@ static const char *debugstr_timeout( const LARGE_INTEGER *timeout )
+     return wine_dbgstr_longlong( timeout->QuadPart );
+ }
+ 
++#ifdef __linux__
++struct timespec64
++{
++    __s64 tv_sec;
++    __s64 tv_nsec;
++};
++#endif
++
++static inline int do_clock_gettime( clockid_t clock_id, ULONGLONG *ticks )
++{
++    static int clock_gettime64_supported = -1;
++#ifdef __linux__
++    struct timespec64 ts64;
++    struct timespec ts;
++#endif
++    int ret;
++
++#if defined(__linux__) && defined(__NR_clock_gettime64)
++    if (clock_gettime64_supported < 0)
++    {
++        if (!syscall( __NR_clock_gettime64, clock_id, &ts64 ))
++        {
++            clock_gettime64_supported = 1;
++            *ticks = ts64.tv_sec * (ULONGLONG)TICKSPERSEC + ts64.tv_nsec / 100;
++            return 0;
++        }
++        clock_gettime64_supported = 0;
++    }
++
++    if (clock_gettime64_supported)
++    {
++        if (!(ret = syscall( __NR_clock_gettime64, clock_id, &ts64 )))
++            *ticks = ts64.tv_sec * (ULONGLONG)TICKSPERSEC + ts64.tv_nsec / 100;
++        return ret;
++    }
++#endif
++
++    if (!(ret = clock_gettime( clock_id, &ts )))
++        *ticks = ts.tv_sec * (ULONGLONG)TICKSPERSEC + ts.tv_nsec / 100;
++    return ret;
++}
++
+ /* return a monotonic time counter, in Win32 ticks */
+ static inline ULONGLONG monotonic_counter(void)
+ {
+@@ -149,13 +194,13 @@ static inline ULONGLONG monotonic_counter(void)
+ #endif
+     return mach_absolute_time() * timebase.numer / timebase.denom / 100;
+ #elif defined(HAVE_CLOCK_GETTIME)
+-    struct timespec ts;
++    ULONGLONG ticks;
+ #ifdef CLOCK_MONOTONIC_RAW
+-    if (!clock_gettime( CLOCK_MONOTONIC_RAW, &ts ))
+-        return ts.tv_sec * (ULONGLONG)TICKSPERSEC + ts.tv_nsec / 100;
++    if (!do_clock_gettime( CLOCK_MONOTONIC_RAW, &ticks ))
++        return ticks;
+ #endif
+-    if (!clock_gettime( CLOCK_MONOTONIC, &ts ))
+-        return ts.tv_sec * (ULONGLONG)TICKSPERSEC + ts.tv_nsec / 100;
++    if (!do_clock_gettime( CLOCK_MONOTONIC, &ticks ))
++        return ticks;
+ #endif
+     gettimeofday( &now, 0 );
+     return ticks_from_time_t( now.tv_sec ) + now.tv_usec * 10 - server_start_time;
+diff --git a/server/request.c b/server/request.c
+index 11111111111..11111111111 100644
+--- a/server/request.c
++++ b/server/request.c
+@@ -35,6 +35,9 @@
+ #include <sys/time.h>
+ #include <sys/types.h>
+ #include <sys/socket.h>
++#ifdef HAVE_SYS_SYSCALL_H
++# include <sys/syscall.h>
++#endif
+ #include <sys/wait.h>
+ #ifdef HAVE_SYS_UIO_H
+ #include <sys/uio.h>
+@@ -47,6 +50,9 @@
+ #ifdef __APPLE__
+ # include <mach/mach_time.h>
+ #endif
++#ifdef __linux__
++# include <linux/types.h>
++#endif
+ 
+ #include "ntstatus.h"
+ #define WIN32_NO_STATUS
+@@ -521,6 +527,44 @@ int send_client_fd( struct process *process, int fd, obj_handle_t handle )
+     return -1;
+ }
+ 
++struct timespec64
++{
++    __s64 tv_sec;
++    __s64 tv_nsec;
++};
++
++static inline int do_clock_gettime( clockid_t clock_id, ULONGLONG *ticks )
++{
++    static int clock_gettime64_supported = -1;
++    struct timespec64 ts64;
++    struct timespec ts;
++    int ret;
++
++#if defined(__linux__) && defined(__NR_clock_gettime64)
++    if (clock_gettime64_supported < 0)
++    {
++        if (!syscall( __NR_clock_gettime64, clock_id, &ts64 ))
++        {
++            clock_gettime64_supported = 1;
++            *ticks = ts64.tv_sec * (ULONGLONG)TICKS_PER_SEC + ts64.tv_nsec / 100;
++            return 0;
++        }
++        clock_gettime64_supported = 0;
++    }
++
++    if (clock_gettime64_supported)
++    {
++        if (!(ret = syscall( __NR_clock_gettime64, clock_id, &ts64 )))
++            *ticks = ts64.tv_sec * (ULONGLONG)TICKS_PER_SEC + ts64.tv_nsec / 100;
++        return ret;
++    }
++#endif
++
++    if (!(ret = clock_gettime( clock_id, &ts )))
++        *ticks = ts.tv_sec * (ULONGLONG)TICKS_PER_SEC + ts.tv_nsec / 100;
++    return ret;
++}
++
+ /* return a monotonic time counter */
+ timeout_t monotonic_counter(void)
+ {
+@@ -534,13 +578,13 @@ timeout_t monotonic_counter(void)
+ #endif
+     return mach_absolute_time() * timebase.numer / timebase.denom / 100;
+ #elif defined(HAVE_CLOCK_GETTIME)
+-    struct timespec ts;
++    ULONGLONG ticks;
+ #ifdef CLOCK_MONOTONIC_RAW
+-    if (!clock_gettime( CLOCK_MONOTONIC_RAW, &ts ))
+-        return (timeout_t)ts.tv_sec * TICKS_PER_SEC + ts.tv_nsec / 100;
++    if (!do_clock_gettime( CLOCK_MONOTONIC_RAW, &ticks ))
++        return ticks;
+ #endif
+-    if (!clock_gettime( CLOCK_MONOTONIC, &ts ))
+-        return (timeout_t)ts.tv_sec * TICKS_PER_SEC + ts.tv_nsec / 100;
++    if (!do_clock_gettime( CLOCK_MONOTONIC, &ticks ))
++        return ticks;
+ #endif
+     return current_time - server_start_time;
+ }
+ 

@@ -1,0 +1,576 @@
+From: "Roman Pišl" <rpisl@seznam.cz>
+Subject: [PATCH 1/2] win32u: Clear validate flag if both internal paint and update now are present.
+Message-Id: <20220102163746.7994-1-rpisl@seznam.cz>
+Date: Sun,  2 Jan 2022 17:37:45 +0100
+
+Wine-Bug: https://bugs.winehq.org/show_bug.cgi?id=48761
+Signed-off-by: Roman Pišl <rpisl@seznam.cz>
+---
+ dlls/win32u/dce.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/dlls/win32u/dce.c b/dlls/win32u/dce.c
+index 11111111111..11111111111 100644
+--- a/dlls/win32u/dce.c
++++ b/dlls/win32u/dce.c
+@@ -1449,6 +1449,9 @@ BOOL WINAPI NtUserRedrawWindow( HWND hwnd, const RECT *rect, HRGN hrgn, UINT fla
+     /* process pending expose events before painting */
+     if (flags & RDW_UPDATENOW) user_driver->pMsgWaitForMultipleObjectsEx( 0, NULL, &zero, QS_PAINT, 0 );
+ 
++    if ((flags & (RDW_INTERNALPAINT | RDW_UPDATENOW | RDW_VALIDATE)) == (RDW_INTERNALPAINT | RDW_UPDATENOW | RDW_VALIDATE))
++        flags &= ~RDW_VALIDATE;
++
+     if (rect && !hrgn)
+     {
+
+         RECT ordered = *rect;
+-- 
+2.37.2
+
+From: "Gabriel Ivăncescu" <gabrielopcode@gmail.com>
+Subject: [PATCH resend 1/2] comctl32: Don't redraw the Combo Box when dropped down if it has an editbox.
+Message-Id: <6508e5f7d1bba3e86c98d9fbe329450a7725d4f7.1606394081.git.gabrielopcode@gmail.com>
+Date: Thu, 26 Nov 2020 14:35:38 +0200
+
+Some applications subclass the combo box and handle WM_ERASEBKGND themselves,
+without using WS_CLIPCHILDREN. This causes them to erase over the editbox
+child. There's no reason to redraw it in this case since the editbox is
+supposed to cover it, anyway.
+
+Wine-Bug: https://bugs.winehq.org/show_bug.cgi?id=22260
+Signed-off-by: Gabriel Ivăncescu <gabrielopcode@gmail.com>
+---
+ dlls/comctl32/combo.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/dlls/comctl32/combo.c b/dlls/comctl32/combo.c
+index 11111111111..11111111111 100644
+--- a/dlls/comctl32/combo.c
++++ b/dlls/comctl32/combo.c
+@@ -1002,7 +1002,7 @@ static void CBDropDown( LPHEADCOMBO lphc )
+                  SWP_NOACTIVATE | SWP_SHOWWINDOW );
+ 
+ 
+-   if( !(lphc->wState & CBF_NOREDRAW) )
++   if( !(lphc->wState & (CBF_NOREDRAW | CBF_EDIT)) )
+      RedrawWindow( lphc->self, NULL, 0, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW );
+ 
+    EnableWindow( lphc->hWndLBox, TRUE );
+-- 
+2.37.2
+
+From: Haoyang Chen <chenhaoyang@uniontech.com>
+#Subject: [PATCH] win32u: Send WM_NCCALCSIZE message, when a new window is displayed.
+Message-Id: <ffb60922-6174-902a-8de3-abaa117a3b81@uniontech.com>
+Date: Tue, 12 Jan 2021 10:14:33 +0800
+
+From 0ef95fe7663a0f35352d6ac1d66698de021b883e Mon Sep 17 00:00:00 2001
+From: Haoyang Chen <chenhaoyang@uniontech.com>
+Date: Mon, 11 Jan 2021 17:54:36 +0800
+Subject: [PATCH] win32u: Send WM_NCCALCSIZE message, when a new window is
+ displayed.
+
+Signed-off-by: Haoyang Chen <chenhaoyang@uniontech.com>
+---
+ dlls/win32u/window.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/dlls/win32u/window.c b/dlls/win32u/window.c
+index 11111111111..11111111111 100644
+--- a/dlls/win32u/window.c
++++ b/dlls/win32u/window.c
+@@ -4457,6 +4457,9 @@ static BOOL show_window( HWND hwnd, INT cmd )
+ 
+     if (!(win = get_win_ptr( hwnd )) || win == WND_OTHER_PROCESS) goto done;
+ 
++    if (show_flag && !was_visible && ((style & (WS_CAPTION | WS_MAXIMIZE | WS_MAXIMIZE)) == WS_CAPTION))
++        swp |= SWP_FRAMECHANGED;
++
+     if (win->flags & WIN_NEED_SIZE)
+     {
+         /* should happen only in CreateWindowEx() */
+
+-- 
+2.37.2
+
+From: Connor McAdams <cmcadams@codeweavers.com>
+Subject: [PATCH 1/2] win32u: Don't fire EVENT_OBJECT_CREATE for dialog and popup windows upon creation.
+Message-Id: <20210812152714.645422-1-cmcadams@codeweavers.com>
+Date: Thu, 12 Aug 2021 11:27:13 -0400
+
+Popup menu and dialog window classes don't have EVENT_OBJECT_CREATE
+winevents associated with their creation.
+
+Signed-off-by: Connor McAdams <cmcadams@codeweavers.com>
+---
+ dlls/win32u/window.c | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/win32u/window.c b/dlls/win32u/window.c
+index 11111111111..11111111111 100644
+--- a/dlls/win32u/window.c
++++ b/dlls/win32u/window.c
+@@ -5410,7 +5410,13 @@ HWND WINAPI NtUserCreateWindowEx( DWORD ex_style, UNICODE_STRING *class_name,
+     if (needs_cloak)
+         user_driver->pSetWindowCompositionAttribute( hwnd, WCA_CLOAK, &needs_cloak );
+ 
+-    NtUserNotifyWinEvent( EVENT_OBJECT_CREATE, hwnd, OBJID_WINDOW, 0 );
++    /*
++     * Popup menus and dialog windows don't get an EVENT_OBJECT_CREATE
++     * WinEvent on their creation.
++     */
++    if (get_class_long( hwnd, GCW_ATOM, FALSE ) != POPUPMENU_CLASS_ATOM &&
++            get_class_long( hwnd, GCW_ATOM, FALSE ) != DIALOG_CLASS_ATOM)
++        NtUserNotifyWinEvent( EVENT_OBJECT_CREATE, hwnd, OBJID_WINDOW, 0 );
+ 
+     /* send the size messages */
+ 
+
+-- 
+2.37.2
+
+From: "Jiangyi Chen" <cjy520lcy@163.com>
+#Subject: [PATCH v3] comdlg32: Fix the wrong popup when saving the same file again in the same directory.
+Message-Id: <1b751b8d.451d.174768cc5cf.Coremail.cjy520lcy@163.com>
+Date: Thu, 10 Sep 2020 13:46:11 +0800 (CST)
+
+From bb30355690365aa4621f5a15331619439e61dd11 Mon Sep 17 00:00:00 2001
+From: Jiangyi Chen <chenjiangyi@uniontech.com>
+Date: Wed, 9 Sep 2020 08:01:59 +0000
+Subject: [PATCH v3] comdlg32: Fix the wrong popup when saving the same file
+ again in the same directory.
+
+Signed-off-by: Jiangyi Chen <chenjiangyi@uniontech.com>
+---
+ dlls/comdlg32/itemdlg.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/dlls/comdlg32/itemdlg.c b/dlls/comdlg32/itemdlg.c
+index 11111111111..11111111111 100644
+--- a/dlls/comdlg32/itemdlg.c
++++ b/dlls/comdlg32/itemdlg.c
+@@ -645,7 +645,7 @@ static HRESULT on_default_action(FileDialogImpl *This)
+             if(FAILED(hr))
+                 break;
+ 
+-            if(This->options & FOS_PICKFOLDERS)
++            if((This->options & FOS_PICKFOLDERS) && This->dlg_type != ITEMDLG_TYPE_SAVE)
+             {
+                 SFGAOF attributes;
+                 hr = IShellItemArray_GetAttributes(This->psia_results, SIATTRIBFLAGS_AND, SFGAO_FOLDER, &attributes);
+-- 
+2.37.2
+
+From: Haoyang Chen <chenhaoyang@uniontech.com>
+Subject: [PATCH v2] win32u: No need to change the z-order of the foreground window.
+Message-Id: <02a5375e-bd42-7924-b620-67602094c815@uniontech.com>
+Date: Fri, 4 Dec 2020 17:46:26 +0800
+
+From 7ccc01f09f958ff5ceeffbd31e368fc4e8799995 Mon Sep 17 00:00:00 2001
+From: Haoyang Chen <chenhaoyang@uniontech.com>
+Date: Fri, 4 Dec 2020 17:25:15 +0800
+#Subject: [PATCH] win32u: No need to change the z-order of the foreground
+# window.
+
+Signed-off-by: Haoyang Chen <chenhaoyang@uniontech.com>
+---
+ dlls/win32u/window.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/win32u/window.c b/dlls/win32u/window.c
+index 11111111111..11111111111 100644
+--- a/dlls/win32u/window.c
++++ b/dlls/win32u/window.c
+@@ -3334,7 +3334,8 @@ static BOOL fixup_swp_flags( WINDOWPOS *winpos, const RECT *old_window_rect, int
+ 
+     if ((win->dwStyle & (WS_POPUP | WS_CHILD)) != WS_CHILD)
+     {
+-        if (!(winpos->flags & (SWP_NOACTIVATE|SWP_HIDEWINDOW)) && /* Bring to the top when activating */
++        if (NtUserGetForegroundWindow() != winpos->hwnd &&
++            !(winpos->flags & (SWP_NOACTIVATE|SWP_HIDEWINDOW)) && /* Bring to the top when activating */
+             (winpos->flags & SWP_NOZORDER ||
+              (winpos->hwndInsertAfter != HWND_TOPMOST && winpos->hwndInsertAfter != HWND_NOTOPMOST)))
+         {
+
+-- 
+2.37.2
+
+From: Paul Gofman <wine@gitlab.winehq.org>
+Subject: [PATCH 1/1] winex11.drv: Always call XSync() in destroy_whole_window() if there is client window.
+Message-Id: <wine-wine-mr264-v1-patch1@gitlab-mail-bridge>
+Date: Fri, 17 Jun 2022 15:30:20 +0000
+In-Reply-To: <wine-wine-mr264-v1@gitlab-mail-bridge>
+References: <merge_request_333@gitlab.winehq.org> <wine-wine-mr264-v1@gitlab-mail-bridge>
+
+From: Paul Gofman <pgofman@codeweavers.com>
+
+Signed-off-by: Paul Gofman <pgofman@codeweavers.com>
+---
+ dlls/winex11.drv/window.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/dlls/winex11.drv/window.c b/dlls/winex11.drv/window.c
+index 11111111111..11111111111 100644
+--- a/dlls/winex11.drv/window.c
++++ b/dlls/winex11.drv/window.c
+@@ -1889,6 +1889,8 @@ static void destroy_whole_window( struct x11drv_win_data *data, BOOL already_des
+             }
+             return;
+         }
++        if (data->client_window && !already_destroyed)
++            XSync( data->display, False );
+     }
+     else
+     {  
+-- 
+2.37.2
+
+From: Zhiyi Zhang <zzhang@codeweavers.com>
+Subject: [PATCH] winex11.drv: Maintain a backing store for layered windows.
+Message-Id: <79f69949-a3a7-e740-1f70-ba8a3a9daf5a@codeweavers.com>
+Date: Wed, 20 Oct 2021 10:08:42 +0800
+
+Copy the window content to a pixmap and set it as the background because
+the X server may discard the window content at any time, even when the
+backing store attribute is set to TRUE when creating a X11 window.
+Layered windows don't get repainted in X11DRV_Expose() like normal
+windows do and their content should always be kept. The window surface
+may be recreated when handling position and changes. So for most of the
+time, there is only one backing store for a window with this patch. It's
+possible that the we can reuse window surfaces but it's a much bigger
+change and risk breaking things.
+
+Fix Word 2016 frame window corruption after it's moved off-screen.
+
+Signed-off-by: Zhiyi Zhang <zzhang@codeweavers.com>
+---
+ dlls/winex11.drv/window.c | 28 ++++++++++++++++++++++++++--
+ 1 file changed, 26 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/winex11.drv/window.c b/dlls/winex11.drv/window.c
+index 11111111111..11111111111 100644
+--- a/dlls/winex11.drv/window.c
++++ b/dlls/winex11.drv/window.c
+@@ -3287,6 +3287,9 @@ BOOL X11DRV_UpdateLayeredWindow( HWND hwnd, const UPDATELAYEREDWINDOWINFO *info,
+     HDC hdc = 0;
+     HBITMAP dib;
+     BOOL mapped, ret = FALSE;
++    int width, height;
++    Pixmap pixmap;
++    GC gc;
+ 
+     if (!(data = get_win_data( hwnd ))) return FALSE;
+ 
+@@ -3312,7 +3315,6 @@ BOOL X11DRV_UpdateLayeredWindow( HWND hwnd, const UPDATELAYEREDWINDOWINFO *info,
+ 
+     if (surface) window_surface_add_ref( surface );
+     mapped = data->mapped;
+-    release_win_data( data );
+ 
+     /* layered windows are mapped only once their attributes are set */
+     if (!mapped)
+@@ -3323,9 +3325,14 @@ BOOL X11DRV_UpdateLayeredWindow( HWND hwnd, const UPDATELAYEREDWINDOWINFO *info,
+             map_window( hwnd, style );
+     }
+ 
+-    if (!surface) return FALSE;
++    if (!surface)
++    {
++        release_win_data( data );
++        return FALSE;
++    }
+     if (!info->hdcSrc)
+     {
++        release_win_data( data );
+         window_surface_release( surface );
+         return TRUE;
+     }
+@@ -3362,7 +3369,24 @@ BOOL X11DRV_UpdateLayeredWindow( HWND hwnd, const UPDATELAYEREDWINDOWINFO *info,
+     surface->funcs->unlock( surface );
+     surface->funcs->flush( surface );
+ 
++    /* Copy the window content to a pixmap and set it as the background because the X server may
++     * discard the window content at any time, even when the backing store attribute is set to TRUE
++     * when creating a X11 window. Layered windows don't get repainted in X11DRV_Expose() like
++     * normal windows do and their content should always be kept. */
++    width = data->whole_rect.right - data->whole_rect.left;
++    height = data->whole_rect.bottom - data->whole_rect.top;
++    if (width > 0 && height > 0)
++    {
++        pixmap = XCreatePixmap( data->display, data->whole_window, width, height, 32 );
++        gc = XCreateGC( data->display, pixmap, 0, NULL );
++        XCopyArea( data->display, data->whole_window, pixmap, gc, 0, 0, width, height, 0, 0 );
++        XFreeGC( data->display, gc );
++        XSetWindowBackgroundPixmap( data->display, data->whole_window, pixmap );
++        XFreePixmap( data->display, pixmap );
++    }
++
+ done:
++    release_win_data( data );
+     window_surface_release( surface );
+
+     if (hdc) NtGdiDeleteObjectApp( hdc );
+     if (dib) NtGdiDeleteObjectApp( dib );
+-- 
+2.37.2
+
+From: "Chao Long" <longchao@uniontech.com>
+Subject: [PATCH] comctl32: Check is a safe window.
+Message-Id: <202010301532590115082@uniontech.com>
+Date: Fri, 30 Oct 2020 15:32:59 +0800
+
+014a:014b:trace:listview:notify_hdr   <= 0
+014a:014b:trace:listview:notify_dispinfoT  resulting code=-176
+014a:014b:trace:listview:EditLblWndProcT (hwnd=0005005C, uMsg=10, wParam=0, lParam=0, isW=1)
+014a:014b:trace:listview:LISTVIEW_WindowProc (hwnd=00020054 uMsg=210 wParam=2 lParam=5005c)
+014a:014b:trace:listview:EditLblWndProcT (hwnd=0005005C, uMsg=18, wParam=0, lParam=0, isW=1)
+014a:014b:trace:listview:EditLblWndProcT (hwnd=0005005C, uMsg=46, wParam=0, lParam=303ba4, isW=1)
+014a:014b:trace:listview:LISTVIEW_WindowProc (hwnd=00020054 uMsg=14 wParam=e0324 lParam=0)
+014a:014b:trace:listview:LISTVIEW_EraseBkgnd (hdc=000E0324)
+014a:014b:trace:listview:EditLblWndProcT (hwnd=0005005C, uMsg=47, wParam=0, lParam=303ba4, isW=1)
+014a:014b:trace:listview:EditLblWndProcT (hwnd=0005005C, uMsg=210, wParam=3ec0002, lParam=30050, isW=1)
+014a:014b:trace:listview:EditLblWndProcT (hwnd=0005005C, uMsg=2, wParam=0, lParam=0, isW=1)
+014a:014b:trace:listview:EditLblWndProcT (hwnd=0005005C, uMsg=8, wParam=20054, lParam=0, isW=1)
+014a:014b:trace:seh:raise_exception code=c0000005 flags=0 addr=0x7d0b2b18 ip=7d0b2b18 tid=014b
+014a:014b:trace:seh:raise_exception  info[0]=00000000
+014a:014b:trace:seh:raise_exception  info[1]=00000074
+014a:014b:trace:seh:raise_exception  eax=00000000 ebx=003047b4 ecx=00304220 edx=00000000 esi=00304eec edi=00000000
+014a:014b:trace:seh:raise_exception  ebp=003046a8 esp=00304680 cs=0023 ds=002b es=002b fs=0063 gs=006b flags=00010206
+
+
+The window is destroy. killfocus msg is not safe.
+
+014a:014b:trace:listview:EditLblWndProcT (hwnd=0005005C, uMsg=2, wParam=0, lParam=0, isW=1)
+014a:014b:trace:listview:EditLblWndProcT (hwnd=0005005C, uMsg=8, wParam=20054, lParam=0, isW=1)
+
+From 6460c5109303e0e4c227692074d0f47f4da29756 Mon Sep 17 00:00:00 2001
+From: Chao Long <longchao@uniontech.com>
+Date: Fri, 30 Oct 2020 15:26:00 +0800
+#Subject: [PATCH] comctl32: Check is a safe window.
+
+Signed-off-by: Chao Long <longchao@uniontech.com>
+---
+ dlls/comctl32/listview.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/dlls/comctl32/listview.c b/dlls/comctl32/listview.c
+index 11111111111..11111111111 100644
+--- a/dlls/comctl32/listview.c
++++ b/dlls/comctl32/listview.c
+@@ -6010,6 +6010,8 @@ static LRESULT EditLblWndProcT(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPara
+ 
+     TRACE("hwnd %p, uMsg %x, wParam %Ix, lParam %Ix, isW %d\n", hwnd, uMsg, wParam, lParam, isW);
+ 
++    if ( !IsWindow(hwnd) ) return 0;
++
+     switch (uMsg)
+     {
+ 	case WM_GETDLGCODE:
+
+-- 
+2.39.0
+
+From: Giovanni Mascellani <gmascellani@codeweavers.com>
+Subject: [PATCH] winex11.drv: Do not call old_error_handler if it is NULL.
+Message-Id: <20210212115800.3997498-1-gmascellani@codeweavers.com>
+Date: Fri, 12 Feb 2021 12:58:00 +0100
+
+Signed-off-by: Giovanni Mascellani <gmascellani@codeweavers.com>
+---
+ dlls/winex11.drv/x11drv_main.c | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/winex11.drv/x11drv_main.c b/dlls/winex11.drv/x11drv_main.c
+index 11111111111..11111111111 100644
+--- a/dlls/winex11.drv/x11drv_main.c
++++ b/dlls/winex11.drv/x11drv_main.c
+@@ -330,7 +330,10 @@ static int error_handler( Display *display, XErrorEvent *error_evt )
+              error_evt->serial, error_evt->request_code );
+         assert( 0 );
+     }
+-    old_error_handler( display, error_evt );
++    /* Xlib never returns a NULL previous error handler, but other
++       implementations, like Steam's overlay, do. */
++    if (old_error_handler)
++        old_error_handler( display, error_evt );
+     return 0;
+ }
+ 
+
+-- 
+2.39.0
+
+From f6d7b88f72f14d4e78511f89dda6435159ee40e9 Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Tue, 31 Mar 2020 20:07:49 +0300
+Subject: [PATCH 1/5] winex11.drv: Remove active client window from window data
+ before deleting it.
+
+CW-Bug-ID: #19216
+
+Fixes a crash with BadDrawable X error which happens when client window is used
+in windows.c:sync_client_position() after the GL drawable has been deleted.
+
+Wine-Bug: https://bugs.winehq.org/show_bug.cgi?id=49649
+---
+ dlls/winex11.drv/opengl.c | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+diff --git a/dlls/winex11.drv/opengl.c b/dlls/winex11.drv/opengl.c
+index 11111111111..11111111111 100644
+--- a/dlls/winex11.drv/opengl.c
++++ b/dlls/winex11.drv/opengl.c
+@@ -221,6 +221,7 @@ enum dc_gl_type
+ struct gl_drawable
+ {
+     LONG                           ref;          /* reference count */
++    HWND                           hwnd;
+     enum dc_gl_type                type;         /* type of GL surface */
+     GLXDrawable                    drawable;     /* drawable for rendering with GL */
+     Window                         window;       /* window if drawable is a GLXWindow */
+@@ -1159,10 +1160,23 @@ static void release_gl_drawable( struct gl_drawable *gl )
+     {
+     case DC_GL_WINDOW:
+     case DC_GL_CHILD_WIN:
++    {
++        struct x11drv_win_data *data = get_win_data( gl->hwnd );
++
+         TRACE( "destroying %lx drawable %lx\n", gl->window, gl->drawable );
++        if (data)
++        {
++            if (data->client_window == gl->window)
++            {
++                XDeleteContext( data->display, data->client_window, winContext );
++                data->client_window = 0;
++            }
++            release_win_data( data );
++        }
+         pglXDestroyWindow( gdi_display, gl->drawable );
+         XDestroyWindow( gdi_display, gl->window );
+         break;
++    }
+     case DC_GL_PIXMAP_WIN:
+         TRACE( "destroying pixmap %lx drawable %lx\n", gl->pixmap, gl->drawable );
+         pglXDestroyPixmap( gdi_display, gl->drawable );
+@@ -1323,6 +1337,7 @@ static struct gl_drawable *create_gl_drawable( HWND hwnd, const struct wgl_pixel
+     /* Default GLX and WGL swap interval is 1, but in case of glXSwapIntervalSGI
+      * there is no way to query it, so we have to store it here.
+      */
++    gl->hwnd = hwnd;
+     gl->swap_interval = 1;
+     gl->refresh_swap_interval = TRUE;
+     gl->format = format;
+-- 
+2.39.0
+
+
+From: "Haidong Yu" <yhd986@163.com>
+#Subject: [PATCH v2] user32: Fix the logical problem that the client window is  a Unicode window and still goes A->W.
+Message-Id: <52d016e.2aa4.17af6b5a23b.Coremail.yhd986@163.com>
+Date: Fri, 30 Jul 2021 17:18:56 +0800 (CST)
+
+From 15542455bd073662c738bee7c0fe75e243995a45 Mon Sep 17 00:00:00 2001
+From: Pengpeng Dong <dongpengpeng@uniontech.com>
+Date: Fri, 30 Jul 2021 16:53:11 +0800
+Subject: [PATCH v2] user32: Fix the logical problem that the client window is
+ a Unicode window and still goes A->W.
+
+When the server is a Unicode server, the judgment of the client window type encoding is omitted.
+
+Signed-off-by: Pengpeng Dong <dongpengpeng@uniontech.com>
+Change-Id: Ia0d6e800713eaefd2cfc9509bc0948ac345b538c
+---
+ dlls/user32/dde_server.c | 11 +++++++----
+ 1 file changed, 7 insertions(+), 4 deletions(-)
+
+diff --git a/dlls/user32/dde_server.c b/dlls/user32/dde_server.c
+index 11111111111..11111111111 100644
+--- a/dlls/user32/dde_server.c
++++ b/dlls/user32/dde_server.c
+@@ -810,10 +810,13 @@ static	WDML_QUEUE_STATE WDML_ServerHandleExecute(WDML_CONV* pConv, WDML_XACT* pX
+ 
+ 	if (ptr)
+ 	{
+-            if (pConv->instance->unicode)  /* Unicode server, try to map A->W */
+-                hDdeData = map_A_to_W( pConv->instance->instanceID, ptr, size );
+-            else if (!IsWindowUnicode( pConv->hwndClient )) /* ANSI server and client, try to map W->A */
+-                hDdeData = map_W_to_A( pConv->instance->instanceID, ptr, size );
++            if (pConv->instance->unicode != IsWindowUnicode( pConv->hwndClient ))
++            {
++                if (IsWindowUnicode( pConv->hwndClient ))
++                    hDdeData = map_A_to_W( pConv->instance->instanceID, ptr, size ); /* Unicode server, try to map A->W */
++                else
++                    hDdeData = map_W_to_A( pConv->instance->instanceID, ptr, size ); /* ASCII server and client, try to map W->A */
++            }
+             else
+                 hDdeData = DdeCreateDataHandle(pConv->instance->instanceID, ptr, size, 0, 0, CF_TEXT, 0);
+ 	    GlobalUnlock(pXAct->hMem);
+
+-- 
+2.39.0
+
+
+From: "longchao@uniontech.com" <longchao@uniontech.com>
+#Subject: [PATCH] comdlg32: The app might strcmp api filter.
+Message-Id: <202012240958067337794@uniontech.com>
+Date: Thu, 24 Dec 2020 09:58:06 +0800
+
+From 5d1a13884d58b07474d29f68c6d00fea2cf3e1f1 Mon Sep 17 00:00:00 2001
+From: Chao Long <longchao@uniontech.com>
+Date: Thu, 24 Dec 2020 09:44:54 +0800
+Subject: [PATCH] comdlg32: The app might strcmp api filter.
+
+Signed-off-by: Chao Long <longchao@uniontech.com>
+---
+ dlls/comdlg32/filedlg.c | 1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/dlls/comdlg32/filedlg.c b/dlls/comdlg32/filedlg.c
+index 11111111111..11111111111 100644
+--- a/dlls/comdlg32/filedlg.c
++++ b/dlls/comdlg32/filedlg.c
+@@ -3154,7 +3154,6 @@ static HRESULT FILEDLG95_FILETYPE_Init(HWND hwnd)
+     if(lpstrFilter)
+     {
+       DWORD len;
+-      CharLowerW(lpstrFilter); /* lowercase */
+       len = lstrlenW(lpstrFilter)+1;
+       fodInfos->ShellInfos.lpstrCurrentFilter = heap_alloc( len * sizeof(WCHAR) );
+       lstrcpyW(fodInfos->ShellInfos.lpstrCurrentFilter,lpstrFilter);
+
+-- 
+2.39.0
+
+From ded4c3b690446edbeef5f83e3a24493d92eba062 Mon Sep 17 00:00:00 2001
+From: Kevin Chabot <Kevin_Chabot@hotmail.com>
+Date: Tue, 13 Dec 2022 19:25:51 -0500
+Subject: [PATCH] Server: Synchronise keystate when locking input when the
+ hardware message is queued.
+
+Fix an issue where modifier keys stay stuck when using a drawing tablet
+and a keyboard using Clip Studio Paint.
+
+Wine-Bug: https://bugs.winehq.org/show_bug.cgi?id=33056
+---
+ server/queue.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/server/queue.c b/server/queue.c
+index 11111111111..11111111111 100644
+--- a/server/queue.c
++++ b/server/queue.c
+@@ -667,7 +667,11 @@ static inline void set_queue_bits( struct msg_queue *queue, unsigned int bits )
+ {
+     if (bits & (QS_KEY | QS_MOUSEBUTTON))
+     {
+-        if (!queue->keystate_lock) lock_input_keystate( queue->input );
++        if (!queue->keystate_lock)
++        {
++            sync_input_keystate( queue->input );
++            lock_input_keystate( queue->input );
++        }
+         queue->keystate_lock = 1;
+     }
+     queue->wake_bits |= bits;
+-- 
+2.40.0
