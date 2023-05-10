@@ -1,0 +1,31 @@
+From 481c3131ad21fc62f45dc4b7c421926805d95285 Mon Sep 17 00:00:00 2001
+From: Torge Matthies <openglfreak@googlemail.com>
+Date: Mon, 15 Aug 2022 21:03:25 +0200
+Subject: [PATCH 5/7] HACK: server: Do not use an atomic instruction to reset
+ futex.
+
+---
+ server/thread.c | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/server/thread.c b/server/thread.c
+index 11111111111..11111111111 100644
+--- a/server/thread.c
++++ b/server/thread.c
+@@ -509,8 +509,11 @@ static void *request_shm_thread(void *param)
+         request_shm = thread->request_shm;
+         if (!request_shm_fd || !request_shm)
+             goto done_locked;
+-        val = __sync_val_compare_and_swap( &request_shm->futex, 1, 0 );
+-        if (val != 1 && val != -1)
++        __sync_synchronize();
++        val = request_shm->futex;
++        if (val == 1)
++            request_shm->futex = 0;
++        else if (val != -1)
+             fatal_protocol_error( thread, "unknown futex state %d\n", val );
+         pthread_mutex_unlock( &global_lock );
+         //syscall( __NR_futex, &request_shm->futex, FUTEX_WAKE, 1, NULL, NULL, 0 );
+-- 
+2.40.0
+
