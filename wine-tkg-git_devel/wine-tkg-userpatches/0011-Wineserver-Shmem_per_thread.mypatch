@@ -187,27 +187,6 @@ index 11111111111..11111111111 100644
      list_add_head( &teb_list, &thread_data->entry );
      return teb;
  }
-diff --git a/server/file.h b/server/file.h
-index 11111111111..11111111111 100644
---- a/server/file.h
-+++ b/server/file.h
-@@ -30,6 +30,7 @@ struct fd;
- struct mapping;
- struct async_queue;
- struct completion;
-+struct request_shm;
- 
- /* server-side representation of I/O status block */
- struct iosb
-@@ -210,6 +211,9 @@ extern struct object *create_hypervisor_data_mapping( struct object *root, const
-                                                       unsigned int attr, const struct security_descriptor *sd );
- extern struct object *create_shared_mapping( struct object *root, const struct unicode_str *name,
-                                              mem_size_t size, const struct security_descriptor *sd, void **ptr );
-+#ifdef __linux__
-+extern int create_request_shm( int *fd, struct request_shm **ptr );
-+#endif
- 
- /* device functions */
  
 diff --git a/server/mapping.c b/server/mapping.c
 index 11111111111..11111111111 100644
@@ -827,9 +806,17 @@ index 11111111111..11111111111 100644
  
 +#include <pthread.h>
  #include <sys/types.h>
- #include <sys/stat.h>
  
-@@ -80,6 +81,9 @@ struct fd_ops
+ #include "object.h"
+@@ -29,6 +30,7 @@ struct fd;
+ struct mapping;
+ struct async_queue;
+ struct completion;
++struct request_shm;
+ 
+ /* server-side representation of I/O status block */
+ struct iosb
+@@ -78,6 +80,9 @@ struct fd_ops
  
  /* file descriptor functions */
  
@@ -839,7 +826,7 @@ index 11111111111..11111111111 100644
  extern struct fd *alloc_pseudo_fd( const struct fd_ops *fd_user_ops, struct object *user,
                                     unsigned int options );
  extern struct fd *open_fd( struct fd *root, const char *name, struct unicode_str nt_name,
-@@ -131,6 +135,7 @@ extern void no_fd_queue_async( struct fd *fd, struct async *async, int type, int
+@@ -127,6 +132,7 @@ extern void no_fd_queue_async( struct fd
  extern void default_fd_queue_async( struct fd *fd, struct async *async, int type, int count );
  extern void default_fd_reselect_async( struct fd *fd, struct async_queue *queue );
  extern void main_loop(void);
@@ -847,6 +834,17 @@ index 11111111111..11111111111 100644
  extern void remove_process_locks( struct process *process );
  
  static inline struct fd *get_obj_fd( struct object *obj ) { return obj->ops->get_fd( obj ); }
+@@ -191,6 +197,10 @@ extern struct mapping *create_fd_mapping
+ extern struct object *create_user_data_mapping( struct object *root, const struct unicode_str *name,
+                                                 unsigned int attr, const struct security_descriptor *sd );
+ 
++#ifdef __linux__
++extern int create_request_shm( int *fd, struct request_shm **ptr );
++#endif
++
+ /* device functions */
+ 
+ extern struct object *create_named_pipe_device( struct object *root, const struct unicode_str *name,
 diff --git a/server/request.c b/server/request.c
 index 11111111111..11111111111 100644
 --- a/server/request.c
@@ -1013,9 +1011,9 @@ index 11111111111..11111111111 100644
  #endif
      thread->state           = RUNNING;
      thread->exit_code       = 0;
-@@ -348,6 +353,86 @@ static struct context *create_thread_con
+@@ -373,6 +383,84 @@ static struct context *create_thread_con
+     return context;
  }
- 
  
 +#ifdef __linux__
 +
@@ -1095,11 +1093,9 @@ index 11111111111..11111111111 100644
 +}
 +
 +#endif /* defined(__linux__) */
-+
-+
- static volatile void *init_queue_mapping( struct thread *thread )
- {
-     struct unicode_str name;
+ 
+ /* create a new thread */
+ struct thread *create_thread( int fd, struct process *process, const struct security_descriptor *sd )
 @@ -406,6 +491,9 @@ struct thread *create_thread( int fd, st
      struct desktop *desktop;
      struct thread *thread;
