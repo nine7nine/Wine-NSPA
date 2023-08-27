@@ -1,89 +1,3 @@
-diff --git a/dlls/ntdll/loader.c b/dlls/ntdll/loader.c
-index f5a07b510c9e..5c7c2592018c 100644
---- a/dlls/ntdll/loader.c
-+++ b/dlls/ntdll/loader.c
-@@ -4600,3 +4600,16 @@ BOOL WINAPI DllMain( HINSTANCE inst, DWORD reason, LPVOID reserved )
-     if (reason == DLL_PROCESS_ATTACH) LdrDisableThreadCalloutsForDll( inst );
-     return TRUE;
- }
-+
-+
-+const struct unix_funcs *unix_funcs;
-+
-+/***********************************************************************
-+ *           __wine_set_unix_funcs
-+ */
-+NTSTATUS CDECL __wine_set_unix_funcs( int version, const struct unix_funcs *funcs )
-+{
-+    if (version != NTDLL_UNIXLIB_VERSION) return STATUS_REVISION_MISMATCH;
-+    unix_funcs = funcs;
-+    return STATUS_SUCCESS;
-+}
-diff --git a/dlls/ntdll/ntdll.spec b/dlls/ntdll/ntdll.spec
-index 74e37fccbb68..7a5a5afdb6b1 100644
---- a/dlls/ntdll/ntdll.spec
-+++ b/dlls/ntdll/ntdll.spec
-@@ -1692,6 +1692,7 @@
- # Unix interface
- @ stdcall __wine_unix_call(int64 long ptr)
- @ stdcall __wine_unix_spawnvp(long ptr)
-+@ cdecl __wine_set_unix_funcs(long ptr)
- @ stdcall __wine_ctrl_routine(ptr)
- @ extern -private __wine_syscall_dispatcher
- @ extern -private __wine_unix_call_dispatcher
-diff --git a/dlls/ntdll/ntdll_misc.h b/dlls/ntdll/ntdll_misc.h
-index 1ce972e3b384..36972a966f1d 100644
---- a/dlls/ntdll/ntdll_misc.h
-+++ b/dlls/ntdll/ntdll_misc.h
-@@ -85,6 +85,7 @@ extern const WCHAR windows_dir[] DECLSPEC_HIDDEN;
- extern const WCHAR system_dir[] DECLSPEC_HIDDEN;
-
- extern void (FASTCALL *pBaseThreadInitThunk)(DWORD,LPTHREAD_START_ROUTINE,void *) DECLSPEC_HIDDEN;
-+extern const struct unix_funcs *unix_funcs DECLSPEC_HIDDEN;
-
- extern struct _KUSER_SHARED_DATA *user_shared_data DECLSPEC_HIDDEN;
-
-diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
-index 3f16d2f00867..35f2e5f986f7 100644
---- a/dlls/ntdll/unix/loader.c
-+++ b/dlls/ntdll/unix/loader.c
-@@ -116,6 +116,7 @@ void     (WINAPI *pRtlUserThreadStart)( PRTL_THREAD_START_ROUTINE entry, void *a
- void     (WINAPI *p__wine_ctrl_routine)(void*);
- SYSTEM_DLL_INIT_BLOCK *pLdrSystemDllInitBlock = NULL;
-
-+static NTSTATUS (CDECL *p__wine_set_unix_funcs)( int version, const struct unix_funcs *funcs );
- static void *p__wine_syscall_dispatcher;
-
- static void * const syscalls[] =
-@@ -1062,6 +1061,7 @@ static void load_ntdll_functions( HMODULE module )
-     GET_FUNC( LdrSystemDllInitBlock );
-     GET_FUNC( RtlUserThreadStart );
-     GET_FUNC( __wine_ctrl_routine );
-+    GET_FUNC( __wine_set_unix_funcs );
-     GET_FUNC( __wine_syscall_dispatcher );
- #ifdef __i386__
-     {
-@@ -2191,6 +2182,7 @@ const unixlib_entry_t __wine_unix_call_wow64_funcs[] =
- static void start_main_thread(void)
- {
-     SYSTEM_SERVICE_TABLE syscall_table = { (ULONG_PTR *)syscalls, NULL, ARRAY_SIZE(syscalls), syscall_args };
-+    NTSTATUS status;
-     TEB *teb = virtual_alloc_first_teb();
-
-     signal_init_threading();
-@@ -2214,6 +2204,12 @@ static void start_main_thread(void)
-     if (main_image_info.Machine != current_machine) load_wow64_ntdll( main_image_info.Machine );
-     load_apiset_dll();
-     ntdll_init_syscalls( 0, &syscall_table, p__wine_syscall_dispatcher );
-+    status = p__wine_set_unix_funcs( NTDLL_UNIXLIB_VERSION, &unix_funcs );
-+    if (status == STATUS_REVISION_MISMATCH)
-+    {
-+        ERR( "ntdll library version mismatch\n" );
-+        NtTerminateProcess( GetCurrentProcess(), status );
-+    }
-     server_init_process_done();
- }
-
 From b9bb042502857bf088bdde3cdb0f998b6fbdcedc Mon Sep 17 00:00:00 2001
 From: Andrew Eikum <aeikum@codeweavers.com>
 Date: Tue, 13 Jun 2017 12:35:56 -0500
@@ -107,28 +21,28 @@ index bf072af84ac..15d6dde0377 100644
 
  static BOOL is_prefix_bootstrap;  /* are we bootstrapping the prefix? */
  static BOOL imports_fixup_done = FALSE;  /* set once the imports have been fixed up, before attaching them */
-From 6fa5dfc0bd079bd18e1f457b1e6ae0bcf7eb383d Mon Sep 17 00:00:00 2001
+From 53ba023e0a3638123c1ae64a070b45b76fdedece Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
-Date: Fri, 5 Nov 2021 23:37:54 +0100
+Date: Tue, 22 Nov 2022 11:02:52 +0100
 Subject: [PATCH] HACK: steam: ntdll: Setup steamclient trampolines to
  lsteamclient.
 
 This uses exec page faults to jump from native steamclient into our
 lsteamclient entry points.
 ---
- dlls/ntdll/loader.c             | 22 +++++++++++
- dlls/ntdll/unix/loader.c        | 67 +++++++++++++++++++++++++++++++++
+ dlls/ntdll/loader.c             | 23 +++++++++++
+ dlls/ntdll/unix/loader.c        | 71 +++++++++++++++++++++++++++++++++
  dlls/ntdll/unix/signal_i386.c   |  7 ++++
  dlls/ntdll/unix/signal_x86_64.c |  7 ++++
  dlls/ntdll/unix/unix_private.h  |  3 ++
- dlls/ntdll/unixlib.h            |  3 ++
- 6 files changed, 109 insertions(+)
+ dlls/ntdll/unixlib.h            |  7 ++++
+ 6 files changed, 118 insertions(+)
 
 diff --git a/dlls/ntdll/loader.c b/dlls/ntdll/loader.c
-index 15d6dde0377..62987663d98 100644
+index 81aca02ab40..327979dfe40 100644
 --- a/dlls/ntdll/loader.c
 +++ b/dlls/ntdll/loader.c
-@@ -2000,12 +2000,16 @@ static NTSTATUS build_module( LPCWSTR load_path, const UNICODE_STRING *nt_name,
+@@ -2107,12 +2107,16 @@ static NTSTATUS build_module( LPCWSTR load_path, const UNICODE_STRING *nt_name,
                                DWORD flags, BOOL system, WINE_MODREF **pwm )
  {
      static const char builtin_signature[] = "Wine builtin DLL";
@@ -145,7 +59,7 @@ index 15d6dde0377..62987663d98 100644
 
      if (!(nt = RtlImageNtHeader( *module ))) return STATUS_INVALID_IMAGE_FORMAT;
 
-@@ -2026,6 +2030,24 @@ static NTSTATUS build_module( LPCWSTR load_path, const UNICODE_STRING *nt_name,
+@@ -2133,6 +2137,25 @@ static NTSTATUS build_module( LPCWSTR load_path, const UNICODE_STRING *nt_name,
 
      set_security_cookie( *module, map_size );
 
@@ -162,7 +76,8 @@ index 15d6dde0377..62987663d98 100644
 +        RtlCreateUnicodeStringFromAsciiz(&lsteamclient_us, "lsteamclient.dll") &&
 +        (lsteamclient || LdrLoadDll(load_path, 0, &lsteamclient_us, &lsteamclient) == STATUS_SUCCESS))
 +    {
-+        unix_funcs->steamclient_setup_trampolines( *module, lsteamclient );
++        struct steamclient_setup_trampolines_params params = {.src_mod = *module, .tgt_mod = lsteamclient};
++        WINE_UNIX_CALL( unix_steamclient_setup_trampolines, &params );
 +        wm->ldr.Flags |= LDR_DONT_RESOLVE_REFS;
 +        flags |= DONT_RESOLVE_DLL_REFERENCES;
 +    }
@@ -171,10 +86,10 @@ index 15d6dde0377..62987663d98 100644
 
      if (!(flags & DONT_RESOLVE_DLL_REFERENCES) &&
 diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
-index 5dcab3455a0..ecf3cf33947 100644
+index a675adea3e3..cf532b236ad 100644
 --- a/dlls/ntdll/unix/loader.c
 +++ b/dlls/ntdll/unix/loader.c
-@@ -2057,6 +2057,72 @@ static ULONG_PTR get_image_address(void)
+@@ -1305,6 +1305,81 @@ static NTSTATUS load_so_dll( void *args )
  }
 
 
@@ -197,8 +112,10 @@ index 5dcab3455a0..ecf3cf33947 100644
 +    return NULL;
 +}
 +
-+static void CDECL steamclient_setup_trampolines(HMODULE src_mod, HMODULE tgt_mod)
++static NTSTATUS steamclient_setup_trampolines( void *args )
 +{
++    struct steamclient_setup_trampolines_params *params = args;
++    HMODULE src_mod = params->src_mod, tgt_mod = params->tgt_mod;
 +    SYSTEM_BASIC_INFORMATION info;
 +    IMAGE_NT_HEADERS *src_nt = (IMAGE_NT_HEADERS *)((UINT_PTR)src_mod + ((IMAGE_DOS_HEADER *)src_mod)->e_lfanew);
 +    IMAGE_NT_HEADERS *tgt_nt = (IMAGE_NT_HEADERS *)((UINT_PTR)tgt_mod + ((IMAGE_DOS_HEADER *)tgt_mod)->e_lfanew);
@@ -242,32 +159,31 @@ index 5dcab3455a0..ecf3cf33947 100644
 +    steamclient_srcs[steamclient_count] = src_addr;
 +    steamclient_tgts[steamclient_count] = tgt_addr;
 +    steamclient_count++;
++
++    return STATUS_SUCCESS;
 +}
 +
- /***********************************************************************
-  *           __wine_unix_call_funcs
-  */
-@@ -2069,6 +2135,15 @@ static struct unix_funcs unix_funcs =
++NTSTATUS unixcall_steamclient_setup_trampolines( void *args )
++{
++    return steamclient_setup_trampolines( args );
++}
++
+ static const unixlib_entry_t unix_call_funcs[] =
+ {
+     load_so_dll,
+@@ -1315,6 +1315,7 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
+     unixcall_wine_server_handle_to_fd,
+     unixcall_wine_spawnvp,
+     system_time_precise,
++    unixcall_steamclient_setup_trampolines,
  };
 
- #endif  /* _WIN64 */
-+
-+/***********************************************************************
-+ *           unix_funcs
-+ */
-+static struct unix_funcs unix_funcs =
-+{
-+    steamclient_setup_trampolines,
-+};
-+
 
- /***********************************************************************
-  *           start_main_thread
 diff --git a/dlls/ntdll/unix/signal_i386.c b/dlls/ntdll/unix/signal_i386.c
-index 6bb5649e2b5..4f471ffb03b 100644
+index d800885748f..aa0f10d5bfa 100644
 --- a/dlls/ntdll/unix/signal_i386.c
 +++ b/dlls/ntdll/unix/signal_i386.c
-@@ -1887,6 +1887,7 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+@@ -1859,6 +1859,7 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
      struct xcontext xcontext;
      ucontext_t *ucontext = sigcontext;
      void *stack = setup_exception_record( sigcontext, &rec, &xcontext );
@@ -275,7 +191,7 @@ index 6bb5649e2b5..4f471ffb03b 100644
 
      switch (TRAP_sig(ucontext))
      {
-@@ -1922,6 +1922,12 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+@@ -1893,6 +1894,12 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
          }
          break;
      case TRAP_x86_PAGEFLT:  /* Page fault */
@@ -289,10 +205,10 @@ index 6bb5649e2b5..4f471ffb03b 100644
          rec.ExceptionInformation[0] = (ERROR_sig(ucontext) >> 1) & 0x09;
          rec.ExceptionInformation[1] = (ULONG_PTR)siginfo->si_addr;
 diff --git a/dlls/ntdll/unix/signal_x86_64.c b/dlls/ntdll/unix/signal_x86_64.c
-index 68e0c7ce66e..aa5dd47d789 100644
+index 94d79b9cdd1..b369988b85c 100644
 --- a/dlls/ntdll/unix/signal_x86_64.c
 +++ b/dlls/ntdll/unix/signal_x86_64.c
-@@ -2182,6 +2182,7 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+@@ -1966,6 +1966,7 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
      EXCEPTION_RECORD rec = { 0 };
      struct xcontext context;
      ucontext_t *ucontext = init_handler( sigcontext );
@@ -300,7 +216,7 @@ index 68e0c7ce66e..aa5dd47d789 100644
 
      rec.ExceptionAddress = (void *)RIP_sig(ucontext);
      save_context( &context, ucontext );
-@@ -2213,6 +2213,12 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+@@ -1997,6 +1998,12 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
          }
          break;
      case TRAP_x86_PAGEFLT:  /* Page fault */
@@ -314,10 +230,10 @@ index 68e0c7ce66e..aa5dd47d789 100644
          rec.ExceptionInformation[0] = (ERROR_sig(ucontext) >> 1) & 0x09;
          rec.ExceptionInformation[1] = (ULONG_PTR)siginfo->si_addr;
 diff --git a/dlls/ntdll/unix/unix_private.h b/dlls/ntdll/unix/unix_private.h
-index e736dd3c456..aee0103dd59 100644
+index 347d1dd6102..975ac0b334f 100644
 --- a/dlls/ntdll/unix/unix_private.h
 +++ b/dlls/ntdll/unix/unix_private.h
-@@ -195,6 +195,9 @@ extern NTSTATUS alloc_object_attributes( const OBJECT_ATTRIBUTES *attr, struct o
+@@ -197,6 +197,9 @@ extern NTSTATUS system_time_precise( void *args ) DECLSPEC_HIDDEN;
 
  extern void *anon_mmap_fixed( void *start, size_t size, int prot, int flags ) DECLSPEC_HIDDEN;
  extern void *anon_mmap_alloc( size_t size, int prot ) DECLSPEC_HIDDEN;
@@ -328,24 +244,35 @@ index e736dd3c456..aee0103dd59 100644
  extern ULONG_PTR get_system_affinity_mask(void) DECLSPEC_HIDDEN;
  extern void virtual_get_system_info( SYSTEM_BASIC_INFORMATION *info, BOOL wow64 ) DECLSPEC_HIDDEN;
 diff --git a/dlls/ntdll/unixlib.h b/dlls/ntdll/unixlib.h
-index cb184431f82..8aca8fe31c3 100644
+index 0b4c2a984bb..36b0ded3bc9 100644
 --- a/dlls/ntdll/unixlib.h
 +++ b/dlls/ntdll/unixlib.h
-@@ -40,4 +40,13 @@ struct unix_funcs
+@@ -38,17 +38,24 @@ struct unwind_builtin_dll_params
+     CONTEXT                    *context;
+ };
 
- #define NTDLL_UNIX_CALL( func, params ) __wine_unix_call( ntdll_unix_handle, unix_ ## func, params )
-
-+/* increment this when you change the function table */
-+#define NTDLL_UNIXLIB_VERSION 139
-+
-+struct unix_funcs
++struct steamclient_setup_trampolines_params
 +{
-+    /* steamclient HACK */
-+    void          (CDECL *steamclient_setup_trampolines)( HMODULE src_mod, HMODULE tgt_mod );
++    HMODULE src_mod;
++    HMODULE tgt_mod;
 +};
 +
- #endif /* __NTDLL_UNIXLIB_H */
-From b25e4e6251675172321a561e1398874fd2dd0126 Mon Sep 17 00:00:00 2001
+ enum ntdll_unix_funcs
+ {
+     unix_load_so_dll,
+     unix_unwind_builtin_dll,
+     unix_wine_dbg_write,
+     unix_wine_needs_override_large_address_aware,
+     unix_wine_server_call,
+     unix_wine_server_fd_to_handle,
+     unix_wine_server_handle_to_fd,
+     unix_wine_spawnvp,
+     unix_system_time_precise,
++    unix_steamclient_setup_trampolines,
+ };
+
+ extern unixlib_handle_t __wine_unixlib_handle DECLSPEC_HIDDEN;
+From 92e01e33fe6eb993582ba40e931479d78f4e9d60 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
 Date: Wed, 5 Aug 2020 10:35:50 +0200
 Subject: [PATCH] HACK: steam: ntdll: Patch entry points with jumps.
@@ -354,14 +281,14 @@ As a preferred alternative to noexec pages which makes debugging
 painful. The noexec can be enabled with WINESTEAMNOEXEC=1 environmnent
 variable.
 ---
- dlls/ntdll/unix/loader.c | 29 +++++++++++++++++++++++++----
- 1 file changed, 25 insertions(+), 4 deletions(-)
+ dlls/ntdll/unix/loader.c | 28 ++++++++++++++++++++++++----
+ 1 file changed, 24 insertions(+), 4 deletions(-)
 
 diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
-index ecf3cf33947..5390b8f6779 100644
+index cf532b236ad..3d250b72178 100644
 --- a/dlls/ntdll/unix/loader.c
 +++ b/dlls/ntdll/unix/loader.c
-@@ -2076,8 +2076,23 @@ void *steamclient_handle_fault( LPCVOID addr, DWORD err )
+@@ -2062,8 +2062,22 @@ void *steamclient_handle_fault( LPCVOID addr, DWORD err )
      return NULL;
  }
 
@@ -378,14 +305,13 @@ index ecf3cf33947..5390b8f6779 100644
 +    memcpy((char *)src_addr + sizeof(mov) + sizeof(tgt_addr), jmp, sizeof(jmp));
 +}
 +
- static void CDECL steamclient_setup_trampolines(HMODULE src_mod, HMODULE tgt_mod)
+ static NTSTATUS steamclient_setup_trampolines( void *args )
  {
 +    static int noexec_cached = -1;
-+
+     struct steamclient_setup_trampolines_params *params = args;
+     HMODULE src_mod = params->src_mod, tgt_mod = params->tgt_mod;
      SYSTEM_BASIC_INFORMATION info;
-     IMAGE_NT_HEADERS *src_nt = (IMAGE_NT_HEADERS *)((UINT_PTR)src_mod + ((IMAGE_DOS_HEADER *)src_mod)->e_lfanew);
-     IMAGE_NT_HEADERS *tgt_nt = (IMAGE_NT_HEADERS *)((UINT_PTR)tgt_mod + ((IMAGE_DOS_HEADER *)tgt_mod)->e_lfanew);
-@@ -2086,10 +2101,13 @@ static void CDECL steamclient_setup_trampolines(HMODULE src_mod, HMODULE tgt_mod
+@@ -2074,10 +2088,13 @@ static NTSTATUS steamclient_setup_trampolines( void *args )
      const DWORD *names;
      SIZE_T size;
      void *addr, *src_addr, *tgt_addr;
@@ -400,7 +326,7 @@ index ecf3cf33947..5390b8f6779 100644
      virtual_get_system_info( &info, !!NtCurrentTeb()->WowTebOffset );
      page_mask = info.PageSize - 1;
 
-@@ -2098,7 +2116,8 @@ static void CDECL steamclient_setup_trampolines(HMODULE src_mod, HMODULE tgt_mod
+@@ -2086,7 +2103,8 @@ static NTSTATUS steamclient_setup_trampolines( void *args )
          if (memcmp(src_sec[i].Name, ".text", 5)) continue;
          addr = (void *)(((UINT_PTR)src_mod + src_sec[i].VirtualAddress) & ~page_mask);
          size = (src_sec[i].Misc.VirtualSize + page_mask) & ~page_mask;
@@ -410,7 +336,7 @@ index ecf3cf33947..5390b8f6779 100644
      }
 
      src_exp = get_module_data_dir( src_mod, IMAGE_FILE_EXPORT_DIRECTORY, NULL );
-@@ -2112,7 +2131,8 @@ static void CDECL steamclient_setup_trampolines(HMODULE src_mod, HMODULE tgt_mod
+@@ -2100,7 +2118,8 @@ static NTSTATUS steamclient_setup_trampolines( void *args )
          assert(steamclient_count < ARRAY_SIZE(steamclient_srcs));
          steamclient_srcs[steamclient_count] = src_addr;
          steamclient_tgts[steamclient_count] = tgt_addr;
@@ -420,16 +346,16 @@ index ecf3cf33947..5390b8f6779 100644
      }
 
      src_addr = (void *)((UINT_PTR)src_mod + src_nt->OptionalHeader.AddressOfEntryPoint);
-@@ -2120,7 +2140,8 @@ static void CDECL steamclient_setup_trampolines(HMODULE src_mod, HMODULE tgt_mod
+@@ -2108,7 +2127,8 @@ static NTSTATUS steamclient_setup_trampolines( void *args )
      assert(steamclient_count < ARRAY_SIZE(steamclient_srcs));
      steamclient_srcs[steamclient_count] = src_addr;
      steamclient_tgts[steamclient_count] = tgt_addr;
 -    steamclient_count++;
 +    if (!noexec_cached) steamclient_write_jump(src_addr, tgt_addr);
 +    else steamclient_count++;
- }
 
- /***********************************************************************
+     return STATUS_SUCCESS;
+ }
 From 901e614e8f3d8913e7f75ccd6cdbabbd0502c53f Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
 Date: Wed, 18 Dec 2019 13:49:00 +0100
@@ -498,168 +424,317 @@ index a7e79a828ca..3df74d45bd7 100644
      signal( SIGPIPE, SIG_DFL );
 
      sprintf( socket_env, "WINESERVERSOCKET=%u", socketfd );
-From bf6233be8f8b7c2e729daa91160dd41fbbb3c64e Mon Sep 17 00:00:00 2001
-From: Andrew Eikum <aeikum@codeweavers.com>
-Date: Mon, 5 Apr 2021 13:20:41 -0500
+From 08290ccabc137d205ceec261706d78b021d14fa4 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Tue, 22 Nov 2022 11:08:22 +0100
 Subject: [PATCH] HACK: proton: ntdll: Export a function to set a Unix
  environment variable
 
 ---
- dlls/ntdll/env.c               | 5 +++++
- dlls/ntdll/ntdll.spec          | 1 +
- dlls/ntdll/unix/env.c          | 5 +++++
- dlls/ntdll/unix/loader.c       | 1 +
- dlls/ntdll/unix/unix_private.h | 2 ++
- dlls/ntdll/unixlib.h           | 1 +
- include/wine/debug.h           | 1 +
- 7 files changed, 16 insertions(+)
+ dlls/ntdll/ntdll.spec          |   1 +
+ dlls/ntdll/unix/env.c          |  10 +++
+ dlls/ntdll/unix/loader.c       |   1 +
+ dlls/ntdll/unix/unix_private.h |   1 +
+ tools/gdbinit.py               | 113 +++++++++++++++++++++++++++++++++
+ 5 files changed, 126 insertions(+)
+ create mode 100644 tools/gdbinit.py
 
-diff --git a/dlls/ntdll/env.c b/dlls/ntdll/env.c
-index bb8931a556b..0353d6dc501 100644
---- a/dlls/ntdll/env.c
-+++ b/dlls/ntdll/env.c
-@@ -684,3 +684,8 @@ void init_user_process_params(void)
-     set_wow64_environment( &new_params->Environment );
-     new_params->EnvironmentSize = RtlSizeHeap( GetProcessHeap(), 0, new_params->Environment );
- }
-+
-+void __cdecl __wine_set_unix_env( const char *var, const char *val)
-+{
-+    unix_funcs->set_unix_env( var, val );
-+}
 diff --git a/dlls/ntdll/ntdll.spec b/dlls/ntdll/ntdll.spec
-index bd8e1f5efe6..e361fac3a3b 100644
+index b41e29c0ff5..05999131fc5 100644
 --- a/dlls/ntdll/ntdll.spec
 +++ b/dlls/ntdll/ntdll.spec
-@@ -1636,6 +1636,7 @@
- @ extern __wine_syscall_dispatcher
- @ extern -arch=i386 __wine_ldt_copy
- @ extern -arch=arm64 __wine_current_teb
-+@ cdecl __wine_set_unix_env(ptr ptr)
+@@ -1696,6 +1696,7 @@
+ @ extern -private __wine_syscall_dispatcher
+ @ extern -private __wine_unix_call_dispatcher
+ @ extern -private __wine_unixlib_handle
++@ stdcall -syscall __wine_set_unix_env(ptr ptr)
 
  # Debugging
  @ stdcall -syscall -norelay __wine_dbg_write(ptr long)
 diff --git a/dlls/ntdll/unix/env.c b/dlls/ntdll/unix/env.c
-index c7e0674e083..c2c420100d1 100644
+index 6f1709f4713..3c387ba9027 100644
 --- a/dlls/ntdll/unix/env.c
 +++ b/dlls/ntdll/unix/env.c
-@@ -2616,3 +2616,8 @@ ULONG WINAPI RtlNtStatusToDosError( NTSTATUS status )
-
-     return map_status( status );
+@@ -2418,3 +2418,13 @@ void WINAPI RtlSetLastWin32Error( DWORD err )
+ #endif
+     teb->LastErrorValue = err;
  }
 +
-+void CDECL set_unix_env( const char *var, const char *val )
++
++/**********************************************************************
++ *      __wine_set_unix_env  (ntdll.so)
++ */
++ULONG WINAPI __wine_set_unix_env( const char *var, const char *val )
 +{
 +    setenv(var, val, 1);
++    return 0;
 +}
 diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
-index 5390b8f6779..a7e79a828ca 100644
+index 3d250b72178..fac93f815fd 100644
 --- a/dlls/ntdll/unix/loader.c
 +++ b/dlls/ntdll/unix/loader.c
-@@ -2157,6 +2157,7 @@ static struct unix_funcs unix_funcs =
- static struct unix_funcs unix_funcs =
- {
-     steamclient_setup_trampolines,
-+    set_unix_env,
+@@ -357,6 +357,7 @@ static void * const syscalls[] =
+     NtWriteFileGather,
+     NtWriteVirtualMemory,
+     NtYieldExecution,
++    __wine_set_unix_env,
+     wine_nt_to_unix_file_name,
+     wine_unix_to_nt_file_name,
  };
-
-
 diff --git a/dlls/ntdll/unix/unix_private.h b/dlls/ntdll/unix/unix_private.h
-index aee0103dd59..25e1445be44 100644
+index 975ac0b334f..a723ae3c5b9 100644
 --- a/dlls/ntdll/unix/unix_private.h
 +++ b/dlls/ntdll/unix/unix_private.h
-@@ -290,6 +290,8 @@ extern void call_raise_user_exception_dispatcher(void) DECLSPEC_HIDDEN;
+@@ -294,6 +294,7 @@ extern NTSTATUS call_user_apc_dispatcher( CONTEXT *context_ptr, ULONG_PTR arg1,
+                                           PNTAPCFUNC func, NTSTATUS status ) DECLSPEC_HIDDEN;
+ extern NTSTATUS call_user_exception_dispatcher( EXCEPTION_RECORD *rec, CONTEXT *context ) DECLSPEC_HIDDEN;
+ extern void call_raise_user_exception_dispatcher(void) DECLSPEC_HIDDEN;
++extern ULONG WINAPI __wine_set_unix_env( const char *var, const char *val ) DECLSPEC_HIDDEN;
 
  #define IMAGE_DLLCHARACTERISTICS_PREFER_NATIVE 0x0010 /* Wine extension */
 
-+extern void CDECL set_unix_env(const char *var, const char *val) DECLSPEC_HIDDEN;
+diff --git a/tools/gdbinit.py b/tools/gdbinit.py
+new file mode 100644
+index 00000000000..ba3b7d003ac
+--- /dev/null
++++ b/tools/gdbinit.py
+@@ -0,0 +1,113 @@
++#!/bin/env python3
 +
- #define TICKSPERSEC 10000000
- #define SECS_1601_TO_1970  ((369 * 365 + 89) * (ULONGLONG)86400)
++# Copyright 2021 Rémi Bernon for CodeWeavers
++#
++# This library is free software; you can redistribute it and/or
++# modify it under the terms of the GNU Lesser General Public
++# License as published by the Free Software Foundation; either
++# version 2.1 of the License, or (at your option) any later version.
++#
++# This library is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++# Lesser General Public License for more details.
++#
++# You should have received a copy of the GNU Lesser General Public
++# License along with this library; if not, write to the Free Software
++# Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++
++from __future__ import print_function
++
++import gdb
++import re
++import subprocess
++import sys
++
++class LoadSymbolFiles(gdb.Command):
++  'Command to load symbol files directly from /proc/<pid>/maps.'
++
++  def __init__(self):
++    sup = super(LoadSymbolFiles, self)
++    sup.__init__('load-symbol-files', gdb.COMMAND_FILES, gdb.COMPLETE_NONE,
++                 False)
++
++    self.libs = {}
++    gdb.execute('alias -a lsf = load-symbol-files', True)
++
++  def invoke(self, arg, from_tty):
++    pid = gdb.selected_inferior().pid
++    if not pid in self.libs: self.libs[pid] = {}
++
++    def command(cmd, confirm=from_tty, to_string=not from_tty):
++      gdb.execute(cmd, from_tty=confirm, to_string=to_string)
++
++    def execute(cmd):
++      return subprocess.check_output(cmd, stderr=subprocess.STDOUT) \
++                       .decode('utf-8')
++
++    # load mappings addresses
++    libs = {}
++    with open('/proc/{}/maps'.format(pid), 'r') as maps:
++      for line in maps:
++        addr, _, _, _, node, path = re.split(r'\s+', line, 5)
++        path = path.strip()
++        if node == '0': continue
++        if path in libs: continue
++        libs[path] = int(addr.split('-')[0], 16)
++
++    # unload symbol file if address changed
++    for k in set(libs) & set(self.libs[pid]):
++      if libs[k] != self.libs[pid][k]:
++        command('remove-symbol-file "{}"'.format(k), confirm=False)
++        del self.libs[k]
++
++    # load symbol file for new mappings
++    for k in set(libs) - set(self.libs[pid]):
++        if arg is not None and re.search(arg, k) is None: continue
++        addr = self.libs[pid][k] = libs[k]
++        has_debug = False
++        offs = None
++
++        try:
++          out = execute(['file', k])
++        except:
++          continue
++
++        # try loading mapping as ELF
++        try:
++          out = execute(['readelf', '-l', k])
++          for line in out.split('\n'):
++            if not 'LOAD' in line: continue
++            base = int(line.split()[2], 16)
++            break
++        except:
++          # assume mapping is PE
++          base = -1
++
++        try:
++          name = None
++          cmd = 'add-symbol-file "{}"'.format(k)
++          out = execute(['objdump', '-h', k])
++          for line in out.split('\n'):
++            if '2**' in line:
++              _, name, _, vma, _, off, _ = line.split(maxsplit=6)
++              if base < 0: offs = int(off, 16)
++              else: offs = int(vma, 16) - base
++            if 'ALLOC' in line:
++              cmd += ' -s {} 0x{:x}'.format(name, addr + offs)
++            elif name in ['.gnu_debuglink', '.debug_info']:
++              has_debug = True
++            elif 'DEBUGGING' in line:
++              has_debug = True
++        except:
++          continue
++
++        if not has_debug:
++          print('no debugging info found in {}'.format(k))
++          continue
++
++        print('loading symbols for {}'.format(k))
++        command(cmd, confirm=False, to_string=True)
++
++
++LoadSymbolFiles()
 
-diff --git a/dlls/ntdll/unixlib.h b/dlls/ntdll/unixlib.h
-index 8aca8fe31c3..595c3931904 100644
---- a/dlls/ntdll/unixlib.h
-+++ b/dlls/ntdll/unixlib.h
-@@ -43,6 +43,7 @@ struct unix_funcs
- {
-     /* steamclient HACK */
-     void          (CDECL *steamclient_setup_trampolines)( HMODULE src_mod, HMODULE tgt_mod );
-+    void          (CDECL *set_unix_env)( const char *var, const char *val );
- };
-
- #endif /* __NTDLL_UNIXLIB_H */
-diff --git a/include/wine/debug.h b/include/wine/debug.h
-index 6aac7fe82e8..bc2b1ec0c40 100644
---- a/include/wine/debug.h
-+++ b/include/wine/debug.h
-@@ -149,6 +149,7 @@ extern const char * __cdecl __wine_dbg_strdup( const char *str );
- extern int __cdecl __wine_dbg_output( const char *str );
- extern int __cdecl __wine_dbg_header( enum __wine_debug_class cls, struct __wine_debug_channel *channel,
-                                       const char *function );
-+extern void __cdecl __wine_set_unix_env( const char *var, const char *val );
-
- /*
-  * Exported definitions and macros
-
-From a1dde27690950aeb4728f0f3783b4d04d608b5c0 Mon Sep 17 00:00:00 2001
-From: Vincent Povirk <vincent@codeweavers.com>
-Date: Wed, 1 Apr 2020 11:47:05 -0500
-Subject: [PATCH] winebrowser: Restore original LD_LIBRARY_PATH before calling
- to system
+From 7aa2679cea3e6edb206da42d23d9d12cb0f1e937 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Fri, 21 May 2021 21:54:39 +0200
+Subject: [PATCH] ntdll: Set RLIMIT_NICE to its hard limit and inform the
+ server.
 
 ---
- dlls/ntdll/unix/env.c       |  3 ++-
- programs/winebrowser/main.c | 16 ++++++++++++++++
- 2 files changed, 18 insertions(+), 1 deletion(-)
+ dlls/ntdll/unix/loader.c |  3 +++
+ dlls/ntdll/unix/server.c | 14 ++++++++++++++
+ server/process.h         |  1 +
+ server/protocol.def      |  1 +
+ server/thread.c          |  7 +++++++
+ 5 files changed, 26 insertions(+)
 
-diff --git a/dlls/ntdll/unix/env.c b/dlls/ntdll/unix/env.c
-index 45e18dbccaf..6130ad23c15 100644
---- a/dlls/ntdll/unix/env.c
-+++ b/dlls/ntdll/unix/env.c
-@@ -2620,5 +2620,6 @@ ULONG WINAPI RtlNtStatusToDosError( NTSTATUS status )
+diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
+index c46f109af71..7ece87338fc 100644
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -2548,6 +2548,9 @@ void __wine_main( int argc, char *argv[], char *envp[] )
+ #ifdef RLIMIT_AS
+     set_max_limit( RLIMIT_AS );
+ #endif
++#ifdef RLIMIT_NICE
++    set_max_limit( RLIMIT_NICE );
++#endif
 
- void CDECL set_unix_env( const char *var, const char *val )
- {
--    setenv(var, val, 1);
-+    if (!val) unsetenv(var);
-+    else setenv(var, val, 1);
- }
-diff --git a/programs/winebrowser/main.c b/programs/winebrowser/main.c
-index 913c0a8d672..df3f7425d65 100644
---- a/programs/winebrowser/main.c
-+++ b/programs/winebrowser/main.c
-@@ -63,6 +63,17 @@ static char *strdup_unixcp( const WCHAR *str )
-     return ret;
- }
+     virtual_init();
+     init_environment( argc, argv, envp );
+diff --git a/dlls/ntdll/unix/server.c b/dlls/ntdll/unix/server.c
+index 56a110882ed..321b91d20e0 100644
+--- a/dlls/ntdll/unix/server.c
++++ b/dlls/ntdll/unix/server.c
+@@ -53,6 +53,9 @@
+ # include <sys/prctl.h>
+ #endif
+ #include <sys/stat.h>
++#ifdef HAVE_SYS_RESOURCE_H
++# include <sys/resource.h>
++#endif
+ #ifdef HAVE_SYS_SYSCALL_H
+ # include <sys/syscall.h>
+ #endif
+@@ -1455,6 +1458,8 @@ size_t server_init_process(void)
+     struct sigaction sig_act;
+     size_t info_size;
+     DWORD pid, tid;
++    struct rlimit rlimit;
++    int nice_limit = 0;
 
-+static void restore_system_environment(void)
-+{
-+    const char* orig_ld_path = getenv("ORIG_LD_LIBRARY_PATH");
-+
-+    if (orig_ld_path)
+     server_pid = -1;
+     if (env_socket)
+@@ -1516,10 +1521,19 @@ size_t server_init_process(void)
+
+     reply_pipe = init_thread_pipe();
+
++#ifdef RLIMIT_NICE
++    if (!getrlimit( RLIMIT_NICE, &rlimit ))
 +    {
-+        __wine_set_unix_env("LD_LIBRARY_PATH", orig_ld_path);
-+        __wine_set_unix_env("ORIG_LD_LIBRARY_PATH", NULL);
++        if (rlimit.rlim_cur <= 40) nice_limit = 20 - rlimit.rlim_cur;
++        else if (rlimit.rlim_cur == -1 /* RLIMIT_INFINITY */) nice_limit = -20;
 +    }
-+}
++#endif
 +
- /* try to launch a unix app from a comma separated string of app names */
- static int launch_app( const WCHAR *candidates, const WCHAR *argv1 )
- {
-@@ -72,6 +83,11 @@ static int launch_app( const WCHAR *candidates, const WCHAR *argv1 )
-
-     if (!(cmdline = strdup_unixcp( argv1 ))) return 1;
-
-+    /* PROTON HACK: Restore ORIG_LD_LIBRARY_PATH to LD_LIBRARY_PATH.
-+     * System programs may not work correctly with our libraries, in
-+     * particular gio on Ubuntu 19.04 is broken by our libgio. */
-+    restore_system_environment();
-+
-     while (*candidates)
+     SERVER_START_REQ( init_first_thread )
      {
-         WCHAR **args = CommandLineToArgvW( candidates, &count );
-From a4048df6a5fec29d849bc2b11627d31f4cb01f3e Mon Sep 17 00:00:00 2001
+         req->unix_pid    = getpid();
+         req->unix_tid    = get_unix_tid();
++        req->nice_limit  = nice_limit;
+         req->reply_fd    = reply_pipe;
+         req->wait_fd     = ntdll_get_thread_data()->wait_fd[1];
+         req->debug_level = (TRACE_ON(server) != 0);
+diff --git a/server/process.h b/server/process.h
+index a0a071d8f88..d073e9e285f 100644
+--- a/server/process.h
++++ b/server/process.h
+@@ -50,6 +50,7 @@ struct process
+     timeout_t            sigkill_delay;   /* delay before final SIGKILL */
+     unsigned short       machine;         /* client machine type */
+     int                  unix_pid;        /* Unix pid for final SIGKILL */
++    int                  nice_limit;      /* RLIMIT_NICE of the process */
+     int                  exit_code;       /* process exit code */
+     int                  running_threads; /* number of threads running in this process */
+     timeout_t            start_time;      /* absolute time at process start */
+diff --git a/server/protocol.def b/server/protocol.def
+index 880ad794982..42eae1db9f3 100644
+--- a/server/protocol.def
++++ b/server/protocol.def
+@@ -941,6 +941,7 @@ typedef struct
+     int          debug_level;  /* new debug level */
+     int          reply_fd;     /* fd for reply pipe */
+     int          wait_fd;      /* fd for blocking calls pipe */
++    char         nice_limit;   /* RLIMIT_NICE of new thread */
+ @REPLY
+     process_id_t pid;          /* process id of the new thread's process */
+     thread_id_t  tid;          /* thread id of the new thread */
+diff --git a/server/thread.c b/server/thread.c
+index 2cb45e2bf76..7efa00312bb 100644
+--- a/server/thread.c
++++ b/server/thread.c
+@@ -37,6 +37,12 @@
+ #define _WITH_CPU_SET_T
+ #include <sched.h>
+ #endif
++#ifdef HAVE_SYS_TIME_H
++#include <sys/time.h>
++#endif
++#ifdef HAVE_SYS_RESOURCE_H
++#include <sys/resource.h>
++#endif
+
+ #include "ntstatus.h"
+ #define WIN32_NO_STATUS
+@@ -1489,6 +1495,7 @@ DECL_HANDLER(init_first_thread)
+
+     current->unix_pid = process->unix_pid = req->unix_pid;
+     current->unix_tid = req->unix_tid;
++    process->nice_limit = req->nice_limit;
+
+     if (!process->parent_id)
+         process->affinity = current->affinity = get_thread_affinity( current );
+
+From cbf6d8c3fe33c73db63246675e2a0e2672128465 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
 Date: Mon, 11 Oct 2021 10:58:33 +0200
 Subject: [PATCH] ntdll: Use RTLD_NOLOAD to find already mapped modules.
@@ -671,10 +746,10 @@ dlclose, and that we should not fixup again.
  1 file changed, 4 insertions(+), 2 deletions(-)
 
 diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
-index de2270fb678..3790baa9fae 100644
+index 7ece87338fc..55d36eaec4f 100644
 --- a/dlls/ntdll/unix/loader.c
 +++ b/dlls/ntdll/unix/loader.c
-@@ -1258,8 +1258,10 @@ static NTSTATUS dlopen_dll( const char *so_name, UNICODE_STRING *nt_name, void *
+@@ -1299,8 +1299,10 @@ static NTSTATUS dlopen_dll( const char *so_name, UNICODE_STRING *nt_name, void *
  {
      void *module, *handle;
      const IMAGE_NT_HEADERS *nt;
@@ -686,7 +761,7 @@ index de2270fb678..3790baa9fae 100644
      if (!handle)
      {
          WARN( "failed to load .so lib %s: %s\n", debugstr_a(so_name), dlerror() );
-@@ -1280,7 +1280,7 @@ static NTSTATUS dlopen_dll( const char *so_name, UNICODE_STRING *nt_name, void *
+@@ -1318,7 +1320,7 @@ static NTSTATUS dlopen_dll( const char *so_name, UNICODE_STRING *nt_name, void *
          return STATUS_SUCCESS;
      }
 
@@ -695,4 +770,79 @@ index de2270fb678..3790baa9fae 100644
      {
          dlclose( handle );
          return STATUS_NO_MEMORY;
+From 4fd446bd2e3e289ff792c5315d8291fbcad7aca5 Mon Sep 17 00:00:00 2001
+From: Andrew Eikum <aeikum@codeweavers.com>
+Date: Mon, 23 May 2022 13:17:32 -0500
+Subject: [PATCH] ntdll: Disable 16-bit TIB hack
+
+MechWarrior Online (342200) writes directly to the SubSystemTib field,
+which Wine would interpret to mean it's a 16-bit executable and then
+crash. We're unlikely to run into any real 16-bit applications in Proton
+(they won't work on modern Windows, anyway), so let's just disable that
+hack entirely.
+
+CW-Bug-Id: #20673
+---
+ dlls/kernelbase/loader.c | 2 +-
+ dlls/ntdll/env.c         | 2 +-
+ dlls/ntdll/path.c        | 6 +++---
+ 3 files changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/dlls/kernelbase/loader.c b/dlls/kernelbase/loader.c
+index 0fd2d7b7c99..af3c193f331 100644
+--- a/dlls/kernelbase/loader.c
++++ b/dlls/kernelbase/loader.c
+@@ -302,7 +302,7 @@ DWORD WINAPI DECLSPEC_HOTPATCH GetModuleFileNameW( HMODULE module, LPWSTR filena
+     UNICODE_STRING name;
+     NTSTATUS status;
+
+-    if (!module && ((win16_tib = NtCurrentTeb()->Tib.SubSystemTib)) && win16_tib->exe_name)
++    if (!module && (0 && (win16_tib = NtCurrentTeb()->Tib.SubSystemTib)) && win16_tib->exe_name)
+     {
+         len = min( size, win16_tib->exe_name->Length / sizeof(WCHAR) );
+         memcpy( filename, win16_tib->exe_name->Buffer, len * sizeof(WCHAR) );
+diff --git a/dlls/ntdll/env.c b/dlls/ntdll/env.c
+index 6db6cee17cd..7d993cd799c 100644
+--- a/dlls/ntdll/env.c
++++ b/dlls/ntdll/env.c
+@@ -589,7 +589,7 @@ NTSTATUS WINAPI RtlCreateProcessParametersEx( RTL_USER_PROCESS_PARAMETERS **resu
+     if (!DllPath) DllPath = &null_str;
+     if (!CurrentDirectoryName)
+     {
+-        if (NtCurrentTeb()->Tib.SubSystemTib)  /* FIXME: hack */
++        if (0 && NtCurrentTeb()->Tib.SubSystemTib)  /* FIXME: hack */
+             curdir = ((WIN16_SUBSYSTEM_TIB *)NtCurrentTeb()->Tib.SubSystemTib)->curdir.DosPath;
+         else
+             curdir = cur_params->CurrentDirectory.DosPath;
+diff --git a/dlls/ntdll/path.c b/dlls/ntdll/path.c
+index da6f55ddb83..dda6ba4ee53 100644
+--- a/dlls/ntdll/path.c
++++ b/dlls/ntdll/path.c
+@@ -528,7 +528,7 @@ static ULONG get_full_path_helper(LPCWSTR name, LPWSTR buffer, ULONG size)
+
+     RtlAcquirePebLock();
+
+-    if (NtCurrentTeb()->Tib.SubSystemTib)  /* FIXME: hack */
++    if (0 && NtCurrentTeb()->Tib.SubSystemTib)  /* FIXME: hack */
+         cd = &((WIN16_SUBSYSTEM_TIB *)NtCurrentTeb()->Tib.SubSystemTib)->curdir.DosPath;
+     else
+         cd = &NtCurrentTeb()->Peb->ProcessParameters->CurrentDirectory.DosPath;
+@@ -883,7 +883,7 @@ ULONG WINAPI RtlGetCurrentDirectory_U(ULONG buflen, LPWSTR buf)
+
+     RtlAcquirePebLock();
+
+-    if (NtCurrentTeb()->Tib.SubSystemTib)  /* FIXME: hack */
++    if (0 && NtCurrentTeb()->Tib.SubSystemTib)  /* FIXME: hack */
+         us = &((WIN16_SUBSYSTEM_TIB *)NtCurrentTeb()->Tib.SubSystemTib)->curdir.DosPath;
+     else
+         us = &NtCurrentTeb()->Peb->ProcessParameters->CurrentDirectory.DosPath;
+@@ -927,7 +927,7 @@ NTSTATUS WINAPI RtlSetCurrentDirectory_U(const UNICODE_STRING* dir)
+
+     RtlAcquirePebLock();
+
+-    if (NtCurrentTeb()->Tib.SubSystemTib)  /* FIXME: hack */
++    if (0 && NtCurrentTeb()->Tib.SubSystemTib)  /* FIXME: hack */
+         curdir = &((WIN16_SUBSYSTEM_TIB *)NtCurrentTeb()->Tib.SubSystemTib)->curdir;
+     else
+         curdir = &NtCurrentTeb()->Peb->ProcessParameters->CurrentDirectory;
 

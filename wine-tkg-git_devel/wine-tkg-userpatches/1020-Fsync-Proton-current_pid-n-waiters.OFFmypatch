@@ -1,0 +1,289 @@
+From 434c16b7eef47d2c489ecc7da0e72ca51c37cbb6 Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Thu, 27 Apr 2023 16:53:17 -0600
+Subject: [PATCH] fsync: Cache current process ID.
+
+CW-Bug-Id: #22194
+---
+ dlls/ntdll/unix/fsync.c | 9 +++++++--
+ 1 file changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/ntdll/unix/fsync.c b/dlls/ntdll/unix/fsync.c
+index ba85862fcc2..ed2c334610f 100644
+--- a/dlls/ntdll/unix/fsync.c
++++ b/dlls/ntdll/unix/fsync.c
+@@ -60,6 +60,8 @@ WINE_DEFAULT_DEBUG_CHANNEL(fsync);
+ #include "pshpack4.h"
+ #include "poppack.h"
+ 
++static int current_pid;
++
+ /* futex_waitv interface */
+ 
+ #ifndef __NR_futex_waitv
+@@ -349,7 +351,7 @@ static void put_object_from_wait( struct fsync *obj )
+ {
+     int *shm = obj->shm;
+ 
+-    __sync_val_compare_and_swap( &shm[3], GetCurrentProcessId(), 0 );
++    __sync_val_compare_and_swap( &shm[3], current_pid, 0 );
+     put_object( obj );
+ }
+ 
+@@ -448,7 +450,7 @@ static NTSTATUS get_object_for_wait( HANDLE handle, struct fsync *obj )
+     shm = obj->shm;
+     /* Give wineserver a chance to cleanup shm index if the process
+      * is killed while we are waiting on the object. */
+-    __atomic_store_n( &shm[3], GetCurrentProcessId(), __ATOMIC_SEQ_CST );
++    __atomic_store_n( &shm[3], current_pid, __ATOMIC_SEQ_CST );
+     return STATUS_SUCCESS;
+ }
+ 
+@@ -578,6 +580,9 @@ void fsync_init(void)
+             ERR("Failed to initialize shared memory: %s\n", strerror( errno ));
+         exit(1);
+     }
++
++    current_pid = GetCurrentProcessId();
++    assert(current_pid);
+ }
+ 
+ NTSTATUS fsync_create_semaphore( HANDLE *handle, ACCESS_MASK access,
+From 9ab6b89e29b1dfde2a85b8fd50e72a21aa69cd2c Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Thu, 27 Apr 2023 16:56:26 -0600
+Subject: [PATCH] fsync: Cache current TID in __fsync_wait_objects().
+
+CW-Bug-Id: #22194
+---
+ dlls/ntdll/unix/fsync.c | 18 +++++++++++-------
+ 1 file changed, 11 insertions(+), 7 deletions(-)
+
+diff --git a/dlls/ntdll/unix/fsync.c b/dlls/ntdll/unix/fsync.c
+index ed2c334610f..479a7a6baf4 100644
+--- a/dlls/ntdll/unix/fsync.c
++++ b/dlls/ntdll/unix/fsync.c
+@@ -885,6 +885,9 @@ static NTSTATUS __fsync_wait_objects( DWORD count, const HANDLE *handles,
+ {
+     static const LARGE_INTEGER zero = {0};
+ 
++    int current_tid = 0;
++#define CURRENT_TID (current_tid ? current_tid : (current_tid = GetCurrentThreadId()))
++
+     struct futex_waitv futexes[MAXIMUM_WAIT_OBJECTS + 1];
+     struct fsync objs[MAXIMUM_WAIT_OBJECTS];
+     BOOL msgwait = FALSE, waited = FALSE;
+@@ -1015,7 +1018,7 @@ static NTSTATUS __fsync_wait_objects( DWORD count, const HANDLE *handles,
+                         struct mutex *mutex = obj->shm;
+                         int tid;
+ 
+-                        if (mutex->tid == GetCurrentThreadId())
++                        if (mutex->tid == CURRENT_TID)
+                         {
+                             TRACE("Woken up by handle %p [%d].\n", handles[i], i);
+                             mutex->count++;
+@@ -1024,7 +1027,7 @@ static NTSTATUS __fsync_wait_objects( DWORD count, const HANDLE *handles,
+                             return i;
+                         }
+ 
+-                        if (!(tid = __sync_val_compare_and_swap( &mutex->tid, 0, GetCurrentThreadId() )))
++                        if (!(tid = __sync_val_compare_and_swap( &mutex->tid, 0, CURRENT_TID )))
+                         {
+                             TRACE("Woken up by handle %p [%d].\n", handles[i], i);
+                             mutex->count = 1;
+@@ -1032,7 +1035,7 @@ static NTSTATUS __fsync_wait_objects( DWORD count, const HANDLE *handles,
+                             put_objects( objs, count );
+                             return i;
+                         }
+-                        else if (tid == ~0 && (tid = __sync_val_compare_and_swap( &mutex->tid, ~0, GetCurrentThreadId() )) == ~0)
++                        else if (tid == ~0 && (tid = __sync_val_compare_and_swap( &mutex->tid, ~0, CURRENT_TID )) == ~0)
+                         {
+                             TRACE("Woken up by abandoned mutex %p [%d].\n", handles[i], i);
+                             mutex->count = 1;
+@@ -1171,7 +1174,7 @@ static NTSTATUS __fsync_wait_objects( DWORD count, const HANDLE *handles,
+                 {
+                     struct mutex *mutex = obj->shm;
+ 
+-                    if (mutex->tid == GetCurrentThreadId())
++                    if (mutex->tid == CURRENT_TID)
+                         continue;
+ 
+                     while ((current = __atomic_load_n( &mutex->tid, __ATOMIC_SEQ_CST )))
+@@ -1215,7 +1218,7 @@ static NTSTATUS __fsync_wait_objects( DWORD count, const HANDLE *handles,
+                     struct mutex *mutex = obj->shm;
+                     int tid = __atomic_load_n( &mutex->tid, __ATOMIC_SEQ_CST );
+ 
+-                    if (tid && tid != ~0 && tid != GetCurrentThreadId())
++                    if (tid && tid != ~0 && tid != CURRENT_TID)
+                         goto tryagain;
+                 }
+                 else if (obj->type)
+@@ -1238,11 +1241,11 @@ static NTSTATUS __fsync_wait_objects( DWORD count, const HANDLE *handles,
+                 {
+                     struct mutex *mutex = obj->shm;
+                     int tid = __atomic_load_n( &mutex->tid, __ATOMIC_SEQ_CST );
+-                    if (tid == GetCurrentThreadId())
++                    if (tid == CURRENT_TID)
+                         break;
+                     if (tid && tid != ~0)
+                         goto tooslow;
+-                    if (__sync_val_compare_and_swap( &mutex->tid, tid, GetCurrentThreadId() ) != tid)
++                    if (__sync_val_compare_and_swap( &mutex->tid, tid, CURRENT_TID ) != tid)
+                         goto tooslow;
+                     if (tid == ~0)
+                         abandoned = TRUE;
+@@ -1352,6 +1355,7 @@ static NTSTATUS __fsync_wait_objects( DWORD count, const HANDLE *handles,
+      * right thing to do seems to be to return STATUS_USER_APC anyway. */
+     if (ret == STATUS_TIMEOUT) ret = STATUS_USER_APC;
+     return ret;
++#undef CURRENT_TID
+ }
+ 
+ /* Like esync, we need to let the server know when we are doing a message wait,
+From 53942be77c3d906b0100a12dbf0aad7254c2db3a Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Thu, 27 Apr 2023 17:32:38 -0600
+Subject: [PATCH] fsync: Add WINE_FSYNC_YIELD_TO_WAITERS option.
+
+CW-Bug-Id: #22194
+---
+ dlls/ntdll/unix/fsync.c        | 37 +++++++++++++++++++++++++++++++---
+ dlls/ntdll/unix/loader.c       |  8 ++++++++
+ dlls/ntdll/unix/unix_private.h |  1 +
+ 3 files changed, 43 insertions(+), 3 deletions(-)
+
+diff --git a/dlls/ntdll/unix/fsync.c b/dlls/ntdll/unix/fsync.c
+index 479a7a6baf4..b4d4b086919 100644
+--- a/dlls/ntdll/unix/fsync.c
++++ b/dlls/ntdll/unix/fsync.c
+@@ -440,7 +440,7 @@ static NTSTATUS get_object( HANDLE handle, struct fsync *obj )
+     return ret;
+ }
+ 
+-static NTSTATUS get_object_for_wait( HANDLE handle, struct fsync *obj )
++static NTSTATUS get_object_for_wait( HANDLE handle, struct fsync *obj, int *prev_pid )
+ {
+     NTSTATUS ret;
+     int *shm;
+@@ -450,7 +450,10 @@ static NTSTATUS get_object_for_wait( HANDLE handle, struct fsync *obj )
+     shm = obj->shm;
+     /* Give wineserver a chance to cleanup shm index if the process
+      * is killed while we are waiting on the object. */
+-    __atomic_store_n( &shm[3], current_pid, __ATOMIC_SEQ_CST );
++    if (fsync_yield_to_waiters)
++        *prev_pid = __atomic_exchange_n( &shm[3], current_pid, __ATOMIC_SEQ_CST );
++    else
++        __atomic_store_n( &shm[3], current_pid, __ATOMIC_SEQ_CST );
+     return STATUS_SUCCESS;
+ }
+ 
+@@ -837,6 +840,24 @@ NTSTATUS fsync_query_mutex( HANDLE handle, void *info, ULONG *ret_len )
+     return STATUS_SUCCESS;
+ }
+ 
++static inline void try_yield_to_waiters( int prev_pid )
++{
++    if (!fsync_yield_to_waiters) return;
++
++    /* On Windows singaling an object will wake the threads waiting on the object. With fsync
++     * it may happen that signaling thread (or other thread) grabs the object before the already waiting
++     * thread gets a chance. Try to workaround that for the affected apps. Non-zero 'prev_pid' indicates
++     * that the object is grabbed in __fsync_wait_objects() by some other thread. It is the same for
++     * a non-current pid, but we may currently have a stale PID on an object from a terminated process
++     * and it is probably safer to skip this workaround. This won't work great if the object is used in 'wait all'
++     * and the waiter is blocked on the other object.
++     * This check is also not entirely reliable as if multiple waiters from the same process enter
++     * __fsync_wait_objects() the first one leaving will clear 'last_pid' in the object. */
++
++    if (prev_pid == current_pid)
++        usleep(0);
++}
++
+ static NTSTATUS do_single_wait( int *addr, int val, const struct timespec64 *end, clockid_t clock_id,
+                                 BOOLEAN alertable )
+ {
+@@ -891,6 +912,7 @@ static NTSTATUS __fsync_wait_objects( DWORD count, const HANDLE *handles,
+     struct futex_waitv futexes[MAXIMUM_WAIT_OBJECTS + 1];
+     struct fsync objs[MAXIMUM_WAIT_OBJECTS];
+     BOOL msgwait = FALSE, waited = FALSE;
++    int prev_pids[MAXIMUM_WAIT_OBJECTS];
+     int has_fsync = 0, has_server = 0;
+     clockid_t clock_id = 0;
+     struct timespec64 end;
+@@ -921,7 +943,7 @@ static NTSTATUS __fsync_wait_objects( DWORD count, const HANDLE *handles,
+ 
+     for (i = 0; i < count; i++)
+     {
+-        ret = get_object_for_wait( handles[i], &objs[i] );
++        ret = get_object_for_wait( handles[i], &objs[i], &prev_pids[i] );
+         if (ret == STATUS_SUCCESS)
+         {
+             assert( objs[i].type );
+@@ -1000,6 +1022,9 @@ static NTSTATUS __fsync_wait_objects( DWORD count, const HANDLE *handles,
+                         int current, new;
+ 
+                         new = __atomic_load_n( &semaphore->count, __ATOMIC_SEQ_CST );
++                        if (!waited && new)
++                            try_yield_to_waiters(prev_pids[i]);
++
+                         while ((current = new))
+                         {
+                             if ((new = __sync_val_compare_and_swap( &semaphore->count, current, current - 1 )) == current)
+@@ -1027,6 +1052,9 @@ static NTSTATUS __fsync_wait_objects( DWORD count, const HANDLE *handles,
+                             return i;
+                         }
+ 
++                        if (!waited && !mutex->tid)
++                            try_yield_to_waiters(prev_pids[i]);
++
+                         if (!(tid = __sync_val_compare_and_swap( &mutex->tid, 0, CURRENT_TID )))
+                         {
+                             TRACE("Woken up by handle %p [%d].\n", handles[i], i);
+@@ -1051,6 +1079,9 @@ static NTSTATUS __fsync_wait_objects( DWORD count, const HANDLE *handles,
+                     {
+                         struct event *event = obj->shm;
+ 
++                        if (!waited && event->signaled)
++                            try_yield_to_waiters(prev_pids[i]);
++
+                         if (__sync_val_compare_and_swap( &event->signaled, 1, 0 ))
+                         {
+                             if (ac_odyssey && alertable)
+diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
+index d1fda7a6e5a..dd16a630bf2 100644
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -2088,6 +2088,7 @@ const unixlib_entry_t __wine_unix_call_w
+ BOOL fsync_simulate_async_read_io;
+ BOOL fsync_simulate_sched_quantum;
+ BOOL alert_simulate_sched_quantum;
++BOOL fsync_yield_to_waiters;
+ BOOL high_dll_addresses;
+ 
+ static void hacks_init(void)
+@@ -2116,6 +2117,12 @@ static void hacks_init(void)
+     }    
+     if (fsync_simulate_sched_quantum)
+         ERR("HACK: Simulating sched quantum in fsync.\n");
++
++    env_str = getenv("WINE_FSYNC_YIELD_TO_WAITERS");
++    if (env_str)
++        fsync_yield_to_waiters = !!atoi(env_str);
++    if (fsync_yield_to_waiters)
++        ERR("HACK: fsync: yield to waiters.\n");
+         
+ #ifdef _WIN64
+     env_str = getenv("WINE_HIGH_DLL_ADDRESSES");
+diff --git a/dlls/ntdll/unix/unix_private.h b/dlls/ntdll/unix/unix_private.h
+index 471f7377233..63ed982be92 100644
+--- a/dlls/ntdll/unix/unix_private.h
++++ b/dlls/ntdll/unix/unix_private.h
+@@ -194,6 +194,7 @@ extern struct ldt_copy __wine_ldt_copy D
+ extern BOOL fsync_simulate_async_read_io DECLSPEC_HIDDEN;
+ extern BOOL fsync_simulate_sched_quantum DECLSPEC_HIDDEN;
+ extern BOOL alert_simulate_sched_quantum DECLSPEC_HIDDEN;
++extern BOOL fsync_yield_to_waiters;
+ extern BOOL high_dll_addresses DECLSPEC_HIDDEN;
+ 
+ extern void init_environment( int argc, char *argv[], char *envp[] ) DECLSPEC_HIDDEN;
+

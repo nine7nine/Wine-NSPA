@@ -1,0 +1,494 @@
+From 19b24ec7f142cab52c16020c60173905b2c98049 Mon Sep 17 00:00:00 2001
+From: Zhiyi Zhang <zzhang@codeweavers.com>
+Date: Mon, 11 Oct 2021 11:01:33 +0200
+Subject: [PATCH] msctf: Use list to keep thread managers.
+
+Thread managers were stored in thread local storage,
+which have a major flaw that they can't not be released
+by another thread.
+
+Signed-off-by: Zhiyi Zhang <zzhang@codeweavers.com>
+---
+ dlls/msctf/msctf.c          | 46 +++++++----------------
+ dlls/msctf/msctf_internal.h |  1 -
+ dlls/msctf/threadmgr.c      | 73 ++++++++++++++++++++++++++++++++-----
+ 3 files changed, 76 insertions(+), 44 deletions(-)
+
+diff --git a/dlls/msctf/msctf.c b/dlls/msctf/msctf.c
+index 0b1a3fbce15..c0dd2c21675 100644
+--- a/dlls/msctf/msctf.c
++++ b/dlls/msctf/msctf.c
+@@ -67,7 +67,6 @@ static UINT array_size;
+ static struct list AtsList = LIST_INIT(AtsList);
+ static UINT activated = 0;
+ 
+-DWORD tlsIndex = 0;
+ TfClientId processId = 0;
+ ITfCompartmentMgr *globalCompartmentMgr = NULL;
+ 
+@@ -395,23 +394,19 @@ HRESULT add_active_textservice(TF_LANGUAGEPROFILE *lp)
+     ActivatedTextService *actsvr;
+     ITfCategoryMgr *catmgr;
+     AtsEntry *entry;
+-    ITfThreadMgrEx *tm = TlsGetValue(tlsIndex);
++    ITfThreadMgr *tm;
+     ITfClientId *clientid;
+ 
+-    if (!tm) return E_UNEXPECTED;
++    if (FAILED(TF_GetThreadMgr(&tm))) return E_UNEXPECTED;
+ 
+     actsvr = HeapAlloc(GetProcessHeap(),0,sizeof(ActivatedTextService));
+-    if (!actsvr) return E_OUTOFMEMORY;
++    if (!actsvr) goto fail;
+ 
+-    ITfThreadMgrEx_QueryInterface(tm, &IID_ITfClientId, (void **)&clientid);
++    ITfThreadMgr_QueryInterface(tm, &IID_ITfClientId, (void **)&clientid);
+     ITfClientId_GetClientId(clientid, &lp->clsid, &actsvr->tid);
+     ITfClientId_Release(clientid);
+ 
+-    if (!actsvr->tid)
+-    {
+-        HeapFree(GetProcessHeap(),0,actsvr);
+-        return E_OUTOFMEMORY;
+-    }
++    if (!actsvr->tid) goto fail;
+ 
+     actsvr->pITfTextInputProcessor = NULL;
+     actsvr->LanguageProfile = *lp;
+@@ -438,20 +433,21 @@ HRESULT add_active_textservice(TF_LANGUAGEPROFILE *lp)
+         deactivate_remove_conflicting_ts(&actsvr->LanguageProfile.catid);
+ 
+     if (activated > 0)
+-        activate_given_ts(actsvr, tm);
++        activate_given_ts(actsvr, (ITfThreadMgrEx *)tm);
+ 
+     entry = HeapAlloc(GetProcessHeap(),0,sizeof(AtsEntry));
+-
+-    if (!entry)
+-    {
+-        HeapFree(GetProcessHeap(),0,actsvr);
+-        return E_OUTOFMEMORY;
+-    }
++    if (!entry) goto fail;
+ 
+     entry->ats = actsvr;
+     list_add_head(&AtsList, &entry->entry);
+ 
++    ITfThreadMgr_Release(tm);
+     return S_OK;
++
++fail:
++    ITfThreadMgr_Release(tm);
++    HeapFree(GetProcessHeap(), 0, actsvr);
++    return E_OUTOFMEMORY;
+ }
+ 
+ BOOL get_active_textservice(REFCLSID rclsid, TF_LANGUAGEPROFILE *profile)
+@@ -555,11 +551,9 @@ BOOL WINAPI DllMain(HINSTANCE hinst, DWORD fdwReason, LPVOID fImpLoad)
+     switch (fdwReason)
+     {
+         case DLL_PROCESS_ATTACH:
+-            tlsIndex = TlsAlloc();
+             break;
+         case DLL_PROCESS_DETACH:
+             if (fImpLoad) break;
+-            TlsFree(tlsIndex);
+             break;
+     }
+     return TRUE;
+@@ -593,20 +587,6 @@ HRESULT WINAPI TF_CreateThreadMgr(ITfThreadMgr **pptim)
+     return ThreadMgr_Constructor(NULL,(IUnknown**)pptim);
+ }
+ 
+-/***********************************************************************
+- *              TF_GetThreadMgr (MSCTF.@)
+- */
+-HRESULT WINAPI TF_GetThreadMgr(ITfThreadMgr **pptim)
+-{
+-    TRACE("\n");
+-    *pptim = TlsGetValue(tlsIndex);
+-
+-    if (*pptim)
+-        ITfThreadMgr_AddRef(*pptim);
+-
+-    return S_OK;
+-}
+-
+ /***********************************************************************
+  *              SetInputScope(MSCTF.@)
+  */
+diff --git a/dlls/msctf/msctf_internal.h b/dlls/msctf/msctf_internal.h
+index 45a39806c22..84f8ebf81c2 100644
+--- a/dlls/msctf/msctf_internal.h
++++ b/dlls/msctf/msctf_internal.h
+@@ -36,7 +36,6 @@
+ #define COOKIE_MAGIC_INPUTPROCESSORPROFILEACTIVATIONSINK 0x00b0
+ #define COOKIE_MAGIC_ACTIVELANGSINK 0x00c0
+ 
+-extern DWORD tlsIndex DECLSPEC_HIDDEN;
+ extern TfClientId processId DECLSPEC_HIDDEN;
+ extern ITfCompartmentMgr *globalCompartmentMgr DECLSPEC_HIDDEN;
+ 
+diff --git a/dlls/msctf/threadmgr.c b/dlls/msctf/threadmgr.c
+index b3cd5fee981..f164afc57d7 100644
+--- a/dlls/msctf/threadmgr.c
++++ b/dlls/msctf/threadmgr.c
+@@ -37,6 +37,17 @@
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(msctf);
+ 
++static CRITICAL_SECTION ThreadMgrCs;
++static CRITICAL_SECTION_DEBUG ThreadMgrCsDebug =
++{
++    0, 0, &ThreadMgrCs,
++    {&ThreadMgrCsDebug.ProcessLocksList,
++     &ThreadMgrCsDebug.ProcessLocksList },
++     0, 0, {(DWORD_PTR)(__FILE__ ": ThreadMgrCs")}
++};
++static CRITICAL_SECTION ThreadMgrCs = {&ThreadMgrCsDebug, -1, 0, 0, 0, 0};
++struct list ThreadMgrList = LIST_INIT(ThreadMgrList);
++
+ typedef struct tagPreservedKey
+ {
+     struct list     entry;
+@@ -98,6 +109,9 @@ typedef struct tagACLMulti {
+     struct list     ThreadMgrEventSink;
+     struct list     UIElementSink;
+     struct list     InputProcessorProfileActivationSink;
++
++    DWORD threadId;
++    struct list entry;
+ } ThreadMgr;
+ 
+ typedef struct tagEnumTfDocumentMgr {
+@@ -110,6 +124,11 @@ typedef struct tagEnumTfDocumentMgr {
+ 
+ static HRESULT EnumTfDocumentMgr_Constructor(struct list* head, IEnumTfDocumentMgrs **ppOut);
+ 
++static inline ThreadMgr *impl_from_ITfThreadMgr(ITfThreadMgr *iface)
++{
++    return CONTAINING_RECORD(iface, ThreadMgr, ITfThreadMgrEx_iface);
++}
++
+ static inline ThreadMgr *impl_from_ITfThreadMgrEx(ITfThreadMgrEx *iface)
+ {
+     return CONTAINING_RECORD(iface, ThreadMgr, ITfThreadMgrEx_iface);
+@@ -155,6 +174,35 @@ static inline EnumTfDocumentMgr *impl_from_IEnumTfDocumentMgrs(IEnumTfDocumentMg
+     return CONTAINING_RECORD(iface, EnumTfDocumentMgr, IEnumTfDocumentMgrs_iface);
+ }
+ 
++/***********************************************************************
++ *              TF_GetThreadMgr (MSCTF.@)
++ */
++HRESULT WINAPI TF_GetThreadMgr(ITfThreadMgr **pptim)
++{
++    DWORD id = GetCurrentThreadId();
++    ThreadMgr *cursor;
++
++    TRACE("%p\n", pptim);
++
++    if (!pptim)
++        return E_INVALIDARG;
++
++    EnterCriticalSection(&ThreadMgrCs);
++    LIST_FOR_EACH_ENTRY(cursor, &ThreadMgrList, ThreadMgr, entry)
++    {
++        if (cursor->threadId == id)
++        {
++            ITfThreadMgrEx_AddRef(&cursor->ITfThreadMgrEx_iface);
++            *pptim = (ITfThreadMgr *)&cursor->ITfThreadMgrEx_iface;
++            LeaveCriticalSection(&ThreadMgrCs);
++            return S_OK;
++        }
++    }
++    LeaveCriticalSection(&ThreadMgrCs);
++    *pptim = NULL;
++    return E_FAIL;
++}
++
+ static void ThreadMgr_Destructor(ThreadMgr *This)
+ {
+     struct list *cursor, *cursor2;
+@@ -163,7 +211,9 @@ static void ThreadMgr_Destructor(ThreadMgr *This)
+     if (This->focusHook)
+         UnhookWindowsHookEx(This->focusHook);
+ 
+-    TlsSetValue(tlsIndex,NULL);
++    EnterCriticalSection(&ThreadMgrCs);
++    list_remove(&This->entry);
++    LeaveCriticalSection(&ThreadMgrCs);
+     TRACE("destroying %p\n", This);
+     if (This->focus)
+         ITfDocumentMgr_Release(This->focus);
+@@ -386,17 +436,20 @@ static HRESULT WINAPI ThreadMgr_SetFocus(ITfThreadMgrEx *iface, ITfDocumentMgr *
+ 
+ static LRESULT CALLBACK ThreadFocusHookProc(int nCode, WPARAM wParam, LPARAM lParam)
+ {
++    ITfThreadMgr *ThreadMgr_iface;
+     ThreadMgr *This;
+ 
+-    This = TlsGetValue(tlsIndex);
+-    if (!This)
++    if (FAILED(TF_GetThreadMgr(&ThreadMgr_iface)))
+     {
+         ERR("Hook proc but no ThreadMgr for this thread. Serious Error\n");
+         return 0;
+     }
++
++    This = impl_from_ITfThreadMgr(ThreadMgr_iface);
+     if (!This->focusHook)
+     {
+         ERR("Hook proc but no ThreadMgr focus Hook. Serious Error\n");
++        ITfThreadMgr_Release(ThreadMgr_iface);
+         return 0;
+     }
+ 
+@@ -417,6 +470,7 @@ static LRESULT CALLBACK ThreadFocusHookProc(int nCode, WPARAM wParam, LPARAM lPa
+         }
+     }
+ 
++    ITfThreadMgr_Release(ThreadMgr_iface);
+     return CallNextHookEx(This->focusHook, nCode, wParam, lParam);
+ }
+ 
+@@ -1346,13 +1400,8 @@ HRESULT ThreadMgr_Constructor(IUnknown *pUnkOuter, IUnknown **ppOut)
+         return CLASS_E_NOAGGREGATION;
+ 
+     /* Only 1 ThreadMgr is created per thread */
+-    This = TlsGetValue(tlsIndex);
+-    if (This)
+-    {
+-        ThreadMgr_AddRef(&This->ITfThreadMgrEx_iface);
+-        *ppOut = (IUnknown*)&This->ITfThreadMgrEx_iface;
++    if (SUCCEEDED(TF_GetThreadMgr((ITfThreadMgr **)ppOut)))
+         return S_OK;
+-    }
+ 
+     This = HeapAlloc(GetProcessHeap(),HEAP_ZERO_MEMORY,sizeof(ThreadMgr));
+     if (This == NULL)
+@@ -1367,7 +1416,6 @@ HRESULT ThreadMgr_Constructor(IUnknown *pUnkOuter, IUnknown **ppOut)
+     This->ITfUIElementMgr_iface.lpVtbl = &ThreadMgrUIElementMgrVtbl;
+     This->ITfSourceSingle_iface.lpVtbl = &SourceSingleVtbl;
+     This->refCount = 1;
+-    TlsSetValue(tlsIndex,This);
+ 
+     CompartmentMgr_Constructor((IUnknown*)&This->ITfThreadMgrEx_iface, &IID_IUnknown, (IUnknown**)&This->CompartmentMgr);
+ 
+@@ -1384,6 +1432,11 @@ HRESULT ThreadMgr_Constructor(IUnknown *pUnkOuter, IUnknown **ppOut)
+     list_init(&This->UIElementSink);
+     list_init(&This->InputProcessorProfileActivationSink);
+ 
++    This->threadId = GetCurrentThreadId();
++    EnterCriticalSection(&ThreadMgrCs);
++    list_add_tail(&ThreadMgrList, &This->entry);
++    LeaveCriticalSection(&ThreadMgrCs);
++
+     TRACE("returning %p\n", This);
+     *ppOut = (IUnknown *)&This->ITfThreadMgrEx_iface;
+     return S_OK;
+
+From 208608ad6b64c3e966860ab0273c251a85417616 Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Mon, 26 Jul 2021 17:36:04 +0300
+Subject: [PATCH] kernel32: Align stack pointer for lstrcpyA() on x64.
+
+For Blood of Steel crash on launch.
+
+CW-Bug-Id: #19148
+---
+ dlls/kernel32/virtual.c | 40 +++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 39 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/kernel32/virtual.c b/dlls/kernel32/virtual.c
+index f5693de4e28..800c25d34cd 100644
+--- a/dlls/kernel32/virtual.c
++++ b/dlls/kernel32/virtual.c
+@@ -36,6 +36,7 @@
+ #include "psapi.h"
+ #include "wine/exception.h"
+ #include "wine/debug.h"
++#include "wine/asm.h"
+ 
+ #include "kernel_private.h"
+ 
+@@ -294,7 +295,8 @@ LPWSTR WINAPI lstrcatW( LPWSTR dst, LPCWSTR src )
+  *           lstrcpyA   (KERNEL32.@)
+  *           lstrcpy    (KERNEL32.@)
+  */
+-LPSTR WINAPI lstrcpyA( LPSTR dst, LPCSTR src )
++#ifdef __x86_64__
++LPSTR WINAPI lstrcpyA_impl( LPSTR dst, LPCSTR src )
+ {
+     __TRY
+     {
+@@ -310,6 +312,42 @@ LPSTR WINAPI lstrcpyA( LPSTR dst, LPCSTR src )
+     return dst;
+ }
+ 
++__ASM_GLOBAL_FUNC( lstrcpyA,
++                   ".byte 0x48, 0x8d, 0xa4, 0x24, 0x00, 0x00, 0x00, 0x00\n\t"
++                   "pushq %rbp\n\t"
++                   __ASM_SEH(".seh_pushreg %rbp\n\t")
++                   __ASM_CFI(".cfi_adjust_cfa_offset 8\n\t")
++                   __ASM_CFI(".cfi_rel_offset %rbp,0\n\t")
++                   "movq %rsp,%rbp\n\t"
++                   __ASM_SEH(".seh_setframe %rbp,0\n\t")
++                   __ASM_CFI(".cfi_def_cfa_register %rbp\n\t")
++                   __ASM_SEH(".seh_endprologue\n\t")
++                   "subq $0x20,%rsp\n\t"
++                   "andq $~15,%rsp\n\t"
++                   "call " __ASM_NAME("lstrcpyA_impl") "\n\t"
++                   "leaq 0(%rbp),%rsp\n\t"
++                   __ASM_CFI(".cfi_def_cfa_register %rsp\n\t")
++                   "popq %rbp\n\t"
++                   __ASM_CFI(".cfi_adjust_cfa_offset -8\n\t")
++                   __ASM_CFI(".cfi_same_value %rbp\n\t")
++                   "ret" )
++#else /* __x86_64__ */
++LPSTR WINAPI lstrcpyA( LPSTR dst, LPCSTR src )
++{
++    __TRY
++    {
++        /* this is how Windows does it */
++        memmove( dst, src, strlen(src)+1 );
++    }
++    __EXCEPT( badptr_handler )
++    {
++        SetLastError( ERROR_INVALID_PARAMETER );
++        return NULL;
++    }
++    __ENDTRY
++    return dst;
++}
++#endif
+ 
+ /***********************************************************************
+  *           lstrcpyW   (KERNEL32.@)
+
+
+From f484fd72a4735d4f6c9b9de04bbea493cfe54bd4 Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Fri, 1 Apr 2022 17:39:50 +0300
+Subject: [PATCH] msvcrt: HACK: Introduce asm wrapper for _isatty on x64.
+
+CW-Bug-Id: #20419
+---
+ dlls/msvcrt/file.c | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+diff --git a/dlls/msvcrt/file.c b/dlls/msvcrt/file.c
+index e72784eef41..8a9c89b9be5 100644
+--- a/dlls/msvcrt/file.c
++++ b/dlls/msvcrt/file.c
+@@ -44,6 +44,7 @@
+ #include "mtdll.h"
+ 
+ #include "wine/debug.h"
++#include "wine/asm.h"
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(msvcrt);
+ 
+@@ -818,12 +819,28 @@ static int msvcrt_flush_buffer(FILE* file)
+ /*********************************************************************
+  *		_isatty (MSVCRT.@)
+  */
++#ifdef __x86_64__
++int CDECL MSVCRT__isatty(int fd)
++{
++    TRACE(":fd (%d)\n",fd);
++
++    return get_ioinfo_nolock(fd)->wxflag & WX_TTY;
++}
++__ASM_GLOBAL_FUNC( _isatty,
++        "sub $0x30,%rsp\n\t"
++        "lea MSVCRT___pioinfo(%rip),%rdx\n\t"
++        "nop;nop;nop;nop;nop;nop;nop;nop;nop\n\t"
++        "add $0x30,%rsp\n\t"
++        "jmp " __ASM_NAME( "MSVCRT__isatty" ) )
++#else
+ int CDECL _isatty(int fd)
+ {
+     TRACE(":fd (%d)\n",fd);
+ 
+     return get_ioinfo_nolock(fd)->wxflag & WX_TTY;
+ }
++#endif
++
+ 
+ /* INTERNAL: Allocate stdio file buffer */
+ static BOOL msvcrt_alloc_buffer(FILE* file)
+
+From 177ce2a1acc0e9fbd65779f272d6c7972ec55d20 Mon Sep 17 00:00:00 2001
+From: Connor McAdams <cmcadams@codeweavers.com>
+Date: Wed, 11 Jan 2023 13:04:18 -0500
+Subject: [PATCH] combase: Further fix a race in find_proxy_manager().
+
+The race was previously mitigated by making sure the refcnt wasn't 0,
+but there will also be a race if we AddRef and reach a refcnt of 1 due
+to having a prior refcnt of 0.
+
+Signed-off-by: Connor McAdams <cmcadams@codeweavers.com>
+---
+ dlls/combase/marshal.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/dlls/combase/marshal.c b/dlls/combase/marshal.c
+index a3da851b139..088160ab167 100644
+--- a/dlls/combase/marshal.c
++++ b/dlls/combase/marshal.c
+@@ -1975,7 +1975,7 @@ static BOOL find_proxy_manager(struct ap
+             /* be careful of a race with ClientIdentity_Release, which would
+              * cause us to return a proxy which is in the process of being
+              * destroyed */
+-            if (proxy_manager_addref_if_alive(proxy) != 0)
++            if (proxy_manager_addref_if_alive(proxy) > 1)
+             {
+                 *proxy_found = proxy;
+                 found = TRUE;
+
+From 00cb510bb36c9bcb5a214997ccdb1fabe6ca2c6c Mon Sep 17 00:00:00 2001
+From: Connor McAdams <cmcadams@codeweavers.com>
+Date: Wed, 11 Jan 2023 13:11:05 -0500
+Subject: [PATCH] oleaut32: Fix a race condition in TLB_ReadTypeLib.
+
+Avoid returning a typelib from the cache that is in the middle of being
+removed.
+
+Signed-off-by: Connor McAdams <cmcadams@codeweavers.com>
+---
+ dlls/oleaut32/typelib.c | 21 ++++++++++++++++-----
+ 1 file changed, 16 insertions(+), 5 deletions(-)
+
+diff --git a/dlls/oleaut32/typelib.c b/dlls/oleaut32/typelib.c
+index d92d0234c6c..5e72e45fde6 100644
+--- a/dlls/oleaut32/typelib.c
++++ b/dlls/oleaut32/typelib.c
+@@ -3342,11 +3342,22 @@ static HRESULT TLB_ReadTypeLib(LPCWSTR pszFileName, LPWSTR pszPath, UINT cchPath
+     {
+         if (!wcsicmp(entry->path, pszPath) && entry->index == index)
+         {
+-            TRACE("cache hit\n");
+-            *ppTypeLib = &entry->ITypeLib2_iface;
+-            ITypeLib2_AddRef(*ppTypeLib);
+-            LeaveCriticalSection(&cache_section);
+-            return S_OK;
++            /*
++             * Avoid a race condition where a cached entry has been released,
++             * but not yet removed from the cache.
++             */
++            if (ITypeLib2_AddRef(&entry->ITypeLib2_iface) > 1)
++            {
++                TRACE("cache hit\n");
++                *ppTypeLib = &entry->ITypeLib2_iface;
++                LeaveCriticalSection(&cache_section);
++                return S_OK;
++            }
++            else
++            {
++                entry->ref = 0;
++                break;
++            }
+         }
+     }
+     LeaveCriticalSection(&cache_section);
+

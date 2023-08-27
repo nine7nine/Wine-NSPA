@@ -80,12 +80,20 @@ diff -Npur a/dlls/avrt/main.c b/dlls/avrt/main.c
 +    if (!wcscmp(name, L"Audio") || !wcscmp(name, L"Pro Audio"))
 +        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
 +        
-+    //if (!wcscmp(name, L"Window Manager"))
-+    //    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
++    if (!wcscmp(name, L"Window Manager"))
++        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL);
 +        
      return (HANDLE)0x12345678;
  }
- 
+
+@@ -89,6 +89,7 @@ BOOL WINAPI AvQuerySystemResponsiveness(
+ BOOL WINAPI AvRevertMmThreadCharacteristics(HANDLE AvrtHandle)
+ {
+     FIXME("(%p): stub\n", AvrtHandle);
++    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL);
+     return TRUE;
+ }
+  
 diff -Npur a/dlls/ntdll/unix/thread.c b/dlls/ntdll/unix/thread.c
 --- a/dlls/ntdll/unix/thread.c	2022-12-03 21:23:52.315015762 -0500
 +++ b/dlls/ntdll/unix/thread.c	2022-12-03 21:09:00.194516128 -0500
@@ -334,7 +342,7 @@ diff -Npur a/server/scheduler.c b/server/scheduler.c
 + *
 + * Copyright (C) 2015 Joakim Hernberg
 + * Copyright (C) 2015 Sebastian Lackner
-+ * Copyright (C) 2020 Jordan Johnston
++ * Copyright (C) 2023 Jordan Johnston
 + *
 + * This library is free software; you can redistribute it and/or
 + * modify it under the terms of the GNU Lesser General Public
@@ -441,7 +449,7 @@ diff -Npur a/server/scheduler.c b/server/scheduler.c
 +        pthread_attr_setinheritsched (&pthread_attr, PTHREAD_EXPLICIT_SCHED);
 +        pthread_attr_setscope( &pthread_attr, PTHREAD_SCOPE_SYSTEM ); 
 +        
-+        pthread_setschedparam (pthread_self(), srv_rt_policy, &param);
++        pthread_setschedparam (pthread_self(), srv_rt_policy | SCHED_RESET_ON_FORK, &param);
 +    }    
 +
 +    /* determine base priority which will be used for all threads */
@@ -473,43 +481,43 @@ diff -Npur a/server/scheduler.c b/server/scheduler.c
 + 
 +    memset( &param, 0, sizeof(param) );
 +    // Hardcoded to SCHED_FIFO just for TIME_CRITICAL threads.
-+    if (thread->priority >= THREAD_PRIORITY_TIME_CRITICAL )
++    if (thread->priority >= THREAD_PRIORITY_TIME_CRITICAL && PROCESS_PRIOCLASS_REALTIME)
 +    {
-+        //wine_rt_policy = SCHED_FIFO;
++        wine_rt_policy = SCHED_FIFO;
 +        param.sched_priority = thread_base_priority -2;
 +    }
-+    else if (thread->priority >= THREAD_PRIORITY_HIGHEST)
++    else if (thread->priority >= THREAD_PRIORITY_HIGHEST && PROCESS_PRIOCLASS_REALTIME)
 +    {
 +        //wine_rt_policy = SCHED_FIFO;
 +        param.sched_priority = thread_base_priority -4;
 +    }
-+    else if (thread->priority >= THREAD_PRIORITY_ABOVE_NORMAL)
++    else if (thread->priority >= THREAD_PRIORITY_ABOVE_NORMAL && PROCESS_PRIOCLASS_REALTIME)
 +    {
 +        param.sched_priority = thread_base_priority -6;
 +    }
-+    else if (thread->priority >= THREAD_PRIORITY_NORMAL)
++    else if (thread->priority >= THREAD_PRIORITY_NORMAL && PROCESS_PRIOCLASS_REALTIME)
 +    {
-+        param.sched_priority = thread_base_priority -8;
++        wine_rt_policy = SCHED_OTHER;
 +    }
-+    else if (thread->priority >= THREAD_PRIORITY_BELOW_NORMAL)
++    else if (thread->priority >= THREAD_PRIORITY_BELOW_NORMAL && PROCESS_PRIOCLASS_REALTIME)
 +    {
-+        param.sched_priority = thread_base_priority -10;
++        wine_rt_policy = SCHED_OTHER;
 +    } 
-+    else if (thread->priority >= THREAD_PRIORITY_LOWEST)
++    else if (thread->priority >= THREAD_PRIORITY_LOWEST && PROCESS_PRIOCLASS_REALTIME)
 +    {
-+        param.sched_priority = thread_base_priority -12;
++        wine_rt_policy = SCHED_OTHER;
 +    }   
-+    else if (thread->priority >= THREAD_PRIORITY_IDLE)
++    else if (thread->priority >= THREAD_PRIORITY_IDLE && PROCESS_PRIOCLASS_REALTIME)
 +    {
-+        param.sched_priority = thread_base_priority -14;
++        wine_rt_policy = SCHED_OTHER;
 +    }
 +    else
 +    {
-+        param.sched_priority = thread_base_priority -16;
++        wine_rt_policy = SCHED_OTHER;
 +    }
 +
 +    if (sched_setscheduler(thread->unix_tid, wine_rt_policy | SCHED_RESET_ON_FORK, &param) == -1 &&
-+        sched_setscheduler(thread->unix_tid, wine_rt_policy, &param) == -1)
++        sched_setscheduler(thread->unix_tid, wine_rt_policy | SCHED_RESET_ON_FORK, &param) == -1)
 +    {
 +        static int once;
 +        if (debug_level || !once++)
@@ -519,7 +527,7 @@ diff -Npur a/server/scheduler.c b/server/scheduler.c
 +    }
 +    // we care about the fsync_idx threads, if they come up.
 +    if (sched_setscheduler(thread->fsync_idx, wine_rt_policy | SCHED_RESET_ON_FORK, &param) == -1 &&
-+        sched_setscheduler(thread->fsync_idx, wine_rt_policy, &param) == -1)
++        sched_setscheduler(thread->fsync_idx, wine_rt_policy | SCHED_RESET_ON_FORK, &param) == -1)
 +    {
 +        static int once;
 +        if (debug_level || !once++)

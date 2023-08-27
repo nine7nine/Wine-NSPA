@@ -1,0 +1,390 @@
+From d1fc8dd88516943600e804499cca6b504cfb5aad Mon Sep 17 00:00:00 2001
+From: Torge Matthies <openglfreak@googlemail.com>
+Date: Tue, 7 Dec 2021 23:34:52 +0100
+Subject: [PATCH] ntdll, server: Write system handle info directly to user
+ supplied buffer.
+
+---
+ dlls/ntdll/unix/system.c |  46 +++--------
+ server/handle.c          | 173 ++++++++++++++++++++++++++++++++++-----
+ server/protocol.def      |  12 +--
+ server/trace.c           |  14 +---
+ 4 files changed, 164 insertions(+), 81 deletions(-)
+
+diff --git a/dlls/ntdll/unix/system.c b/dlls/ntdll/unix/system.c
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/unix/system.c
++++ b/dlls/ntdll/unix/system.c
+@@ -2924,8 +2924,7 @@ NTSTATUS WINAPI NtQuerySystemInformation( SYSTEM_INFORMATION_CLASS class,
+ 
+     case SystemHandleInformation:  /* 16 */
+     {
+-        struct handle_info *handle_info;
+-        DWORD i, num_handles;
++        DWORD num_handles;
+ 
+         if (size < sizeof(SYSTEM_HANDLE_INFORMATION))
+         {
+@@ -2940,26 +2939,16 @@ NTSTATUS WINAPI NtQuerySystemInformation( SYSTEM_INFORMATION_CLASS class,
+         }
+ 
+         num_handles = (size - FIELD_OFFSET( SYSTEM_HANDLE_INFORMATION, Handle )) / sizeof(SYSTEM_HANDLE_ENTRY);
+-        if (!(handle_info = malloc( sizeof(*handle_info) * num_handles ))) return STATUS_NO_MEMORY;
+ 
+         SERVER_START_REQ( get_system_handles )
+         {
+-            wine_server_set_reply( req, handle_info, sizeof(*handle_info) * num_handles );
++            SYSTEM_HANDLE_INFORMATION *shi = info;
++            req->ex = 0;
++            wine_server_set_reply( req, shi->Handle, sizeof(shi->Handle[0]) * num_handles );
+             if (!(ret = wine_server_call( req )))
+             {
+-                SYSTEM_HANDLE_INFORMATION *shi = info;
+-                shi->Count = wine_server_reply_size( req ) / sizeof(*handle_info);
++                shi->Count = wine_server_reply_size( req ) / sizeof(shi->Handle[0]);
+                 len = FIELD_OFFSET( SYSTEM_HANDLE_INFORMATION, Handle[shi->Count] );
+-                for (i = 0; i < shi->Count; i++)
+-                {
+-                    memset( &shi->Handle[i], 0, sizeof(shi->Handle[i]) );
+-                    shi->Handle[i].OwnerPid     = handle_info[i].owner;
+-                    shi->Handle[i].HandleValue  = handle_info[i].handle;
+-                    shi->Handle[i].AccessMask   = handle_info[i].access;
+-                    shi->Handle[i].HandleFlags  = handle_info[i].attributes;
+-                    shi->Handle[i].ObjectType   = handle_info[i].type;
+-                    /* FIXME: Fill out ObjectPointer */
+-                }
+             }
+             else if (ret == STATUS_BUFFER_TOO_SMALL)
+             {
+@@ -2968,8 +2957,6 @@ NTSTATUS WINAPI NtQuerySystemInformation( SYSTEM_INFORMATION_CLASS class,
+             }
+         }
+         SERVER_END_REQ;
+-
+-        free( handle_info );
+         break;
+     }
+ 
+@@ -3142,8 +3129,7 @@ NTSTATUS WINAPI NtQuerySystemInformation( SYSTEM_INFORMATION_CLASS class,
+ 
+     case SystemExtendedHandleInformation:  /* 64 */
+     {
+-        struct handle_info *handle_info;
+-        DWORD i, num_handles;
++        DWORD num_handles;
+ 
+         if (size < sizeof(SYSTEM_HANDLE_INFORMATION_EX))
+         {
+@@ -3159,26 +3145,16 @@ NTSTATUS WINAPI NtQuerySystemInformation( SYSTEM_INFORMATION_CLASS class,
+ 
+         num_handles = (size - FIELD_OFFSET( SYSTEM_HANDLE_INFORMATION_EX, Handles ))
+                       / sizeof(SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX);
+-        if (!(handle_info = malloc( sizeof(*handle_info) * num_handles ))) return STATUS_NO_MEMORY;
+ 
+         SERVER_START_REQ( get_system_handles )
+         {
+-            wine_server_set_reply( req, handle_info, sizeof(*handle_info) * num_handles );
++            SYSTEM_HANDLE_INFORMATION_EX *shi = info;
++            req->ex = 1;
++            wine_server_set_reply( req, shi->Handles, sizeof(shi->Handles[0]) * num_handles );
+             if (!(ret = wine_server_call( req )))
+             {
+-                SYSTEM_HANDLE_INFORMATION_EX *shi = info;
+-                shi->NumberOfHandles = wine_server_reply_size( req ) / sizeof(*handle_info);
++                shi->NumberOfHandles = wine_server_reply_size( req ) / sizeof(shi->Handles[0]);
+                 len = FIELD_OFFSET( SYSTEM_HANDLE_INFORMATION_EX, Handles[shi->NumberOfHandles] );
+-                for (i = 0; i < shi->NumberOfHandles; i++)
+-                {
+-                    memset( &shi->Handles[i], 0, sizeof(shi->Handles[i]) );
+-                    shi->Handles[i].UniqueProcessId  = handle_info[i].owner;
+-                    shi->Handles[i].HandleValue      = handle_info[i].handle;
+-                    shi->Handles[i].GrantedAccess    = handle_info[i].access;
+-                    shi->Handles[i].HandleAttributes = handle_info[i].attributes;
+-                    shi->Handles[i].ObjectTypeIndex  = handle_info[i].type;
+-                    /* FIXME: Fill out Object */
+-                }
+             }
+             else if (ret == STATUS_BUFFER_TOO_SMALL)
+             {
+@@ -3187,8 +3163,6 @@ NTSTATUS WINAPI NtQuerySystemInformation( SYSTEM_INFORMATION_CLASS class,
+             }
+         }
+         SERVER_END_REQ;
+-
+-        free( handle_info );
+         break;
+     }
+ 
+diff --git a/server/handle.c b/server/handle.c
+index 11111111111..11111111111 100644
+--- a/server/handle.c
++++ b/server/handle.c
+@@ -820,18 +820,142 @@ done:
+     free( label_acl );
+ }
+ 
++static int count_handles( struct process *process, void *user )
++{
++    unsigned int *count = user;
++    struct handle_table *table = process->handles;
++    struct handle_entry *entry;
++    unsigned int i;
++
++    if (!table)
++        return 0;
++
++    for (i = 0, entry = table->entries; i <= table->last; i++, entry++)
++        if (entry->ptr)
++            (*count)++;
++
++    return 0;
++}
++
++struct system_handle_entry_32
++{
++    unsigned int    owner_pid;
++    unsigned char   object_type;
++    unsigned char   handle_flags;
++    unsigned short  handle_value;
++    unsigned int    object_pointer;
++    unsigned int    access_mask;
++};
++
++struct system_handle_entry_64
++{
++    unsigned int        owner_pid;
++    unsigned char       object_type;
++    unsigned char       handle_flags;
++    unsigned short      handle_value;
++    unsigned __int64    object_pointer;
++    unsigned int        access_mask;
++};
++
++struct system_handle_entry_ex_32
++{
++    unsigned int    object;
++    unsigned int    unique_process_id;
++    unsigned int    handle_value;
++    unsigned int    granted_access;
++    unsigned short  creator_back_trace_index;
++    unsigned short  object_type_index;
++    unsigned int    handle_attributes;
++    unsigned int    reserved;
++};
++
++struct system_handle_entry_ex_64
++{
++    unsigned __int64    object;
++    unsigned __int64    unique_process_id;
++    unsigned __int64    handle_value;
++    unsigned int        granted_access;
++    unsigned short      creator_back_trace_index;
++    unsigned short      object_type_index;
++    unsigned int        handle_attributes;
++    unsigned int        reserved;
++};
++
+ struct enum_handle_info
+ {
++    int is_64bit;
++    int ex;
+     unsigned int count;
+-    struct handle_info *handle;
++    union {
++        void *handle;
++        struct system_handle_entry_32 *handle_32;
++        struct system_handle_entry_64 *handle_64;
++        struct system_handle_entry_ex_32 *handle_ex_32;
++        struct system_handle_entry_ex_64 *handle_ex_64;
++    } u;
+ };
+ 
++static void enum_handle_ex_64( struct process *process, unsigned int i, struct system_handle_entry_ex_64 *handle,
++                               struct handle_entry *entry )
++{
++    handle->object                      = 0; /* FIXME: Fill out object */
++    handle->unique_process_id           = process->id;
++    handle->handle_value                = index_to_handle(i);
++    handle->granted_access              = entry->access & ~RESERVED_ALL;
++    handle->creator_back_trace_index    = 0;
++    handle->object_type_index           = entry->ptr->ops->type->index;
++    handle->handle_attributes           = 0;
++    handle->reserved                    = 0;
++    if (entry->access & RESERVED_INHERIT) handle->handle_attributes |= OBJ_INHERIT;
++    if (entry->access & RESERVED_CLOSE_PROTECT) handle->handle_attributes |= OBJ_PROTECT_CLOSE;
++}
++
++static void enum_handle_ex_32( struct process *process, unsigned int i, struct system_handle_entry_ex_32 *handle,
++                               struct handle_entry *entry )
++{
++    handle->object                      = 0; /* FIXME: Fill out object */
++    handle->unique_process_id           = process->id;
++    handle->handle_value                = index_to_handle(i);
++    handle->granted_access              = entry->access & ~RESERVED_ALL;
++    handle->creator_back_trace_index    = 0;
++    handle->object_type_index           = entry->ptr->ops->type->index;
++    handle->handle_attributes           = 0;
++    handle->reserved                    = 0;
++    if (entry->access & RESERVED_INHERIT) handle->handle_attributes |= OBJ_INHERIT;
++    if (entry->access & RESERVED_CLOSE_PROTECT) handle->handle_attributes |= OBJ_PROTECT_CLOSE;
++}
++
++static void enum_handle_64( struct process *process, unsigned int i, struct system_handle_entry_64 *handle,
++                            struct handle_entry *entry )
++{
++    handle->owner_pid       = process->id;
++    handle->object_type     = entry->ptr->ops->type->index;
++    handle->handle_flags    = 0;
++    handle->handle_value    = index_to_handle(i);
++    handle->object_pointer  = 0; /* FIXME: Fill out object_pointer */
++    handle->access_mask     = entry->access & ~RESERVED_ALL;
++    if (entry->access & RESERVED_INHERIT) handle->handle_flags |= OBJ_INHERIT;
++    if (entry->access & RESERVED_CLOSE_PROTECT) handle->handle_flags |= OBJ_PROTECT_CLOSE;
++}
++
++static void enum_handle_32( struct process *process, unsigned int i, struct system_handle_entry_32 *handle,
++                            struct handle_entry *entry )
++{
++    handle->owner_pid       = process->id;
++    handle->object_type     = entry->ptr->ops->type->index;
++    handle->handle_flags    = 0;
++    handle->handle_value    = index_to_handle(i);
++    handle->object_pointer  = 0; /* FIXME: Fill out object_pointer */
++    handle->access_mask     = entry->access & ~RESERVED_ALL;
++    if (entry->access & RESERVED_INHERIT) handle->handle_flags |= OBJ_INHERIT;
++    if (entry->access & RESERVED_CLOSE_PROTECT) handle->handle_flags |= OBJ_PROTECT_CLOSE;
++}
++
+ static int enum_handles( struct process *process, void *user )
+ {
+     struct enum_handle_info *info = user;
+     struct handle_table *table = process->handles;
+     struct handle_entry *entry;
+-    struct handle_info *handle;
+     unsigned int i;
+ 
+     if (!table)
+@@ -840,20 +964,21 @@ static int enum_handles( struct process *process, void *user )
+     for (i = 0, entry = table->entries; i <= table->last; i++, entry++)
+     {
+         if (!entry->ptr) continue;
+-        if (!info->handle)
++        assert( info->count );
++        if (info->ex)
+         {
+-            info->count++;
+-            continue;
++            if (info->is_64bit)
++                enum_handle_ex_64( process, i, info->u.handle_ex_64++, entry );
++            else
++                enum_handle_ex_32( process, i, info->u.handle_ex_32++, entry );
++        }
++        else
++        {
++            if (info->is_64bit)
++                enum_handle_64( process, i, info->u.handle_64++, entry );
++            else
++                enum_handle_32( process, i, info->u.handle_32++, entry );
+         }
+-        assert( info->count );
+-        handle = info->handle++;
+-        handle->owner      = process->id;
+-        handle->handle     = index_to_handle(i);
+-        handle->access     = entry->access & ~RESERVED_ALL;
+-        handle->type       = entry->ptr->ops->type->index;
+-        handle->attributes = 0;
+-        if (entry->access & RESERVED_INHERIT) handle->attributes |= OBJ_INHERIT;
+-        if (entry->access & RESERVED_CLOSE_PROTECT) handle->attributes |= OBJ_PROTECT_CLOSE;
+         info->count--;
+     }
+ 
+@@ -863,21 +988,25 @@ static int enum_handles( struct process *process, void *user )
+ DECL_HANDLER(get_system_handles)
+ {
+     struct enum_handle_info info;
+-    struct handle_info *handle;
+-    data_size_t max_handles = get_reply_max_size() / sizeof(*handle);
++    size_t handle_size;
++    data_size_t max_handles;
++
++    info.is_64bit = is_machine_64bit( current->process->machine );
++    if (req->ex)
++        handle_size = info.is_64bit ? sizeof(*info.u.handle_ex_64) : sizeof(*info.u.handle_ex_32);
++    else
++        handle_size = info.is_64bit ? sizeof(*info.u.handle_64) : sizeof(*info.u.handle_32);
+ 
+-    info.handle = NULL;
++    info.ex = req->ex;
+     info.count  = 0;
+-    enum_processes( enum_handles, &info );
++    enum_processes( count_handles, &info.count );
+     reply->count = info.count;
+ 
++    max_handles = get_reply_max_size() / handle_size;
+     if (max_handles < info.count)
+         set_error( STATUS_BUFFER_TOO_SMALL );
+-    else if ((handle = set_reply_data_size( info.count * sizeof(*handle) )))
+-    {
+-        info.handle = handle;
++    else if ((info.u.handle = set_reply_data_size( info.count * handle_size )))
+         enum_processes( enum_handles, &info );
+-    }
+ }
+ 
+ DECL_HANDLER(make_temporary)
+diff --git a/server/protocol.def b/server/protocol.def
+index 11111111111..11111111111 100644
+--- a/server/protocol.def
++++ b/server/protocol.def
+@@ -3331,20 +3331,12 @@ enum caret_state
+ @END
+ 
+ 
+-struct handle_info
+-{
+-    process_id_t owner;
+-    obj_handle_t handle;
+-    unsigned int access;
+-    unsigned int attributes;
+-    unsigned int type;
+-};
+-
+ /* Return a list of all opened handles */
+ @REQ(get_system_handles)
++    unsigned int    ex;           /* return extended handle information */
+ @REPLY
+     unsigned int    count;        /* number of handles */
+-    VARARG(data,handle_infos);    /* array of handle_infos */
++    VARARG(data,handle_infos);    /* array of handle information */
+ @END
+ 
+ 
+diff --git a/server/trace.c b/server/trace.c
+index 11111111111..11111111111 100644
+--- a/server/trace.c
++++ b/server/trace.c
+@@ -1334,19 +1334,7 @@ static void dump_varargs_rawinput_devices(const char *prefix, data_size_t size )
+ 
+ static void dump_varargs_handle_infos( const char *prefix, data_size_t size )
+ {
+-    const struct handle_info *handle;
+-
+-    fprintf( stderr, "%s{", prefix );
+-    while (size >= sizeof(*handle))
+-    {
+-        handle = cur_data;
+-        fprintf( stderr, "{owner=%04x,handle=%04x,access=%08x,attributes=%08x,type=%u}",
+-                 handle->owner, handle->handle, handle->access, handle->attributes, handle->type );
+-        size -= sizeof(*handle);
+-        remove_data( sizeof(*handle) );
+-        if (size) fputc( ',', stderr );
+-    }
+-    fputc( '}', stderr );
++    fprintf( stderr, "%s", prefix );
+ }
+ 
+ static void dump_varargs_cpu_topology_override( const char *prefix, data_size_t size )
+-- 
+2.37.1
+
+
