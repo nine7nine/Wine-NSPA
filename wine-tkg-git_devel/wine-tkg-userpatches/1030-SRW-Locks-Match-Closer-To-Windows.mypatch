@@ -1,0 +1,847 @@
+diff --git a/dlls/kernel32/tests/sync.c b/dlls/kernel32/tests/sync.c
+index 60180194b7a1641e3a131fb03cf38c04ce7d9027..4eaec87c52faff548608feaa356bf971fb6271b9 100644
+--- a/dlls/kernel32/tests/sync.c
++++ b/dlls/kernel32/tests/sync.c
+@@ -2533,6 +2533,29 @@ static void test_srwlock_example(void)
+     trace("number of total exclusive accesses is %ld\n", srwlock_protected_value);
+ }
+ 
++static void test_srwlock_quirk(void)
++{
++    union { SRWLOCK *s; LONG *l; } u = { &srwlock_example };
++
++    if (!pInitializeSRWLock) {
++        /* function is not yet in XP, only in newer Windows */
++        win_skip("no srw lock support.\n");
++        return;
++    }
++
++    *u.l = 0;
++    pReleaseSRWLockExclusive(&srwlock_example);
++    ok(*u.l == 0xffffffff, "expected 0xffffffff, got %lx\n", *u.l);
++
++    *u.l = 1;
++    pReleaseSRWLockExclusive(&srwlock_example);
++    ok(*u.l == 0, "expected 0x0, got %lx\n", *u.l);
++
++    *u.l = 0x10000;
++    pReleaseSRWLockExclusive(&srwlock_example);
++    ok(*u.l == 0xffff, "expected 0xffff, got %lx\n", *u.l);
++}
++
+ static DWORD WINAPI alertable_wait_thread(void *param)
+ {
+     HANDLE *semaphores = param;
+@@ -2887,6 +2910,7 @@ START_TEST(sync)
+     test_srwlock_base(&aligned_srwlock);
+     test_srwlock_base(&unaligned_srwlock.lock);
+     test_srwlock_example();
++    test_srwlock_quirk();
+     test_alertable_wait();
+     test_apc_deadlock();
+     test_crit_section();
+diff --git a/dlls/ntdll/sync.c b/dlls/ntdll/sync.c
+index fa64917029af262d8af414ee09a6cfe5395537b0..1b377c75ac0d240e7638280f8eb2a494dc556152 100644
+--- a/dlls/ntdll/sync.c
++++ b/dlls/ntdll/sync.c
+@@ -26,6 +26,8 @@
+ #include <stdarg.h>
+ #include <stdio.h>
+ #include <stdlib.h>
++#include <stdint.h>
++#include <assert.h>
+ #include <time.h>
+ 
+ #include "ntstatus.h"
+@@ -471,24 +473,95 @@ DWORD WINAPI RtlRunOnceExecuteOnce( RTL_RUN_ONCE *once, PRTL_RUN_ONCE_INIT_FN fu
+     return RtlRunOnceComplete( once, 0, context ? *context : NULL );
+ }
+ 
+-struct srw_lock
+-{
+-    short exclusive_waiters;
++/**
++ * The SRWLOCK is a tagged pointer, with the last 4 bits been the tag.
++ * The pointer part serves 2 roles: if there is no waiters on the lock,
++ * it counts the number of shared owners of the lock; otherwise, it
++ * points to the end of the waiter queue, which is a linked list of waiters.
++ * This also implies the pointer must be 16 byte aligned.
++ *
++ * There are a couple helper functions below to make accessing different parts
++ * of the SRWLOCK easier.
++ */
+ 
+-    /* Number of shared owners, or -1 if owned exclusive.
+-     *
+-     * Sadly Windows has no equivalent to FUTEX_WAIT_BITSET, so in order to wake
+-     * up *only* exclusive or *only* shared waiters (and thus avoid spurious
+-     * wakeups), we need to wait on two different addresses.
+-     * RtlAcquireSRWLockShared() needs to know the values of "exclusive_waiters"
+-     * and "owners", but RtlAcquireSRWLockExclusive() only needs to know the
+-     * value of "owners", so the former can wait on the entire structure, and
+-     * the latter waits only on the "owners" member. Note then that "owners"
+-     * must not be the first element in the structure.
++enum srwlock_tag {
++    SRWLOCK_TAG_LOCKED = 1 << 0,
++    SRWLOCK_TAG_HAS_WAITERS = 1 << 1,
++    /* Unknown purpose on Windows, but we use it to indicate the list
++     * is being modified. */
++    SRWLOCK_TAG_LIST_LOCKED = 1 << 2,
++    /* Unclear purpose on Windows, might be indicating this lock has
++     * > 1 owners. */
++    SRWLOCK_TAG_HAS_MULTIPLE_OWNERS = 1 << 3,
++};
++
++enum srwlock_waiter_state {
++    SRWLOCK_WAITER_STATE_IS_EXCLUSIVE = 1,
++    /* ???? = 2, */
++    SRWLOCK_WAITER_STATE_NOTIFIED = 1 << 2,
++};
++struct DECLSPEC_ALIGN(16) srwlock_waiter {
++    /* Note the prev pointer is uninitialized for the list head. */
++    struct srwlock_waiter *prev;
++    struct srwlock_waiter *head;
++    struct srwlock_waiter *next;
++    ULONG_PTR thread_id;
++    /* When the first waiter appears, the shared owner counter store in
++     * SRWLOCK is transferred here, however only the lower 28 bits are kept.
++     * A special value 0xffffffff indicates this waiter is not at the
++     * head of the list, and 0xfffffffe indicates this waiter is at the head
++     * of the list, but the lock is held exclusively.
+      */
+-    short owners;
++    DWORD num_owners;
++
++    /* A bitflag of states, see `enum srwlock_waiter_state`. */
++    DWORD state;
+ };
+-C_ASSERT( sizeof(struct srw_lock) == 4 );
++
++#define SRWLOCK_WAITER_IS_NOT_HEAD 0xffffffff
++#define SRWLOCK_WAITER_EXCLUSIVELY_LOCKED 0xfffffffe
++
++#ifdef _WIN64
++#define InterlockedAddPointer(ptr,val) (PVOID)InterlockedAdd64((PLONGLONG)(ptr),(LONGLONG)(val))
++#define InterlockedAndPointer(ptr,val) (PVOID)InterlockedAnd64((PLONGLONG)(ptr),(LONGLONG)(val))
++#define InterlockedOrPointer(ptr,val) (PVOID)InterlockedOr64((PLONGLONG)(ptr),(LONGLONG)(val))
++#else
++#define InterlockedAddPointer(ptr,val) (PVOID)InterlockedAdd((PLONG)(ptr),(LONG)(val))
++#define InterlockedAndPointer(ptr,val) (PVOID)InterlockedAnd((PLONG)(ptr),(LONG)(val))
++#define InterlockedOrPointer(ptr,val) (PVOID)InterlockedOr((PLONG)(ptr),(LONG)(val))
++#endif
++
++static inline struct srwlock_waiter *srwlock_get_waiter(RTL_SRWLOCK lock)
++{
++    ULONG_PTR ptr = (ULONG_PTR)lock.Ptr;
++    return (void *)(ptr & ~(ULONG_PTR)0xf);
++}
++
++static inline ULONG_PTR srwlock_get_shared_count(RTL_SRWLOCK lock)
++{
++    ULONG_PTR ptr = (ULONG_PTR)lock.Ptr;
++    return ((ptr & (ULONG_PTR)0xfffffff0) >> 4);
++}
++
++static inline USHORT srwlock_get_tag(RTL_SRWLOCK lock)
++{
++    ULONG_PTR ptr = (ULONG_PTR)lock.Ptr;
++    return (USHORT)(ptr & (ULONG_PTR)0xf);
++}
++
++static inline RTL_SRWLOCK srwlock_from_waiter(struct srwlock_waiter *waiter, USHORT tag)
++{
++    RTL_SRWLOCK lock;
++    lock.Ptr = (void *)((ULONG_PTR)waiter | (ULONG_PTR)tag);
++    return lock;
++}
++
++static inline RTL_SRWLOCK srwlock_from_shared_owner_count(ULONG_PTR count, USHORT tag)
++{
++    RTL_SRWLOCK lock;
++    lock.Ptr = (void *)(((ULONG_PTR)count << 4) | (ULONG_PTR)tag);
++    return lock;
++}
+ 
+ /***********************************************************************
+  *              RtlInitializeSRWLock (NTDLL.@)
+@@ -496,141 +569,217 @@ C_ASSERT( sizeof(struct srw_lock) == 4 );
+  * NOTES
+  *  Please note that SRWLocks do not keep track of the owner of a lock.
+  *  It doesn't make any difference which thread for example unlocks an
+- *  SRWLock (see corresponding tests). This implementation uses two
+- *  keyed events (one for the exclusive waiters and one for the shared
+- *  waiters) and is limited to 2^15-1 waiting threads.
++ *  SRWLock (see corresponding tests).
+  */
+ void WINAPI RtlInitializeSRWLock( RTL_SRWLOCK *lock )
+ {
+     lock->Ptr = NULL;
+ }
+ 
+-/***********************************************************************
+- *              RtlAcquireSRWLockExclusive (NTDLL.@)
++/* Lock the SRWLOCK, remove then wake up the waiters at the front of the list,
++ * Only one thread can call this function at any given time. Must be called
++ * with LIST_LOCKED, and HAS_WAITERS bits set; the HAS_MULTIPLE_OWNERS bit
++ * must NOT be set.
+  *
+- * NOTES
+- *  Unlike RtlAcquireResourceExclusive this function doesn't allow
+- *  nested calls from the same thread. "Upgrading" a shared access lock
+- *  to an exclusive access lock also doesn't seem to be supported.
+- */
+-void WINAPI RtlAcquireSRWLockExclusive( RTL_SRWLOCK *lock )
++ * Returns TRUE if the operation is successful. If another thread acquired the
++ * lock while we are scanning the list, this aborts and returns FALSE. */
++static void srwlock_wake(RTL_SRWLOCK *lock, struct srwlock_waiter * const last)
+ {
+-    union { RTL_SRWLOCK *rtl; struct srw_lock *s; LONG *l; } u = { lock };
++    RTL_SRWLOCK new, read;
++    struct srwlock_waiter *head = last->head, *new_head = NULL, *i;
++    UINT tag;
++    RTL_SRWLOCK expected = srwlock_from_waiter(last,
++        SRWLOCK_TAG_LIST_LOCKED | SRWLOCK_TAG_HAS_WAITERS);
++    ULONG shared_owner_count = 0;
+ 
+-    InterlockedIncrement16( &u.s->exclusive_waiters );
++    TRACE("%p\n", lock);
+ 
+-    for (;;)
+-    {
+-        union { struct srw_lock s; LONG l; } old, new;
+-        BOOL wait;
++retry:
+ 
+-        do
++    head->num_owners = 0;
++    if (head->state & SRWLOCK_WAITER_STATE_IS_EXCLUSIVE)
++    {
++        new_head = head->next;
++    }
++    else
++    {
++        i = head;
++        while (i && !(i->state & SRWLOCK_WAITER_STATE_IS_EXCLUSIVE))
+         {
+-            old.s = *u.s;
+-            new.s = old.s;
++            shared_owner_count += 1;
++            new_head = i;
++            i = i->next;
++        }
++        if (!i)
++            new_head = NULL;
++    }
++    for (i = new_head; i; i = i->next)
++        i->head = new_head;
++
++    tag = SRWLOCK_TAG_LOCKED;
++    if (shared_owner_count > 1)
++        tag |= SRWLOCK_TAG_HAS_MULTIPLE_OWNERS;
++    if (new_head == NULL)
++        new = srwlock_from_shared_owner_count(shared_owner_count, tag);
++    else
++    {
++        new = srwlock_from_waiter(last, tag | SRWLOCK_TAG_HAS_WAITERS);
++        if (shared_owner_count)
++            new_head->num_owners = shared_owner_count;
++        else
++            new_head->num_owners = SRWLOCK_WAITER_EXCLUSIVELY_LOCKED;
++    }
+ 
+-            if (!old.s.owners)
+-            {
+-                /* Not locked exclusive or shared. We can try to grab it. */
+-                new.s.owners = -1;
+-                --new.s.exclusive_waiters;
+-                wait = FALSE;
+-            }
+-            else
+-            {
+-                wait = TRUE;
+-            }
+-        } while (InterlockedCompareExchange( u.l, new.l, old.l ) != old.l);
++    TRACE("new = %p, #owners = %ld\n", new.Ptr, shared_owner_count);
++    read.Ptr = InterlockedCompareExchangePointer(&lock->Ptr, new.Ptr, expected.Ptr);
++    if (read.Ptr != expected.Ptr)
++    {
++        tag = srwlock_get_tag(read);
++        TRACE("bail, read = %p\n", read.Ptr);
++        assert(tag == (SRWLOCK_TAG_LOCKED | SRWLOCK_TAG_LIST_LOCKED | SRWLOCK_TAG_HAS_WAITERS));
++        /* Bail, we need to restore the head pointers to their original value. */
++        for (i = new_head; i; i = i->next)
++            i->head = head;
++        if (new_head)
++            new_head->num_owners = SRWLOCK_WAITER_IS_NOT_HEAD;
++        head->num_owners = 1;
++        new.Ptr = (PVOID)((ULONG_PTR)read.Ptr & ~(ULONG_PTR)SRWLOCK_TAG_LIST_LOCKED);
++        if (InterlockedCompareExchangePointer(&lock->Ptr, new.Ptr, read.Ptr) != read.Ptr)
++            goto retry;
++
++        RtlWakeAddressSingle(&lock->Ptr);
++        return;
++    }
++    RtlWakeAddressSingle(&lock->Ptr);
+ 
+-        if (!wait) return;
+-        RtlWaitOnAddress( &u.s->owners, &new.s.owners, sizeof(short), NULL );
++    while (head != new_head)
++    {
++        /* waking up the waiter will invalidate the waiter's entry in
++         * the list. */
++        struct srwlock_waiter *next = head->next;
++        InterlockedOr((LONG *)&head->state, SRWLOCK_WAITER_STATE_NOTIFIED);
++        TRACE("waking %p\n", head);
++        RtlWakeAddressSingle(&head->state);
++        head = next;
+     }
+ }
+ 
+-/***********************************************************************
+- *              RtlAcquireSRWLockShared (NTDLL.@)
++/**
++ * Add a new waiter to the SRWLOCK, and wait on it. The wait will be interrupted
++ * if the value stored in `lock` changes to something other than `expected`.
+  *
+- * NOTES
+- *   Do not call this function recursively - it will only succeed when
+- *   there are no threads waiting for an exclusive lock!
++ * Returns TRUE if the lock is acquired, FALSE otherwise.
+  */
+-void WINAPI RtlAcquireSRWLockShared( RTL_SRWLOCK *lock )
++#ifdef __GNUC__
++__attribute__((force_align_arg_pointer))
++#endif
++static BOOLEAN srwlock_wait(RTL_SRWLOCK *lock, DWORD waiter_state,
++                            RTL_SRWLOCK expected)
+ {
+-    union { RTL_SRWLOCK *rtl; struct srw_lock *s; LONG *l; } u = { lock };
++    RTL_SRWLOCK new, old;
++    USHORT tag;
++    struct srwlock_waiter *prev = NULL, waiter = {0};
+ 
+-    for (;;)
+-    {
+-        union { struct srw_lock s; LONG l; } old, new;
+-        BOOL wait;
++    tag  = srwlock_get_tag(expected);
++    TRACE("%p %p %p\n", lock, &waiter, expected.Ptr);
+ 
+-        do
+-        {
+-            old.s = *u.s;
+-            new = old;
+-
+-            if (old.s.owners != -1 && !old.s.exclusive_waiters)
+-            {
+-                /* Not locked exclusive, and no exclusive waiters.
+-                 * We can try to grab it. */
+-                ++new.s.owners;
+-                wait = FALSE;
+-            }
+-            else
+-            {
+-                wait = TRUE;
+-            }
+-        } while (InterlockedCompareExchange( u.l, new.l, old.l ) != old.l);
++    if (tag & SRWLOCK_TAG_LIST_LOCKED) {
++        /* We only ever blocking wait on &lock->Ptr for the LIST_LOCKED bit. */
++        RtlWaitOnAddress(&lock->Ptr, &expected.Ptr, sizeof(expected.Ptr), NULL);
++        return FALSE;
++    }
+ 
+-        if (!wait) return;
+-        RtlWaitOnAddress( u.s, &new.s, sizeof(struct srw_lock), NULL );
++    waiter.state = waiter_state;
++    if (tag & SRWLOCK_TAG_HAS_WAITERS)
++    {
++        prev = srwlock_get_waiter(expected);
++        waiter.head = NULL;
++        waiter.prev = prev;
++        waiter.num_owners = SRWLOCK_WAITER_IS_NOT_HEAD;
+     }
+-}
++    else
++    {
++        waiter.head = &waiter;
++        waiter.num_owners = srwlock_get_shared_count(expected);
++        if (waiter.num_owners > 1)
++            tag |= SRWLOCK_TAG_HAS_MULTIPLE_OWNERS;
++        if (waiter.num_owners == 0)
++            waiter.num_owners = SRWLOCK_WAITER_EXCLUSIVELY_LOCKED;
++        tag |= SRWLOCK_TAG_HAS_WAITERS;
++    }
++    waiter.next = NULL;
+ 
+-/***********************************************************************
+- *              RtlReleaseSRWLockExclusive (NTDLL.@)
+- */
+-void WINAPI RtlReleaseSRWLockExclusive( RTL_SRWLOCK *lock )
+-{
+-    union { RTL_SRWLOCK *rtl; struct srw_lock *s; LONG *l; } u = { lock };
+-    union { struct srw_lock s; LONG l; } old, new;
++    new = srwlock_from_waiter(&waiter, tag | SRWLOCK_TAG_LIST_LOCKED);
++    if (InterlockedCompareExchangePointer((void **)&lock->Ptr, new.Ptr, expected.Ptr) != expected.Ptr)
++        return FALSE;
+ 
+-    do
+-    {
+-        old.s = *u.s;
+-        new = old;
++    /* The linked list is locked by us now */
++    if (prev) {
++        waiter.head = prev->head;
++        prev->next = &waiter;
++    }
++
++    /* Update tail and unlock list */
++    do {
++        old.Ptr = ReadPointerAcquire(&lock->Ptr);
++        tag = srwlock_get_tag(old);
+ 
+-        if (old.s.owners != -1) ERR("Lock %p is not owned exclusive!\n", lock);
++        if (tag & SRWLOCK_TAG_LOCKED)
++            /* If the lock is unlocked while we are holding the list lock,
++             * then we would have to perform the waking up duty, so we
++             * would still need the list lock, otherwise we can unlock
++             * the list. */
++            tag &= ~SRWLOCK_TAG_LIST_LOCKED;
+ 
+-        new.s.owners = 0;
+-    } while (InterlockedCompareExchange( u.l, new.l, old.l ) != old.l);
++        new = srwlock_from_waiter(&waiter, tag);
++        TRACE("new = %p, tag = %x\n", new.Ptr, tag);
++    } while( InterlockedCompareExchangePointer((void **)&lock->Ptr, new.Ptr, old.Ptr) != old.Ptr );
+ 
+-    if (new.s.exclusive_waiters)
+-        RtlWakeAddressSingle( &u.s->owners );
++    if (!(tag & SRWLOCK_TAG_LOCKED))
++        srwlock_wake(lock, srwlock_get_waiter(old));
+     else
+-        RtlWakeAddressAll( u.s );
++        RtlWakeAddressSingle(&lock->Ptr);
++
++    TRACE("waiting: %p, %p, %lu\n", lock, &waiter, waiter.num_owners);
++    while (TRUE)
++    {
++        waiter_state = ReadAcquire((LONG *)&waiter.state);
++        if (waiter_state & SRWLOCK_WAITER_STATE_NOTIFIED)
++            break;
++        RtlWaitOnAddress(&waiter.state, &waiter_state, sizeof(DWORD), NULL);
++    };
++
++    TRACE("acquired: %p\n", lock);
++    return TRUE;
+ }
+ 
+-/***********************************************************************
+- *              RtlReleaseSRWLockShared (NTDLL.@)
+- */
+-void WINAPI RtlReleaseSRWLockShared( RTL_SRWLOCK *lock )
++static BOOLEAN srwlock_try_acquire_exclusive(RTL_SRWLOCK *lock, RTL_SRWLOCK *old)
+ {
+-    union { RTL_SRWLOCK *rtl; struct srw_lock *s; LONG *l; } u = { lock };
+-    union { struct srw_lock s; LONG l; } old, new;
++    RTL_SRWLOCK new;
++    USHORT tag;
++    struct srwlock_waiter *last;
+ 
+     do
+     {
+-        old.s = *u.s;
+-        new = old;
+-
+-        if (old.s.owners == -1) ERR("Lock %p is owned exclusive!\n", lock);
+-        else if (!old.s.owners) ERR("Lock %p is not owned shared!\n", lock);
+-
+-        --new.s.owners;
+-    } while (InterlockedCompareExchange( u.l, new.l, old.l ) != old.l);
++        old->Ptr = ReadPointerAcquire(&lock->Ptr);
++        TRACE("old = %p\n", old->Ptr);
++        tag = srwlock_get_tag(*old);
++        last = srwlock_get_waiter(*old);
++
++        /* We can't acquire the lock if it's locked (obviously), or if
++         * the MULTIPLE_OWNERS bit is set. See `RtlReleaseSRWLockShared`
++         * for an explanation on why this is necessary. */
++        if (tag & (SRWLOCK_TAG_HAS_MULTIPLE_OWNERS | SRWLOCK_TAG_LOCKED))
++            return FALSE;
++
++        if (tag & SRWLOCK_TAG_HAS_WAITERS)
++            new = srwlock_from_waiter(last, tag | SRWLOCK_TAG_LOCKED);
++        else
++            new = srwlock_from_shared_owner_count(0, tag | SRWLOCK_TAG_LOCKED);
++    } while (InterlockedCompareExchangePointer(&lock->Ptr, new.Ptr,
++                                               old->Ptr ) != old->Ptr);
+ 
+-    if (!new.s.owners)
+-        RtlWakeAddressSingle( &u.s->owners );
++    return TRUE;
+ }
+ 
+ /***********************************************************************
+@@ -642,28 +791,61 @@ void WINAPI RtlReleaseSRWLockShared( RTL_SRWLOCK *lock )
+  */
+ BOOLEAN WINAPI RtlTryAcquireSRWLockExclusive( RTL_SRWLOCK *lock )
+ {
+-    union { RTL_SRWLOCK *rtl; struct srw_lock *s; LONG *l; } u = { lock };
+-    union { struct srw_lock s; LONG l; } old, new;
+-    BOOLEAN ret;
++    RTL_SRWLOCK old;
++    TRACE("%p\n", lock);
++    return srwlock_try_acquire_exclusive(lock, &old);
++}
++
++/***********************************************************************
++ *              RtlAcquireSRWLockExclusive (NTDLL.@)
++ *
++ * NOTES
++ *  Unlike RtlAcquireResourceExclusive this function doesn't allow
++ *  nested calls from the same thread. "Upgrading" a shared access lock
++ *  to an exclusive access lock also doesn't seem to be supported.
++ */
++void WINAPI RtlAcquireSRWLockExclusive( RTL_SRWLOCK *lock )
++{
++    RTL_SRWLOCK old;
++
++    TRACE("%p\n", lock);
++
++    while (!srwlock_try_acquire_exclusive(lock, &old))
++        if (srwlock_wait(lock, SRWLOCK_WAITER_STATE_IS_EXCLUSIVE, old))
++            break;
++}
++
++static BOOLEAN srwlock_try_acquire_shared(RTL_SRWLOCK *lock, RTL_SRWLOCK *old)
++{
++    RTL_SRWLOCK new;
++    USHORT tag;
++    ULONG_PTR shared_count;
++    struct srwlock_waiter *last;
+ 
+     do
+     {
+-        old.s = *u.s;
+-        new.s = old.s;
++        old->Ptr = ReadPointerAcquire(&lock->Ptr);
++        TRACE("old = %p\n", old->Ptr);
++        tag = srwlock_get_tag(*old);
++        last = srwlock_get_waiter(*old);
++        shared_count = srwlock_get_shared_count(*old);
+ 
+-        if (!old.s.owners)
+-        {
+-            /* Not locked exclusive or shared. We can try to grab it. */
+-            new.s.owners = -1;
+-            ret = TRUE;
+-        }
++        if (tag & SRWLOCK_TAG_HAS_MULTIPLE_OWNERS)
++            return FALSE;
++
++        if ((tag & SRWLOCK_TAG_LOCKED) && (shared_count == 0 || (tag & SRWLOCK_TAG_HAS_WAITERS)))
++            return FALSE;
++
++        /* The lock is either locked shared, or not locked at all. We can try to grab it. */
++        if (tag & SRWLOCK_TAG_HAS_WAITERS)
++            new = srwlock_from_waiter(last, tag | SRWLOCK_TAG_LOCKED);
+         else
+-        {
+-            ret = FALSE;
+-        }
+-    } while (InterlockedCompareExchange( u.l, new.l, old.l ) != old.l);
++            new = srwlock_from_shared_owner_count(shared_count + 1,
++                                                  tag | SRWLOCK_TAG_LOCKED);
++    } while (InterlockedCompareExchangePointer(&lock->Ptr, new.Ptr,
++                                               old->Ptr ) != old->Ptr);
+ 
+-    return ret;
++    return TRUE;
+ }
+ 
+ /***********************************************************************
+@@ -671,29 +853,174 @@ BOOLEAN WINAPI RtlTryAcquireSRWLockExclusive( RTL_SRWLOCK *lock )
+  */
+ BOOLEAN WINAPI RtlTryAcquireSRWLockShared( RTL_SRWLOCK *lock )
+ {
+-    union { RTL_SRWLOCK *rtl; struct srw_lock *s; LONG *l; } u = { lock };
+-    union { struct srw_lock s; LONG l; } old, new;
+-    BOOLEAN ret;
++    RTL_SRWLOCK old;
++    TRACE("%p\n", lock);
++    return srwlock_try_acquire_shared(lock, &old);
++}
++
++/***********************************************************************
++ *              RtlAcquireSRWLockShared (NTDLL.@)
++ *
++ * NOTES
++ *   Do not call this function recursively - it will only succeed when
++ *   there are no threads waiting for an exclusive lock!
++ */
++void WINAPI RtlAcquireSRWLockShared( RTL_SRWLOCK *lock )
++{
++    RTL_SRWLOCK old;
++
++    TRACE("%p\n", lock);
++
++    while (!srwlock_try_acquire_shared(lock, &old))
++        if (srwlock_wait(lock, 0, old))
++            break;
++}
++
++/* Try to acquire the list lock and start waking waiters up.
++ *
++ * This function bails in the following cases:
++ *
++ * - the lock become locked, we should not try to wake anyone up. And the
++ *   new owner of the lock will be doing the waking when it releases the
++ *   lock.
++ * - someone else acquired the list lock. In this case they will be responsible
++ *   of waking up the waiters.
++ * - no waiters remain. No one to wake up.
++ */
++static void srwlock_maybe_wake(RTL_SRWLOCK *lock, RTL_SRWLOCK old)
++{
++    RTL_SRWLOCK new, read;
++    UINT tag = srwlock_get_tag(old);
++    TRACE("\n");
++
++    /* Try to acquire the lock on the list. If we are not able to, meaning
++     * there is another thread (can be either an acquirer or a releaser)
++     * currently holding the list lock, we give up and leave the duty of
++     * waking waiters up to that thread. */
++    while ((tag & (SRWLOCK_TAG_HAS_WAITERS | SRWLOCK_TAG_LOCKED | SRWLOCK_TAG_LIST_LOCKED)) ==
++           SRWLOCK_TAG_HAS_WAITERS)
++    {
++        struct srwlock_waiter *waiter = srwlock_get_waiter(old);
++        new = srwlock_from_waiter(waiter, tag | SRWLOCK_TAG_LIST_LOCKED);
++        read.Ptr = InterlockedCompareExchangePointer(&lock->Ptr, new.Ptr, old.Ptr);
++        if (read.Ptr == old.Ptr) {
++            /* If we do succeed in locking the list, we are responsible for
++             * waking up the waiters. */
++            srwlock_wake(lock, waiter);
++            break;
++        }
++        old = read;
++        tag = srwlock_get_tag(old);
++    }
++}
++/***********************************************************************
++ *              RtlReleaseSRWLockExclusive (NTDLL.@)
++ */
++void WINAPI RtlReleaseSRWLockExclusive( RTL_SRWLOCK *lock )
++{
++    RTL_SRWLOCK old;
++
++    TRACE("%p\n", lock);
++
++    /* Looks weird but this is how Windows does it. */
++    old.Ptr = InterlockedAddPointer(&lock->Ptr, -1);
++    TRACE("after = %p\n", old.Ptr);
++
++    srwlock_maybe_wake(lock, old);
++}
++
++/***********************************************************************
++ *              RtlReleaseSRWLockShared (NTDLL.@)
++ */
++void WINAPI RtlReleaseSRWLockShared( RTL_SRWLOCK *lock )
++{
++    RTL_SRWLOCK old, new;
++    USHORT tag;
++    LONG shared_count;
++    struct srwlock_waiter *last;
++
++    TRACE("%p\n", lock);
+ 
+     do
+     {
+-        old.s = *u.s;
+-        new.s = old.s;
++        old.Ptr = ReadPointerAcquire(&lock->Ptr);
++        TRACE("old = %p\n", old.Ptr);
++
++        tag = srwlock_get_tag(old);
++        last = srwlock_get_waiter(old);
+ 
+-        if (old.s.owners != -1 && !old.s.exclusive_waiters)
++        if (!(tag & SRWLOCK_TAG_LOCKED))
+         {
+-            /* Not locked exclusive, and no exclusive waiters.
+-             * We can try to grab it. */
+-            ++new.s.owners;
+-            ret = TRUE;
++            /* interestingly this check is only done for shared locks. */
++            EXCEPTION_RECORD record;
++            record.ExceptionAddress = RtlReleaseSRWLockShared;
++            record.ExceptionCode = STATUS_RESOURCE_NOT_OWNED;
++            record.ExceptionFlags = 0;
++            record.ExceptionRecord = NULL;
++            record.NumberParameters = 0;
++            return RtlRaiseException(&record);
+         }
+-        else
++
++        if (tag & SRWLOCK_TAG_HAS_WAITERS)
+         {
+-            ret = FALSE;
++            /* We are only safe to access the list head if there are multiple owners,
++             * in which case only after the last owner has decremented `num_owners`
++             * can the list starts to be modified. OTOH when the HAS_MULTIPLE_OWNERS
++             * bit is not set, we know we are the sole owner without needing to
++             * consult the list. */
++            if (tag & SRWLOCK_TAG_HAS_MULTIPLE_OWNERS)
++            {
++                shared_count = InterlockedDecrement((LONG *)&last->head->num_owners);
++                TRACE("shared_count in head = %ld\n", shared_count);
++
++                /* Now, threads that got shared_count = either 1 or 0 have
++                 * something to do here. The thread that got 1 needs to unset
++                 * MULTIPLE_OWNERS, the other thread needs to unset LOCKED.
++                 *
++                 * We said earlier either of these bits being set blocks lock
++                 * acquisition. Because otherwise would require strong ordering
++                 * of these two unsets. If LOCKED is unset first, other threads
++                 * would start acquiring/releasing the lock. Later when
++                 * MULTIPLE_OWNERS is unset, it would scribble over lock state
++                 * that has since changed, potentially making it invalid.
++                 */
++                if (shared_count > 1)
++                    return;
++
++                /* At most 2 threads can reach here. */
++                if (shared_count == 1)
++                    old.Ptr = InterlockedAndPointer(&lock->Ptr, ~(ULONG_PTR)SRWLOCK_TAG_HAS_MULTIPLE_OWNERS);
++                else
++                    old.Ptr = InterlockedAndPointer(&lock->Ptr, ~(ULONG_PTR)SRWLOCK_TAG_LOCKED);
++
++                TRACE("before = %p, shared_count = %ld\n", old.Ptr, shared_count);
++                tag = srwlock_get_tag(old);
++                if ((tag & SRWLOCK_TAG_LOCKED) && (tag & SRWLOCK_TAG_HAS_MULTIPLE_OWNERS))
++                    return;
++
++                /* The thread that finished second will be the only one that reaches here. */
++            }
++            else {
++                /* This thread is the sole owner of the lock. */
++                old.Ptr = InterlockedAndPointer(&lock->Ptr, ~(ULONG_PTR)SRWLOCK_TAG_LOCKED);
++                TRACE("before = %p\n", old.Ptr);
++            }
++
++            /* Only the last owner reaches here. */
++            old.Ptr = (PVOID)((ULONG_PTR)old.Ptr & ~(ULONG_PTR)(SRWLOCK_TAG_HAS_MULTIPLE_OWNERS | SRWLOCK_TAG_LOCKED));
++            return srwlock_maybe_wake(lock, old);
+         }
+-    } while (InterlockedCompareExchange( u.l, new.l, old.l ) != old.l);
+ 
+-    return ret;
++        shared_count = srwlock_get_shared_count(old) - 1;
++        if (shared_count == 0)
++            tag &= ~SRWLOCK_TAG_LOCKED;
++        if (shared_count == 1)
++            tag &= ~SRWLOCK_TAG_HAS_MULTIPLE_OWNERS;
++
++        new = srwlock_from_shared_owner_count(shared_count, tag);
++        TRACE("new = %p\n", new.Ptr);
++    } while (InterlockedCompareExchangePointer(&lock->Ptr, new.Ptr, old.Ptr) !=
++             old.Ptr);
+ }
+ 
+ /***********************************************************************
+diff --git a/include/winnt.h b/include/winnt.h
+index 2e1aac0f477432b9b41a6ebb78129855d069cb06..6bb5d3f0c644c7ecfe4d4e5fb317591348163042 100644
+--- a/include/winnt.h
++++ b/include/winnt.h
+@@ -4245,7 +4245,7 @@ typedef struct _ACL {
+ 
+ typedef enum _ACL_INFORMATION_CLASS
+ {
+-  AclRevisionInformation = 1, 
++  AclRevisionInformation = 1,
+   AclSizeInformation
+ } ACL_INFORMATION_CLASS;
+ 
+@@ -6912,12 +6912,20 @@ static FORCEINLINE void MemoryBarrier(void)
+  */
+ #if _MSC_VER >= 1700
+ #pragma intrinsic(__iso_volatile_load32)
++#pragma intrinsic(__iso_volatile_load64)
+ #pragma intrinsic(__iso_volatile_store32)
++#pragma intrinsic(__iso_volatile_store64)
+ #define __WINE_LOAD32_NO_FENCE(src) (__iso_volatile_load32(src))
++#define __WINE_LOAD64_NO_FENCE(src) (__iso_volatile_load64(src))
+ #define __WINE_STORE32_NO_FENCE(dest, value) (__iso_volatile_store32(dest, value))
++#define __WINE_STORE64_NO_FENCE(dest, value) (__iso_volatile_store64(dest, value))
+ #else  /* _MSC_VER >= 1700 */
+-#define __WINE_LOAD32_NO_FENCE(src) (*(src))
+-#define __WINE_STORE32_NO_FENCE(dest, value) ((void)(*(dest) = (value)))
++#define __WINE_LOAD_NO_FENCE(src) (*(src))
++#define __WINE_STORE_NO_FENCE(dest, value) ((void)(*(dest) = (value)))
++#define __WINE_LOAD32_NO_FENCE(src) __WINE_LOAD_NO_FENCE(src)
++#define __WINE_LOAD64_NO_FENCE(src) __WINE_LOAD_NO_FENCE(src)
++#define __WINE_STORE32_NO_FENCE(dest, value) __WINE_STORE_NO_FENCE(dest, value)
++#define __WINE_STORE64_NO_FENCE(dest, value) __WINE_STORE_NO_FENCE(dest, value)
+ #endif  /* _MSC_VER >= 1700 */
+ 
+ #if defined(__i386__) || defined(__x86_64__)
+@@ -6944,6 +6952,18 @@ static FORCEINLINE LONG ReadAcquire( LONG const volatile *src )
+     return value;
+ }
+ 
++static FORCEINLINE void* ReadPointerAcquire( void* const volatile *src )
++{
++    void *value;
++#ifdef _WIN64
++    value = (void *)__WINE_LOAD64_NO_FENCE( (INT64 const volatile *)src );
++#else
++    value = (void *)__WINE_LOAD32_NO_FENCE( (INT32 const volatile *)src );
++#endif
++    __wine_memory_barrier_acq_rel();
++    return value;
++}
++
+ static FORCEINLINE LONG ReadNoFence( LONG const volatile *src )
+ {
+     LONG value = __WINE_LOAD32_NO_FENCE( (int const volatile *)src );
+@@ -6956,6 +6976,16 @@ static FORCEINLINE void WriteRelease( LONG volatile *dest, LONG value )
+     __WINE_STORE32_NO_FENCE( (int volatile *)dest, value );
+ }
+ 
++static FORCEINLINE void WritePointerRelease( void* volatile *dest, void* value )
++{
++    __wine_memory_barrier_acq_rel();
++#ifdef _WIN64
++    __WINE_STORE64_NO_FENCE( (INT64 volatile *)dest, (INT64)value );
++#else
++    __WINE_STORE32_NO_FENCE( (INT32 volatile *)dest, (INT32)value );
++#endif
++}
++
+ static FORCEINLINE void WriteNoFence( LONG volatile *dest, LONG value )
+ {
+     __WINE_STORE32_NO_FENCE( (int volatile *)dest, value );
+@@ -7124,6 +7154,13 @@ static FORCEINLINE LONG ReadAcquire( LONG const volatile *src )
+     return value;
+ }
+ 
++static FORCEINLINE void *ReadPointerAcquire( void *const volatile *src )
++{
++    void *value;
++    __WINE_ATOMIC_LOAD_ACQUIRE( src, &value );
++    return value;
++}
++
+ static FORCEINLINE LONG ReadNoFence( LONG const volatile *src )
+ {
+     LONG value;
+@@ -7141,6 +7178,11 @@ static FORCEINLINE void WriteNoFence( LONG volatile *dest, LONG value )
+     __WINE_ATOMIC_STORE_RELAXED( dest, &value );
+ }
+ 
++static FORCEINLINE void WritePointerRelease( void *volatile *src, void *value )
++{
++    __WINE_ATOMIC_STORE_RELEASE( src, &value );
++}
++
+ static FORCEINLINE DECLSPEC_NORETURN void __fastfail(unsigned int code)
+ {
+ #if defined(__x86_64__) || defined(__i386__)

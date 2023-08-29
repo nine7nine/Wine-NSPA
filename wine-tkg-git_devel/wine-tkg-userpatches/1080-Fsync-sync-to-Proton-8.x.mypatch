@@ -1,4 +1,4 @@
-From 434c16b7eef47d2c489ecc7da0e72ca51c37cbb6 Mon Sep 17 00:00:00 2001
+From 7ccce68a3c21e7d89f0ba306b08d29f6811a190c Mon Sep 17 00:00:00 2001
 From: Paul Gofman <pgofman@codeweavers.com>
 Date: Thu, 27 Apr 2023 16:53:17 -0600
 Subject: [PATCH] fsync: Cache current process ID.
@@ -49,7 +49,8 @@ index ba85862fcc2..ed2c334610f 100644
  }
  
  NTSTATUS fsync_create_semaphore( HANDLE *handle, ACCESS_MASK access,
-From 9ab6b89e29b1dfde2a85b8fd50e72a21aa69cd2c Mon Sep 17 00:00:00 2001
+
+From d00022a765f54b7d01e5dbc1c3a3a1e0ac82d1f0 Mon Sep 17 00:00:00 2001
 From: Paul Gofman <pgofman@codeweavers.com>
 Date: Thu, 27 Apr 2023 16:56:26 -0600
 Subject: [PATCH] fsync: Cache current TID in __fsync_wait_objects().
@@ -140,7 +141,8 @@ index ed2c334610f..479a7a6baf4 100644
  }
  
  /* Like esync, we need to let the server know when we are doing a message wait,
-From 53942be77c3d906b0100a12dbf0aad7254c2db3a Mon Sep 17 00:00:00 2001
+
+From e2f18ede64bd44779c87c2908203e150c900eb58 Mon Sep 17 00:00:00 2001
 From: Paul Gofman <pgofman@codeweavers.com>
 Date: Thu, 27 Apr 2023 17:32:38 -0600
 Subject: [PATCH] fsync: Add WINE_FSYNC_YIELD_TO_WAITERS option.
@@ -253,15 +255,15 @@ diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
 index d1fda7a6e5a..dd16a630bf2 100644
 --- a/dlls/ntdll/unix/loader.c
 +++ b/dlls/ntdll/unix/loader.c
-@@ -2088,6 +2088,7 @@ const unixlib_entry_t __wine_unix_call_w
+@@ -1371,6 +1371,7 @@ const unixlib_entry_t unix_call_wow64_fu
  BOOL fsync_simulate_async_read_io;
  BOOL fsync_simulate_sched_quantum;
  BOOL alert_simulate_sched_quantum;
 +BOOL fsync_yield_to_waiters;
- BOOL high_dll_addresses;
  
  static void hacks_init(void)
-@@ -2116,6 +2117,12 @@ static void hacks_init(void)
+ {
+@@ -1398,6 +1399,12 @@ static void hacks_init(void)
      }    
      if (fsync_simulate_sched_quantum)
          ERR("HACK: Simulating sched quantum in fsync.\n");
@@ -271,19 +273,153 @@ index d1fda7a6e5a..dd16a630bf2 100644
 +        fsync_yield_to_waiters = !!atoi(env_str);
 +    if (fsync_yield_to_waiters)
 +        ERR("HACK: fsync: yield to waiters.\n");
-         
- #ifdef _WIN64
-     env_str = getenv("WINE_HIGH_DLL_ADDRESSES");
+ }
+ 
+ 
 diff --git a/dlls/ntdll/unix/unix_private.h b/dlls/ntdll/unix/unix_private.h
 index 471f7377233..63ed982be92 100644
 --- a/dlls/ntdll/unix/unix_private.h
 +++ b/dlls/ntdll/unix/unix_private.h
-@@ -194,6 +194,7 @@ extern struct ldt_copy __wine_ldt_copy D
+@@ -193,6 +193,7 @@ extern struct ldt_copy __wine_ldt_copy D
  extern BOOL fsync_simulate_async_read_io DECLSPEC_HIDDEN;
  extern BOOL fsync_simulate_sched_quantum DECLSPEC_HIDDEN;
  extern BOOL alert_simulate_sched_quantum DECLSPEC_HIDDEN;
 +extern BOOL fsync_yield_to_waiters;
- extern BOOL high_dll_addresses DECLSPEC_HIDDEN;
  
  extern void init_environment( int argc, char *argv[], char *envp[] ) DECLSPEC_HIDDEN;
+ extern void init_startup_info(void) DECLSPEC_HIDDEN;
 
+From 2ab9f8646a5a3c723e459d467f2c386b8d2fd15f Mon Sep 17 00:00:00 2001
+From: Zhiyi Zhang <zzhang@codeweavers.com>
+Date: Fri, 9 Jun 2023 15:12:31 +0800
+Subject: [PATCH] fsync: Type-check HANDLE in fsync_reset_event().
+
+Oddworld: Stranger's Wrath HD (15750) calls ResetEvent() on a file handle and then waits for the
+handle with an infinite timeout. Without esync/fsync, NtResetEvent() should return
+STATUS_OBJECT_TYPE_MISMATCH because the handle is not an event handle. With esync/fsync, the file
+handle is set to non-signaled successfully and causes the game to hang at start-up. The same check
+should also apply to fsync_pulse_event(), esync_reset_event(), and esync_pulse_event().
+
+CW-Bug-Id: #22326
+---
+ dlls/ntdll/unix/fsync.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/dlls/ntdll/unix/fsync.c b/dlls/ntdll/unix/fsync.c
+index b4d4b086919..aab9096cf14 100644
+--- a/dlls/ntdll/unix/fsync.c
++++ b/dlls/ntdll/unix/fsync.c
+@@ -714,6 +714,12 @@ NTSTATUS fsync_reset_event( HANDLE handle, LONG *prev )
+     if ((ret = get_object( handle, &obj ))) return ret;
+     event = obj.shm;
+ 
++    if (obj.type != FSYNC_MANUAL_EVENT && obj.type != FSYNC_AUTO_EVENT)
++    {
++        put_object( &obj );
++        return STATUS_OBJECT_TYPE_MISMATCH;
++    }
++
+     current = __atomic_exchange_n( &event->signaled, 0, __ATOMIC_SEQ_CST );
+ 
+     if (prev) *prev = current;
+     
+From 1ca0faa0d14090ff8bd5b95a6ddbcffb2f279c2e Mon Sep 17 00:00:00 2001
+From: Zhiyi Zhang <zzhang@codeweavers.com>
+Date: Fri, 9 Jun 2023 15:13:12 +0800
+Subject: [PATCH] fsync: Type-check HANDLE in fsync_pulse_event().
+
+CW-Bug-Id: #22326
+---
+ dlls/ntdll/unix/fsync.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/dlls/ntdll/unix/fsync.c b/dlls/ntdll/unix/fsync.c
+index aab9096cf14..d6025a173a8 100644
+--- a/dlls/ntdll/unix/fsync.c
++++ b/dlls/ntdll/unix/fsync.c
+@@ -740,6 +740,12 @@ NTSTATUS fsync_pulse_event( HANDLE handle, LONG *prev )
+     if ((ret = get_object( handle, &obj ))) return ret;
+     event = obj.shm;
+ 
++    if (obj.type != FSYNC_MANUAL_EVENT && obj.type != FSYNC_AUTO_EVENT)
++    {
++        put_object( &obj );
++        return STATUS_OBJECT_TYPE_MISMATCH;
++    }
++
+     /* This isn't really correct; an application could miss the write.
+      * Unfortunately we can't really do much better. Fortunately this is rarely
+      * used (and publicly deprecated). */
+
+From 1e95c24a9876120100d4a6d1c82a16b59f84d2bf Mon Sep 17 00:00:00 2001
+From: Zhiyi Zhang <zzhang@codeweavers.com>
+Date: Fri, 9 Jun 2023 15:14:59 +0800
+Subject: [PATCH] esync: Type-check HANDLE in esync_reset_event().
+
+CW-Bug-Id: #22326
+---
+ dlls/ntdll/unix/esync.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/dlls/ntdll/unix/esync.c b/dlls/ntdll/unix/esync.c
+index 40cf4a07056..948602ef35a 100644
+--- a/dlls/ntdll/unix/esync.c
++++ b/dlls/ntdll/unix/esync.c
+@@ -572,6 +572,9 @@ NTSTATUS esync_reset_event( HANDLE handle )
+     if ((ret = get_object( handle, &obj ))) return ret;
+     event = obj->shm;
+ 
++    if (obj->type != ESYNC_MANUAL_EVENT && obj->type != ESYNC_AUTO_EVENT)
++        return STATUS_OBJECT_TYPE_MISMATCH;
++
+     if (obj->type == ESYNC_MANUAL_EVENT)
+     {
+         /* Acquire the spinlock. */
+
+From 17133385f61e03826aaa84bcbc54cf339d4132d5 Mon Sep 17 00:00:00 2001
+From: Zhiyi Zhang <zzhang@codeweavers.com>
+Date: Fri, 9 Jun 2023 15:15:55 +0800
+Subject: [PATCH] esync: Type-check HANDLE in esync_pulse_event().
+
+CW-Bug-Id: #22326
+---
+ dlls/ntdll/unix/esync.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/dlls/ntdll/unix/esync.c b/dlls/ntdll/unix/esync.c
+index 948602ef35a..56fdd150175 100644
+--- a/dlls/ntdll/unix/esync.c
++++ b/dlls/ntdll/unix/esync.c
+@@ -615,6 +615,9 @@ NTSTATUS esync_pulse_event( HANDLE handle )
+ 
+     if ((ret = get_object( handle, &obj ))) return ret;
+ 
++    if (obj->type != ESYNC_MANUAL_EVENT && obj->type != ESYNC_AUTO_EVENT)
++        return STATUS_OBJECT_TYPE_MISMATCH;
++
+     /* This isn't really correct; an application could miss the write.
+      * Unfortunately we can't really do much better. Fortunately this is rarely
+      * used (and publicly deprecated). */
+
+From 20b191b0197b50660a53c22d0a50c0e04a8078e3 Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Mon, 3 Jul 2023 13:30:33 -0600
+Subject: [PATCH] fsync: Check for NULL handle in get_object().
+
+CW-Bug-Id: #22395
+---
+ dlls/ntdll/unix/fsync.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/dlls/ntdll/unix/fsync.c b/dlls/ntdll/unix/fsync.c
+index d6025a173a8..c265d6c02e0 100644
+--- a/dlls/ntdll/unix/fsync.c
++++ b/dlls/ntdll/unix/fsync.c
+@@ -402,6 +402,7 @@ static NTSTATUS get_object( HANDLE handle, struct fsync *obj )
+         return STATUS_NOT_IMPLEMENTED;
+     }
+ 
++    if (!handle) return STATUS_INVALID_HANDLE;
+ 
+     /* We need to try grabbing it from the server. Uninterrupted section
+      * is needed to avoid race with NtClose() which first calls fsync_close()
