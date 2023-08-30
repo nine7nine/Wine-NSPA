@@ -12,11 +12,9 @@ Wine-NSPA focuses on the integration of performance enhancements and RT related 
 
 ![](https://github.com/nine7nine/Wine-NSPA/blob/main/examples/images/terminal-banner.png)
 
-Wine-NSPA is currently based on Wine-7.5; due to newer versions having some regressions and bugs that affect some applications that I use (showstopping bugs). Wine-7.5 seems to be fairly solid and I don't have any desire to chase every development release. That said; I do pickup upstream bugfixes, MRs and the occasional patch from WineHQ Bugzilla. Additionally, Wine-TKG is used as a base; as it's a powerful build system, flexible, easy to use and significantly reduces maintenance burden. It also supports Archlinux / Makepkg, which makes building and packaging Wine a straightforward process.
+Wine-NSPA has two branches 7x (7.5 based, getting old) and 8x (based on 8.14+). wine-nspa-8x-git is what sould probably be used, as going forward - that is where active development will happen.
 
-### IMPORTANT:
-
- - While I have begun Wine-NSPA-8.0 development: I Do NOT recommend building or Wine-NSPA-devel. Use Wine-NSPA 7.5 package(../wine-tkg-git). The Wine-7.5 builds are fairly solid and have better performance, as well...
+Note: 8x buils are still mssing a few bits, but nothing too critical... I currently use my typical setup of NI Komplete, UHE, AAS, etc plugins all running with Kushview Element ~ which works reasonably well with 8x builds. Ableton Live is also running alright too -- although, given that I'm still working on 8x builds (and Wine-8.x has only recently stabilized for my use:), mileage wil vary.
 
 _________________________
 
@@ -28,7 +26,7 @@ _________________________
 * **Kernelbase linux-thread RT hooking for TIME_CRITICAL threads*** 
 * **Wineserver Shared Memory support**
 * **Wineserver SHMEM Per Thread (Server Requests/Replies)**
-* **Esync / Fsync Proton 7.0-experimental implementation**
+* **Esync / Fsync Proton 8.0-experimental implementation**
 * **Wine Low Fragmentation Heap Patchwork**
 * **Keyed Events Linux Futexes Implementation**
 * **Numerous Performance Optimizations**
@@ -69,11 +67,6 @@ DPC Latency Checker is used in older versions of Windows to verify if your syste
 ![](https://github.com/nine7nine/Wine-NSPA/blob/main/examples/images/Dpc_Latency_Test.png)
 
 The above is from my Microsoft Surface 7. It's a decently designed PC, running Linux-NSPA on a well-configured Arch Linux system. NOTE: this isn't a substitute replacement for rt-tests (cyclictest, hackbench) for testing a linux system: but will help indicate if your Wine-NSPA / linux system setup is actually usable for ProAudio.
-_________________________
-
-### Future Work && Plans
-
-Wine-NSPA will be rebased on Wine-8.0+ in the future, but only when 8.0+ becomes more suitable. Atm, Wine-8.0rc has problems/regressions, when compared to Wine-7.5... The performance is lacking, there are some nasty bugs and overall it's just not good enough for me.* I prefer to have reliable builds that are usuable. Right now, my Wine-7.5 builds are just significatly better than newer versions of Wine (for a variety of reasons).
 _________________________
 
 ### Credits/Shoutouts:
