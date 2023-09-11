@@ -1,5 +1,176 @@
+From ca62e2bb6934a1304e2833c56dd0c36b11f48e42 Mon Sep 17 00:00:00 2001
+From: Yuxuan Shui <yshui@codeweavers.com>
+Date: Wed, 9 Aug 2023 14:27:28 +0100
+Subject: [PATCH 1/4] include: add atomic read/write of pointers
+
+---
+ include/winnt.h | 80 +++++++++++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 77 insertions(+), 3 deletions(-)
+
+diff --git a/include/winnt.h b/include/winnt.h
+index 2e1aac0f477..607caba047e 100644
+--- a/include/winnt.h
++++ b/include/winnt.h
+@@ -4245,7 +4245,7 @@ typedef struct _ACL {
+ 
+ typedef enum _ACL_INFORMATION_CLASS
+ {
+-  AclRevisionInformation = 1, 
++  AclRevisionInformation = 1,
+   AclSizeInformation
+ } ACL_INFORMATION_CLASS;
+ 
+@@ -6912,12 +6912,20 @@ static FORCEINLINE void MemoryBarrier(void)
+  */
+ #if _MSC_VER >= 1700
+ #pragma intrinsic(__iso_volatile_load32)
++#pragma intrinsic(__iso_volatile_load64)
+ #pragma intrinsic(__iso_volatile_store32)
++#pragma intrinsic(__iso_volatile_store64)
+ #define __WINE_LOAD32_NO_FENCE(src) (__iso_volatile_load32(src))
++#define __WINE_LOAD64_NO_FENCE(src) (__iso_volatile_load64(src))
+ #define __WINE_STORE32_NO_FENCE(dest, value) (__iso_volatile_store32(dest, value))
++#define __WINE_STORE64_NO_FENCE(dest, value) (__iso_volatile_store64(dest, value))
+ #else  /* _MSC_VER >= 1700 */
+-#define __WINE_LOAD32_NO_FENCE(src) (*(src))
+-#define __WINE_STORE32_NO_FENCE(dest, value) ((void)(*(dest) = (value)))
++#define __WINE_LOAD_NO_FENCE(src) (*(src))
++#define __WINE_STORE_NO_FENCE(dest, value) ((void)(*(dest) = (value)))
++#define __WINE_LOAD32_NO_FENCE(src) __WINE_LOAD_NO_FENCE(src)
++#define __WINE_LOAD64_NO_FENCE(src) __WINE_LOAD_NO_FENCE(src)
++#define __WINE_STORE32_NO_FENCE(dest, value) __WINE_STORE_NO_FENCE(dest, value)
++#define __WINE_STORE64_NO_FENCE(dest, value) __WINE_STORE_NO_FENCE(dest, value)
+ #endif  /* _MSC_VER >= 1700 */
+ 
+ #if defined(__i386__) || defined(__x86_64__)
+@@ -6944,23 +6952,65 @@ static FORCEINLINE LONG ReadAcquire( LONG const volatile *src )
+     return value;
+ }
+ 
++static FORCEINLINE void* ReadPointerAcquire( void* const volatile *src )
++{
++    void *value;
++#ifdef _WIN64
++    value = (void *)__WINE_LOAD64_NO_FENCE( (INT64 const volatile *)src );
++#else
++    value = (void *)__WINE_LOAD32_NO_FENCE( (INT32 const volatile *)src );
++#endif
++    __wine_memory_barrier_acq_rel();
++    return value;
++}
++
+ static FORCEINLINE LONG ReadNoFence( LONG const volatile *src )
+ {
+     LONG value = __WINE_LOAD32_NO_FENCE( (int const volatile *)src );
+     return value;
+ }
+ 
++static FORCEINLINE void* ReadPointerNoFence( void* const volatile *src )
++{
++    void *value;
++#ifdef _WIN64
++    value = (void *)__WINE_LOAD64_NO_FENCE( (INT64 const volatile *)src );
++#else
++    value = (void *)__WINE_LOAD32_NO_FENCE( (INT32 const volatile *)src );
++#endif
++    return value;
++}
++
+ static FORCEINLINE void WriteRelease( LONG volatile *dest, LONG value )
+ {
+     __wine_memory_barrier_acq_rel();
+     __WINE_STORE32_NO_FENCE( (int volatile *)dest, value );
+ }
+ 
++static FORCEINLINE void WritePointerRelease( void* volatile *dest, void* value )
++{
++    __wine_memory_barrier_acq_rel();
++#ifdef _WIN64
++    __WINE_STORE64_NO_FENCE( (INT64 volatile *)dest, (INT64)value );
++#else
++    __WINE_STORE32_NO_FENCE( (INT32 volatile *)dest, (INT32)value );
++#endif
++}
++
+ static FORCEINLINE void WriteNoFence( LONG volatile *dest, LONG value )
+ {
+     __WINE_STORE32_NO_FENCE( (int volatile *)dest, value );
+ }
+ 
++static FORCEINLINE void WritePointerNoFence( void* volatile *dest, void* value )
++{
++#ifdef _WIN64
++    __WINE_STORE64_NO_FENCE( (INT64 volatile *)dest, (INT64)value );
++#else
++    __WINE_STORE32_NO_FENCE( (INT32 volatile *)dest, (INT32)value );
++#endif
++}
++
+ #elif defined(__GNUC__)
+ 
+ static FORCEINLINE BOOLEAN WINAPI BitScanForward(DWORD *index, DWORD mask)
+@@ -7124,6 +7174,13 @@ static FORCEINLINE LONG ReadAcquire( LONG const volatile *src )
+     return value;
+ }
+ 
++static FORCEINLINE void *ReadPointerAcquire( void *const volatile *src )
++{
++    void *value;
++    __WINE_ATOMIC_LOAD_ACQUIRE( src, &value );
++    return value;
++}
++
+ static FORCEINLINE LONG ReadNoFence( LONG const volatile *src )
+ {
+     LONG value;
+@@ -7131,6 +7188,13 @@ static FORCEINLINE LONG ReadNoFence( LONG const volatile *src )
+     return value;
+ }
+ 
++static FORCEINLINE void *ReadPointerNoFence( void *const volatile *src )
++{
++    void *value;
++    __WINE_ATOMIC_LOAD_RELAXED( src, &value );
++    return value;
++}
++
+ static FORCEINLINE void WriteRelease( LONG volatile *dest, LONG value )
+ {
+     __WINE_ATOMIC_STORE_RELEASE( dest, &value );
+@@ -7141,6 +7205,16 @@ static FORCEINLINE void WriteNoFence( LONG volatile *dest, LONG value )
+     __WINE_ATOMIC_STORE_RELAXED( dest, &value );
+ }
+ 
++static FORCEINLINE void WritePointerRelease( void *volatile *src, void *value )
++{
++    __WINE_ATOMIC_STORE_RELEASE( src, &value );
++}
++
++static FORCEINLINE void WritePointerNoFence( void *volatile *src, void *value )
++{
++    __WINE_ATOMIC_STORE_RELAXED( src, &value );
++}
++
+ static FORCEINLINE DECLSPEC_NORETURN void __fastfail(unsigned int code)
+ {
+ #if defined(__x86_64__) || defined(__i386__)
+-- 
+GitLab
+
+
+From b785f0abe99b9e7816d7e66d0633109963b41f96 Mon Sep 17 00:00:00 2001
+From: Yuxuan Shui <yshui@codeweavers.com>
+Date: Thu, 3 Aug 2023 12:05:57 +0100
+Subject: [PATCH 2/4] ntdll: An implementation of SRWLOCK that closer matches
+ Windows'.
+
+---
+ dlls/kernel32/tests/sync.c |  24 ++
+ dlls/ntdll/sync.c          | 623 ++++++++++++++++++++++++++++---------
+ 2 files changed, 504 insertions(+), 143 deletions(-)
+
 diff --git a/dlls/kernel32/tests/sync.c b/dlls/kernel32/tests/sync.c
-index 60180194b7a1641e3a131fb03cf38c04ce7d9027..4eaec87c52faff548608feaa356bf971fb6271b9 100644
+index 60180194b7a..4eaec87c52f 100644
 --- a/dlls/kernel32/tests/sync.c
 +++ b/dlls/kernel32/tests/sync.c
 @@ -2533,6 +2533,29 @@ static void test_srwlock_example(void)
@@ -41,7 +212,7 @@ index 60180194b7a1641e3a131fb03cf38c04ce7d9027..4eaec87c52faff548608feaa356bf971
      test_apc_deadlock();
      test_crit_section();
 diff --git a/dlls/ntdll/sync.c b/dlls/ntdll/sync.c
-index fa64917029af262d8af414ee09a6cfe5395537b0..1b377c75ac0d240e7638280f8eb2a494dc556152 100644
+index fa64917029a..2d1ca822ecf 100644
 --- a/dlls/ntdll/sync.c
 +++ b/dlls/ntdll/sync.c
 @@ -26,6 +26,8 @@
@@ -164,7 +335,7 @@ index fa64917029af262d8af414ee09a6cfe5395537b0..1b377c75ac0d240e7638280f8eb2a494
  
  /***********************************************************************
   *              RtlInitializeSRWLock (NTDLL.@)
-@@ -496,141 +569,217 @@ C_ASSERT( sizeof(struct srw_lock) == 4 );
+@@ -496,141 +569,218 @@ C_ASSERT( sizeof(struct srw_lock) == 4 );
   * NOTES
   *  Please note that SRWLocks do not keep track of the owner of a lock.
   *  It doesn't make any difference which thread for example unlocks an
@@ -214,6 +385,7 @@ index fa64917029af262d8af414ee09a6cfe5395537b0..1b377c75ac0d240e7638280f8eb2a494
  
 -        do
 +    head->num_owners = 0;
++    shared_owner_count = 0;
 +    if (head->state & SRWLOCK_WAITER_STATE_IS_EXCLUSIVE)
 +    {
 +        new_head = head->next;
@@ -226,7 +398,7 @@ index fa64917029af262d8af414ee09a6cfe5395537b0..1b377c75ac0d240e7638280f8eb2a494
 -            old.s = *u.s;
 -            new.s = old.s;
 +            shared_owner_count += 1;
-+            new_head = i;
++            new_head = i->next;
 +            i = i->next;
 +        }
 +        if (!i)
@@ -390,7 +562,7 @@ index fa64917029af262d8af414ee09a6cfe5395537b0..1b377c75ac0d240e7638280f8eb2a494
 -        new = old;
 +    /* The linked list is locked by us now */
 +    if (prev) {
-+        waiter.head = prev->head;
++        WritePointerNoFence((void **)&waiter.head, prev->head);
 +        prev->next = &waiter;
 +    }
 +
@@ -400,7 +572,7 @@ index fa64917029af262d8af414ee09a6cfe5395537b0..1b377c75ac0d240e7638280f8eb2a494
 +        tag = srwlock_get_tag(old);
  
 -        if (old.s.owners != -1) ERR("Lock %p is not owned exclusive!\n", lock);
-+        if (tag & SRWLOCK_TAG_LOCKED)
++        if (tag & (SRWLOCK_TAG_LOCKED | SRWLOCK_TAG_HAS_MULTIPLE_OWNERS))
 +            /* If the lock is unlocked while we are holding the list lock,
 +             * then we would have to perform the waking up duty, so we
 +             * would still need the list lock, otherwise we can unlock
@@ -415,7 +587,7 @@ index fa64917029af262d8af414ee09a6cfe5395537b0..1b377c75ac0d240e7638280f8eb2a494
  
 -    if (new.s.exclusive_waiters)
 -        RtlWakeAddressSingle( &u.s->owners );
-+    if (!(tag & SRWLOCK_TAG_LOCKED))
++    if (!(tag & (SRWLOCK_TAG_LOCKED | SRWLOCK_TAG_HAS_MULTIPLE_OWNERS)))
 +        srwlock_wake(lock, srwlock_get_waiter(old));
      else
 -        RtlWakeAddressAll( u.s );
@@ -480,7 +652,7 @@ index fa64917029af262d8af414ee09a6cfe5395537b0..1b377c75ac0d240e7638280f8eb2a494
  }
  
  /***********************************************************************
-@@ -642,28 +791,61 @@ void WINAPI RtlReleaseSRWLockShared( RTL_SRWLOCK *lock )
+@@ -642,28 +792,61 @@ void WINAPI RtlReleaseSRWLockShared( RTL_SRWLOCK *lock )
   */
  BOOLEAN WINAPI RtlTryAcquireSRWLockExclusive( RTL_SRWLOCK *lock )
  {
@@ -558,7 +730,7 @@ index fa64917029af262d8af414ee09a6cfe5395537b0..1b377c75ac0d240e7638280f8eb2a494
  }
  
  /***********************************************************************
-@@ -671,29 +853,174 @@ BOOLEAN WINAPI RtlTryAcquireSRWLockExclusive( RTL_SRWLOCK *lock )
+@@ -671,29 +854,183 @@ BOOLEAN WINAPI RtlTryAcquireSRWLockExclusive( RTL_SRWLOCK *lock )
   */
  BOOLEAN WINAPI RtlTryAcquireSRWLockShared( RTL_SRWLOCK *lock )
  {
@@ -609,8 +781,7 @@ index fa64917029af262d8af414ee09a6cfe5395537b0..1b377c75ac0d240e7638280f8eb2a494
 +     * there is another thread (can be either an acquirer or a releaser)
 +     * currently holding the list lock, we give up and leave the duty of
 +     * waking waiters up to that thread. */
-+    while ((tag & (SRWLOCK_TAG_HAS_WAITERS | SRWLOCK_TAG_LOCKED | SRWLOCK_TAG_LIST_LOCKED)) ==
-+           SRWLOCK_TAG_HAS_WAITERS)
++    while (tag == SRWLOCK_TAG_HAS_WAITERS)
 +    {
 +        struct srwlock_waiter *waiter = srwlock_get_waiter(old);
 +        new = srwlock_from_waiter(waiter, tag | SRWLOCK_TAG_LIST_LOCKED);
@@ -649,7 +820,7 @@ index fa64917029af262d8af414ee09a6cfe5395537b0..1b377c75ac0d240e7638280f8eb2a494
 +    RTL_SRWLOCK old, new;
 +    USHORT tag;
 +    LONG shared_count;
-+    struct srwlock_waiter *last;
++    struct srwlock_waiter *last, *head;
 +
 +    TRACE("%p\n", lock);
  
@@ -691,7 +862,17 @@ index fa64917029af262d8af414ee09a6cfe5395537b0..1b377c75ac0d240e7638280f8eb2a494
 +             * consult the list. */
 +            if (tag & SRWLOCK_TAG_HAS_MULTIPLE_OWNERS)
 +            {
-+                shared_count = InterlockedDecrement((LONG *)&last->head->num_owners);
++                /* last->head can be NULL if another thread is in the process
++                 * of adding a waiter. If we reach this point we know the list
++                 * head cannot change, and nodes won't be removed from the list.
++                 * So we can safely scan backwards to find a valid head pointer.*/
++                while (TRUE) {
++                    head = ReadPointerNoFence((void **)&last->head);
++                    if (head)
++                        break;
++                    last = last->prev;
++                }
++                shared_count = InterlockedDecrement((LONG *)&head->num_owners);
 +                TRACE("shared_count in head = %ld\n", shared_count);
 +
 +                /* Now, threads that got shared_count = either 1 or 0 have
@@ -747,101 +928,177 @@ index fa64917029af262d8af414ee09a6cfe5395537b0..1b377c75ac0d240e7638280f8eb2a494
  }
  
  /***********************************************************************
-diff --git a/include/winnt.h b/include/winnt.h
-index 2e1aac0f477432b9b41a6ebb78129855d069cb06..6bb5d3f0c644c7ecfe4d4e5fb317591348163042 100644
---- a/include/winnt.h
-+++ b/include/winnt.h
-@@ -4245,7 +4245,7 @@ typedef struct _ACL {
+-- 
+GitLab
+
+
+From eb3b4fff5ca3e7f9318dbea3f9c73631a1426806 Mon Sep 17 00:00:00 2001
+From: Yuxuan Shui <yshui@codeweavers.com>
+Date: Fri, 1 Sep 2023 00:03:44 +0100
+Subject: [PATCH 3/4] ntdll: allow SRWLOCKs to be quickly re-acquired
+
+Allow thread that released an SRWLOCK to immediately re-acquire it. This makes
+the lock less fair but improves throughput.
+---
+ dlls/ntdll/sync.c | 49 +++++++++++++++++++++++++++++++----------------
+ 1 file changed, 32 insertions(+), 17 deletions(-)
+
+diff --git a/dlls/ntdll/sync.c b/dlls/ntdll/sync.c
+index 2d1ca822ecf..f6d38d29efd 100644
+--- a/dlls/ntdll/sync.c
++++ b/dlls/ntdll/sync.c
+@@ -496,8 +496,9 @@ enum srwlock_tag {
+ };
  
- typedef enum _ACL_INFORMATION_CLASS
- {
--  AclRevisionInformation = 1, 
-+  AclRevisionInformation = 1,
-   AclSizeInformation
- } ACL_INFORMATION_CLASS;
+ enum srwlock_waiter_state {
+-    SRWLOCK_WAITER_STATE_IS_EXCLUSIVE = 1,
+-    /* ???? = 2, */
++    SRWLOCK_WAITER_STATE_IS_EXCLUSIVE = 1 << 0,
++    /* Unknown on windows */
++    SRWLOCK_WAITER_STATE_LOCKED = 1 << 1,
+     SRWLOCK_WAITER_STATE_NOTIFIED = 1 << 2,
+ };
+ struct DECLSPEC_ALIGN(16) srwlock_waiter {
+@@ -591,6 +592,7 @@ static void srwlock_wake(RTL_SRWLOCK *lock, struct srwlock_waiter * const last)
+     RTL_SRWLOCK expected = srwlock_from_waiter(last,
+         SRWLOCK_TAG_LIST_LOCKED | SRWLOCK_TAG_HAS_WAITERS);
+     ULONG shared_owner_count = 0;
++    LONG waiter_state;
  
-@@ -6912,12 +6912,20 @@ static FORCEINLINE void MemoryBarrier(void)
-  */
- #if _MSC_VER >= 1700
- #pragma intrinsic(__iso_volatile_load32)
-+#pragma intrinsic(__iso_volatile_load64)
- #pragma intrinsic(__iso_volatile_store32)
-+#pragma intrinsic(__iso_volatile_store64)
- #define __WINE_LOAD32_NO_FENCE(src) (__iso_volatile_load32(src))
-+#define __WINE_LOAD64_NO_FENCE(src) (__iso_volatile_load64(src))
- #define __WINE_STORE32_NO_FENCE(dest, value) (__iso_volatile_store32(dest, value))
-+#define __WINE_STORE64_NO_FENCE(dest, value) (__iso_volatile_store64(dest, value))
- #else  /* _MSC_VER >= 1700 */
--#define __WINE_LOAD32_NO_FENCE(src) (*(src))
--#define __WINE_STORE32_NO_FENCE(dest, value) ((void)(*(dest) = (value)))
-+#define __WINE_LOAD_NO_FENCE(src) (*(src))
-+#define __WINE_STORE_NO_FENCE(dest, value) ((void)(*(dest) = (value)))
-+#define __WINE_LOAD32_NO_FENCE(src) __WINE_LOAD_NO_FENCE(src)
-+#define __WINE_LOAD64_NO_FENCE(src) __WINE_LOAD_NO_FENCE(src)
-+#define __WINE_STORE32_NO_FENCE(dest, value) __WINE_STORE_NO_FENCE(dest, value)
-+#define __WINE_STORE64_NO_FENCE(dest, value) __WINE_STORE_NO_FENCE(dest, value)
- #endif  /* _MSC_VER >= 1700 */
+     TRACE("%p\n", lock);
  
- #if defined(__i386__) || defined(__x86_64__)
-@@ -6944,6 +6952,18 @@ static FORCEINLINE LONG ReadAcquire( LONG const volatile *src )
-     return value;
+@@ -617,19 +619,29 @@ retry:
+     for (i = new_head; i; i = i->next)
+         i->head = new_head;
+ 
+-    tag = SRWLOCK_TAG_LOCKED;
+-    if (shared_owner_count > 1)
+-        tag |= SRWLOCK_TAG_HAS_MULTIPLE_OWNERS;
+-    if (new_head == NULL)
+-        new = srwlock_from_shared_owner_count(shared_owner_count, tag);
+-    else
++    TRACE("%ld waiters will be woken, new_head = %p, head = %p\n", shared_owner_count, new_head, head);
++
++    /* We only transfer the lock if there are more than 1 shared owners and with
++     * wait list present, because in that case, they are not capable of
++     * acquiring the lock all at the same time themselves. If there is only 1
++     * owner, we wake it up without giving it the lock and let it acquire it the
++     * usual way. The purpose is so the current thread can immediately acquire
++     * the lock again if it wants to. This is less fair but helps with
++     * throughput. */
++    if (shared_owner_count == 1 || !new_head)
++        shared_owner_count = 0;
++
++    tag = 0;
++    if (shared_owner_count)
++        tag = SRWLOCK_TAG_HAS_MULTIPLE_OWNERS | SRWLOCK_TAG_LOCKED;
++
++    if (new_head)
+     {
+         new = srwlock_from_waiter(last, tag | SRWLOCK_TAG_HAS_WAITERS);
+-        if (shared_owner_count)
+-            new_head->num_owners = shared_owner_count;
+-        else
+-            new_head->num_owners = SRWLOCK_WAITER_EXCLUSIVELY_LOCKED;
++        new_head->num_owners = shared_owner_count;
+     }
++    else
++        new = srwlock_from_shared_owner_count(shared_owner_count, tag);
+ 
+     TRACE("new = %p, #owners = %ld\n", new.Ptr, shared_owner_count);
+     read.Ptr = InterlockedCompareExchangePointer(&lock->Ptr, new.Ptr, expected.Ptr);
+@@ -643,7 +655,7 @@ retry:
+             i->head = head;
+         if (new_head)
+             new_head->num_owners = SRWLOCK_WAITER_IS_NOT_HEAD;
+-        head->num_owners = 1;
++        head->num_owners = SRWLOCK_WAITER_EXCLUSIVELY_LOCKED;
+         new.Ptr = (PVOID)((ULONG_PTR)read.Ptr & ~(ULONG_PTR)SRWLOCK_TAG_LIST_LOCKED);
+         if (InterlockedCompareExchangePointer(&lock->Ptr, new.Ptr, read.Ptr) != read.Ptr)
+             goto retry;
+@@ -653,12 +665,15 @@ retry:
+     }
+     RtlWakeAddressSingle(&lock->Ptr);
+ 
++    waiter_state = SRWLOCK_WAITER_STATE_NOTIFIED;
++    if (tag & SRWLOCK_TAG_LOCKED)
++        waiter_state |= SRWLOCK_WAITER_STATE_LOCKED;
+     while (head != new_head)
+     {
+         /* waking up the waiter will invalidate the waiter's entry in
+          * the list. */
+         struct srwlock_waiter *next = head->next;
+-        InterlockedOr((LONG *)&head->state, SRWLOCK_WAITER_STATE_NOTIFIED);
++        InterlockedOr((LONG *)&head->state, waiter_state);
+         TRACE("waking %p\n", head);
+         RtlWakeAddressSingle(&head->state);
+         head = next;
+@@ -733,7 +748,7 @@ static BOOLEAN srwlock_wait(RTL_SRWLOCK *lock, DWORD waiter_state,
+             tag &= ~SRWLOCK_TAG_LIST_LOCKED;
+ 
+         new = srwlock_from_waiter(&waiter, tag);
+-        TRACE("new = %p, tag = %x\n", new.Ptr, tag);
++        TRACE("new = %p, tag = %#x\n", new.Ptr, tag);
+     } while( InterlockedCompareExchangePointer((void **)&lock->Ptr, new.Ptr, old.Ptr) != old.Ptr );
+ 
+     if (!(tag & (SRWLOCK_TAG_LOCKED | SRWLOCK_TAG_HAS_MULTIPLE_OWNERS)))
+@@ -750,8 +765,8 @@ static BOOLEAN srwlock_wait(RTL_SRWLOCK *lock, DWORD waiter_state,
+         RtlWaitOnAddress(&waiter.state, &waiter_state, sizeof(DWORD), NULL);
+     };
+ 
+-    TRACE("acquired: %p\n", lock);
+-    return TRUE;
++    TRACE("woken: %p %#lx\n", lock, waiter_state);
++    return (waiter_state & SRWLOCK_WAITER_STATE_LOCKED) != 0;
  }
  
-+static FORCEINLINE void* ReadPointerAcquire( void* const volatile *src )
-+{
-+    void *value;
-+#ifdef _WIN64
-+    value = (void *)__WINE_LOAD64_NO_FENCE( (INT64 const volatile *)src );
-+#else
-+    value = (void *)__WINE_LOAD32_NO_FENCE( (INT32 const volatile *)src );
-+#endif
-+    __wine_memory_barrier_acq_rel();
-+    return value;
-+}
-+
- static FORCEINLINE LONG ReadNoFence( LONG const volatile *src )
- {
-     LONG value = __WINE_LOAD32_NO_FENCE( (int const volatile *)src );
-@@ -6956,6 +6976,16 @@ static FORCEINLINE void WriteRelease( LONG volatile *dest, LONG value )
-     __WINE_STORE32_NO_FENCE( (int volatile *)dest, value );
+ static BOOLEAN srwlock_try_acquire_exclusive(RTL_SRWLOCK *lock, RTL_SRWLOCK *old)
+-- 
+GitLab
+
+
+From 7ad04b02d662f2a64623b63a50897ff8a1c9661a Mon Sep 17 00:00:00 2001
+From: Yuxuan Shui <yshui@codeweavers.com>
+Date: Fri, 1 Sep 2023 00:07:15 +0100
+Subject: [PATCH 4/4] ntdll: wake up SRWLOCK waiters by thread id
+
+---
+ dlls/ntdll/sync.c | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/ntdll/sync.c b/dlls/ntdll/sync.c
+index f6d38d29efd..cfd8e310737 100644
+--- a/dlls/ntdll/sync.c
++++ b/dlls/ntdll/sync.c
+@@ -673,9 +673,10 @@ retry:
+         /* waking up the waiter will invalidate the waiter's entry in
+          * the list. */
+         struct srwlock_waiter *next = head->next;
++        ULONG_PTR thread_id = head->thread_id;
+         InterlockedOr((LONG *)&head->state, waiter_state);
+         TRACE("waking %p\n", head);
+-        RtlWakeAddressSingle(&head->state);
++        NtAlertThreadByThreadId((HANDLE)thread_id);
+         head = next;
+     }
  }
+@@ -705,6 +706,7 @@ static BOOLEAN srwlock_wait(RTL_SRWLOCK *lock, DWORD waiter_state,
+         return FALSE;
+     }
  
-+static FORCEINLINE void WritePointerRelease( void* volatile *dest, void* value )
-+{
-+    __wine_memory_barrier_acq_rel();
-+#ifdef _WIN64
-+    __WINE_STORE64_NO_FENCE( (INT64 volatile *)dest, (INT64)value );
-+#else
-+    __WINE_STORE32_NO_FENCE( (INT32 volatile *)dest, (INT32)value );
-+#endif
-+}
-+
- static FORCEINLINE void WriteNoFence( LONG volatile *dest, LONG value )
- {
-     __WINE_STORE32_NO_FENCE( (int volatile *)dest, value );
-@@ -7124,6 +7154,13 @@ static FORCEINLINE LONG ReadAcquire( LONG const volatile *src )
-     return value;
- }
++    waiter.thread_id = GetCurrentThreadId();
+     waiter.state = waiter_state;
+     if (tag & SRWLOCK_TAG_HAS_WAITERS)
+     {
+@@ -762,7 +764,7 @@ static BOOLEAN srwlock_wait(RTL_SRWLOCK *lock, DWORD waiter_state,
+         waiter_state = ReadAcquire((LONG *)&waiter.state);
+         if (waiter_state & SRWLOCK_WAITER_STATE_NOTIFIED)
+             break;
+-        RtlWaitOnAddress(&waiter.state, &waiter_state, sizeof(DWORD), NULL);
++        NtWaitForAlertByThreadId(NULL, NULL);
+     };
  
-+static FORCEINLINE void *ReadPointerAcquire( void *const volatile *src )
-+{
-+    void *value;
-+    __WINE_ATOMIC_LOAD_ACQUIRE( src, &value );
-+    return value;
-+}
-+
- static FORCEINLINE LONG ReadNoFence( LONG const volatile *src )
- {
-     LONG value;
-@@ -7141,6 +7178,11 @@ static FORCEINLINE void WriteNoFence( LONG volatile *dest, LONG value )
-     __WINE_ATOMIC_STORE_RELAXED( dest, &value );
- }
- 
-+static FORCEINLINE void WritePointerRelease( void *volatile *src, void *value )
-+{
-+    __WINE_ATOMIC_STORE_RELEASE( src, &value );
-+}
-+
- static FORCEINLINE DECLSPEC_NORETURN void __fastfail(unsigned int code)
- {
- #if defined(__x86_64__) || defined(__i386__)
+     TRACE("woken: %p %#lx\n", lock, waiter_state);
+-- 
+GitLab
+
