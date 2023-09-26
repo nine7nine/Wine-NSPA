@@ -1,0 +1,73 @@
+From c8ed4731c90d0d38e1637bebcc2ec6ea00c2565a Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Thu, 21 Sep 2023 16:23:33 -0600
+Subject: [PATCH] ntdll: Remove entries from queue in RtlWakeAddressAll().
+
+CW-Bug-Id: #22770
+---
+ dlls/ntdll/sync.c | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/ntdll/sync.c b/dlls/ntdll/sync.c
+index 4f5ee820286..11cea3c27ae 100644
+--- a/dlls/ntdll/sync.c
++++ b/dlls/ntdll/sync.c
+@@ -954,8 +954,8 @@ NTSTATUS WINAPI RtlWaitOnAddress( const void *addr, const void *cmp, SIZE_T size
+ void WINAPI RtlWakeAddressAll( const void *addr )
+ {
+     struct futex_queue *queue = get_futex_queue( addr );
++    struct futex_entry *entry, *next;
+     unsigned int count = 0, i;
+-    struct futex_entry *entry;
+     DWORD tids[256];
+ 
+     TRACE("%p\n", addr);
+@@ -967,10 +967,12 @@ void WINAPI RtlWakeAddressAll( const void *addr )
+     if (!queue->queue.next)
+         list_init(&queue->queue);
+ 
+-    LIST_FOR_EACH_ENTRY( entry, &queue->queue, struct futex_entry, entry )
++    LIST_FOR_EACH_ENTRY_SAFE( entry, next, &queue->queue, struct futex_entry, entry )
+     {
+         if (entry->addr == addr)
+         {
++            entry->addr = NULL;
++            list_remove( &entry->entry );
+             /* Try to buffer wakes, so that we don't make a system call while
+              * holding a spinlock. */
+             if (count < ARRAY_SIZE(tids))
+ 
+From f74188ebd336b543108402cdadfb4c2bfc44e8cd Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Thu, 21 Sep 2023 16:29:14 -0600
+Subject: [PATCH] ntdll: Pre-check entry->addr before taking a spin lock in
+ RtlWaitOnAddress().
+
+CW-Bug-Id: #22770
+---
+ dlls/ntdll/sync.c | 11 +++++++----
+ 1 file changed, 7 insertions(+), 4 deletions(-)
+
+diff --git a/dlls/ntdll/sync.c b/dlls/ntdll/sync.c
+index 11cea3c27ae..650226b89f4 100644
+--- a/dlls/ntdll/sync.c
++++ b/dlls/ntdll/sync.c
+@@ -936,11 +936,14 @@ NTSTATUS WINAPI RtlWaitOnAddress( const void *addr, const void *cmp, SIZE_T size
+ 
+     ret = NtWaitForAlertByThreadId( NULL, timeout );
+ 
+-    spin_lock( &queue->lock );
+-    /* We may have already been removed by a call to RtlWakeAddressSingle(). */
++    /* We may have already been removed by a call to RtlWakeAddressSingle() or RtlWakeAddressAll(). */
+     if (entry.addr)
+-        list_remove( &entry.entry );
+-    spin_unlock( &queue->lock );
++    {
++        spin_lock( &queue->lock );
++        if (entry.addr)
++            list_remove( &entry.entry );
++        spin_unlock( &queue->lock );
++    }
+ 
+     TRACE("returning %#lx\n", ret);
+ 
