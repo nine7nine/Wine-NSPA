@@ -1,0 +1,348 @@
+From: Jinoh Kang <jinoh.kang.kr@gmail.com>
+Subject: [PATCH v4 resend 2/2] server: Allow creating named pipes using \Device\NamedPipe\ as RootDirectory.
+Message-Id: <1a5fdfd1-14f3-0342-219b-47da6e5b14b2@gmail.com>
+Date: Fri, 25 Mar 2022 00:49:25 +0900
+In-Reply-To: <e4b7924b-6074-c95f-58f2-a31f7f938172@gmail.com>
+References: <e4b7924b-6074-c95f-58f2-a31f7f938172@gmail.com>
+
+Separate the named pipe root directory from the named pipe device file.
+Open the root directory instead of the device file if the path ends
+with backslash.
+
+Wine-Bug: https://bugs.winehq.org/show_bug.cgi?id=52105
+Signed-off-by: Jinoh Kang <jinoh.kang.kr@gmail.com>
+---
+
+Notes:
+    v3 -> v4:
+    - don't memcpy backslash
+    - formatting changes
+
+ dlls/ntdll/tests/om.c   |   2 +-
+ dlls/ntdll/tests/pipe.c |   6 +-
+ server/named_pipe.c     | 228 +++++++++++++++++++++++++++++++++-------
+ 3 files changed, 192 insertions(+), 44 deletions(-)
+
+diff --git a/dlls/ntdll/tests/om.c b/dlls/ntdll/tests/om.c
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/tests/om.c
++++ b/dlls/ntdll/tests/om.c
+@@ -1944,7 +1944,7 @@ static void test_query_object(void)
+     handle = CreateFileA( "\\\\.\\pipe\\", 0, 0, NULL, OPEN_EXISTING, 0, 0 );
+     ok( handle != INVALID_HANDLE_VALUE, "CreateFile failed (%lu)\n", GetLastError() );
+ 
+-    test_object_name( handle, L"\\Device\\NamedPipe\\", TRUE );
++    test_object_name( handle, L"\\Device\\NamedPipe\\", FALSE );
+     test_object_type( handle, L"File" );
+     test_file_info( handle );
+ 
+diff --git a/dlls/ntdll/tests/pipe.c b/dlls/ntdll/tests/pipe.c
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/tests/pipe.c
++++ b/dlls/ntdll/tests/pipe.c
+@@ -2766,7 +2766,7 @@ static void test_empty_name(void)
+ 
+     pRtlInitUnicodeString(&name, L"nonexistent_pipe");
+     status = wait_pipe(hdirectory, &name, &zero_timeout);
+-    todo_wine ok(status == STATUS_ILLEGAL_FUNCTION, "unexpected status for FSCTL_PIPE_WAIT on \\Device\\NamedPipe: %#lx\n", status);
++    ok(status == STATUS_ILLEGAL_FUNCTION, "unexpected status for FSCTL_PIPE_WAIT on \\Device\\NamedPipe: %#lx\n", status);
+ 
+     subtest_empty_name_pipe_operations(hdirectory);
+ 
+@@ -2911,11 +2911,11 @@ static void test_empty_name(void)
+     timeout.QuadPart = -(LONG64)10000000;
+     status = pNtCreateNamedPipeFile(&hpipe, GENERIC_READ|GENERIC_WRITE, &attr, &io, FILE_SHARE_READ|FILE_SHARE_WRITE,
+                                     FILE_CREATE, FILE_PIPE_FULL_DUPLEX, 0, 0, 0, 1, 256, 256, &timeout);
+-    todo_wine ok(!status, "unexpected failure from NtCreateNamedPipeFile: %#lx\n", status);
++    ok(!status, "unexpected failure from NtCreateNamedPipeFile: %#lx\n", status);
+ 
+     handle = CreateFileA("\\\\.\\pipe\\test3\\pipe", GENERIC_READ, FILE_SHARE_READ|FILE_SHARE_WRITE, NULL,
+                          OPEN_EXISTING, 0, 0 );
+-    todo_wine ok(handle != INVALID_HANDLE_VALUE, "Failed to open NamedPipe (%lu)\n", GetLastError());
++    ok(handle != INVALID_HANDLE_VALUE, "Failed to open NamedPipe (%lu)\n", GetLastError());
+ 
+     CloseHandle(handle);
+     CloseHandle(hpipe);
+diff --git a/server/named_pipe.c b/server/named_pipe.c
+index 11111111111..11111111111 100644
+--- a/server/named_pipe.c
++++ b/server/named_pipe.c
+@@ -103,6 +103,14 @@ struct named_pipe_device_file
+     struct named_pipe_device *device;      /* named pipe device */
+ };
+ 
++/* mostly identical to named_pipe_device_file (declared separately for type checking) */
++struct named_pipe_dir
++{
++    struct object             obj;         /* object header */
++    struct fd                *fd;          /* pseudo-fd for ioctls */
++    struct named_pipe_device *device;      /* named pipe device */
++};
++
+ static void named_pipe_dump( struct object *obj, int verbose );
+ static unsigned int named_pipe_map_access( struct object *obj, unsigned int access );
+ static WCHAR *named_pipe_get_full_name( struct object *obj, data_size_t *ret_len );
+@@ -336,6 +344,60 @@ static const struct fd_ops named_pipe_device_fd_ops =
+     default_fd_reselect_async                /* reselect_async */
+ };
+ 
++static void named_pipe_dir_dump( struct object *obj, int verbose );
++static struct fd *named_pipe_dir_get_fd( struct object *obj );
++static enum server_fd_type named_pipe_dir_get_fd_type( struct fd *fd );
++static void named_pipe_dir_ioctl( struct fd *fd, ioctl_code_t code, struct async *async );
++static WCHAR *named_pipe_dir_get_full_name( struct object *obj, data_size_t *ret_len );
++static struct object *named_pipe_dir_lookup_name( struct object *obj, struct unicode_str *name,
++                                                  unsigned int attr, struct object *root );
++static struct object *named_pipe_dir_open_file( struct object *obj, unsigned int access,
++                                                unsigned int sharing, unsigned int options );
++static void named_pipe_dir_destroy( struct object *obj );
++
++static const struct object_ops named_pipe_dir_ops =
++{
++    sizeof(struct named_pipe_dir),           /* size */
++    &file_type,                              /* type */
++    named_pipe_dir_dump,                     /* dump */
++    add_queue,                               /* add_queue */
++    remove_queue,                            /* remove_queue */
++    default_fd_signaled,                     /* signaled */
++    NULL,                                    /* get_esync_fd */
++    NULL,                                    /* get_fsync_idx */
++    no_satisfied,                            /* satisfied */
++    no_signal,                               /* signal */
++    named_pipe_dir_get_fd,                   /* get_fd */
++    default_map_access,                      /* map_access */
++    default_get_sd,                          /* get_sd */
++    default_set_sd,                          /* set_sd */
++    named_pipe_dir_get_full_name,            /* get_full_name */
++    named_pipe_dir_lookup_name,              /* lookup_name */
++    no_link_name,                            /* link_name */
++    NULL,                                    /* unlink_name */
++    named_pipe_dir_open_file,                /* open_file */
++    no_kernel_obj_list,                      /* get_kernel_obj_list */
++    default_fd_get_fast_sync,                /* get_fast_sync */
++    no_close_handle,                         /* close_handle */
++    named_pipe_dir_destroy                   /* destroy */
++};
++
++static const struct fd_ops named_pipe_dir_fd_ops =
++{
++    default_fd_get_poll_events,              /* get_poll_events */
++    default_poll_event,                      /* poll_event */
++    named_pipe_dir_get_fd_type,              /* get_fd_type */
++    no_fd_read,                              /* read */
++    no_fd_write,                             /* write */
++    no_fd_flush,                             /* flush */
++    default_fd_get_file_info,                /* get_file_info */
++    no_fd_get_volume_info,                   /* get_volume_info */
++    named_pipe_dir_ioctl,                    /* ioctl */
++    default_fd_cancel_async,                 /* cancel_async */
++    default_fd_queue_async,                  /* queue_async */
++    default_fd_reselect_async                /* reselect_async */
++};
++
+ static void named_pipe_dump( struct object *obj, int verbose )
+ {
+     fputs( "Named pipe\n", stderr );
+@@ -516,6 +578,18 @@ static struct object *named_pipe_device_lookup_name( struct object *obj, struct
+     assert( device->pipes );
+ 
+     if (!name) return NULL;  /* open the device itself */
++    if (!name->len && name->str)
++    {
++        /* open the root directory */
++        struct named_pipe_dir *dir = alloc_object( &named_pipe_dir_ops );
++
++        if (!dir) return NULL;
++
++        dir->fd = NULL;  /* defer alloc_pseudo_fd() until after we have options */
++        dir->device = (struct named_pipe_device *)grab_object( obj );
++
++        return &dir->obj;
++    }
+ 
+     if ((found = find_object( device->pipes, name, attr | OBJ_CASE_INSENSITIVE )))
+         name->len = 0;
+@@ -596,6 +670,117 @@ static void named_pipe_device_file_destroy( struct object *obj )
+     release_object( file->device );
+ }
+ 
++static void named_pipe_dir_dump( struct object *obj, int verbose )
++{
++    struct named_pipe_dir *dir = (struct named_pipe_dir *)obj;
++
++    fprintf( stderr, "Root directory of named pipe device %p\n", dir->device );
++}
++
++static struct fd *named_pipe_dir_get_fd( struct object *obj )
++{
++    struct named_pipe_dir *dir = (struct named_pipe_dir *)obj;
++    return (struct fd *)grab_object( dir->fd );
++}
++
++static enum server_fd_type named_pipe_dir_get_fd_type( struct fd *fd )
++{
++    /* TODO actually implement NtQueryDirectoryFile */
++    return FD_TYPE_DIR;
++}
++
++static void named_pipe_dir_ioctl( struct fd *fd, ioctl_code_t code, struct async *async )
++{
++    struct named_pipe_dir *dir = get_fd_user( fd );
++
++    switch(code)
++    {
++    case FSCTL_PIPE_WAIT:
++        {
++            const FILE_PIPE_WAIT_FOR_BUFFER *buffer = get_req_data();
++            data_size_t size = get_req_data_size();
++            struct named_pipe *pipe;
++            struct unicode_str name;
++            timeout_t when;
++
++            if (size < sizeof(*buffer) ||
++                size < FIELD_OFFSET(FILE_PIPE_WAIT_FOR_BUFFER, Name[buffer->NameLength/sizeof(WCHAR)]))
++            {
++                set_error( STATUS_INVALID_PARAMETER );
++                return;
++            }
++            name.str = buffer->Name;
++            name.len = (buffer->NameLength / sizeof(WCHAR)) * sizeof(WCHAR);
++            if (!(pipe = open_named_object( &dir->obj, &named_pipe_ops, &name, 0 ))) return;
++
++            if (list_empty( &pipe->listeners ))
++            {
++                queue_async( &pipe->waiters, async );
++                when = buffer->TimeoutSpecified ? buffer->Timeout.QuadPart : pipe->timeout;
++                async_set_timeout( async, when, STATUS_IO_TIMEOUT );
++                set_error( STATUS_PENDING );
++            }
++
++            release_object( pipe );
++            return;
++        }
++
++    default:
++        default_fd_ioctl( fd, code, async );
++    }
++}
++
++static WCHAR *named_pipe_dir_get_full_name( struct object *obj, data_size_t *ret_len )
++{
++    struct named_pipe_dir *dir = (struct named_pipe_dir *)obj;
++    data_size_t len;
++    char *device_name, *ret;
++
++    device_name = (char *)dir->device->obj.ops->get_full_name( &dir->device->obj, &len );
++    if (!device_name) return NULL;
++
++    len += sizeof(WCHAR);
++    ret = realloc(device_name, len);
++    if (!ret)
++    {
++        free(device_name);
++        return NULL;
++    }
++    *(WCHAR *)(ret + len - sizeof(WCHAR)) = '\\';
++
++    *ret_len = len;
++    return (WCHAR *)ret;
++}
++
++static struct object *named_pipe_dir_lookup_name( struct object *obj, struct unicode_str *name,
++                                                  unsigned int attr, struct object *root )
++{
++    struct named_pipe_dir *dir = (struct named_pipe_dir *)obj;
++    if (!name || !name->len) return NULL;  /* open the directory itself */
++    return dir->device->obj.ops->lookup_name( &dir->device->obj, name, attr, root );
++}
++
++static struct object *named_pipe_dir_open_file( struct object *obj, unsigned int access,
++                                                unsigned int sharing, unsigned int options )
++{
++    struct named_pipe_dir *dir = (struct named_pipe_dir *)obj;
++    if (!dir->fd)
++    {
++        if (!(dir->fd = alloc_pseudo_fd( &named_pipe_dir_fd_ops, obj, options )))
++            return NULL;
++        allow_fd_caching( dir->fd );
++    }
++    return grab_object( obj );
++}
++
++static void named_pipe_dir_destroy( struct object *obj )
++{
++    struct named_pipe_dir *file = (struct named_pipe_dir*)obj;
++    assert( obj->ops == &named_pipe_dir_ops );
++    if (file->fd) release_object( file->fd );
++    if (file->device) release_object( file->device );
++}
++
+ static void pipe_end_flush( struct fd *fd, struct async *async )
+ {
+     struct pipe_end *pipe_end = get_fd_user( fd );
+@@ -1336,14 +1521,13 @@ static struct pipe_end *create_pipe_client( struct named_pipe *pipe, data_size_t
+ 
+ static int named_pipe_link_name( struct object *obj, struct object_name *name, struct object *parent )
+ {
+-    struct named_pipe_device *dev = (struct named_pipe_device *)parent;
+-
++    if (parent->ops == &named_pipe_dir_ops) parent = &((struct named_pipe_dir *)parent)->device->obj;
+     if (parent->ops != &named_pipe_device_ops)
+     {
+         set_error( STATUS_OBJECT_NAME_INVALID );
+         return 0;
+     }
+-    namespace_add( dev->pipes, name );
++    namespace_add( ((struct named_pipe_device *)parent)->pipes, name );
+     name->parent = grab_object( parent );
+     return 1;
+ }
+@@ -1386,43 +1570,7 @@ static struct object *named_pipe_open_file( struct object *obj, unsigned int acc
+ 
+ static void named_pipe_device_ioctl( struct fd *fd, ioctl_code_t code, struct async *async )
+ {
+-    struct named_pipe_device *device = get_fd_user( fd );
+-
+-    switch(code)
+-    {
+-    case FSCTL_PIPE_WAIT:
+-        {
+-            const FILE_PIPE_WAIT_FOR_BUFFER *buffer = get_req_data();
+-            data_size_t size = get_req_data_size();
+-            struct named_pipe *pipe;
+-            struct unicode_str name;
+-            timeout_t when;
+-
+-            if (size < sizeof(*buffer) ||
+-                size < FIELD_OFFSET(FILE_PIPE_WAIT_FOR_BUFFER, Name[buffer->NameLength/sizeof(WCHAR)]))
+-            {
+-                set_error( STATUS_INVALID_PARAMETER );
+-                return;
+-            }
+-            name.str = buffer->Name;
+-            name.len = (buffer->NameLength / sizeof(WCHAR)) * sizeof(WCHAR);
+-            if (!(pipe = open_named_object( &device->obj, &named_pipe_ops, &name, 0 ))) return;
+-
+-            if (list_empty( &pipe->listeners ))
+-            {
+-                queue_async( &pipe->waiters, async );
+-                when = buffer->TimeoutSpecified ? buffer->Timeout.QuadPart : pipe->timeout;
+-                async_set_timeout( async, when, STATUS_IO_TIMEOUT );
+-                set_error( STATUS_PENDING );
+-            }
+-
+-            release_object( pipe );
+-            return;
+-        }
+-
+-    default:
+-        default_fd_ioctl( fd, code, async );
+-    }
++    set_error( STATUS_ILLEGAL_FUNCTION );
+ }
+ 
+ 
+
+-- 
+0.0.0
+
