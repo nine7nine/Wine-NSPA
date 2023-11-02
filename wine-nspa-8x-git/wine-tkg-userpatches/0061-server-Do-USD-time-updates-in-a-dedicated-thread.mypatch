@@ -1,0 +1,111 @@
+From 1381a3d00759a796639f6956ff09d88b5a38b6f3 Mon Sep 17 00:00:00 2001
+From: Torge Matthies <openglfreak@googlemail.com>
+Date: Thu, 25 May 2023 23:57:06 +0200
+Subject: [PATCH] server: Do USD time updates in a dedicated thread.
+
+---
+ server/fd.c | 49 +++++++++++++++++++++++++++++++++++++++++++------
+ 1 file changed, 43 insertions(+), 6 deletions(-)
+
+diff --git a/server/fd.c b/server/fd.c
+index 11111111111..11111111111 100644
+--- a/server/fd.c
++++ b/server/fd.c
+@@ -409,7 +409,7 @@ static void atomic_store_long(volatile LONG *ptr, LONG value)
+ #endif
+ }
+ 
+-static void set_user_shared_data_time(void)
++static void set_user_shared_data_time(timeout_t current_time, timeout_t monotonic_time)
+ {
+     timeout_t tick_count = monotonic_time / 10000;
+     static timeout_t last_timezone_update;
+@@ -481,14 +481,18 @@ pthread_mutex_t global_lock = PTHREAD_MUTEX_INITIALIZER;
+ int poll_exit_pipe[2];
+ struct fd *poll_exit_fd;
+ 
+-void set_current_time(void)
++static void get_current_time(timeout_t *current_time, timeout_t *monotonic_time)
+ {
+     static const timeout_t ticks_1601_to_1970 = (timeout_t)86400 * (369 * 365 + 89) * TICKS_PER_SEC;
+     struct timeval now;
+     gettimeofday( &now, NULL );
+-    current_time = (timeout_t)now.tv_sec * TICKS_PER_SEC + now.tv_usec * 10 + ticks_1601_to_1970;
+-    monotonic_time = monotonic_counter();
+-    if (user_shared_data) set_user_shared_data_time();
++    *current_time = (timeout_t)now.tv_sec * TICKS_PER_SEC + now.tv_usec * 10 + ticks_1601_to_1970;
++    *monotonic_time = monotonic_counter();
++}
++
++void set_current_time(void)
++{
++    get_current_time(&current_time, &monotonic_time);
+ }
+ 
+ /* add a timeout user */
+@@ -579,6 +583,7 @@ static struct fd **freelist;                /* list of free entries in the array
+ unsigned long poll_generation;              /* current poll array generation */
+ 
+ static int get_next_timeout(void);
++static void *update_user_shared_data_time_thread(void *param);
+ 
+ static inline void fd_poll_event( struct fd *fd, int event )
+ {
+@@ -990,7 +995,7 @@ static void remove_poll_user( struct fd *fd, int user )
+ /* process pending timeouts and return the time until the next timeout, in milliseconds */
+ static int get_next_timeout(void)
+ {
+-    int ret = user_shared_data ? user_shared_data_timeout : -1;
++    int ret = -1;
+ 
+     if (!list_empty( &abs_timeout_list ) || !list_empty( &rel_timeout_list ))
+     {
+@@ -1053,6 +1058,36 @@ static int get_next_timeout(void)
+     return ret;
+ }
+ 
++static void *update_user_shared_data_time_thread(void *param)
++{
++    timeout_t current_time, monotonic_time, next_wake_time;
++    get_current_time(&current_time, &monotonic_time);
++    set_user_shared_data_time(current_time, monotonic_time);
++    next_wake_time = monotonic_time;
++    while (active_users)
++    {
++        next_wake_time += user_shared_data_timeout * TICKS_PER_SEC / 1000;
++        if (next_wake_time > monotonic_time)
++            usleep((next_wake_time - monotonic_time) / 10);
++        get_current_time(&current_time, &monotonic_time);
++        set_user_shared_data_time(current_time, monotonic_time);
++    }
++    return NULL;
++}
++
++static void start_user_shared_data_time_thread(void)
++{
++    pthread_t pthread;
++    int policy;
++    struct sched_param param;
++    if (pthread_create( &pthread, NULL, update_user_shared_data_time_thread, NULL ))
++        fatal_error( "failed to create time update thread\n" );
++    if (!pthread_getschedparam( pthread_self(), &policy, &param ) && (policy || param.sched_priority))
++        if (pthread_setschedparam( pthread, policy | SCHED_RESET_ON_FORK, &param ))
++            pthread_setschedparam( pthread, policy, &param );
++    pthread_detach( pthread );
++}
++
+ static void poll_exit_poll_event( struct fd *fd, int event )
+ {
+     char dummy;
+@@ -1089,6 +1124,8 @@ void main_loop(void)
+     set_current_time();
+     server_start_time = current_time;
+ 
++    start_user_shared_data_time_thread();
++
+     main_loop_epoll();
+     /* fall through to normal poll loop */
+ 
+-- 
+0.0.0
+
