@@ -1,0 +1,184 @@
+
+From 40145ff85b39d69a0a53a8534e2431d75b51a765 Mon Sep 17 00:00:00 2001
+From: Torge Matthies <openglfreak@googlemail.com>
+Date: Sat, 24 Jun 2023 16:34:51 +0200
+Subject: [PATCH 8/8] HACK: ntdll: Track spin timeout counts and stop spinning
+ after a certain number of timeouts.
+
+---
+ dlls/ntdll/unix/server.c | 27 +++++++++++++++++++++++++--
+ server/thread.c          |  2 +-
+ 2 files changed, 26 insertions(+), 3 deletions(-)
+
+diff --git a/dlls/ntdll/unix/server.c b/dlls/ntdll/unix/server.c
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/unix/server.c
++++ b/dlls/ntdll/unix/server.c
+@@ -231,6 +231,9 @@ static unsigned int send_request_shm( const struct __server_request_info *req )
+ 
+ static void read_reply_data( void *buffer, size_t size );
+ 
++unsigned int request_spin_timeout_count[REQ_NB_REQUESTS];
++unsigned int request_spin_success_count[REQ_NB_REQUESTS];
++
+ /***********************************************************************
+  *           wait_reply_shm
+  *
+@@ -241,16 +244,36 @@ static inline unsigned int wait_reply_shm( struct __server_request_info *req )
+     volatile struct request_shm *request_shm = ntdll_get_thread_data()->request_shm;
+     char *data_ptr = (char*)(request_shm + 1) + req->u.req.request_header.request_size;
+     unsigned int copy_limit = (char*)request_shm + REQUEST_SHM_SIZE - data_ptr;
++    enum request req_nr = req->u.req.request_header.req;
++    unsigned int spincount = 8000;
+     int val;
+ 
+-    while ((val = request_shm->futex) != 0)
++    if ((request_spin_timeout_count[req_nr] * 64) > request_spin_success_count[req_nr] + 2048)
++        goto no_spin;
++
++    while (spincount > 0 && (val = request_shm->futex) != 0)
+     {
+         if (val == -1)
+             abort_thread(0);
+-        //syscall( __NR_futex, &request_shm->futex, FUTEX_WAIT, val, NULL, NULL, 0 );
++        spincount--;
+         YieldProcessor();
+     }
+ 
++    if (spincount)
++        InterlockedIncrement( &request_spin_success_count[req_nr] );
++    else
++    {
++        InterlockedIncrement( &request_spin_timeout_count[req_nr] );
++
++    no_spin:;
++        while ((val = request_shm->futex) != 0)
++        {
++            if (val == -1)
++                abort_thread(0);
++            syscall( __NR_futex, &request_shm->futex, FUTEX_WAIT, val, NULL, NULL, 0 );
++        }
++    }
++
+     memcpy( &req->u.reply, (void*)&request_shm->u.reply, sizeof(req->u.reply) );
+     if (req->u.reply.reply_header.reply_size)
+     {
+
+From dfd4f6e375524b320e7bbb892b42bc22ab5fac0a Mon Sep 17 00:00:00 2001
+From: Torge Matthies <openglfreak@googlemail.com>
+Date: Thu, 3 Aug 2023 22:10:18 +0200
+Subject: [PATCH 9/9] HACK: ntdll: Use mwaitx if available.
+
+---
+ dlls/ntdll/unix/server.c | 88 ++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 88 insertions(+)
+
+diff --git a/dlls/ntdll/unix/server.c b/dlls/ntdll/unix/server.c
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/unix/server.c
++++ b/dlls/ntdll/unix/server.c
+@@ -229,6 +229,84 @@ static unsigned int send_request_shm( const struct __server_request_info *req )
+ }
+ 
+ 
++#if defined(__x86_64__) || defined(__i386__)
++
++#if __GNUC__ > 8 || (__GNUC__ == 8 && __GNUC_MINOR__ >= 3)
++#define __asm_inline__ __inline__
++#else
++#define __asm_inline__
++#endif
++
++static inline int mwaitx_supported(void)
++{
++    static int supported;
++    if (!supported)
++    {
++        unsigned int eax, ecx;
++        __asm__ __volatile__ (
++            "cpuid"
++            : "=a" (eax), "=c" (ecx)
++            : "a" (0x80000001U)
++            : "ebx", "edx"
++        );
++        if (ecx & (1U << 29))
++            supported = 3;
++        else
++            supported = 2;
++    }
++    return supported & 1;
++}
++
++#define DEFINE_MWAITX(name, type) \
++    void name(type *addr, type value, unsigned int timeout) \
++    { \
++        if (*addr != value) \
++            return; \
++        __asm__ __asm_inline__ __volatile__ ( \
++            ".byte 0x0f,0x01,0xfa" /* monitorx */ \
++            : "+m" (*(volatile type*)addr) \
++            : "a" (addr), "c" (0x0U), "d" (0x0U) \
++        ); \
++        if (__builtin_expect(*addr != value, 0)) \
++            return; \
++        if (__builtin_constant_p(timeout) && timeout == 0) \
++        { \
++            __asm__ __volatile__ ( \
++                ".byte 0x0f,0x01,0xfb" /* mwaitx */ \
++                : "+m" (*(volatile type*)addr) \
++                : "a" (0xF0U), "c" (0x0U) \
++            ); \
++        } \
++        else \
++        { \
++            __asm__ __volatile__ ( \
++                ".byte 0x0f,0x01,0xfb" /* mwaitx */ \
++                : "+m" (*(volatile type*)addr) \
++                : "a" (0xF0U), "b" (timeout), "c" (0x2U) \
++            ); \
++        } \
++    }
++
++#else
++
++#define mwaitx_supported() 0
++
++#define DEFINE_MWAITX(name, type) \
++    static inline void name(type *addr, type value, unsigned int timeout) {}
++
++#endif
++
++static inline DEFINE_MWAITX(mwaitxc, unsigned char)
++static inline DEFINE_MWAITX(mwaitxs, unsigned short)
++static inline DEFINE_MWAITX(mwaitx, unsigned int)
++static inline DEFINE_MWAITX(mwaitxl, unsigned long long)
++static inline DEFINE_MWAITX(mwaitxll, unsigned long long)
++#define mwaitx8(a,v) mwaitxc(a,v)
++#define mwaitx16(a,v) mwaitxs(a,v)
++#define mwaitx32(a,v) mwaitx(a,v)
++#define mwaitx64(a,v) mwaitxll(a,v)
++
++
+ static void read_reply_data( void *buffer, size_t size );
+ 
+ unsigned int request_spin_timeout_count[REQ_NB_REQUESTS];
+@@ -251,6 +329,16 @@ static inline unsigned int wait_reply_shm( struct __server_request_info *req )
+     if ((request_spin_timeout_count[req_nr] * 64) > request_spin_success_count[req_nr] + 2048)
+         goto no_spin;
+ 
++    if (mwaitx_supported())
++    {
++        if ((val = request_shm->futex) != 0)
++            mwaitx(&request_shm->futex, val, 10000U);
++        if (request_shm->futex != 0)
++            spincount = 400;
++        else
++            spincount = 1;
++    }
++
+     while (spincount > 0 && (val = request_shm->futex) != 0)
+     {
+         if (val == -1)
+-- 
+0.0.0
+

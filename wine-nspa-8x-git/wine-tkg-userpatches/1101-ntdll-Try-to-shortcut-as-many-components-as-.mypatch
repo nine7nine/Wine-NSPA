@@ -1,0 +1,70 @@
+From c284f1728ee1f00a92c9e88ffb1db20cf5724718 Mon Sep 17 00:00:00 2001
+From: Torge Matthies <tmatthies@codeweavers.com>
+Date: Thu, 21 Sep 2023 02:50:24 +0200
+Subject: [PATCH 1/5] ntdll: Try to shortcut as many components as possible.
+
+---
+ dlls/ntdll/unix/file.c | 47 ++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 47 insertions(+)
+
+diff --git a/dlls/ntdll/unix/file.c b/dlls/ntdll/unix/file.c
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/unix/file.c
++++ b/dlls/ntdll/unix/file.c
+@@ -4336,6 +4336,53 @@ static NTSTATUS lookup_unix_name( FILE_OBJECT *fileobj, const WCHAR *name, int n
+     if (is_unix && (disposition == FILE_OPEN || disposition == FILE_OVERWRITE))
+         return STATUS_OBJECT_NAME_NOT_FOUND;
+ 
++    /* try to shortcut as many components as possible */
++
++    if (ret >= 1 && ret < unix_len - pos - 1)
++    {
++        size_t count_unix = 0, count_nt = 0, components, i;
++        char *pu = unix_name + pos + 1;
++        const WCHAR *pn = name;
++        for (; *pu; pu++) if (*pu == '/') count_unix++;
++        for (; *pn; pn++) if (*pn == '/' || *pn == '\\') count_nt++;
++        components = count_unix < count_nt ? count_unix : count_nt;
++
++        for (; components > 0; components--)
++        {
++            pu = unix_name + pos + 1;
++            for (i = 0; *pu; pu++)
++            {
++                if (*pu == '/')
++                {
++                    i++;
++                    if (i >= components)
++                        break;
++                }
++            }
++            *pu = 0;
++
++            pn = name;
++            for (i = 0; pn < name + name_len; pn++)
++            {
++                if (*pn == '/' || *pn == '\\')
++                {
++                    i++;
++                    if (i >= components)
++                        break;
++                }
++            }
++            if (pn < name + name_len) pn++;
++
++            if (!stat( unix_name, &st ))
++            {
++                pos += strlen( unix_name + pos );
++                name_len -= pn - name;
++                name = pn;
++                break;
++            }
++        }
++    }
++
+     /* now do it component by component */
+ 
+     while (name_len)
+-- 
+0.0.0
+

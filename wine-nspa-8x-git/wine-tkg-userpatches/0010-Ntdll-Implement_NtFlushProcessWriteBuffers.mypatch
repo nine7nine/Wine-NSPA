@@ -24,7 +24,7 @@ diff --git a/dlls/ntdll/unix/server.c b/dlls/ntdll/unix/server.c
 index 11111111111..11111111111 100644
 --- a/dlls/ntdll/unix/server.c
 +++ b/dlls/ntdll/unix/server.c
-@@ -668,6 +668,12 @@ static void invoke_system_apc( const apc_call_t *call, apc_result_t *result, BOO
+@@ -734,6 +734,12 @@ static void invoke_system_apc( const apc_call_t *call, apc_result_t *result, BOO
          if (!self) NtClose( wine_server_ptr_handle(call->dup_handle.dst_process) );
          break;
      }
@@ -41,9 +41,9 @@ diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
 index 11111111111..11111111111 100644
 --- a/dlls/ntdll/unix/virtual.c
 +++ b/dlls/ntdll/unix/virtual.c
-@@ -5800,8 +5800,31 @@ NTSTATUS WINAPI NtFlushInstructionCache( HANDLE handle, const void *addr, SIZE_T
+@@ -6350,8 +6350,31 @@ NTSTATUS WINAPI NtFlushInstructionCache( HANDLE handle, const void *addr, SIZE_T
   */
- void WINAPI NtFlushProcessWriteBuffers(void)
+ NTSTATUS WINAPI NtFlushProcessWriteBuffers(void)
  {
 -    static int once = 0;
 -    if (!once++) FIXME( "stub\n" );
@@ -72,14 +72,14 @@ index 11111111111..11111111111 100644
 +    while (status);
 +
 +    pthread_mutex_unlock( &apc_memorybarrier_mutex );
+     return STATUS_SUCCESS;
  }
- 
  
 diff --git a/server/protocol.def b/server/protocol.def
 index 11111111111..11111111111 100644
 --- a/server/protocol.def
 +++ b/server/protocol.def
-@@ -462,7 +462,8 @@ enum select_op
+@@ -463,7 +463,8 @@ enum select_op
      SELECT_WAIT_ALL,
      SELECT_SIGNAL_AND_WAIT,
      SELECT_KEYED_EVENT_WAIT,
@@ -89,7 +89,7 @@ index 11111111111..11111111111 100644
  };
  
  typedef union
-@@ -485,6 +486,10 @@ typedef union
+@@ -487,6 +488,10 @@ typedef union
          obj_handle_t    handle;
          client_ptr_t    key;
      } keyed_event;
@@ -100,8 +100,8 @@ index 11111111111..11111111111 100644
  } select_op_t;
  
  enum apc_type
-@@ -503,7 +508,8 @@ enum apc_type
-     APC_MAP_VIEW,
+@@ -506,7 +511,8 @@ enum apc_type
+     APC_MAP_VIEW_EX,
      APC_UNMAP_VIEW,
      APC_CREATE_THREAD,
 -    APC_DUP_HANDLE
@@ -110,7 +110,7 @@ index 11111111111..11111111111 100644
  };
  
  typedef struct
-@@ -623,6 +629,10 @@ typedef union
+@@ -641,6 +647,10 @@ typedef union
          unsigned int     attributes;   /* object attributes */
          unsigned int     options;      /* duplicate options */
      } dup_handle;
@@ -121,7 +121,7 @@ index 11111111111..11111111111 100644
  } apc_call_t;
  
  typedef union
-@@ -1693,6 +1703,11 @@ enum server_fd_type
+@@ -1763,6 +1773,11 @@ enum server_fd_type
  @END
  
  
@@ -137,7 +137,7 @@ diff --git a/server/thread.c b/server/thread.c
 index 11111111111..11111111111 100644
 --- a/server/thread.c
 +++ b/server/thread.c
-@@ -196,6 +196,43 @@ static const struct object_ops thread_apc_ops =
+@@ -196,6 +196,44 @@ static const struct object_ops thread_apc_ops =
      thread_apc_destroy          /* destroy */
  };
  
@@ -178,10 +178,11 @@ index 11111111111..11111111111 100644
 +};
 +
 +struct memory_barrier *memory_barrier_obj;
++
  
  /* thread CPU context */
  
-@@ -286,6 +323,7 @@ static inline void init_thread_structure
+@@ -285,6 +323,7 @@ static inline void init_thread_structure
      thread->desc            = NULL;
      thread->desc_len        = 0;
      thread->exit_poll       = NULL;
@@ -189,7 +190,7 @@ index 11111111111..11111111111 100644
  
      thread->creation_time = current_time;
      thread->exit_time     = 0;
-@@ -463,6 +502,11 @@ struct thread *create_thread( int fd, struct process *process, const struct secu
+@@ -461,6 +500,11 @@ struct thread *create_thread( int fd, struct process *process, const struct secu
      struct thread *thread;
      int request_pipe[2];
  
@@ -201,7 +202,7 @@ index 11111111111..11111111111 100644
      if (fd == -1)
      {
          if (pipe( request_pipe ) == -1)
-@@ -636,12 +680,14 @@ static void cleanup_thread( struct thread *thread )
+@@ -634,12 +678,14 @@ static void cleanup_thread( struct thread *thread )
      thread->desktop = 0;
      thread->desc = NULL;
      thread->desc_len = 0;
@@ -216,7 +217,7 @@ index 11111111111..11111111111 100644
      assert( obj->ops == &thread_ops );
  
      list_remove( &thread->entry );
-@@ -580,6 +626,9 @@ static void destroy_thread( struct objec
+@@ -507,6 +553,9 @@ static void destroy_thread( struct objec
      if (thread->exit_poll) remove_timeout_user( thread->exit_poll );
      if (thread->id) free_ptid( thread->id );
      if (thread->token) release_object( thread->token );
@@ -226,7 +227,7 @@ index 11111111111..11111111111 100644
  
      if (do_esync())
          close( thread->esync_fd );
-@@ -742,6 +791,18 @@ static struct thread_apc *create_apc( struct object *owner, const apc_call_t *ca
+@@ -741,6 +790,18 @@ static struct thread_apc *create_apc( struct object *owner, const apc_call_t *ca
      return apc;
  }
  
@@ -245,7 +246,7 @@ index 11111111111..11111111111 100644
  /* get a thread pointer from a thread id (and increment the refcount) */
  struct thread *get_thread_from_id( thread_id_t id )
  {
-@@ -1444,6 +1505,13 @@ static int select_on( const select_op_t *select_op, data_size_t op_size, client_
+@@ -1443,6 +1504,13 @@ static int select_on( const select_op_t *select_op, data_size_t op_size, client_
          current->wait->key = select_op->keyed_event.key;
          break;
  
@@ -259,7 +260,7 @@ index 11111111111..11111111111 100644
      default:
          set_error( STATUS_INVALID_PARAMETER );
          return 1;
-@@ -1597,6 +1665,16 @@ int thread_queue_apc( struct process *process, struct thread *thread, struct obj
+@@ -1596,6 +1664,16 @@ int thread_queue_apc( struct process *process, struct thread *thread, struct obj
      return ret;
  }
  
@@ -276,7 +277,7 @@ index 11111111111..11111111111 100644
  /* cancel the async procedure call owned by a specific object */
  void thread_cancel_apc( struct thread *thread, struct object *owner, enum apc_type type )
  {
-@@ -1608,6 +1686,8 @@ void thread_cancel_apc( struct thread *thread, struct object *owner, enum apc_ty
+@@ -1607,6 +1685,8 @@ void thread_cancel_apc( struct thread *thread, struct object *owner, enum apc_ty
          if (apc->owner != owner) continue;
          list_remove( &apc->entry );
          apc->executed = 1;
@@ -285,7 +286,7 @@ index 11111111111..11111111111 100644
          wake_up( &apc->obj, 0 );
          release_object( apc );
          if (list_empty( &thread->user_apc ) && thread->fast_alert_event)
-@@ -1650,6 +1730,8 @@ static void clear_apc_queue( struct list *queue )
+@@ -1649,6 +1729,8 @@ static void clear_apc_queue( struct list *queue )
          struct thread_apc *apc = LIST_ENTRY( ptr, struct thread_apc, entry );
          list_remove( &apc->entry );
          apc->executed = 1;
@@ -294,7 +295,7 @@ index 11111111111..11111111111 100644
          wake_up( &apc->obj, 0 );
          release_object( apc );
      }
-@@ -2133,6 +2215,8 @@ DECL_HANDLER(select)
+@@ -2130,6 +2212,8 @@ DECL_HANDLER(select)
              apc->result.create_thread.handle = handle;
              clear_error();  /* ignore errors from the above calls */
          }
@@ -303,7 +304,7 @@ index 11111111111..11111111111 100644
          wake_up( &apc->obj, 0 );
          close_handle( current->process, req->prev_apc );
          release_object( apc );
-@@ -2154,6 +2238,8 @@ DECL_HANDLER(select)
+@@ -2153,6 +2237,8 @@ DECL_HANDLER(select)
          else
          {
              apc->executed = 1;
@@ -312,7 +313,7 @@ index 11111111111..11111111111 100644
              wake_up( &apc->obj, 0 );
          }
          release_object( apc );
-@@ -2503,3 +2589,36 @@ DECL_HANDLER(get_fast_alert_event)
+@@ -2513,3 +2599,36 @@ DECL_HANDLER(get_fast_alert_event)
      if (current->fast_alert_event)
          reply->handle = alloc_handle( current->process, current->fast_alert_event, SYNCHRONIZE, 0 );
  }
@@ -362,6 +363,7 @@ index 11111111111..11111111111 100644
  
  extern struct thread *current;
 
+
 From 1c2c89b95206e6fec4d85bae849467fecf72a386 Mon Sep 17 00:00:00 2001
 From: Torge Matthies <tmatthies@codeweavers.com>
 Date: Wed, 7 Sep 2022 16:10:53 +0200
@@ -376,9 +378,9 @@ diff --git a/dlls/ntdll/unix/server.c b/dlls/ntdll/unix/server.c
 index 11111111111..11111111111 100644
 --- a/dlls/ntdll/unix/server.c
 +++ b/dlls/ntdll/unix/server.c
-@@ -696,6 +696,9 @@ unsigned int server_select( const select_op_t *select_op, data_size_t size, UINT
-     sigset_t old_set;
-     int signaled;
+@@ -767,6 +767,9 @@ unsigned int server_select( const select_op_t *select_op, data_size_t size, UINT
+         context_t  context[2];
+     } reply_data;
  
 +    /* ensure writes so far are visible to other threads */
 +    MemoryBarrier();
@@ -390,7 +392,7 @@ diff --git a/server/thread.c b/server/thread.c
 index 11111111111..11111111111 100644
 --- a/server/thread.c
 +++ b/server/thread.c
-@@ -2606,7 +2606,7 @@ DECL_HANDLER(flush_process_write_buffers)
+@@ -2616,7 +2616,7 @@ DECL_HANDLER(flush_process_write_buffers)
          struct thread_apc *apc;
          int success;
  
@@ -418,7 +420,7 @@ diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
 index 11111111111..11111111111 100644
 --- a/dlls/ntdll/unix/virtual.c
 +++ b/dlls/ntdll/unix/virtual.c
-@@ -228,6 +228,11 @@ struct range_entry
+@@ -230,6 +230,11 @@ struct range_entry
  static struct range_entry *free_ranges;
  static struct range_entry *free_ranges_end;
  
@@ -430,14 +432,14 @@ index 11111111111..11111111111 100644
  
  static inline BOOL is_beyond_limit( const void *addr, size_t size, const void *limit )
  {
-@@ -5795,10 +5800,40 @@ NTSTATUS WINAPI NtFlushInstructionCache( HANDLE handle, const void *addr, SIZE_T
+@@ -6345,10 +6350,40 @@ NTSTATUS WINAPI NtFlushInstructionCache( HANDLE handle, const void *addr, SIZE_T
  }
  
  
 -/**********************************************************************
 - *           NtFlushProcessWriteBuffers  (NTDLL.@)
 - */
--void WINAPI NtFlushProcessWriteBuffers(void)
+-NTSTATUS WINAPI NtFlushProcessWriteBuffers(void)
 +#if defined(__linux__) && (defined(__i386__) || defined(__x86_64__))
 +static int try_madvise( void )
 +{
@@ -471,22 +473,22 @@ index 11111111111..11111111111 100644
 +#endif
 +
 +
-+static void do_apc_memorybarrier( void )
++static NTSTATUS do_apc_memorybarrier( void )
  {
      static pthread_mutex_t apc_memorybarrier_mutex = PTHREAD_MUTEX_INITIALIZER;
      NTSTATUS status;
-@@ -5828,6 +5863,17 @@ void WINAPI NtFlushProcessWriteBuffers(void)
+@@ -6379,6 +6414,17 @@ NTSTATUS WINAPI NtFlushProcessWriteBuffers(void)
  }
  
  
 +/**********************************************************************
 + *           NtFlushProcessWriteBuffers  (NTDLL.@)
 + */
-+void WINAPI NtFlushProcessWriteBuffers(void)
++NTSTATUS WINAPI NtFlushProcessWriteBuffers(void)
 +{
 +    if (try_madvise())
 +        return;
-+    do_apc_memorybarrier();
++    return do_apc_memorybarrier();
 +}
 +
 +
@@ -520,7 +522,7 @@ index 11111111111..11111111111 100644
  #ifdef HAVE_SYS_SYSCTL_H
  # include <sys/sysctl.h>
  #endif
-@@ -228,10 +231,16 @@ struct range_entry
+@@ -230,10 +233,16 @@ struct range_entry
  static struct range_entry *free_ranges;
  static struct range_entry *free_ranges_end;
  
@@ -538,7 +540,7 @@ index 11111111111..11111111111 100644
  
  
  static inline BOOL is_beyond_limit( const void *addr, size_t size, const void *limit )
-@@ -5800,6 +5809,42 @@ NTSTATUS WINAPI NtFlushInstructionCache( HANDLE handle, const void *addr, SIZE_T
+@@ -6350,6 +6359,42 @@ NTSTATUS WINAPI NtFlushInstructionCache( HANDLE handle, const void *addr, SIZE_T
  }
  
  
@@ -581,17 +583,17 @@ index 11111111111..11111111111 100644
  #if defined(__linux__) && (defined(__i386__) || defined(__x86_64__))
  static int try_madvise( void )
  {
-@@ -5868,6 +5913,8 @@ static void do_apc_memorybarrier( void )
+@@ -6419,6 +6464,8 @@ static NTSTATUS do_apc_memorybarrier( void )
   */
- void WINAPI NtFlushProcessWriteBuffers(void)
+ NTSTATUS WINAPI NtFlushProcessWriteBuffers(void)
  {
 +    if (try_exp_membarrier())
 +        return;
      if (try_madvise())
          return;
-     do_apc_memorybarrier();
 
 
+     return do_apc_memorybarrier();
 From 0ae80583212d85416339156e5838d670902eccd9 Mon Sep 17 00:00:00 2001
 From: Torge Matthies <tmatthies@codeweavers.com>
 Date: Wed, 7 Sep 2022 16:10:53 +0200
@@ -616,7 +618,7 @@ index 11111111111..11111111111 100644
  #endif
  
  #include <sys/uio.h>
-@@ -231,6 +234,11 @@ struct range_entry
+@@ -233,6 +236,11 @@ struct range_entry
  static struct range_entry *free_ranges;
  static struct range_entry *free_ranges_end;
  
@@ -628,7 +630,7 @@ index 11111111111..11111111111 100644
  #ifdef __linux__
  #ifdef __NR_membarrier
  static BOOL membarrier_exp_available;
-@@ -5809,6 +5817,54 @@ NTSTATUS WINAPI NtFlushInstructionCache( HANDLE handle, const void *addr, SIZE_T
+@@ -6359,6 +6367,54 @@ NTSTATUS WINAPI NtFlushInstructionCache( HANDLE handle, const void *addr, SIZE_T
  }
  
  
@@ -683,9 +685,9 @@ index 11111111111..11111111111 100644
  #if defined(__linux__) && defined(__NR_membarrier)
  #define MEMBARRIER_CMD_QUERY                        0x00
  #define MEMBARRIER_CMD_PRIVATE_EXPEDITED            0x08
-@@ -5913,6 +5969,8 @@ static void do_apc_memorybarrier( void )
+@@ -6464,6 +6520,8 @@ static NTSTATUS do_apc_memorybarrier( void )
   */
- void WINAPI NtFlushProcessWriteBuffers(void)
+ NTSTATUS WINAPI NtFlushProcessWriteBuffers(void)
  {
 +    if (try_mach_tgrpvs())
 +        return;
@@ -693,5 +695,5 @@ index 11111111111..11111111111 100644
          return;
      if (try_madvise())
 -- 
-2.40.0
+0.0.0
 
