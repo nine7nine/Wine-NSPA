@@ -1,0 +1,91 @@
+From a1c074a5eec1e9a005cdfaec915dd860e84c4ab4 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Fri, 8 Sep 2023 14:24:11 +0200
+Subject: [PATCH] winex11: Always ignore MotionNotify event after SetCursorPos.
+
+Trying to workaround spurious Wayland mouse motion.
+
+CW-Bug-Id: #22650
+---
+ dlls/winex11.drv/mouse.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/winex11.drv/mouse.c b/dlls/winex11.drv/mouse.c
+index 72a5d0173e4..2f208da3645 100644
+--- a/dlls/winex11.drv/mouse.c
++++ b/dlls/winex11.drv/mouse.c
+@@ -1674,7 +1674,7 @@ BOOL X11DRV_MotionNotify( HWND hwnd, XEvent *xev )
+     input.u.mi.time        = x11drv_time_to_ticks( event->time );
+     input.u.mi.dwExtraInfo = 0;
+ 
+-    if (!hwnd && is_old_motion_event( event->serial ))
++    if (is_old_motion_event( event->serial ))
+     {
+         TRACE( "pos %d,%d old serial %lu, ignoring\n", event->x, event->y, event->serial );
+         return FALSE;
+
+From 7940050635c1de9636194b59845e07ee7be49842 Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Thu, 12 Oct 2023 21:38:46 -0600
+Subject: [PATCH] ntdll: HACK: Avoid unitialized Dr7 in RtlRaiseException on
+ x64.
+
+CW-Bug-Id: #22848
+---
+ dlls/ntdll/signal_x86_64.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/dlls/ntdll/signal_x86_64.c b/dlls/ntdll/signal_x86_64.c
+index f41a09f9ca4..3cb6e09736c 100644
+--- a/dlls/ntdll/signal_x86_64.c
++++ b/dlls/ntdll/signal_x86_64.c
+@@ -1553,6 +1553,8 @@ __ASM_GLOBAL_FUNC( RtlRaiseException,
+                    "movq 0x4f8(%rsp),%rax\n\t"  /* return address */
+                    "movq %rax,0xf8(%rdx)\n\t"   /* context->Rip */
+                    "movq %rax,0x10(%rcx)\n\t"   /* rec->ExceptionAddress */
++                   "xor %rax,%rax\n\t"
++                   "movq %rax,0x70(%rdx)\n\t"   /* Context->Dr7 */
+                    "movl $1,%r8d\n\t"
+                    "movq %gs:(0x30),%rax\n\t"   /* Teb */
+                    "movq 0x60(%rax),%rax\n\t"   /* Peb */
+
+From 7bc7829db283134946d1c7ae0468ddc1bbf993a0 Mon Sep 17 00:00:00 2001
+From: deltaconnected <deltaconnected@gmail.com>
+Date: Thu, 26 Aug 2021 03:06:23 +0200
+Subject: [PATCH] ntdll: Use a critical section for setting the newly created timer in RtlCreateTimer
+
+In RtlCreateTimer, NewTimer is being set after RtlLeaveCriticalSection, which
+seems to allow callbacks created with DueTime == 0 to execute and finish and
+delete an invalid timer before the scheduling thread is switched back.
+
+Fixes crashes inside DeleteTimerQueueEx and DeleteTimerQueueTimer for 
+Guild Wars 2 with Arcdps (https://www.deltaconnected.com/arcdps/)
+
+Wine-Bug: https://bugs.winehq.org/show_bug.cgi?id=51683
+---
+ dlls/ntdll/threadpool.c | 7 ++++---
+ 1 file changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/dlls/ntdll/threadpool.c b/dlls/ntdll/threadpool.c
+index ca323919d05..20096573c2b 100644
+--- a/dlls/ntdll/threadpool.c
++++ b/dlls/ntdll/threadpool.c
+@@ -936,12 +936,13 @@ NTSTATUS WINAPI RtlCreateTimer(PHANDLE NewTimer, HANDLE TimerQueue,
+     if (q->quit)
+         status = STATUS_INVALID_HANDLE;
+     else
++    {
++        *NewTimer = t;
+         queue_add_timer(t, queue_current_time() + DueTime, TRUE);
++    }
+     RtlLeaveCriticalSection(&q->cs);
+ 
+-    if (status == STATUS_SUCCESS)
+-        *NewTimer = t;
+-    else
++    if (status != STATUS_SUCCESS)
+         RtlFreeHeap(GetProcessHeap(), 0, t);
+ 
+     return status;
+-- 
+2.33.0

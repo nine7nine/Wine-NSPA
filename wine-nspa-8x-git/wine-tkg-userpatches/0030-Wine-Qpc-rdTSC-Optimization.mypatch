@@ -933,3 +933,306 @@ index 5d4df2050e4..281d797dd37 100644
  DECL_HANDLER(create_mapping)
  {
 
+From 98fd80a14e1c1e2ba78ff75340069cc2f6527ec2 Mon Sep 17 00:00:00 2001
+From: Torge Matthies <openglfreak@googlemail.com>
+Date: Fri, 8 Sep 2023 16:07:21 +0200
+Subject: [PATCH 1001/2] ntdll: Add __wine_get_tsc_calibration internal function.
+
+---
+ dlls/ntdll/ntdll.spec          |   3 +
+ dlls/ntdll/time.c              |  14 +++
+ dlls/ntdll/unix/loader.c       |   2 +
+ dlls/ntdll/unix/sync.c         | 162 +++++++++++++++++++++++++++++++++
+ dlls/ntdll/unix/unix_private.h |   1 +
+ dlls/ntdll/unixlib.h           |   7 ++
+ include/winternl.h             |   1 +
+ 7 files changed, 190 insertions(+)
+
+diff --git a/dlls/ntdll/ntdll.spec b/dlls/ntdll/ntdll.spec
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/ntdll.spec
++++ b/dlls/ntdll/ntdll.spec
+@@ -1733,3 +1733,6 @@
+ # Filesystem
+ @ stdcall -syscall wine_nt_to_unix_file_name(ptr ptr ptr long)
+ @ stdcall -syscall wine_unix_to_nt_file_name(str ptr ptr)
++
++# Time
++@ cdecl __wine_get_tsc_calibration(ptr ptr)
+diff --git a/dlls/ntdll/time.c b/dlls/ntdll/time.c
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/time.c
++++ b/dlls/ntdll/time.c
+@@ -427,6 +427,20 @@ BOOL WINAPI DECLSPEC_HOTPATCH RtlQueryPerformanceFrequency( LARGE_INTEGER *frequ
+     return TRUE;
+ }
+ 
++/***********************************************************************
++ *  __wine_get_tsc_calibration   [NTDLL.@]
++ */
++NTSTATUS __cdecl __wine_get_tsc_calibration( ULONGLONG *frequency, LONGLONG *offset )
++{
++    struct wine_get_tsc_calibration_params params = { 0 };
++    NTSTATUS ret;
++
++    ret = WINE_UNIX_CALL( unix_wine_get_tsc_calibration, &params );
++    *frequency = params.frequency;
++    *offset = params.offset;
++    return ret;
++}
++
+ /******************************************************************************
+  * NtGetTickCount   (NTDLL.@)
+  * ZwGetTickCount   (NTDLL.@)
+diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -1262,6 +1262,7 @@ static const unixlib_entry_t unix_call_funcs[] =
+     load_so_dll,
+     unwind_builtin_dll,
+     unixcall_wine_dbg_write,
++    unixcall_wine_get_tsc_calibration,
+     unixcall_wine_needs_override_large_address_aware,
+     unixcall_wine_server_call,
+     unixcall_wine_server_fd_to_handle,
+@@ -1281,6 +1282,7 @@ const unixlib_entry_t unix_call_wow64_funcs[] =
+     wow64_load_so_dll,
+     wow64_unwind_builtin_dll,
+     wow64_wine_dbg_write,
++    unixcall_wine_get_tsc_calibration,
+     wow64_wine_server_call,
+     wow64_wine_server_fd_to_handle,
+     wow64_wine_server_handle_to_fd,
+diff --git a/dlls/ntdll/unix/sync.c b/dlls/ntdll/unix/sync.c
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/unix/sync.c
++++ b/dlls/ntdll/unix/sync.c
+@@ -54,6 +54,9 @@
+ # include <mach/semaphore.h>
+ # include <mach/mach_time.h>
+ #endif
++#ifdef __linux__
++# include <linux/perf_event.h>
++#endif
+ 
+ #include "ntstatus.h"
+ #define WIN32_NO_STATUS
+@@ -1840,6 +1843,165 @@ NTSTATUS system_time_precise( void *args )
+ }
+ 
+ 
++#ifdef __linux__
++
++static inline int perf_event_open( struct perf_event_attr *attr, pid_t pid, int cpu, int group_fd, unsigned long flags )
++{
++    return syscall( __NR_perf_event_open, attr, pid, cpu, group_fd, flags );
++}
++
++/* 128-bit multiply a by b and return the high 64 bits, same as __umulh */
++static UINT64 multiply_tsc( UINT64 a, UINT64 b )
++{
++    UINT64 ah = a >> 32, al = (UINT32)a, bh = b >> 32, bl = (UINT32)b, m;
++    m = (ah * bl) + (bh * al) + ((al * bl) >> 32);
++    return (ah * bh) + (m >> 32);
++}
++
++static UINT64 muldiv_tsc( UINT64 a, UINT64 b, UINT64 c )
++{
++    UINT64 ka = a / c, ra = a % c, kb = b / c, rb = b % c;
++    return ka * kb * c + kb * ra + ka * rb + (ra * rb + c / 2) / c;
++}
++
++static UINT64 do_rdtsc(void)
++{
++    UINT64 ret;
++    __asm__ __volatile__( "" : : : "memory" );
++    if ((user_shared_data->QpcBypassEnabled & SHARED_GLOBAL_FLAGS_QPC_BYPASS_USE_RDTSCP))
++    {
++        unsigned int aux;
++        ret = __builtin_ia32_rdtscp( &aux );
++    }
++    else
++    {
++        if ((user_shared_data->QpcBypassEnabled & SHARED_GLOBAL_FLAGS_QPC_BYPASS_USE_LFENCE))
++            __asm__ __volatile__ ( "lfence" : : : "memory" );
++        if ((user_shared_data->QpcBypassEnabled & SHARED_GLOBAL_FLAGS_QPC_BYPASS_USE_MFENCE))
++            __asm__ __volatile__ ( "mfence" : : : "memory" );
++        ret = __builtin_ia32_rdtsc();
++    }
++    __asm__ __volatile__( "" : : : "memory" );
++    return ret;
++}
++
++static NTSTATUS map_perf_event_mmap_page( struct perf_event_mmap_page **addr )
++{
++    struct perf_event_attr attr;
++    int fd;
++
++    memset( &attr, 0, sizeof(attr) );
++    attr.type = PERF_TYPE_SOFTWARE;
++    attr.size = sizeof(attr);
++    attr.config = PERF_COUNT_SW_DUMMY;
++    attr.disabled = 1;
++    attr.exclude_kernel = 1;
++    attr.exclude_hv = 1;
++    attr.exclude_host = 1;
++    attr.remove_on_exec = 1;
++    fd = perf_event_open( &attr, 0, -1, -1, PERF_FLAG_FD_CLOEXEC );
++    if (fd == -1)
++    {
++        fd = perf_event_open( &attr, 0, -1, -1, 0 );
++        if (fd != -1)
++            fcntl( fd, F_SETFD, FD_CLOEXEC );
++    }
++    if (fd == -1)
++        return errno_to_status( errno );
++    *addr = mmap( NULL, page_size, PROT_READ, MAP_SHARED, fd, 0 );
++    close( fd );
++    if (*addr == MAP_FAILED)
++        return errno_to_status( errno );
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS get_time_shift_mult( struct perf_event_mmap_page *page, __u32 *time_mult, __u16 *time_shift )
++{
++    BOOL user_time_supported;
++    __u32 seq;
++
++    /* See linux/perf_event.h */
++    do
++    {
++        while (((seq = page->lock) % 2)) YieldProcessor();
++        __asm__ __volatile__( "" : : : "memory" );
++        user_time_supported = page->cap_user_time && !page->cap_user_time_short;
++        if (user_time_supported)
++        {
++            *time_mult = page->time_mult;
++            *time_shift = page->time_shift;
++        }
++        __asm__ __volatile__( "" : : : "memory" );
++    } while (page->lock != seq);
++    if (!user_time_supported)
++        return STATUS_NOT_SUPPORTED;
++    return STATUS_SUCCESS;
++}
++
++#define hz_from_shift_mult(mul,sft) muldiv_tsc( 1000000000, (__u32)1 << (sft), (mul) )
++#define timespec_to_ns(ts) ((ts)->tv_sec * 1000000000 + (ts)->tv_nsec)
++
++static int monotonic_time_raw( struct timespec *ts )
++{
++#ifdef HAVE_CLOCK_GETTIME
++    ULONGLONG ticks;
++#ifdef CLOCK_MONOTONIC_RAW
++    if (!clock_gettime( CLOCK_MONOTONIC_RAW, ts ))
++        return 0;
++#endif
++    return clock_gettime( CLOCK_MONOTONIC, ts );
++#endif
++    return -ENOTSUP;
++}
++
++NTSTATUS unixcall_wine_get_tsc_calibration( void *args )
++{
++    UINT64 tsc_freq, tsc1, tsc2, clock_ts, tsc_ts;
++    struct wine_get_tsc_calibration_params *ret = args;
++    struct perf_event_mmap_page *page;
++    struct timespec ts;
++    __u16 time_shift;
++    __u32 time_mult;
++    NTSTATUS s;
++
++    if (monotonic_time_raw( &ts ))
++        return STATUS_NOT_SUPPORTED;
++
++    s = map_perf_event_mmap_page( &page );
++    if (s)
++        return s;
++    s = get_time_shift_mult( page, &time_mult, &time_shift );
++    munmap( page, page_size );
++    if (s)
++        return s;
++
++    tsc_freq = hz_from_shift_mult( time_mult, time_shift ) + 500;
++    tsc_freq = tsc_freq - tsc_freq % 1000;
++
++    /* Duplicated deliberately, affects timing in the .1 us range */
++    tsc1 = do_rdtsc();
++    monotonic_time_raw( &ts );
++    tsc1 = do_rdtsc();
++    monotonic_time_raw( &ts );
++    tsc2 = do_rdtsc();
++    clock_ts = timespec_to_ns(&ts);
++    tsc_ts = multiply_tsc( tsc1 + tsc2, muldiv_tsc( (UINT64)(50000 / 2) << 32, (UINT64)20000 << 32, tsc_freq ) );
++
++    ret->frequency = tsc_freq;
++    ret->offset = (INT64)(clock_ts - tsc_ts + 50) / 100;
++    return STATUS_SUCCESS;
++}
++
++#else
++
++NTSTATUS unixcall_wine_get_tsc_calibration( void *args )
++{
++    return STATUS_NOT_SUPPORTED;
++}
++
++#endif /* defined(__linux__) */
++
++
+ /******************************************************************************
+  *              NtCreateKeyedEvent (NTDLL.@)
+  */
+diff --git a/dlls/ntdll/unix/unix_private.h b/dlls/ntdll/unix/unix_private.h
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/unix/unix_private.h
++++ b/dlls/ntdll/unix/unix_private.h
+@@ -327,6 +327,7 @@ extern void add_completion( HANDLE handle, ULONG_PTR value, NTSTATUS status, ULO
+ extern void set_async_direct_result( HANDLE *async_handle, NTSTATUS status, ULONG_PTR information, BOOL mark_pending ) DECLSPEC_HIDDEN;
+ 
+ extern NTSTATUS unixcall_wine_dbg_write( void *args ) DECLSPEC_HIDDEN;
++extern NTSTATUS unixcall_wine_get_tsc_calibration( void *args ) DECLSPEC_HIDDEN;
+ extern NTSTATUS unixcall_wine_needs_override_large_address_aware( void *args ) DECLSPEC_HIDDEN;
+ extern NTSTATUS unixcall_wine_server_call( void *args ) DECLSPEC_HIDDEN;
+ extern NTSTATUS unixcall_wine_server_fd_to_handle( void *args ) DECLSPEC_HIDDEN;
+diff --git a/dlls/ntdll/unixlib.h b/dlls/ntdll/unixlib.h
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/unixlib.h
++++ b/dlls/ntdll/unixlib.h
+@@ -31,6 +31,12 @@ struct wine_dbg_write_params
+     unsigned int len;
+ };
+ 
++struct wine_get_tsc_calibration_params
++{
++    ULONGLONG frequency;
++    LONGLONG offset;
++};
++
+ struct wine_server_fd_to_handle_params
+ {
+     int          fd;
+@@ -71,6 +77,7 @@ enum ntdll_unix_funcs
+     unix_load_so_dll,
+     unix_unwind_builtin_dll,
+     unix_wine_dbg_write,
++    unix_wine_get_tsc_calibration,
+     unix_wine_needs_override_large_address_aware,
+     unix_wine_server_call,
+     unix_wine_server_fd_to_handle,
+diff --git a/include/winternl.h b/include/winternl.h
+index 11111111111..11111111111 100644
+--- a/include/winternl.h
++++ b/include/winternl.h
+@@ -5180,6 +5180,7 @@ static inline PLIST_ENTRY RemoveTailList(PLIST_ENTRY le)
+ /* Wine internal functions */
+ 
+ extern NTSTATUS WINAPI __wine_unix_spawnvp( char * const argv[], int wait );
++extern NTSTATUS __cdecl __wine_get_tsc_calibration( ULONGLONG *frequency, LONGLONG *offset );
+ 
+ /* The thread information for 16-bit threads */
+ /* NtCurrentTeb()->SubSystemTib points to this */
+-- 
+0.0.0
+
