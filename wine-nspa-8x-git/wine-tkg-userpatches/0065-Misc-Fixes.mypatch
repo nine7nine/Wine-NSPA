@@ -89,3 +89,458 @@ index ca323919d05..20096573c2b 100644
      return status;
 -- 
 2.33.0
+
+From 988ed7cef7c734708b61bad84911486ed3107b7e Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Mon, 1 May 2023 21:19:09 -0600
+Subject: [PATCH] ntdll: HACK: Set thread teb earlier in start_main_thread().
+
+CW-Bug-Id: #22218
+---
+ dlls/ntdll/unix/loader.c        | 3 +++
+ dlls/ntdll/unix/signal_i386.c   | 6 ++++++
+ dlls/ntdll/unix/signal_x86_64.c | 4 ++++
+ dlls/ntdll/unix/unix_private.h  | 1 +
+ 4 files changed, 14 insertions(+)
+
+diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
+index 19d30b4f0d5..d3dea1b0dd1 100644
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -2138,6 +2138,9 @@ static void start_main_thread(void)
+     virtual_map_user_shared_data();
+     init_cpu_info();
+     init_files();
++
++    set_thread_teb( teb );
++
+     init_startup_info();
+     *(ULONG_PTR *)&peb->CloudFileFlags = get_image_address();
+     set_load_order_app_name( main_wargv[0] );
+diff --git a/dlls/ntdll/unix/signal_i386.c b/dlls/ntdll/unix/signal_i386.c
+index eb40bda2d94..5b7d460372c 100644
+--- a/dlls/ntdll/unix/signal_i386.c
++++ b/dlls/ntdll/unix/signal_i386.c
+@@ -2393,6 +2393,12 @@ void signal_init_threading(void)
+ #endif
+ }
+ 
++void set_thread_teb( TEB *teb )
++{
++    struct x86_thread_data *thread_data = (struct x86_thread_data *)&teb->GdiTebBatch;
++
++    ldt_set_fs( thread_data->fs, teb );
++}
+ 
+ /**********************************************************************
+  *		signal_alloc_thread
+diff --git a/dlls/ntdll/unix/signal_x86_64.c b/dlls/ntdll/unix/signal_x86_64.c
+index ea826a7e8dc..63f732b45b4 100644
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -2814,6 +2814,10 @@ void signal_init_process(void)
+     exit(1);
+ }
+ 
++void set_thread_teb( TEB *teb )
++{
++    arch_prctl( ARCH_SET_GS, teb );
++}
+ 
+ /***********************************************************************
+  *           call_init_thunk
+diff --git a/dlls/ntdll/unix/unix_private.h b/dlls/ntdll/unix/unix_private.h
+index b09255e8dbd..5e4cfbd834b 100644
+--- a/dlls/ntdll/unix/unix_private.h
++++ b/dlls/ntdll/unix/unix_private.h
+@@ -295,6 +295,7 @@ extern BOOL get_thread_times( int unix_p
+                               LARGE_INTEGER *user_time ) DECLSPEC_HIDDEN;
+ extern void signal_init_threading(void) DECLSPEC_HIDDEN;
+ extern NTSTATUS signal_alloc_thread( TEB *teb ) DECLSPEC_HIDDEN;
++extern void set_thread_teb( TEB *teb );
+ extern void signal_free_thread( TEB *teb ) DECLSPEC_HIDDEN;
+ extern void signal_init_process(void) DECLSPEC_HIDDEN;
+ extern void signal_init_early(void) DECLSPEC_HIDDEN;
+
+From 11511dfebb9ffd465a8eeb8fca6ad5e2bfbd012b Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Fri, 26 Jan 2024 23:01:11 -0600
+Subject: [PATCH] kernelbase: Workaround forced stack aligment for
+ SignalObjectAndWait().
+
+CW-Bug-Id: #23256
+---
+ dlls/kernelbase/sync.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/dlls/kernelbase/sync.c b/dlls/kernelbase/sync.c
+index 406af74c269..7406291ed78 100644
+--- a/dlls/kernelbase/sync.c
++++ b/dlls/kernelbase/sync.c
+@@ -284,7 +284,11 @@ DWORD WINAPI DECLSPEC_HOTPATCH SignalObjectAndWait( HANDLE signal, HANDLE wait,
+                                                     DWORD timeout, BOOL alertable )
+ {
+     NTSTATUS status;
++#ifdef __i386__
++    DECLSPEC_ALIGN(4) LARGE_INTEGER time;
++#else
+     LARGE_INTEGER time;
++#endif
+ 
+     TRACE( "%p %p %ld %d\n", signal, wait, timeout, alertable );
+ 
+From 38ee816b818e08a36aa94c697f26ce8c317a7c1d Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Mon, 18 Dec 2023 17:02:28 -0600
+Subject: [PATCH] ntdll: Only allocate debug info with
+ RTL_CRITICAL_SECTION_FLAG_FORCE_DEBUG_INFO in
+ RtlInitializeCriticalSectionEx().
+
+CW-Bug-Id: #23142
+---
+ dlls/kernel32/tests/sync.c | 23 ++++++++++++++++++++++-
+ dlls/ntdll/sync.c          |  6 +++---
+ include/winnt.h            |  1 +
+ 3 files changed, 26 insertions(+), 4 deletions(-)
+
+diff --git a/dlls/ntdll/sync.c b/dlls/ntdll/sync.c
+index d872d75fdd1..28f07f572c3 100644
+--- a/dlls/ntdll/sync.c
++++ b/dlls/ntdll/sync.c
+@@ -205,7 +205,7 @@ static inline NTSTATUS wait_semaphore( RTL_CRITICAL_SECTION *crit, int timeout )
+  */
+ NTSTATUS WINAPI RtlInitializeCriticalSection( RTL_CRITICAL_SECTION *crit )
+ {
+-    return RtlInitializeCriticalSectionEx( crit, 0, 0 );
++    return RtlInitializeCriticalSectionEx( crit, 0, RTL_CRITICAL_SECTION_FLAG_FORCE_DEBUG_INFO );
+ }
+ 
+ 
+@@ -214,7 +214,7 @@ NTSTATUS WINAPI RtlInitializeCriticalSection( RTL_CRITICAL_SECTION *crit )
+  */
+ NTSTATUS WINAPI RtlInitializeCriticalSectionAndSpinCount( RTL_CRITICAL_SECTION *crit, ULONG spincount )
+ {
+-    return RtlInitializeCriticalSectionEx( crit, spincount, 0 );
++    return RtlInitializeCriticalSectionEx( crit, spincount, RTL_CRITICAL_SECTION_FLAG_FORCE_DEBUG_INFO );
+ }
+ 
+ 
+@@ -232,7 +232,7 @@ NTSTATUS WINAPI RtlInitializeCriticalSectionEx( RTL_CRITICAL_SECTION *crit, ULON
+      * is done, then debug info should be managed through Rtlp[Allocate|Free]DebugInfo
+      * so (e.g.) MakeCriticalSectionGlobal() doesn't free it using HeapFree().
+      */
+-    if (flags & RTL_CRITICAL_SECTION_FLAG_NO_DEBUG_INFO)
++    if (!(flags & RTL_CRITICAL_SECTION_FLAG_FORCE_DEBUG_INFO))
+         crit->DebugInfo = no_debug_info_marker;
+     else
+     {
+diff --git a/include/winnt.h b/include/winnt.h
+index 20db9a8aabd..0e1a197d423 100644
+--- a/include/winnt.h
++++ b/include/winnt.h
+@@ -6056,6 +6056,7 @@ typedef struct _RTL_CRITICAL_SECTION {
+ #define RTL_CRITICAL_SECTION_FLAG_NO_DEBUG_INFO 0x1000000
+ #define RTL_CRITICAL_SECTION_FLAG_DYNAMIC_SPIN  0x2000000
+ #define RTL_CRITICAL_SECTION_FLAG_STATIC_INIT   0x4000000
++#define RTL_CRITICAL_SECTION_FLAG_FORCE_DEBUG_INFO 0x10000000
+ #define RTL_CRITICAL_SECTION_ALL_FLAG_BITS      0xFF000000
+ #define RTL_CRITICAL_SECTION_FLAG_RESERVED      (RTL_CRITICAL_SECTION_ALL_FLAG_BITS & ~0x7000000)
+ 
+From 14f7b22769d6cc6f2ded0dad7fde3755459bc407 Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Mon, 18 Dec 2023 17:49:20 -0600
+Subject: [PATCH] ntdll: Set DebugInfo to NULL for absent DebugInfo in
+ RtlDeleteCriticalSection().
+
+CW-Bug-Id: #23142
+---
+ dlls/kernel32/tests/sync.c | 6 +++---
+ dlls/ntdll/sync.c          | 6 +++++-
+ 2 files changed, 8 insertions(+), 4 deletions(-)
+
+diff --git a/dlls/ntdll/sync.c b/dlls/ntdll/sync.c
+index 28f07f572c3..54a8a122dc0 100644
+--- a/dlls/ntdll/sync.c
++++ b/dlls/ntdll/sync.c
+@@ -288,7 +288,11 @@ NTSTATUS WINAPI RtlDeleteCriticalSection( RTL_CRITICAL_SECTION *crit )
+             crit->DebugInfo = NULL;
+         }
+     }
+-    else NtClose( crit->LockSemaphore );
++    else
++    {
++        NtClose( crit->LockSemaphore );
++        crit->DebugInfo = NULL;
++    }
+     crit->LockSemaphore = 0;
+     return STATUS_SUCCESS;
+ }
+
+From 26e3d2ecedb4f48d0002b7e75dd4d80eb00b54a9 Mon Sep 17 00:00:00 2001
+From: Alexandros Frantzis <alexandros.frantzis@collabora.com>
+Date: Tue, 6 Feb 2024 18:01:59 +0200
+Subject: [PATCH] win32u: Use consistent locking order for display related
+ mutexes.
+
+Most paths that hold both the display_lock and the display_devices_init
+mutex acquire them in the order just mentioned. However, there are two
+cases where these are acquired in the opposite order, which with
+unfortunate thread interactions and timings can lead to a deadlock. Fix
+these cases to use the same order as the rest of the code.
+---
+ dlls/win32u/sysparams.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/win32u/sysparams.c b/dlls/win32u/sysparams.c
+index 9a43de8fd76..673082056b1 100644
+--- a/dlls/win32u/sysparams.c
++++ b/dlls/win32u/sysparams.c
+@@ -1251,8 +1251,8 @@ static void add_gpu( const struct gdi_gpu *gpu, void *param )
+ 
+     if (!ctx->mutex)
+     {
+-        ctx->mutex = get_display_device_init_mutex();
+         pthread_mutex_lock( &display_lock );
++        ctx->mutex = get_display_device_init_mutex();
+         prepare_devices();
+     }
+ 
+@@ -1717,8 +1717,8 @@ static BOOL update_display_cache_from_registry(void)
+ 
+     if (key.LastWriteTime.QuadPart <= last_query_display_time) return TRUE;
+ 
+-    mutex = get_display_device_init_mutex();
+     pthread_mutex_lock( &display_lock );
++    mutex = get_display_device_init_mutex();
+ 
+     clear_display_devices();
+ 
+-- 
+GitLab
+
+From 7562292ceae1b36b5e7ac2402ac0fba7486acd7a Mon Sep 17 00:00:00 2001
+From: Eric Pouech <epouech@codeweavers.com>
+Date: Tue, 7 Nov 2023 19:12:39 +0100
+Subject: [PATCH] user32: Use SecureZeroMemory to clear magic fields.
+
+Signed-off-by: Eric Pouech <epouech@codeweavers.com>
+---
+ dlls/user32/dde_misc.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/user32/dde_misc.c b/dlls/user32/dde_misc.c
+index 39b439976cd..b5ccf449692 100644
+--- a/dlls/user32/dde_misc.c
++++ b/dlls/user32/dde_misc.c
+@@ -2113,7 +2113,8 @@ void WDML_RemoveConv(WDML_CONV* pRef, WDML_SIDE side)
+ 	    {
+ 		pPrev->next = pCurrent->next;
+ 	    }
+-	    pCurrent->magic = 0;
++            /* Ensure compiler doesn't optimize out the assignment with 0. */
++	    SecureZeroMemory(&pCurrent->magic, sizeof(pCurrent->magic));
+ 	    HeapFree(GetProcessHeap(), 0, pCurrent);
+ 	    break;
+ 	}
+-- 
+GitLab
+
+From 6a862c997584816064be6f0e0ec9308dece6d376 Mon Sep 17 00:00:00 2001
+From: Jinoh Kang <jinoh.kang.kr@gmail.com>
+Date: Thu, 21 Apr 2022 00:09:40 +0900
+Subject: [PATCH 1/6] user32/tests: Make test_unicode_wm_char robust against
+ superfluous messages.
+
+Commit e445303ab45 (user32/tests: Make a few more messages optional.,
+2014-03-20) modified test_unicode_wm_char so that it skips non-essential
+messages (e.g. WM_DWMNCRENDERINGCHANGED) from GetMessageW.
+
+Extend this for messages from GetMessageA as well.
+
+Also, handle the case where no messages other than WM_QUIT are received
+at all.
+
+Signed-off-by: Jinoh Kang <jinoh.kang.kr@gmail.com>
+---
+ dlls/user32/tests/msg.c | 20 +++++++++++++-------
+ 1 file changed, 13 insertions(+), 7 deletions(-)
+
+From c6df0448fee728c997f1756ec9eff65f5b774992 Mon Sep 17 00:00:00 2001
+From: Jinoh Kang <jinoh.kang.kr@gmail.com>
+Date: Sun, 17 Apr 2022 00:49:56 +0900
+Subject: [PATCH 2/6] include: Add definition for
+ UOI_TIMERPROC_EXCEPTION_SUPPRESSION
+
+Signed-off-by: Jinoh Kang <jinoh.kang.kr@gmail.com>
+---
+ include/winuser.h | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/include/winuser.h b/include/winuser.h
+index 453f561e62f..666deeb6cbe 100644
+--- a/include/winuser.h
++++ b/include/winuser.h
+@@ -99,6 +99,7 @@ typedef void* HPOWERNOTIFY;
+ #define UOI_NAME        2
+ #define UOI_TYPE        3
+ #define UOI_USER_SID    4
++#define UOI_TIMERPROC_EXCEPTION_SUPPRESSION 7
+ 
+ #define WSF_VISIBLE     1
+ #define DF_ALLOWOTHERACCOUNTHOOK  1
+-- 
+GitLab
+
+From 5ba99e842f71b3b8d2632c55ae202ccde1751f42 Mon Sep 17 00:00:00 2001
+From: Jinoh Kang <jinoh.kang.kr@gmail.com>
+Date: Mon, 18 Apr 2022 19:27:38 +0900
+Subject: [PATCH 4/6] user32: Implement UOI_TIMERPROC_EXCEPTION_SUPPRESSION.
+
+Signed-off-by: Jinoh Kang <jinoh.kang.kr@gmail.com>
+---
+ dlls/user32/message.c      | 11 ++++++++++-
+ dlls/user32/tests/msg.c    |  6 ------
+ dlls/user32/user32.spec    |  2 +-
+ dlls/user32/user_main.c    |  1 +
+ dlls/user32/user_private.h |  1 +
+ dlls/user32/winstation.c   | 23 ++++++++++++++++++++++-
+ 6 files changed, 35 insertions(+), 9 deletions(-)
+
+diff --git a/dlls/user32/message.c b/dlls/user32/message.c
+index 4016c95539a..54ee5317eed 100644
+--- a/dlls/user32/message.c
++++ b/dlls/user32/message.c
+@@ -861,6 +861,15 @@ static LRESULT dispatch_message( const MSG *msg, BOOL ansi )
+ }
+ 
+ 
++static LONG WINAPI timerproc_exception_filter(EXCEPTION_POINTERS *eptr)
++{
++    if (suppress_timerproc_exception)
++        return EXCEPTION_EXECUTE_HANDLER;
++
++    return EXCEPTION_CONTINUE_SEARCH;
++}
++
++
+ /***********************************************************************
+  *		DispatchMessageA (USER32.@)
+  *
+@@ -878,7 +887,7 @@ LRESULT WINAPI DECLSPEC_HOTPATCH DispatchMessageA( const MSG* msg )
+             retval = CallWindowProcA( (WNDPROC)msg->lParam, msg->hwnd,
+                                       msg->message, msg->wParam, GetTickCount() );
+         }
+-        __EXCEPT_ALL
++        __EXCEPT(timerproc_exception_filter)
+         {
+             retval = 0;
+         }
+
+diff --git a/dlls/user32/user32.spec b/dlls/user32/user32.spec
+index 96e6e1a7d6b..6a605ae4216 100644
+--- a/dlls/user32/user32.spec
++++ b/dlls/user32/user32.spec
+@@ -721,7 +721,7 @@
+ @ stdcall SetThreadDpiAwarenessContext(ptr)
+ @ stdcall SetTimer(long long long ptr)
+ @ stdcall SetUserObjectInformationA(long long ptr long)
+-@ stdcall SetUserObjectInformationW(long long ptr long) NtUserSetObjectInformation
++@ stdcall SetUserObjectInformationW(long long ptr long)
+ @ stdcall SetUserObjectSecurity(long ptr ptr)
+ @ stdcall SetWinEventHook(long long long ptr long long long)
+ @ stdcall SetWindowCompositionAttribute(ptr ptr)
+diff --git a/dlls/user32/user_main.c b/dlls/user32/user_main.c
+index ef2b94ba698..f375462487b 100644
+--- a/dlls/user32/user_main.c
++++ b/dlls/user32/user_main.c
+@@ -29,6 +29,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(graphics);
+ WINE_DECLARE_DEBUG_CHANNEL(message);
+ 
+ HMODULE user32_module = 0;
++BOOL suppress_timerproc_exception = TRUE;
+ 
+ extern void WDML_NotifyThreadDetach(void);
+ 
+diff --git a/dlls/user32/user_private.h b/dlls/user32/user_private.h
+index a9bbdd16fb0..91612f9c6c5 100644
+--- a/dlls/user32/user_private.h
++++ b/dlls/user32/user_private.h
+@@ -44,6 +44,7 @@ struct wm_char_mapping_data
+ };
+ 
+ extern HMODULE user32_module;
++extern BOOL suppress_timerproc_exception;
+ 
+ extern BOOL post_dde_message( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam, DWORD dest_tid,
+                               DWORD type );
+diff --git a/dlls/user32/winstation.c b/dlls/user32/winstation.c
+index 62593ca046f..789e45f8928 100644
+--- a/dlls/user32/winstation.c
++++ b/dlls/user32/winstation.c
+@@ -389,12 +389,33 @@ BOOL WINAPI GetUserObjectInformationA( HANDLE handle, INT index, LPVOID info, DW
+ }
+ 
+ 
++/******************************************************************************
++ *              SetUserObjectInformationW   (USER32.@)
++ */
++BOOL WINAPI SetUserObjectInformationW( HANDLE handle, INT index, LPVOID info, DWORD len )
++{
++    if (index == UOI_TIMERPROC_EXCEPTION_SUPPRESSION)
++    {
++        if (handle != GetCurrentProcess() || len != sizeof(BOOL))
++        {
++            SetLastError(ERROR_INVALID_PARAMETER);
++            return FALSE;
++        }
++
++        suppress_timerproc_exception = *(const BOOL *)info;
++        return TRUE;
++    }
++
++    return NtUserSetObjectInformation( handle, index, info, len );
++}
++
++
+ /******************************************************************************
+  *              SetUserObjectInformationA   (USER32.@)
+  */
+ BOOL WINAPI SetUserObjectInformationA( HANDLE handle, INT index, LPVOID info, DWORD len )
+ {
+-    return NtUserSetObjectInformation( handle, index, info, len );
++    return SetUserObjectInformationW( handle, index, info, len );
+ }
+ 
+ 
+-- 
+GitLab
+
+From 66fb617b6945bac43a1ac8a5073aae06d602b4e1 Mon Sep 17 00:00:00 2001
+From: Jinoh Kang <jinoh.kang.kr@gmail.com>
+Date: Mon, 18 Apr 2022 19:39:07 +0900
+Subject: [PATCH 6/6] win32u: Ignore unhandled info index in
+ NtUserSetObjectInformation.
+
+Signed-off-by: Jinoh Kang <jinoh.kang.kr@gmail.com>
+---
+ dlls/win32u/tests/win32u.c | 4 ----
+ dlls/win32u/winstation.c   | 2 ++
+ 2 files changed, 2 insertions(+), 4 deletions(-)
+
+diff --git a/dlls/win32u/winstation.c b/dlls/win32u/winstation.c
+index b187b246941..0a84cf03552 100644
+--- a/dlls/win32u/winstation.c
++++ b/dlls/win32u/winstation.c
+@@ -395,6 +395,8 @@ BOOL WINAPI NtUserSetObjectInformation( HANDLE handle, INT index, void *info, DW
+     BOOL ret;
+     const USEROBJECTFLAGS *obj_flags = info;
+ 
++    if (index == UOI_TIMERPROC_EXCEPTION_SUPPRESSION) return TRUE;
++
+     if (index != UOI_FLAGS || !info || len < sizeof(*obj_flags))
+     {
+         RtlSetLastWin32Error( ERROR_INVALID_PARAMETER );
+-- 
+GitLab
+
+

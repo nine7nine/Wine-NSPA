@@ -95,3 +95,102 @@
  
      return E_NOTIMPL;
  }
+
+From c8a04b21cd4a1a246ed68b036b4eb3d8089af4bf Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Aida=20Jonikien=C4=97?= <aidas957@gmail.com>
+Date: Sun, 26 Nov 2023 11:25:59 +0200
+Subject: [PATCH] ole32: Disable other-process support in RevokeDragDrop().
+
+The RoShade installer crashes because of ole32 trying to release
+the OLE drop target from another process (which can't be accessed
+despite it being a valid pointer).
+
+Windows probably supports this behavior (but implementing it here
+would require extra work and this is enough to make this app work).
+
+Wine-Bug: https://bugs.winehq.org/show_bug.cgi?id=54912
+---
+ dlls/ole32/ole2.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/dlls/ole32/ole2.c b/dlls/ole32/ole2.c
+index f4672b704ee..efee49a6ab5 100644
+--- a/dlls/ole32/ole2.c
++++ b/dlls/ole32/ole2.c
+@@ -618,6 +618,7 @@ HRESULT WINAPI RegisterDragDrop(HWND hwnd, LPDROPTARGET pDropTarget)
+  */
+ HRESULT WINAPI RevokeDragDrop(HWND hwnd)
+ {
++  DWORD pid = 0;
+   HANDLE map;
+   IStream *stream;
+   IDropTarget *drop_target;
+@@ -631,6 +632,14 @@ HRESULT WINAPI RevokeDragDrop(HWND hwnd)
+     return DRAGDROP_E_INVALIDHWND;
+   }
+ 
++  /* block revoke for other processes windows */
++  GetWindowThreadProcessId(hwnd, &pid);
++  if (pid != GetCurrentProcessId())
++  {
++    FIXME("revoke for another process windows is disabled\n");
++    return DRAGDROP_E_INVALIDHWND;
++  }
++
+   /* no registration data */
+   if (!(map = get_droptarget_handle(hwnd)))
+     return DRAGDROP_E_NOTREGISTERED;
+-- 
+GitLab
+
+From c03c17277f4a2ffa49f97ea43f201abf09e25a78 Mon Sep 17 00:00:00 2001
+From: Akihiro Sagawa <sagawa.aki@gmail.com>
+Date: Mon, 11 Dec 2023 23:09:31 +0900
+Subject: [PATCH] winex11: Do window search if IDropTarget::DragOver() returns
+ DROPEFFECT_NONE.
+
+Fixes a regression from 1d337249f16ed61163315019f5dbbe4db3386390.
+
+Prior to the commit, we were solving this case in a different way.
+If IDropTarget::DragOver() returned DROPEFFECT_NONE,
+X11DRV_XDND_DROPEFFECTToXdndAction() would convert it to XdndActionCopy.
+
+Wine-Bug: https://bugs.winehq.org/show_bug.cgi?id=55179
+---
+ dlls/winex11.drv/xdnd.c | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/dlls/winex11.drv/xdnd.c b/dlls/winex11.drv/xdnd.c
+index ce99941c021..0e1a747b604 100644
+--- a/dlls/winex11.drv/xdnd.c
++++ b/dlls/winex11.drv/xdnd.c
+@@ -233,7 +233,7 @@ NTSTATUS WINAPI x11drv_dnd_position_event( void *arg, ULONG size )
+         }
+     }
+ 
+-    if (XDNDAccepted)
++    if (XDNDAccepted && XDNDDropEffect != DROPEFFECT_NONE)
+         accept = 1;
+     else
+     {
+@@ -246,7 +246,7 @@ NTSTATUS WINAPI x11drv_dnd_position_event( void *arg, ULONG size )
+         }
+     }
+ 
+-    return accept ? effect : 0;
++    return accept ? effect : DROPEFFECT_NONE;
+ }
+ 
+ NTSTATUS x11drv_dnd_drop_event( UINT arg )
+@@ -319,7 +319,7 @@ NTSTATUS x11drv_dnd_drop_event( UINT arg )
+     TRACE("effectRequested(0x%lx) accept(%d) performed(0x%lx) at x(%ld),y(%ld)\n",
+           XDNDDropEffect, accept, effect, XDNDxy.x, XDNDxy.y);
+ 
+-    return accept ? effect : 0;
++    return accept ? effect : DROPEFFECT_NONE;
+ }
+ 
+ /**************************************************************************
+-- 
+GitLab
+
