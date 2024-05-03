@@ -79,6 +79,12 @@ _prebuild_common() {
 	    _configure_args+=(--without-mingw)
 	  fi
 
+	  # Disable Pulseaudio
+	  if [ "$_no_pulse" = "true" ]; then
+	    _configure_args64+=(--without-pulse)
+	    _configure_args32+=(--without-pulse)
+	  fi
+
 	  # Wayland driver
 	  if [ "$_wayland_driver" = "true" ]; then
 	    _configure_args64+=(--with-wayland --with-vulkan)

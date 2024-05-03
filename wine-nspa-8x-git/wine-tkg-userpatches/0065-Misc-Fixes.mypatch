@@ -543,4 +543,256 @@ index b187b246941..0a84cf03552 100644
 -- 
 GitLab
 
+From 61176033a2bb3c6a5a229078f684b85ee085ef80 Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Tue, 6 Feb 2024 19:05:00 -0600
+Subject: [PATCH] ntdll: Better track thread pool wait's wait_pending state.
+
+CW-Bug-Id: #21509
+---
+ dlls/ntdll/threadpool.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/dlls/ntdll/threadpool.c b/dlls/ntdll/threadpool.c
+index 4f22114a55e..9a8f380bf72 100644
+--- a/dlls/ntdll/threadpool.c
++++ b/dlls/ntdll/threadpool.c
+@@ -1265,6 +1265,7 @@ static void CALLBACK waitqueue_thread_proc( void *param )
+                                   u.wait.wait_entry )
+         {
+             assert( wait->type == TP_OBJECT_TYPE_WAIT );
++            assert( wait->u.wait.wait_pending );
+             if (wait->u.wait.timeout <= now.QuadPart)
+             {
+                 /* Wait object timed out. */
+@@ -1272,6 +1273,7 @@ static void CALLBACK waitqueue_thread_proc( void *param )
+                 {
+                     list_remove( &wait->u.wait.wait_entry );
+                     list_add_tail( &bucket->reserved, &wait->u.wait.wait_entry );
++                    wait->u.wait.wait_pending = FALSE;
+                 }
+                 if ((wait->u.wait.flags & (WT_EXECUTEINWAITTHREAD | WT_EXECUTEINIOTHREAD)))
+                 {
+@@ -1329,6 +1331,7 @@ static void CALLBACK waitqueue_thread_proc( void *param )
+                     {
+                         list_remove( &wait->u.wait.wait_entry );
+                         list_add_tail( &bucket->reserved, &wait->u.wait.wait_entry );
++                        wait->u.wait.wait_pending = FALSE;
+                     }
+                     if ((wait->u.wait.flags & (WT_EXECUTEINWAITTHREAD | WT_EXECUTEINIOTHREAD)))
+                     {
+
+From 25d2d4c847b03b409564079a5cef1ab6ff71e457 Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Tue, 6 Feb 2024 19:14:40 -0600
+Subject: [PATCH] ntdll: Make sure wakeups from already unset events are
+ ignored in waitqueue_thread_proc().
+
+CW-Bug-Id: #21509
+---
+ dlls/ntdll/threadpool.c | 16 ++++++++++++++--
+ 1 file changed, 14 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/ntdll/threadpool.c b/dlls/ntdll/threadpool.c
+index 9a8f380bf72..2887e84b12c 100644
+--- a/dlls/ntdll/threadpool.c
++++ b/dlls/ntdll/threadpool.c
+@@ -160,6 +160,7 @@ struct threadpool_object
+     LONG                    num_pending_callbacks;
+     LONG                    num_running_callbacks;
+     LONG                    num_associated_callbacks;
++    LONG                    update_serial;
+     /* arguments for callback */
+     union
+     {
+@@ -1243,6 +1244,7 @@ static void tp_timerqueue_unlock( struct threadpool_object *timer )
+ static void CALLBACK waitqueue_thread_proc( void *param )
+ {
+     struct threadpool_object *objects[MAXIMUM_WAITQUEUE_OBJECTS];
++    LONG update_serials[MAXIMUM_WAITQUEUE_OBJECTS];
+     HANDLE handles[MAXIMUM_WAITQUEUE_OBJECTS + 1];
+     struct waitqueue_bucket *bucket = param;
+     struct threadpool_object *wait, *next;
+@@ -1295,6 +1297,7 @@ static void CALLBACK waitqueue_thread_proc( void *param )
+                 InterlockedIncrement( &wait->refcount );
+                 objects[num_handles] = wait;
+                 handles[num_handles] = wait->u.wait.handle;
++                update_serials[num_handles] = wait->update_serial;
+                 num_handles++;
+             }
+         }
+@@ -1323,7 +1326,7 @@ static void CALLBACK waitqueue_thread_proc( void *param )
+             {
+                 wait = objects[status - STATUS_WAIT_0];
+                 assert( wait->type == TP_OBJECT_TYPE_WAIT );
+-                if (wait->u.wait.bucket)
++                if (wait->u.wait.bucket && wait->update_serial == update_serials[status - STATUS_WAIT_0])
+                 {
+                     /* Wait object signaled. */
+                     assert( wait->u.wait.bucket == bucket );
+@@ -1344,7 +1347,10 @@ static void CALLBACK waitqueue_thread_proc( void *param )
+                     else tp_object_submit( wait, TRUE );
+                 }
+                 else
+-                    WARN("wait object %p triggered while object was destroyed\n", wait);
++                {
++                    WARN("wait object %p triggered while object was %s.\n",
++                            wait, wait->u.wait.bucket ? "updated" : "destroyed");
++                }
+             }
+ 
+             /* Release temporary references to wait objects. */
+@@ -1917,6 +1923,7 @@ static void tp_object_initialize( struct threadpool_object *object, struct threa
+     object->num_pending_callbacks   = 0;
+     object->num_running_callbacks   = 0;
+     object->num_associated_callbacks = 0;
++    object->update_serial           = 0;
+ 
+     if (environment)
+     {
+@@ -3050,12 +3061,15 @@ VOID WINAPI TpSetWait( TP_WAIT *wait, HA
+ {
+     struct threadpool_object *this = impl_from_TP_WAIT( wait );
+     ULONGLONG timestamp = MAXLONGLONG;
++    BOOL same_handle;
+ 
+     TRACE( "%p %p %p\n", wait, handle, timeout );
+ 
+     enter_critical_section( &waitqueue.cs );
+ 
+     assert( this->u.wait.bucket );
++
++    same_handle = this->u.wait.handle == handle;
+     this->u.wait.handle = handle;
+ 
+     if (handle || this->u.wait.wait_pending)
+@@ -3090,6 +3100,8 @@ VOID WINAPI TpSetWait( TP_WAIT *wait, HANDLE handle, LARGE_INTEGER *timeout )
+         }
+ 
+         /* Wake up the wait queue thread. */
++        if (!same_handle)
++            ++this->update_serial;
+         NtSetEvent( bucket->update_event, NULL );
+     }
+ 
+From a4cf21c6f78639f60aa3af69de4cac9d0468f13f Mon Sep 17 00:00:00 2001
+From: Tatsuyuki Ishi <ishitatsuyuki@gmail.com>
+Date: Sat, 17 Feb 2024 22:11:43 +0900
+Subject: [PATCH] ntdll: Don't leak objattr allocation in NtCreateSemaphore.
+
+https://github.com/ValveSoftware/wine/pull/219
+---
+ dlls/ntdll/unix/sync.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/ntdll/unix/sync.c b/dlls/ntdll/unix/sync.c
+index ed30388b026..dd08632e21c 100644
+--- a/dlls/ntdll/unix/sync.c
++++ b/dlls/ntdll/unix/sync.c
+@@ -272,7 +272,6 @@ NTSTATUS WINAPI NtCreateSemaphore( HANDLE *handle, ACCESS_MASK access, const OBJ
+ 
+     *handle = 0;
+     if (max <= 0 || initial < 0 || initial > max) return STATUS_INVALID_PARAMETER;
+-    if ((ret = alloc_object_attributes( attr, &objattr, &len ))) return ret;
+ 
+     if (do_fsync())
+         return fsync_create_semaphore( handle, access, attr, initial, max );
+@@ -280,6 +279,8 @@ NTSTATUS WINAPI NtCreateSemaphore( HANDLE *handle, ACCESS_MASK access, const OBJ
+     if (do_esync())
+         return esync_create_semaphore( handle, access, attr, initial, max );
+ 
++    if ((ret = alloc_object_attributes( attr, &objattr, &len ))) return ret;
++
+     SERVER_START_REQ( create_semaphore )
+     {
+         req->access  = access;
+
+From f392d0687cb74f47dbfceb4a57b496191f183969 Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Thu, 29 Feb 2024 20:02:48 -0600
+Subject: [PATCH] fixup! ntdll: Read process memory on the client side in
+ NtReadVirtualMemory().
+
+CW-Bug-Id: #23456
+---
+ dlls/ntdll/unix/virtual.c | 18 +++++++++++++-----
+ 1 file changed, 13 insertions(+), 5 deletions(-)
+
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index ba2fe258ede..97b55022c7a 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -6305,13 +6305,21 @@ NTSTATUS WINAPI NtReadVirtualMemory( HANDLE process, const void *addr, void *buf
+     int unix_pid;
+     ssize_t ret;
+ 
+-    SERVER_START_REQ( read_process_memory )
++    if (process == NtCurrentProcess())
+     {
+-        req->handle = wine_server_obj_handle( process );
+-        status = wine_server_call( req );
+-        unix_pid = reply->unix_pid;
++        unix_pid = getpid();
++        status = STATUS_SUCCESS;
++    }
++    else
++    {
++        SERVER_START_REQ( read_process_memory )
++        {
++            req->handle = wine_server_obj_handle( process );
++            status = wine_server_call( req );
++            unix_pid = reply->unix_pid;
++        }
++        SERVER_END_REQ;
+     }
+-    SERVER_END_REQ;
+ 
+     if (status)
+     {
+
+
+From 146c2631276b3e826085a6d270d71c5f56b75d87 Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Fri, 5 Apr 2024 12:11:51 -0600
+Subject: [PATCH] ntdll: Return STATUS_NO_YIELD_PERFORMED from
+ NtYieldExecution() on Linux if no yield was performed.
+
+---
+ dlls/ntdll/unix/sync.c | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/dlls/ntdll/unix/sync.c b/dlls/ntdll/unix/sync.c
+index ae7bc115ffe..e070233104b 100644
+--- a/dlls/ntdll/unix/sync.c
++++ b/dlls/ntdll/unix/sync.c
+@@ -43,6 +43,9 @@
+ #ifdef HAVE_SCHED_H
+ # include <sched.h>
+ #endif
++#ifdef HAVE_SYS_RESOURCE_H
++# include <sys/resource.h>
++#endif
+ #include <string.h>
+ #include <stdarg.h>
+ #include <stdio.h>
+@@ -1514,7 +1517,17 @@ NTSTATUS WINAPI NtSignalAndWaitForSingleObject( HANDLE signal, HANDLE wait,
+ NTSTATUS WINAPI NtYieldExecution(void)
+ {
+ #ifdef HAVE_SCHED_YIELD
++#ifdef RUSAGE_THREAD
++    struct rusage u1, u2;
++    int ret;
++
++    ret = getrusage( RUSAGE_THREAD, &u1 );
++#endif
+     sched_yield();
++#ifdef RUSAGE_THREAD
++    if (!ret) ret = getrusage( RUSAGE_THREAD, &u2 );
++    if (!ret && u1.ru_nvcsw == u2.ru_nvcsw && u1.ru_nivcsw == u2.ru_nivcsw) return STATUS_NO_YIELD_PERFORMED;
++#endif
+     return STATUS_SUCCESS;
+ #else
+     return STATUS_NO_YIELD_PERFORMED;
+-- 
+GitLab
 
