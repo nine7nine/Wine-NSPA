@@ -795,4 +795,507 @@ index ae7bc115ffe..e070233104b 100644
      return STATUS_NO_YIELD_PERFORMED;
 -- 
 GitLab
+From c55cce6fcbadca3d5b5fd4e2a434ada2c2012479 Mon Sep 17 00:00:00 2001
+From: Fabian Maurer <dark.shadow4@web.de>
+Date: Thu, 16 Nov 2023 19:54:07 +0100
+Subject: [PATCH] server: Initialize pe image struct padding to avoid Valgrind
+ warning.
+
+---
+ include/wine/server_protocol.h | 3 ++-
+ server/mapping.c               | 1 +
+ server/protocol.def            | 1 +
+ 3 files changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/include/wine/server_protocol.h b/include/wine/server_protocol.h
+index 15156a12353..139a7bca69e 100644
+--- a/include/wine/server_protocol.h
++++ b/include/wine/server_protocol.h
+@@ -844,6 +844,7 @@ typedef struct
+     unsigned char  contains_code : 1;
+     unsigned char  wine_builtin : 1;
+     unsigned char  wine_fakedll : 1;
++    unsigned char  padding : 5;
+     unsigned char  image_flags;
+     unsigned int   loader_flags;
+     unsigned int   header_size;
+@@ -6506,7 +6507,7 @@ union generic_reply
+ 
+ /* ### protocol_version begin ### */
+ 
+-#define SERVER_PROTOCOL_VERSION 785
++#define SERVER_PROTOCOL_VERSION 786
+ 
+ /* ### protocol_version end ### */
+ 
+diff --git a/server/mapping.c b/server/mapping.c
+index a795dc4b38b..b5684c484d2 100644
+--- a/server/mapping.c
++++ b/server/mapping.c
+@@ -842,6 +842,7 @@ static unsigned int get_image_params( struct mapping *mapping, file_pos_t file_s
+         return STATUS_INVALID_IMAGE_FORMAT;
+     }
+ 
++    mapping->image.padding       = 0;
+     mapping->image.map_addr      = get_fd_map_address( mapping->fd );
+     mapping->image.image_charact = nt.FileHeader.Characteristics;
+     mapping->image.machine       = nt.FileHeader.Machine;
+diff --git a/server/protocol.def b/server/protocol.def
+index b4d6d74d6fc..5d60e7fcda3 100644
+--- a/server/protocol.def
++++ b/server/protocol.def
+@@ -860,6 +860,7 @@ typedef struct
+     unsigned char  contains_code : 1;
+     unsigned char  wine_builtin : 1;
+     unsigned char  wine_fakedll : 1;
++    unsigned char  padding : 5;
+     unsigned char  image_flags;
+     unsigned int   loader_flags;
+     unsigned int   header_size;
+-- 
+GitLab
+
+From 9dc80b13bec0b482150dbd8c9236dbb8b6a31ccd Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Thu, 21 Dec 2023 11:44:39 +0100
+Subject: [PATCH 1/2] server: Introduce a new get_desktop_cursor_thread_input
+ helper.
+
+Wine-Bug: https://bugs.winehq.org/show_bug.cgi?id=55961
+---
+ server/queue.c | 30 +++++++++++++++++++-----------
+ 1 file changed, 19 insertions(+), 11 deletions(-)
+
+diff --git a/server/queue.c b/server/queue.c
+index ee8bdf34b7f..d2cf9800258 100644
+--- a/server/queue.c
++++ b/server/queue.c
+@@ -429,26 +429,34 @@ static void queue_cursor_message( struct desktop *desktop, user_handle_t win, un
+     queue_hardware_message( desktop, msg, 1 );
+ }
+ 
++static struct thread_input *get_desktop_cursor_thread_input( struct desktop *desktop )
++{
++    struct thread_input *input = NULL;
++    struct thread *thread;
++
++    if ((thread = get_window_thread( desktop->cursor.win )))
++    {
++        if (thread->queue) input = thread->queue->input;
++        release_object( thread );
++    }
++
++    return input;
++}
++
+ static int update_desktop_cursor_window( struct desktop *desktop, user_handle_t win )
+ {
+     int updated = win != desktop->cursor.win;
+-    user_handle_t handle = desktop->cursor.handle;
++    struct thread_input *input;
+     desktop->cursor.win = win;
+-    if (updated)
+-    {
+-        struct thread *thread;
+-
+-        if ((thread = get_window_thread( win )))
+-        {
+-            struct thread_input *input = thread->queue->input;
+-            if (input) handle = input->cursor_count < 0 ? 0 : input->cursor;
+-            release_object( thread );
+-        }
+ 
++    if (updated && (input = get_desktop_cursor_thread_input( desktop )))
++    {
++        user_handle_t handle = input->cursor_count < 0 ? 0 : input->cursor;
+         /* when clipping send the message to the foreground window as well, as some driver have an artificial overlay window */
+         if (is_cursor_clipped( desktop )) queue_cursor_message( desktop, 0, WM_WINE_SETCURSOR, win, handle );
+         queue_cursor_message( desktop, win, WM_WINE_SETCURSOR, win, handle );
+     }
++
+     return updated;
+ }
+ 
+-- 
+GitLab
+
+
+From d1789fbb40d74b747451c9c5d9e738c463a6aa67 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Thu, 21 Dec 2023 11:47:00 +0100
+Subject: [PATCH 2/2] server: Change desktop cursor only when inside the
+ thread's windows.
+
+Getting rid of the desktop cursor handle at the same time.
+
+Wine-Bug: https://bugs.winehq.org/show_bug.cgi?id=55961
+---
+ server/queue.c | 13 ++++---------
+ server/user.h  |  1 -
+ 2 files changed, 4 insertions(+), 10 deletions(-)
+
+diff --git a/server/queue.c b/server/queue.c
+index d2cf9800258..cd913ae03e5 100644
+--- a/server/queue.c
++++ b/server/queue.c
+@@ -478,13 +478,11 @@ static int update_desktop_cursor_pos( struct desktop *desktop, user_handle_t win
+     return updated;
+ }
+ 
+-static void update_desktop_cursor_handle( struct desktop *desktop, user_handle_t handle )
++static void update_desktop_cursor_handle( struct desktop *desktop, struct thread_input *input )
+ {
+-    int updated = desktop->cursor.handle != handle;
+-    user_handle_t win = desktop->cursor.win;
+-    desktop->cursor.handle = handle;
+-    if (updated)
++    if (input == get_desktop_cursor_thread_input( desktop ))
+     {
++        user_handle_t handle = input->cursor_count < 0 ? 0 : input->cursor, win = desktop->cursor.win;
+         /* when clipping send the message to the foreground window as well, as some driver have an artificial overlay window */
+         if (is_cursor_clipped( desktop )) queue_cursor_message( desktop, 0, WM_WINE_SETCURSOR, win, handle );
+         queue_cursor_message( desktop, win, WM_WINE_SETCURSOR, win, handle );
+@@ -3414,10 +3412,7 @@ DECL_HANDLER(set_cursor)
+     if (req->flags & SET_CURSOR_NOCLIP) set_clip_rectangle( desktop, NULL, SET_CURSOR_NOCLIP, 0 );
+ 
+     if (req->flags & (SET_CURSOR_HANDLE | SET_CURSOR_COUNT))
+-    {
+-        if (input->cursor_count < 0) update_desktop_cursor_handle( desktop, 0 );
+-        else update_desktop_cursor_handle( desktop, input->cursor );
+-    }
++        update_desktop_cursor_handle( desktop, input );
+ 
+     reply->new_x       = desktop->cursor.x;
+     reply->new_y       = desktop->cursor.y;
+diff --git a/server/user.h b/server/user.h
+index b6f47bcac1c..8fa55e09b0f 100644
+--- a/server/user.h
++++ b/server/user.h
+@@ -59,7 +59,6 @@ struct global_cursor
+     rectangle_t          clip;             /* cursor clip rectangle */
+     unsigned int         last_change;      /* time of last position change */
+     user_handle_t        win;              /* window that contains the cursor */
+-    user_handle_t        handle;           /* last set cursor handle */
+ };
+ 
+ struct desktop
+-- 
+GitLab
+
+From 6c44228c1f673f4147153db53247b2dc700ae24e Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Mon, 22 Jan 2024 23:25:33 +0100
+Subject: [PATCH] winex11: Sync with gdi_display before closing the threads
+ display.
+
+---
+ dlls/winex11.drv/x11drv_main.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/dlls/winex11.drv/x11drv_main.c b/dlls/winex11.drv/x11drv_main.c
+index 1b9555bcfbf..25a36cb8c0c 100644
+--- a/dlls/winex11.drv/x11drv_main.c
++++ b/dlls/winex11.drv/x11drv_main.c
+@@ -721,6 +721,7 @@ void X11DRV_ThreadDetach(void)
+         vulkan_thread_detach();
+         if (data->xim) XCloseIM( data->xim );
+         if (data->font_set) XFreeFontSet( data->display, data->font_set );
++        XSync( gdi_display, False ); /* make sure XReparentWindow requests have completed before closing the thread display */
+         XCloseDisplay( data->display );
+         free( data );
+         /* clear data in case we get re-entered from user32 before the thread is truly dead */
+-- 
+GitLab
+
+From a2f384b71cafb619124a10471f4b2c84fe1da278 Mon Sep 17 00:00:00 2001
+From: Ruslan Garipov <ruslanngaripov@gmail.com>
+Date: Tue, 16 Apr 2024 23:19:05 +0500
+Subject: [PATCH 1/6] Fix initialization of the handler_fd_ops
+
+This lists all fields of the `struct fd_ops' when object of that type --
+handler_fd_ops in server/signal.c -- is being initialized.
+
+It looks like field list in initialization of the handler_fd_ops in
+server/signal.c was out-of-sync for a long time.  Take a look, for
+example, on patches ad1e0609a0f (server: Get rid of no loner used
+cancel_async from fd_ops., 2016-12-01) (which removed "reference" to the
+cancel_async field correctly, but did not add "references" to the read
+and write fields, for example), or 837b39b2028 (server: Add read and
+write fd member functions., 2015-05-05) (which updated `struct fd_ops'
+but did not change initialization of the handler_fd_ops at all).
+
+Because the main purpose of initialization of the handler_fd_ops made in
+server/signal.c is to assign address of the handler_poll_event()
+function to the poll_event field, while making all other fields NULLed,
+lacking some fields in that initialization is not an error according to
+C standard:
+
+> 6.7.11 Initialization
+>
+> 11 ... If an object that has static or thread storage duration is not
+> initialized explicitly, or any object is initialized with an empty
+> initializer, then it is subject to default initialization, which
+> initializes an object as follows:
+>
+>   - if it has pointer type, it is initialized to a null pointer;
+> ...
+> 22 If there are fewer initializers in a brace-enclosed list than there
+> are elements or members of an aggregate, or fewer characters in a
+> string literal used to initialize an array of known size than there
+> are elements in the array, the remainder of the aggregate is subject
+> to default initialization.
+
+But to maintain code consistency I believe initialization of the
+handler_fd_ops object should enumerate all fields of the
+`struct fd_ops' type.
+
+No functional changes intended.
+
+Signed-off-by: Ruslan Garipov <ruslanngaripov@gmail.com>
+---
+ server/signal.c | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/server/signal.c b/server/signal.c
+index 19b76d44c16..45a516f4599 100644
+--- a/server/signal.c
++++ b/server/signal.c
+@@ -84,9 +84,14 @@ static const struct fd_ops handler_fd_ops =
+ {
+     NULL,                     /* get_poll_events */
+     handler_poll_event,       /* poll_event */
+-    NULL,                     /* flush */
+     NULL,                     /* get_fd_type */
++    NULL,                     /* read */
++    NULL,                     /* write */
++    NULL,                     /* flush */
++    NULL,                     /* get_file_info */
++    NULL,                     /* get_volume_info */
+     NULL,                     /* ioctl */
++    NULL,                     /* cancel_async */
+     NULL,                     /* queue_async */
+     NULL                      /* reselect_async */
+ };
+-- 
+GitLab
+
+
+From ea2e56de5f5afb7983fd209f466e92424a403a59 Mon Sep 17 00:00:00 2001
+From: Ruslan Garipov <ruslanngaripov@gmail.com>
+Date: Wed, 17 Apr 2024 11:44:35 +0500
+Subject: [PATCH 2/6] Fix initialization of the master_socket_fd_ops
+
+This lists all fields of the `struct fd_ops' when object of that type --
+master_socket_fd_ops in server/request.c -- is being initialized.
+
+For motivation behind this patch please read message of the previous
+commit 0bd610a1680 (Fix initialization of the handler_fd_ops,
+2024-04-16).
+
+No functional changes intended.
+
+Signed-off-by: Ruslan Garipov <ruslanngaripov@gmail.com>
+---
+ server/request.c | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/server/request.c b/server/request.c
+index 2691e0c7cff..bb9b978df46 100644
+--- a/server/request.c
++++ b/server/request.c
+@@ -110,9 +110,14 @@ static const struct fd_ops master_socket_fd_ops =
+ {
+     NULL,                          /* get_poll_events */
+     master_socket_poll_event,      /* poll_event */
+-    NULL,                          /* flush */
+     NULL,                          /* get_fd_type */
++    NULL,                          /* read */
++    NULL,                          /* write */
++    NULL,                          /* flush */
++    NULL,                          /* get_file_info */
++    NULL,                          /* get_volume_info */
+     NULL,                          /* ioctl */
++    NULL,                          /* cancel_async */
+     NULL,                          /* queue_async */
+     NULL                           /* reselect_async */
+ };
+-- 
+GitLab
+
+
+From 436b01b543ea88f22da4973f43b3f00311f87409 Mon Sep 17 00:00:00 2001
+From: Ruslan Garipov <ruslanngaripov@gmail.com>
+Date: Wed, 17 Apr 2024 15:01:28 +0500
+Subject: [PATCH 3/6] Fix initialization of the inotify_fd_ops
+
+This lists all fields of the `struct fd_ops' when object of that type --
+inotify_fd_ops in server/change.c -- is being initialized.
+
+For motivation behind this patch please read message of commit
+0bd610a1680 (Fix initialization of the handler_fd_ops, 2024-04-16).
+
+No functional changes intended.
+
+Signed-off-by: Ruslan Garipov <ruslanngaripov@gmail.com>
+---
+ server/change.c | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/server/change.c b/server/change.c
+index f773ccf8831..36c648f18b7 100644
+--- a/server/change.c
++++ b/server/change.c
+@@ -644,9 +644,14 @@ static const struct fd_ops inotify_fd_ops =
+ {
+     inotify_get_poll_events,     /* get_poll_events */
+     inotify_poll_event,          /* poll_event */
+-    NULL,                        /* flush */
+     NULL,                        /* get_fd_type */
++    NULL,                        /* read */
++    NULL,                        /* write */
++    NULL,                        /* flush */
++    NULL,                        /* get_file_info */
++    NULL,                        /* get_volume_info */
+     NULL,                        /* ioctl */
++    NULL,                        /* cancel_async */
+     NULL,                        /* queue_async */
+     NULL                         /* reselect_async */
+ };
+-- 
+GitLab
+
+
+From 44212a437dcad90f7f3eb05e949d2a42199dd62e Mon Sep 17 00:00:00 2001
+From: Ruslan Garipov <ruslanngaripov@gmail.com>
+Date: Wed, 17 Apr 2024 15:09:54 +0500
+Subject: [PATCH 4/6] Fix initialization of the thread_fd_ops
+
+This lists all fields of the `struct fd_ops' when object of that type --
+thread_fd_ops in server/thread.c -- is being initialized.
+
+For motivation behind this patch please read message of commit
+0bd610a1680 (Fix initialization of the handler_fd_ops, 2024-04-16).
+
+No functional changes intended.
+
+Signed-off-by: Ruslan Garipov <ruslanngaripov@gmail.com>
+---
+ server/thread.c | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/server/thread.c b/server/thread.c
+index 55bd63d3030..d88698092bb 100644
+--- a/server/thread.c
++++ b/server/thread.c
+@@ -207,9 +207,14 @@ static const struct fd_ops thread_fd_ops =
+ {
+     NULL,                       /* get_poll_events */
+     thread_poll_event,          /* poll_event */
+-    NULL,                       /* flush */
+     NULL,                       /* get_fd_type */
++    NULL,                       /* read */
++    NULL,                       /* write */
++    NULL,                       /* flush */
++    NULL,                       /* get_file_info */
++    NULL,                       /* get_volume_info */
+     NULL,                       /* ioctl */
++    NULL,                       /* cancel_async */
+     NULL,                       /* queue_async */
+     NULL                        /* reselect_async */
+ };
+-- 
+GitLab
+
+
+From 4369162d6f0b21f2daee89887e0a03a5933f4b55 Mon Sep 17 00:00:00 2001
+From: Ruslan Garipov <ruslanngaripov@gmail.com>
+Date: Wed, 17 Apr 2024 15:16:52 +0500
+Subject: [PATCH 5/6] Fix initialization of the process_fd_ops
+
+This lists all fields of the `struct fd_ops' when object of that type --
+process_fd_ops in server/process.c -- is being initialized.
+
+For motivation behind this patch please read message of commit
+0bd610a1680 (Fix initialization of the handler_fd_ops, 2024-04-16).
+
+No functional changes intended.
+
+Signed-off-by: Ruslan Garipov <ruslanngaripov@gmail.com>
+---
+ server/process.c | 10 +++++++---
+ 1 file changed, 7 insertions(+), 3 deletions(-)
+
+diff --git a/server/process.c b/server/process.c
+index f6d1641cb94..83c16cec17a 100644
+--- a/server/process.c
++++ b/server/process.c
+@@ -125,12 +125,16 @@ static const struct fd_ops process_fd_ops =
+ {
+     NULL,                        /* get_poll_events */
+     process_poll_event,          /* poll_event */
+-    NULL,                        /* flush */
+     NULL,                        /* get_fd_type */
++    NULL,                        /* read */
++    NULL,                        /* write */
++    NULL,                        /* flush */
++    NULL,                        /* get_file_info */
++    NULL,                        /* get_volume_info */
+     NULL,                        /* ioctl */
++    NULL,                        /* cancel_async */
+     NULL,                        /* queue_async */
+-    NULL,                        /* reselect_async */
+-    NULL                         /* cancel async */
++    NULL                         /* reselect_async */
+ };
+ 
+ /* process startup info */
+-- 
+GitLab
+
+
+From bee383d256daf444967a0837f1e8a3aa52563313 Mon Sep 17 00:00:00 2001
+From: Ruslan Garipov <ruslanngaripov@gmail.com>
+Date: Wed, 17 Apr 2024 15:22:21 +0500
+Subject: [PATCH 6/6] Fix initialization of the msg_queue_fd_ops
+
+This lists all fields of the `struct fd_ops' when object of that type --
+msg_queue_fd_ops in server/queue.c -- is being initialized.
+
+For motivation behind this patch please read message of commit
+0bd610a1680 (Fix initialization of the handler_fd_ops, 2024-04-16).
+
+No functional changes intended.
+
+Signed-off-by: Ruslan Garipov <ruslanngaripov@gmail.com>
+---
+ server/queue.c | 10 +++++++---
+ 1 file changed, 7 insertions(+), 3 deletions(-)
+
+diff --git a/server/queue.c b/server/queue.c
+index ed099b3b989..2d891f66e43 100644
+--- a/server/queue.c
++++ b/server/queue.c
+@@ -196,12 +196,16 @@ static const struct fd_ops msg_queue_fd_ops =
+ {
+     NULL,                        /* get_poll_events */
+     msg_queue_poll_event,        /* poll_event */
+-    NULL,                        /* flush */
+     NULL,                        /* get_fd_type */
++    NULL,                        /* read */
++    NULL,                        /* write */
++    NULL,                        /* flush */
++    NULL,                        /* get_file_info */
++    NULL,                        /* get_volume_info */
+     NULL,                        /* ioctl */
++    NULL,                        /* cancel_async */
+     NULL,                        /* queue_async */
+-    NULL,                        /* reselect_async */
+-    NULL                         /* cancel async */
++    NULL                         /* reselect_async */
+ };
+ 
+ 
+-- 
+GitLab
+
 
