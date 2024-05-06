@@ -919,7 +919,6 @@ index ee8bdf34b7f..d2cf9800258 100644
 -- 
 GitLab
 
-
 From d1789fbb40d74b747451c9c5d9e738c463a6aa67 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
 Date: Thu, 21 Dec 2023 11:47:00 +0100
@@ -1006,6 +1005,186 @@ index 1b9555bcfbf..25a36cb8c0c 100644
          /* clear data in case we get re-entered from user32 before the thread is truly dead */
 -- 
 GitLab
+
+From e390b67fa52b0808b71bb4c7feb08ca12a3a7444 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Gabriel=20Iv=C4=83ncescu?= <gabrielopcode@gmail.com>
+Date: Mon, 21 Sep 2020 17:27:00 +0300
+Subject: [PATCH] server: Try to retrieve the unix name on handles created from
+ file descriptors.
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Wine-Bug: https://bugs.winehq.org/show_bug.cgi?id=46070
+Signed-off-by: Gabriel Ivăncescu <gabrielopcode@gmail.com>
+---
+ server/fd.c   | 39 +++++++++++++++++++++++++++++++++++++++
+ server/file.c |  1 +
+ server/file.h |  2 ++
+ 3 files changed, 42 insertions(+)
+
+diff --git a/server/fd.c b/server/fd.c
+index 11111111111..11111111111 100644
+--- a/server/fd.c
++++ b/server/fd.c
+@@ -2312,6 +2312,45 @@ struct fd *create_anonymous_fd( const struct fd_ops *fd_user_ops, int unix_fd, s
+     return NULL;
+ }
+ 
++void set_unix_name_of_fd( struct fd *fd, const struct stat *fd_st )
++{
++#ifdef __linux__
++    static const char procfs_fmt[] = "/proc/self/fd/%d";
++
++    char path[PATH_MAX], procfs_path[sizeof(procfs_fmt) - 2 /* %d */ + 11];
++    struct stat path_st;
++    ssize_t len;
++
++    sprintf( procfs_path, procfs_fmt, fd->unix_fd );
++    len = readlink( procfs_path, path, sizeof(path) );
++    if (len == -1 || len >= sizeof(path) )
++        return;
++    path[len] = '\0';
++
++    /* Make sure it's an absolute path, has at least one hardlink, and the same inode */
++    if (path[0] != '/' || stat( path, &path_st ) || path_st.st_nlink < 1 ||
++        path_st.st_dev != fd_st->st_dev || path_st.st_ino != fd_st->st_ino)
++        return;
++
++    if (!(fd->unix_name = mem_alloc( len + 1 )))
++        return;
++    memcpy( fd->unix_name, path, len + 1 );
++
++#elif defined(F_GETPATH)
++    char path[PATH_MAX];
++    size_t size;
++
++    if (fcntl( fd->unix_fd, F_GETPATH, path ) == -1 || path[0] != '/')
++        return;
++
++    size = strlen(path) + 1;
++    if (!(fd->unix_name = mem_alloc( size )))
++        return;
++    memcpy( fd->unix_name, path, size );
++
++#endif
++}
++
+ /* retrieve the object that is using an fd */
+ void *get_fd_user( struct fd *fd )
+ {
+diff --git a/server/file.c b/server/file.c
+index 11111111111..11111111111 100644
+--- a/server/file.c
++++ b/server/file.c
+@@ -187,6 +187,7 @@ struct file *create_file_for_fd( int fd, unsigned int access, unsigned int shari
+         release_object( file );
+         return NULL;
+     }
++    set_unix_name_of_fd( file->fd, &st );
+     allow_fd_caching( file->fd );
+     return file;
+ }
+diff --git a/server/file.h b/server/file.h
+index 11111111111..11111111111 100644
+--- a/server/file.h
++++ b/server/file.h
+@@ -22,6 +22,7 @@
+ #define __WINE_SERVER_FILE_H
+ 
+ #include <sys/types.h>
++#include <sys/stat.h>
+ 
+ #include "object.h"
+ 
+@@ -85,6 +86,7 @@ extern struct fd *open_fd( struct fd *root, const char *name, struct unicode_str
+                            unsigned int sharing, unsigned int options );
+ extern struct fd *create_anonymous_fd( const struct fd_ops *fd_user_ops,
+                                        int unix_fd, struct object *user, unsigned int options );
++extern void set_unix_name_of_fd( struct fd *fd, const struct stat *fd_st );
+ extern struct fd *dup_fd_object( struct fd *orig, unsigned int access, unsigned int sharing,
+                                  unsigned int options );
+ extern struct fd *get_fd_object_for_mapping( struct fd *fd, unsigned int access, unsigned int sharing );
+-- 
+0.0.0
+
+From 36e637ec9c2e14836e316e30546c5f6936a7e249 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Fri, 31 Jul 2020 09:09:47 +0200
+Subject: [PATCH] ntdll: Use RTLD_NOLOAD to find already mapped modules.
+
+This makes it possible to detect modules that weren't unmapped from
+dlclose, and that we should not fixup again.
+---
+ dlls/ntdll/unix/loader.c | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -1142,8 +1142,10 @@ static NTSTATUS dlopen_dll( const char *so_name, UNICODE_STRING *nt_name, void *
+ {
+     void *module, *handle;
+     const IMAGE_NT_HEADERS *nt;
++    BOOL mapped = FALSE;
+ 
+-    handle = dlopen( so_name, RTLD_NOW );
++    if ((handle = dlopen( so_name, RTLD_NOW | RTLD_NOLOAD ))) mapped = TRUE;
++    else handle = dlopen( so_name, RTLD_NOW );
+     if (!handle)
+     {
+         WARN( "failed to load .so lib %s: %s\n", debugstr_a(so_name), dlerror() );
+@@ -1165,7 +1167,7 @@ static NTSTATUS dlopen_dll( const char *so_name, UNICODE_STRING *nt_name, void *
+         return STATUS_SUCCESS;
+     }
+ 
+-    if (map_so_dll( nt, module ))
++    if (!mapped && map_so_dll( nt, module ))
+     {
+         dlclose( handle );
+         return STATUS_NO_MEMORY;
+
+From: Paul Gofman <pgofman@codeweavers.com>
+Subject: [PATCH v3 1/3] server: Update system regs from set_thread_context handler only.
+Message-Id: <20210527101600.348718-1-pgofman@codeweavers.com>
+Date: Thu, 27 May 2021 13:15:58 +0300
+
+Signed-off-by: Paul Gofman <pgofman@codeweavers.com>
+---
+    Supersedes 206374-206376.
+v3:
+    - replaced patch.
+
+ server/thread.c | 5 +----
+ 1 file changed, 1 insertion(+), 4 deletions(-)
+
+diff --git a/server/thread.c b/server/thread.c
+index 11111111111..11111111111 100644
+--- a/server/thread.c
++++ b/server/thread.c
+@@ -2165,9 +2165,6 @@ DECL_HANDLER(select)
+         {
+             apc_call_t *data;
+             data_size_t size = sizeof(*data) + (ctx->regs[CTX_WOW].flags ? 2 : 1) * sizeof(context_t);
+-            unsigned int flags = system_flags & ctx->regs[CTX_NATIVE].flags;
+-
+-            if (flags) set_thread_context( current, &ctx->regs[CTX_NATIVE], flags );
+             size = min( size, get_reply_max_size() );
+             if ((data = set_reply_data_size( size )))
+             {
+@@ -2413,7 +2410,7 @@ DECL_HANDLER(set_thread_context)
+         unsigned int flags = system_flags & contexts[CTX_NATIVE].flags;
+ 
+         if (thread != current) stop_thread( thread );
+-        else if (flags) set_thread_context( thread, &contexts[CTX_NATIVE], flags );
++        if (flags) set_thread_context( thread, &contexts[CTX_NATIVE], flags );
+ 
+         if (thread->context && !get_error())
+         {
+
+-- 
+0.0.0
 
 From a2f384b71cafb619124a10471f4b2c84fe1da278 Mon Sep 17 00:00:00 2001
 From: Ruslan Garipov <ruslanngaripov@gmail.com>
@@ -1298,4 +1477,472 @@ index ed099b3b989..2d891f66e43 100644
 -- 
 GitLab
 
+From aeda480e2a0a1b83dc738c3419b3827fd70ac197 Mon Sep 17 00:00:00 2001
+From: Zhiyi Zhang <zzhang@codeweavers.com>
+Date: Sat, 25 Nov 2023 23:17:34 +0800
+Subject: [PATCH] ntdll: Fix an out-of-bounds write (Coverity).
+
+---
+ dlls/ntdll/unix/system.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/dlls/ntdll/unix/system.c b/dlls/ntdll/unix/system.c
+index a6f1382a5fa..5516831a7b7 100644
+--- a/dlls/ntdll/unix/system.c
++++ b/dlls/ntdll/unix/system.c
+@@ -874,7 +874,7 @@ static void fill_performance_core_info(void)
+ 
+         for(i = beg; i <= end; i++)
+         {
+-            if (i / 32 > performance_cores_capacity)
++            if (i / 32 >= performance_cores_capacity)
+             {
+                 p = realloc(performance_cores, performance_cores_capacity * 2 * sizeof(ULONG));
+                 if (!p) goto done;
+-- 
+GitLab
+
+From 2146a4428933b3f582ac533de3393ae9075627d8 Mon Sep 17 00:00:00 2001
+From: Zhiyi Zhang <zzhang@codeweavers.com>
+Date: Sat, 25 Nov 2023 23:00:15 +0800
+Subject: [PATCH] ntdll: Fix a memory leak (Coverity).
+
+---
+ dlls/ntdll/unix/security.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/dlls/ntdll/unix/security.c b/dlls/ntdll/unix/security.c
+index 76a5cc3f253..3f66d959373 100644
+--- a/dlls/ntdll/unix/security.c
++++ b/dlls/ntdll/unix/security.c
+@@ -87,7 +87,10 @@ NTSTATUS WINAPI NtCreateToken( HANDLE *handle, ACCESS_MASK access, OBJECT_ATTRIB
+     }
+ 
+     if (primary_group == -1)
++    {
++        free( objattr );
+         return STATUS_INVALID_PRIMARY_GROUP;
++    }
+ 
+     groups_info = malloc( groups_size );
+     if (!groups_info)
+-- 
+GitLab
+
+From c2b7453b05b74b012c2417f6953846680a6bd3fb Mon Sep 17 00:00:00 2001
+From: Zebediah Figura <z.figura12@gmail.com>
+Date: Wed, 20 Jun 2018 15:07:28 -0500
+Subject: [PATCH] HACK: user32: Remove hooks that time out.
+
+In accordance with Win7+ behaviour.
+---
+ dlls/win32u/hook.c | 19 +++++++++++++------
+ 1 file changed, 13 insertions(+), 6 deletions(-)
+
+diff --git a/dlls/win32u/hook.c b/dlls/win32u/hook.c
+index 378eda40abb..7cdd327a9f5 100644
+--- a/dlls/win32u/hook.c
++++ b/dlls/win32u/hook.c
+@@ -204,6 +204,7 @@ static LRESULT call_hook( struct win_hook_params *info, const WCHAR *module, siz
+                           size_t message_size, BOOL ansi )
+ {
+     DWORD_PTR ret = 0;
++    LRESULT lres = 0;
+ 
+     if (info->tid)
+     {
+@@ -218,20 +219,26 @@ static LRESULT call_hook( struct win_hook_params *info, const WCHAR *module, siz
+         switch(info->id)
+         {
+         case WH_KEYBOARD_LL:
+-            send_internal_message_timeout( info->pid, info->tid, WM_WINE_KEYBOARD_LL_HOOK,
+-                                           info->wparam, (LPARAM)&h_extra, SMTO_ABORTIFHUNG,
+-                                           get_ll_hook_timeout(), &ret );
++            lres = send_internal_message_timeout( info->pid, info->tid, WM_WINE_KEYBOARD_LL_HOOK,
++                                                  info->wparam, (LPARAM)&h_extra, SMTO_ABORTIFHUNG,
++                                                  get_ll_hook_timeout(), &ret );
+             break;
+         case WH_MOUSE_LL:
+-            send_internal_message_timeout( info->pid, info->tid, WM_WINE_MOUSE_LL_HOOK,
+-                                           info->wparam, (LPARAM)&h_extra, SMTO_ABORTIFHUNG,
+-                                           get_ll_hook_timeout(), &ret );
++            lres = send_internal_message_timeout( info->pid, info->tid, WM_WINE_MOUSE_LL_HOOK,
++                                                  info->wparam, (LPARAM)&h_extra, SMTO_ABORTIFHUNG,
++                                                  get_ll_hook_timeout(), &ret );
+             break;
+         default:
+             ERR("Unknown hook id %d\n", info->id);
+             assert(0);
+             break;
+         }
++
++        if (!lres && RtlGetLastWin32Error() == ERROR_TIMEOUT)
++        {
++            TRACE( "Hook %p timed out; removing it.\n", info->handle );
++            NtUserUnhookWindowsHookEx( info->handle );
++        }
+     }
+     else if (info->proc)
+     {
+
+From 8e6caf3f5e751b5202efdc455d43214d037e5a30 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Fri, 16 Jun 2023 09:58:54 +0200
+Subject: [PATCH] user32: Refresh active hook list only when needed.
+
+Instead of doing it on every get_message request.
+---
+ dlls/win32u/hook.c    | 29 ++++++++++++++++++++++++-----
+ dlls/win32u/message.c |  4 +++-
+ server/hook.c         |  8 +++++++-
+ server/protocol.def   |  8 +++++++-
+ server/queue.c        |  2 --
+ server/user.h         |  1 -
+ 6 files changed, 41 insertions(+), 11 deletions(-)
+
+diff --git a/dlls/win32u/hook.c b/dlls/win32u/hook.c
+index f37928e5836..2dadf485c0f 100644
+--- a/dlls/win32u/hook.c
++++ b/dlls/win32u/hook.c
+@@ -60,12 +60,31 @@ static const char *debugstr_hook_id( unsigned int id )
+     return hook_names[id - WH_MINHOOK];
+ }
+ 
+-BOOL is_hooked( INT id )
++/***********************************************************************
++ *      get_active_hooks
++ *
++ */
++static UINT get_active_hooks(void)
+ {
+     struct user_thread_info *thread_info = get_user_thread_info();
+ 
+-    if (!thread_info->active_hooks) return TRUE;
+-    return (thread_info->active_hooks & (1 << (id - WH_MINHOOK))) != 0;
++    if (!thread_info->active_hooks)
++    {
++        SERVER_START_REQ( get_active_hooks )
++        {
++            if (!wine_server_call( req )) thread_info->active_hooks = reply->active_hooks;
++        }
++        SERVER_END_REQ;
++    }
++
++    return thread_info->active_hooks;
++}
++
++BOOL is_hooked( INT id )
++{
++    UINT active_hooks = get_active_hooks();
++    if (!active_hooks) return TRUE;
++    return (active_hooks & (1 << (id - WH_MINHOOK))) != 0;
+ }
+ 
+ /***********************************************************************
+@@ -432,7 +451,7 @@ LRESULT call_message_hooks( INT id, INT code, WPARAM wparam, LPARAM lparam, size
+ 
+     if (!is_hooked( id ))
+     {
+-        TRACE( "skipping hook %s mask %x\n", hook_names[id-WH_MINHOOK], thread_info->active_hooks );
++        TRACE( "skipping hook %s mask %x\n", hook_names[id-WH_MINHOOK], get_active_hooks() );
+         return 0;
+     }
+ 
+@@ -571,7 +590,7 @@ void WINAPI NtUserNotifyWinEvent( DWORD event, HWND hwnd, LONG object_id, LONG c
+ 
+     if (!is_hooked( WH_WINEVENT ))
+     {
+-        TRACE( "skipping hook mask %x\n", thread_info->active_hooks );
++        TRACE( "skipping hook mask %x\n", get_active_hooks() );
+         return;
+     }
+ 
+diff --git a/dlls/win32u/message.c b/dlls/win32u/message.c
+index a7266a6b768..2f1e11f89d2 100644
+--- a/dlls/win32u/message.c
++++ b/dlls/win32u/message.c
+@@ -2787,12 +2787,14 @@ static int peek_message( MSG *msg, HWND hwnd, UINT first, UINT last, UINT flags,
+                 info.msg.pt.x    = reply->x;
+                 info.msg.pt.y    = reply->y;
+                 hw_id            = 0;
+-                thread_info->active_hooks = reply->active_hooks;
+             }
+             else buffer_size = reply->total;
+         }
+         SERVER_END_REQ;
+ 
++        /* force refreshing hooks */
++        thread_info->active_hooks = 0;
++
+         if (res)
+         {
+             free( buffer );
+diff --git a/server/hook.c b/server/hook.c
+index 5abdf39ad37..dd3657c2eac 100644
+--- a/server/hook.c
++++ b/server/hook.c
+@@ -355,7 +355,7 @@ static int is_hook_active( struct hook_table *table, int index )
+ }
+ 
+ /* get a bitmap of all active hooks for the current thread */
+-unsigned int get_active_hooks(void)
++static unsigned int get_active_hooks(void)
+ {
+     struct hook_table *table = get_queue_hooks( current );
+     struct hook_table *global_hooks = get_global_hooks( current );
+@@ -382,6 +382,12 @@ struct thread *get_first_global_hook( int id )
+     return hook->owner;
+ }
+ 
++/* get thread active hooks */
++DECL_HANDLER(get_active_hooks)
++{
++    reply->active_hooks = get_active_hooks();
++}
++
+ /* set a window hook */
+ DECL_HANDLER(set_hook)
+ {
+diff --git a/server/protocol.def b/server/protocol.def
+index 8f35a0772f4..cb54b6ebb79 100644
+--- a/server/protocol.def
++++ b/server/protocol.def
+@@ -2193,7 +2193,6 @@ enum message_type
+     int             x;         /* message x position */
+     int             y;         /* message y position */
+     unsigned int    time;      /* message time */
+-    unsigned int    active_hooks; /* active hooks bitmap */
+     data_size_t     total;     /* total size of extra data */
+     VARARG(data,message_data); /* message data for sent messages */
+ @END
+@@ -2990,6 +2989,13 @@ enum caret_state
+ };
+ 
+ 
++/* get thread active hooks */
++@REQ(get_active_hooks)
++@REPLY
++    unsigned int   active_hooks;   /* active hooks bitmap */
++@END
++
++
+ /* Set a window hook */
+ @REQ(set_hook)
+     int            id;             /* id of the hook */
+diff --git a/server/user.h b/server/user.h
+index 0ad24ba20df..c753e1799a4 100644
+--- a/server/user.h
++++ b/server/user.h
+@@ -91,7 +91,6 @@ extern void cleanup_clipboard_thread( struct thread *thread );
+ /* hook functions */
+ 
+ extern void remove_thread_hooks( struct thread *thread );
+-extern unsigned int get_active_hooks(void);
+ extern struct thread *get_first_global_hook( int id );
+ 
+ /* queue functions */
+
+
+From 74e8b85db92a4f5643115d6c7f434795d5b535e3 Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Mon, 24 Apr 2023 19:58:11 -0600
+Subject: [PATCH] HACK: server: Disable hooks that time out.
+
+An addition to "HACK: user32: Remove hooks that time out."
+
+CW-Bug-Id: #22178
+---
+ server/hook.c  | 25 ++++++++++++++++++++++++-
+ server/queue.c | 22 ++++++++++++++++++----
+ server/user.h  |  3 ++-
+ 3 files changed, 44 insertions(+), 6 deletions(-)
+
+diff --git a/server/hook.c b/server/hook.c
+index 3a89a883c3c..24eb27434db 100644
+--- a/server/hook.c
++++ b/server/hook.c
+@@ -374,16 +374,39 @@ static unsigned int get_active_hooks(void)
+ }
+ 
+ /* return the thread that owns the first global hook */
+-struct thread *get_first_global_hook( int id )
++struct thread *get_first_global_hook( int id, thread_id_t *thread_id, client_ptr_t *proc )
+ {
+     struct hook *hook;
+     struct hook_table *global_hooks = get_global_hooks( current );
+ 
+     if (!global_hooks) return NULL;
+     if (!(hook = get_first_valid_hook( global_hooks, id - WH_MINHOOK, EVENT_MIN, 0, 0, 0 ))) return NULL;
++    *thread_id = hook->owner->id;
++    *proc = hook->proc;
+     return hook->owner;
+ }
+ 
++void disable_hung_hook( struct desktop *desktop, int id, thread_id_t thread_id, client_ptr_t proc )
++{
++    struct hook_table *global_hooks = desktop->global_hooks;
++    int index = id - WH_MINHOOK;
++    struct hook *hook;
++
++    if (!global_hooks || !proc) return;
++
++    hook = get_first_hook( global_hooks, index );
++
++    while (hook)
++    {
++        if (hook->proc == proc && hook->owner->id == thread_id)
++        {
++            hook->proc = 0;
++            return;
++        }
++        hook = HOOK_ENTRY( list_next( &global_hooks->hooks[index], &hook->chain ) );
++    }
++}
++
+ /* get thread active hooks */
+ DECL_HANDLER(get_active_hooks)
+ {
+diff --git a/server/queue.c b/server/queue.c
+index fb6fe2d9478..12592241c92 100644
+--- a/server/queue.c
++++ b/server/queue.c
+@@ -68,6 +68,8 @@ struct message_result
+     void                  *data;          /* message reply data */
+     unsigned int           data_size;     /* size of message reply data */
+     struct timeout_user   *timeout;       /* result timeout */
++    thread_id_t            hook_thread_id;/* Hook owner thread id. */
++    client_ptr_t           hook_proc;     /* Hook proc address. */
+ };
+ 
+ struct message
+@@ -986,6 +988,13 @@ static void result_timeout( void *private )
+     {
+         struct message *msg = result->msg;
+ 
++        if (result->sender && result->hook_thread_id && result->hook_proc)
++        {
++            if (debug_level > 1)
++                fprintf( stderr, "disabling hung hook: tid %04x, proc %#lx\n",
++                         result->hook_thread_id, (unsigned long)result->hook_proc );
++            disable_hung_hook( result->sender->input->desktop, msg->msg, result->hook_thread_id, result->hook_proc );
++        }
+         result->msg = NULL;
+         msg->result = NULL;
+         remove_queue_message( result->receiver, msg, SEND_MESSAGE );
+@@ -997,7 +1006,8 @@ static void result_timeout( void *private )
+ /* allocate and fill a message result structure */
+ static struct message_result *alloc_message_result( struct msg_queue *send_queue,
+                                                     struct msg_queue *recv_queue,
+-                                                    struct message *msg, timeout_t timeout )
++                                                    struct message *msg, timeout_t timeout,
++                                                    thread_id_t hook_thread_id, client_ptr_t hook_proc)
+ {
+     struct message_result *result = mem_alloc( sizeof(*result) );
+     if (result)
+@@ -1012,6 +1022,8 @@ static struct message_result *alloc_message_result( struct msg_queue *send_queue
+         result->hardware_msg = NULL;
+         result->desktop      = NULL;
+         result->callback_msg = NULL;
++        result->hook_thread_id = hook_thread_id;
++        result->hook_proc = hook_proc;
+ 
+         if (msg->type == MSG_CALLBACK)
+         {
+@@ -2001,8 +2013,10 @@ static int send_hook_ll_message( struct desktop *desktop, struct message *hardwa
+     struct message *msg;
+     timeout_t timeout = 2000 * -10000;  /* FIXME: load from registry */
+     int id = (input->type == INPUT_MOUSE) ? WH_MOUSE_LL : WH_KEYBOARD_LL;
++    thread_id_t hook_thread_id;
++    client_ptr_t hook_proc;
+ 
+-    if (!(hook_thread = get_first_global_hook( id ))) return 0;
++    if (!(hook_thread = get_first_global_hook( id, &hook_thread_id, &hook_proc ))) return 0;
+     if (!(queue = hook_thread->queue)) return 0;
+     if (is_queue_hung( queue )) return 0;
+ 
+@@ -2027,7 +2041,7 @@ static int send_hook_ll_message( struct desktop *desktop, struct message *hardwa
+     else msg->lparam = input->mouse.data << 16;
+ 
+     if (!(msg->data = memdup( hardware_msg->data, hardware_msg->data_size )) ||
+-        !(msg->result = alloc_message_result( sender, queue, msg, timeout )))
++        !(msg->result = alloc_message_result( sender, queue, msg, timeout, hook_thread_id, hook_proc )))
+     {
+         free_message( msg );
+         return 0;
+@@ -3031,7 +3045,7 @@ DECL_HANDLER(send_message)
+         case MSG_ASCII:
+         case MSG_UNICODE:
+         case MSG_CALLBACK:
+-            if (!(msg->result = alloc_message_result( send_queue, recv_queue, msg, req->timeout )))
++            if (!(msg->result = alloc_message_result( send_queue, recv_queue, msg, req->timeout, 0, 0 )))
+             {
+                 free_message( msg );
+                 break;
+diff --git a/server/user.h b/server/user.h
+index 26d22a00240..a6ef5fc1f83 100644
+--- a/server/user.h
++++ b/server/user.h
+@@ -92,7 +92,8 @@ extern void cleanup_clipboard_thread( struct thread *thread );
+ /* hook functions */
+ 
+ extern void remove_thread_hooks( struct thread *thread );
+-extern struct thread *get_first_global_hook( int id );
++extern struct thread *get_first_global_hook( int id, thread_id_t *thread_id, client_ptr_t *proc );
++extern void disable_hung_hook( struct desktop *desktop, int id, thread_id_t thread_id, client_ptr_t proc );
+ 
+ /* queue functions */
+ 
+From 5b833c83beadcad2ace5f27e95554c164f6f7c86 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Sat, 20 Jan 2024 16:05:17 +0100
+Subject: [PATCH] server: Stop waiting on LL-hooks for non-injected input.
+
+---
+ server/queue.c | 8 +++++---
+ 1 file changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/server/queue.c b/server/queue.c
+index 0b9430c5f4d..91284f1da17 100644
+--- a/server/queue.c
++++ b/server/queue.c
+@@ -2871,7 +2871,8 @@ DECL_HANDLER(send_hardware_message)
+ {
+     struct desktop *desktop;
+     unsigned int origin = (req->flags & SEND_HWMSG_INJECTED ? IMO_INJECTED : IMO_HARDWARE);
+-    struct msg_queue *sender = get_current_queue();
++    struct msg_queue *sender = req->flags & SEND_HWMSG_INJECTED ? get_current_queue() : NULL;
++    int wait = 0;
+ 
+     if (!(desktop = get_hardware_input_desktop( req->win ))) return;
+     if ((origin == IMO_INJECTED && desktop != current->queue->input->desktop) ||
+@@ -2756,10 +2781,10 @@ DECL_HANDLER(send_hardware_message)
+     switch (req->input.type)
+     {
+     case INPUT_MOUSE:
+-        reply->wait = queue_mouse_message( desktop, req->win, &req->input, origin, sender, req->flags );
++        wait = queue_mouse_message( desktop, req->win, &req->input, origin, sender, req->flags );
+         break;
+     case INPUT_KEYBOARD:
+-        reply->wait = queue_keyboard_message( desktop, req->win, &req->input, origin, sender, req->flags );
++        wait = queue_keyboard_message( desktop, req->win, &req->input, origin, sender, req->flags );
+         break;
+     case INPUT_HARDWARE:
+         queue_custom_hardware_message( desktop, req->win, origin, &req->input );
+@@ -2900,6 +2901,7 @@ DECL_HANDLER(send_hardware_message)
+         set_error( STATUS_INVALID_PARAMETER );
+     }
+ 
++    reply->wait = sender ? wait : 0;
+     reply->new_x = desktop->cursor.x;
+     reply->new_y = desktop->cursor.y;
+     release_object( desktop );
+@@ -2795,8 +2821,6 @@ DECL_HANDLER(get_message)
+     user_handle_t get_win = get_user_full_handle( req->get_win );
+     unsigned int filter = req->flags >> 16;
+ 
+-    reply->active_hooks = get_active_hooks();
+-
+     /* first check for internal messages */
+     if (queue && get_queued_message( queue, 0, SEND_MESSAGE, 0, 0x80000000, 0xffffffff, PM_REMOVE, reply ))
+         return;
 
