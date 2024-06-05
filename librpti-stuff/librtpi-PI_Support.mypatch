@@ -381,16 +381,16 @@ diff -Npur a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
  
  static const UINT page_shift = 12;
  static const UINT_PTR page_mask = 0xfff;
-@@ -248,7 +248,7 @@ static pthread_once_t membarrier_init_on
- #endif
- #if defined(__i386__) || defined(__x86_64__)
- static void *dontneed_page;
--static pthread_mutex_t dontneed_page_mutex = PTHREAD_MUTEX_INITIALIZER;
-+static pi_mutex_t dontneed_page_mutex = PI_MUTEX_INIT(0);
- #endif
+@@ -247,7 +247,7 @@ static pthread_once_t membarrier_init_on
  #endif
  
-@@ -3322,12 +3322,8 @@ void virtual_init(void)
+ static void *dummy_page;
+-static pthread_mutex_t dummy_page_mutex = PTHREAD_MUTEX_INITIALIZER;
++static pi_mutex_t dummy_page_mutex = PI_MUTEX_INIT(0);
+ 
+ 
+ static inline BOOL is_beyond_limit( const void *addr, size_t size, const void *limit )
+@@ -3319,12 +3319,8 @@ void virtual_init(void)
      const char *preload = getenv( "WINEPRELOADRESERVE" );
      size_t size;
      int i;
@@ -404,44 +404,22 @@ diff -Npur a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
  
      if (preload_info && *preload_info)
          for (i = 0; (*preload_info)[i].size; i++)
-@@ -6412,7 +6407,7 @@ static int try_madvise( void )
-     int ret = 0;
+@@ -6426,7 +6422,7 @@ static BOOL try_mprotect( void )
+     BOOL success = FALSE;
      char *mem;
  
--    pthread_mutex_lock(&dontneed_page_mutex);
-+    pi_mutex_lock(&dontneed_page_mutex);
-     /* Credits to Avi Kivity (scylladb) and Aliaksei Kandratsenka (gperftools) for this trick,
-      * see https://github.com/scylladb/seastar/commit/77a58e4dc020233f66fccb8d9e8f7a8b7f9210c4 */
-     mem = dontneed_page;
-@@ -6431,7 +6426,7 @@ static int try_madvise( void )
-     *mem = 3;
-     ret = !madvise( mem, page_size, MADV_DONTNEED );
- failed:
--    pthread_mutex_unlock(&dontneed_page_mutex);
-+    pi_mutex_unlock(&dontneed_page_mutex);
-     return ret;
- }
- #else
-@@ -6441,10 +6436,10 @@ static int try_madvise( void ) { return
- 
- static NTSTATUS do_apc_memorybarrier( void )
- {
--    static pthread_mutex_t apc_memorybarrier_mutex = PTHREAD_MUTEX_INITIALIZER;
-+    static pi_mutex_t apc_memorybarrier_mutex = PI_MUTEX_INIT(0);
-     NTSTATUS status;
- 
--    pthread_mutex_lock( &apc_memorybarrier_mutex );
-+    pi_mutex_lock( &apc_memorybarrier_mutex );
- 
-     do
+-    pthread_mutex_lock(&dummy_page_mutex);
++    pi_mutex_lock(&dummy_page_mutex);
+     mem = dummy_page;
+     if (!mem)
      {
-@@ -6465,7 +6460,7 @@ static NTSTATUS do_apc_memorybarrier( vo
-     }
-     while (status);
- 
--    pthread_mutex_unlock( &apc_memorybarrier_mutex );
-+    pi_mutex_unlock( &apc_memorybarrier_mutex );
-     return STATUS_SUCCESS;
+@@ -6455,7 +6451,7 @@ static BOOL try_mprotect( void )
+         FIXME( "memory barrier may not work on this platform\n" );
+ #endif
+ failed:
+-    pthread_mutex_unlock(&dummy_page_mutex);
++    pi_mutex_unlock(&dummy_page_mutex);
+     return success;
  }
  
 diff -Npur a/dlls/opengl32/unix_wgl.c b/dlls/opengl32/unix_wgl.c

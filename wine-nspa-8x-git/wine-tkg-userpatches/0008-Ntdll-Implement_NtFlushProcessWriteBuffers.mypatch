@@ -1,515 +1,105 @@
-From 9b0b37954a057df41de2662b2a953b559f5c0ee3 Mon Sep 17 00:00:00 2001
+From c1720fc3ab35df2aa9c02f14a3214a4cc9370fdd Mon Sep 17 00:00:00 2001
 From: Torge Matthies <tmatthies@codeweavers.com>
-Date: Wed, 7 Sep 2022 16:10:53 +0200
-Subject: [PATCH 1/5] ntdll: Implement NtFlushProcessWriteBuffers.
-
-Based on a patch by Jinoh Kang from February 2022 [1]. The following
-description is copied from said patch:
-
-NtFlushProcessWriteBuffers is the NT equivalent of Linux membarrier()
-system call.  The .NET Framework garbage collector uses it to
-synchronize with other threads, and thus is required to avoid silent
-memory corruption.
-
-[1] https://www.winehq.org/mailman3/hyperkitty/list/wine-devel@winehq.org/message/F33GVEUQ4MXD6IXOEG56DNVVXC2D4AM2/
----
- dlls/ntdll/unix/server.c  |   6 ++
- dlls/ntdll/unix/virtual.c |  27 ++++++++-
- server/protocol.def       |  19 +++++-
- server/thread.c           | 119 ++++++++++++++++++++++++++++++++++++++
- server/thread.h           |   1 +
- 5 files changed, 168 insertions(+), 4 deletions(-)
-
-diff --git a/dlls/ntdll/unix/server.c b/dlls/ntdll/unix/server.c
-index 11111111111..11111111111 100644
---- a/dlls/ntdll/unix/server.c
-+++ b/dlls/ntdll/unix/server.c
-@@ -734,6 +734,12 @@ static void invoke_system_apc( const apc_call_t *call, apc_result_t *result, BOO
-         if (!self) NtClose( wine_server_ptr_handle(call->dup_handle.dst_process) );
-         break;
-     }
-+    case APC_MEMORY_BARRIER:
-+    {
-+        MemoryBarrier();
-+        result->type = call->type;
-+        break;
-+    }
-     default:
-         server_protocol_error( "get_apc_request: bad type %d\n", call->type );
-         break;
-diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
-index 11111111111..11111111111 100644
---- a/dlls/ntdll/unix/virtual.c
-+++ b/dlls/ntdll/unix/virtual.c
-@@ -6350,8 +6350,31 @@ NTSTATUS WINAPI NtFlushInstructionCache( HANDLE handle, const void *addr, SIZE_T
-  */
- NTSTATUS WINAPI NtFlushProcessWriteBuffers(void)
- {
--    static int once = 0;
--    if (!once++) FIXME( "stub\n" );
-+    static pthread_mutex_t apc_memorybarrier_mutex = PTHREAD_MUTEX_INITIALIZER;
-+    NTSTATUS status;
-+
-+    pthread_mutex_lock( &apc_memorybarrier_mutex );
-+
-+    do
-+    {
-+        SERVER_START_REQ( flush_process_write_buffers )
-+        {
-+            status = wine_server_call( req );
-+        }
-+        SERVER_END_REQ;
-+    }
-+    while (status);
-+
-+    do
-+    {
-+        select_op_t select_op;
-+        select_op.membarrier.op = SELECT_MEMBARRIER;
-+        status = server_select( &select_op, sizeof(select_op.membarrier), SELECT_INTERRUPTIBLE,
-+                                TIMEOUT_INFINITE, NULL, NULL );
-+    }
-+    while (status);
-+
-+    pthread_mutex_unlock( &apc_memorybarrier_mutex );
-     return STATUS_SUCCESS;
- }
- 
-diff --git a/server/protocol.def b/server/protocol.def
-index 11111111111..11111111111 100644
---- a/server/protocol.def
-+++ b/server/protocol.def
-@@ -463,7 +463,8 @@ enum select_op
-     SELECT_WAIT_ALL,
-     SELECT_SIGNAL_AND_WAIT,
-     SELECT_KEYED_EVENT_WAIT,
--    SELECT_KEYED_EVENT_RELEASE
-+    SELECT_KEYED_EVENT_RELEASE,
-+    SELECT_MEMBARRIER
- };
- 
- typedef union
-@@ -487,6 +488,10 @@ typedef union
-         obj_handle_t    handle;
-         client_ptr_t    key;
-     } keyed_event;
-+    struct
-+    {
-+        enum select_op  op;      /* SELECT_MEMBARRIER */
-+    } membarrier;
- } select_op_t;
- 
- enum apc_type
-@@ -506,7 +511,8 @@ enum apc_type
-     APC_MAP_VIEW_EX,
-     APC_UNMAP_VIEW,
-     APC_CREATE_THREAD,
--    APC_DUP_HANDLE
-+    APC_DUP_HANDLE,
-+    APC_MEMORY_BARRIER
- };
- 
- typedef struct
-@@ -641,6 +647,10 @@ typedef union
-         unsigned int     attributes;   /* object attributes */
-         unsigned int     options;      /* duplicate options */
-     } dup_handle;
-+    struct
-+    {
-+        enum apc_type    type;      /* APC_MEMORY_BARRIER */
-+    } memory_barrier;
- } apc_call_t;
- 
- typedef union
-@@ -1763,6 +1773,11 @@ enum server_fd_type
- @END
- 
- 
-+/* Issue a memory barrier on other threads in the same process */
-+@REQ(flush_process_write_buffers)
-+@END
-+
-+
- struct thread_info
- {
-     timeout_t       start_time;
-diff --git a/server/thread.c b/server/thread.c
-index 11111111111..11111111111 100644
---- a/server/thread.c
-+++ b/server/thread.c
-@@ -196,6 +196,44 @@ static const struct object_ops thread_apc_ops =
-     thread_apc_destroy          /* destroy */
- };
- 
-+/* process-wide memory barriers */
-+
-+struct memory_barrier
-+{
-+    struct object   obj;      /* object header */
-+};
-+
-+static void dump_memory_barrier( struct object *obj, int verbose );
-+static int memory_barrier_signaled( struct object *obj, struct wait_queue_entry *entry );
-+
-+static const struct object_ops memory_barrier_ops =
-+{
-+    sizeof(struct memory_barrier),      /* size */
-+    &no_type,                           /* type */
-+    dump_memory_barrier,                /* dump */
-+    add_queue,                          /* add_queue */
-+    remove_queue,                       /* remove_queue */
-+    memory_barrier_signaled,            /* signaled */
-+    NULL,                               /* get_esync_fd */
-+    NULL,                               /* get_fsync_idx */
-+    no_satisfied,                       /* satisfied */
-+    no_signal,                          /* signal */
-+    no_get_fd,                          /* get_fd */
-+    default_map_access,                 /* map_access */
-+    default_get_sd,                     /* get_sd */
-+    default_set_sd,                     /* set_sd */
-+    no_get_full_name,                   /* get_full_name */
-+    no_lookup_name,                     /* lookup_name */
-+    no_link_name,                       /* link_name */
-+    NULL,                               /* unlink_name */
-+    no_open_file,                       /* open_file */
-+    no_kernel_obj_list,                 /* get_kernel_obj_list */
-+    no_close_handle,                    /* close_handle */
-+    no_destroy                          /* destroy */
-+};
-+
-+struct memory_barrier *memory_barrier_obj;
-+
- 
- /* thread CPU context */
- 
-@@ -285,6 +323,7 @@ static inline void init_thread_structure
-     thread->desc            = NULL;
-     thread->desc_len        = 0;
-     thread->exit_poll       = NULL;
-+    thread->mb_apcs_pending = 0;
- 
-     thread->creation_time = current_time;
-     thread->exit_time     = 0;
-@@ -461,6 +500,11 @@ struct thread *create_thread( int fd, struct process *process, const struct secu
-     struct thread *thread;
-     int request_pipe[2];
- 
-+    if (memory_barrier_obj)
-+        grab_object( &memory_barrier_obj->obj );
-+    else if (!(memory_barrier_obj = alloc_object( &memory_barrier_ops )))
-+        return NULL;
-+
-     if (fd == -1)
-     {
-         if (pipe( request_pipe ) == -1)
-@@ -634,12 +678,14 @@ static void cleanup_thread( struct thread *thread )
-     thread->desktop = 0;
-     thread->desc = NULL;
-     thread->desc_len = 0;
-+    thread->mb_apcs_pending = 0;
- }
- 
- /* destroy a thread when its refcount is 0 */
- static void destroy_thread( struct object *obj )
- {
-     struct thread *thread = (struct thread *)obj;
-+    struct memory_barrier *mb = memory_barrier_obj;
-     assert( obj->ops == &thread_ops );
- 
-     list_remove( &thread->entry );
-@@ -507,6 +553,9 @@ static void destroy_thread( struct objec
-     if (thread->exit_poll) remove_timeout_user( thread->exit_poll );
-     if (thread->id) free_ptid( thread->id );
-     if (thread->token) release_object( thread->token );
-+    if (mb->obj.refcount == 1)
-+        memory_barrier_obj = NULL;
-+    release_object( &mb->obj );
- 
-     if (do_esync())
-         close( thread->esync_fd );
-@@ -741,6 +790,18 @@ static struct thread_apc *create_apc( struct object *owner, const apc_call_t *ca
-     return apc;
- }
- 
-+static void dump_memory_barrier( struct object *obj, int verbose )
-+{
-+    assert( obj->ops == &memory_barrier_ops );
-+    fprintf( stderr, "Memory barrier\n" );
-+}
-+
-+static int memory_barrier_signaled( struct object *obj, struct wait_queue_entry *entry )
-+{
-+    struct thread *thread = entry->wait->thread;
-+    return !thread->mb_apcs_pending;
-+}
-+
- /* get a thread pointer from a thread id (and increment the refcount) */
- struct thread *get_thread_from_id( thread_id_t id )
- {
-@@ -1443,6 +1504,13 @@ static int select_on( const select_op_t *select_op, data_size_t op_size, client_
-         current->wait->key = select_op->keyed_event.key;
-         break;
- 
-+    case SELECT_MEMBARRIER:
-+        object = &memory_barrier_obj->obj;
-+        if (!object) return 1;
-+        ret = wait_on( select_op, 1, &object, flags, when );
-+        if (!ret) return 1;
-+        break;
-+
-     default:
-         set_error( STATUS_INVALID_PARAMETER );
-         return 1;
-@@ -1596,6 +1664,16 @@ int thread_queue_apc( struct process *process, struct thread *thread, struct obj
-     return ret;
- }
- 
-+static void finish_membarrier_apc( struct thread_apc *apc )
-+{
-+    struct thread *thread = (struct thread *)apc->owner;
-+
-+    assert( thread );
-+    assert( thread->mb_apcs_pending > 0 );
-+    if (--thread->mb_apcs_pending)
-+        wake_up( &memory_barrier_obj->obj, 1 );
-+}
-+
- /* cancel the async procedure call owned by a specific object */
- void thread_cancel_apc( struct thread *thread, struct object *owner, enum apc_type type )
- {
-@@ -1607,6 +1685,8 @@ void thread_cancel_apc( struct thread *thread, struct object *owner, enum apc_ty
-         if (apc->owner != owner) continue;
-         list_remove( &apc->entry );
-         apc->executed = 1;
-+        if (apc->call.type == APC_MEMORY_BARRIER)
-+            finish_membarrier_apc( apc );
-         wake_up( &apc->obj, 0 );
-         release_object( apc );
-         if (list_empty( &thread->user_apc ) && thread->fast_alert_event)
-@@ -1649,6 +1729,8 @@ static void clear_apc_queue( struct list *queue )
-         struct thread_apc *apc = LIST_ENTRY( ptr, struct thread_apc, entry );
-         list_remove( &apc->entry );
-         apc->executed = 1;
-+        if (apc->call.type == APC_MEMORY_BARRIER)
-+            finish_membarrier_apc( apc );
-         wake_up( &apc->obj, 0 );
-         release_object( apc );
-     }
-@@ -2130,6 +2212,8 @@ DECL_HANDLER(select)
-             apc->result.create_thread.handle = handle;
-             clear_error();  /* ignore errors from the above calls */
-         }
-+        if (apc->call.type == APC_MEMORY_BARRIER)   /* wake up caller if membarriers done */
-+            finish_membarrier_apc( apc );
-         wake_up( &apc->obj, 0 );
-         close_handle( current->process, req->prev_apc );
-         release_object( apc );
-@@ -2153,6 +2237,8 @@ DECL_HANDLER(select)
-         else
-         {
-             apc->executed = 1;
-+            if (apc->call.type == APC_MEMORY_BARRIER)
-+                finish_membarrier_apc( apc );
-             wake_up( &apc->obj, 0 );
-         }
-         release_object( apc );
-@@ -2513,3 +2599,36 @@ DECL_HANDLER(get_fast_alert_event)
-     if (current->fast_alert_event)
-         reply->handle = alloc_handle( current->process, current->fast_alert_event, SYNCHRONIZE, 0 );
- }
-+
-+DECL_HANDLER(flush_process_write_buffers)
-+{
-+    struct process *process = current->process;
-+    struct thread *thread;
-+    apc_call_t call;
-+
-+    assert( memory_barrier_obj );
-+
-+    memset( &call, 0, sizeof(call) );
-+    call.memory_barrier.type = APC_MEMORY_BARRIER;
-+
-+    LIST_FOR_EACH_ENTRY( thread, &process->thread_list, struct thread, proc_entry )
-+    {
-+        struct thread_apc *apc;
-+        int success;
-+
-+        if (thread == current || thread->state == TERMINATED) continue;
-+
-+        if (!(apc = create_apc( &current->obj, &call ))) break;
-+
-+        if ((success = queue_apc( NULL, thread, apc )))
-+            thread->mb_apcs_pending++;
-+
-+        release_object( apc );
-+
-+        if (!success)
-+        {
-+            set_error( STATUS_UNSUCCESSFUL );
-+            break;
-+        }
-+    }
-+}
-diff --git a/server/thread.h b/server/thread.h
-index 11111111111..11111111111 100644
---- a/server/thread.h
-+++ b/server/thread.h
-@@ -99,6 +99,7 @@ struct thread
-     data_size_t            desc_len;      /* thread description length in bytes */
-     WCHAR                 *desc;          /* thread description string */
-     struct timeout_user   *exit_poll;     /* poll if the thread/process has exited already */
-+    int                    mb_apcs_pending; /* number of APCs left for the current memory barrier */
- };
- 
- extern struct thread *current;
-
-
-From 1c2c89b95206e6fec4d85bae849467fecf72a386 Mon Sep 17 00:00:00 2001
-From: Torge Matthies <tmatthies@codeweavers.com>
-Date: Wed, 7 Sep 2022 16:10:53 +0200
-Subject: [PATCH 2/5] ntdll: Make server_select a memory barrier.
-
----
- dlls/ntdll/unix/server.c | 3 +++
- server/thread.c          | 2 +-
- 2 files changed, 4 insertions(+), 1 deletion(-)
-
-diff --git a/dlls/ntdll/unix/server.c b/dlls/ntdll/unix/server.c
-index 11111111111..11111111111 100644
---- a/dlls/ntdll/unix/server.c
-+++ b/dlls/ntdll/unix/server.c
-@@ -767,6 +767,9 @@ unsigned int server_select( const select_op_t *select_op, data_size_t size, UINT
-         context_t  context[2];
-     } reply_data;
- 
-+    /* ensure writes so far are visible to other threads */
-+    MemoryBarrier();
-+
-     memset( &result, 0, sizeof(result) );
- 
-     do
-diff --git a/server/thread.c b/server/thread.c
-index 11111111111..11111111111 100644
---- a/server/thread.c
-+++ b/server/thread.c
-@@ -2616,7 +2616,7 @@ DECL_HANDLER(flush_process_write_buffers)
-         struct thread_apc *apc;
-         int success;
- 
--        if (thread == current || thread->state == TERMINATED) continue;
-+        if (thread == current || thread->state == TERMINATED || thread->wait) continue;
- 
-         if (!(apc = create_apc( &current->obj, &call ))) break;
- 
-
-
-From bdafce376cd69e42a106c56a08d1decf6889b173 Mon Sep 17 00:00:00 2001
-From: Torge Matthies <tmatthies@codeweavers.com>
-Date: Wed, 7 Sep 2022 16:10:53 +0200
-Subject: [PATCH 3/5] ntdll: Add MADV_DONTNEED-based fast path for
+Date: Tue, 20 Feb 2024 16:45:49 +0100
+Subject: [PATCH 1/4] ntdll: Add mprotect-based implementation of
  NtFlushProcessWriteBuffers.
 
-Credits to Avi Kivity (scylladb) and Aliaksei Kandratsenka (gperftools) for this trick, see [1].
-
-[1] https://github.com/scylladb/seastar/commit/77a58e4dc020233f66fccb8d9e8f7a8b7f9210c4
 ---
- dlls/ntdll/unix/virtual.c | 54 ++++++++++++++++++++++++++++++++++++---
- 1 file changed, 50 insertions(+), 4 deletions(-)
+ dlls/ntdll/unix/virtual.c | 51 +++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 49 insertions(+), 2 deletions(-)
 
 diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
-index 11111111111..11111111111 100644
+index 2b6ce543531..219a0339933 100644
 --- a/dlls/ntdll/unix/virtual.c
 +++ b/dlls/ntdll/unix/virtual.c
-@@ -230,6 +230,11 @@ struct range_entry
+@@ -219,6 +219,9 @@ struct range_entry
  static struct range_entry *free_ranges;
  static struct range_entry *free_ranges_end;
  
-+#if defined(__linux__) && (defined(__i386__) || defined(__x86_64__))
-+static void *dontneed_page;
-+static pthread_mutex_t dontneed_page_mutex = PTHREAD_MUTEX_INITIALIZER;
-+#endif
++static void *dummy_page;
++static pthread_mutex_t dummy_page_mutex = PTHREAD_MUTEX_INITIALIZER;
 +
  
  static inline BOOL is_beyond_limit( const void *addr, size_t size, const void *limit )
  {
-@@ -6345,10 +6350,40 @@ NTSTATUS WINAPI NtFlushInstructionCache( HANDLE handle, const void *addr, SIZE_T
+@@ -6073,14 +6076,58 @@ NTSTATUS WINAPI NtFlushInstructionCache( HANDLE handle, const void *addr, SIZE_T
  }
  
  
--/**********************************************************************
-- *           NtFlushProcessWriteBuffers  (NTDLL.@)
-- */
--NTSTATUS WINAPI NtFlushProcessWriteBuffers(void)
-+#if defined(__linux__) && (defined(__i386__) || defined(__x86_64__))
-+static int try_madvise( void )
++static BOOL try_mprotect( void )
 +{
-+    int ret = 0;
++#if !defined(__i386__) && !defined(__x86_64__)
++    static int once = 0;
++#endif
++    BOOL success = FALSE;
 +    char *mem;
 +
-+    pthread_mutex_lock(&dontneed_page_mutex);
-+    /* Credits to Avi Kivity (scylladb) and Aliaksei Kandratsenka (gperftools) for this trick,
-+     * see https://github.com/scylladb/seastar/commit/77a58e4dc020233f66fccb8d9e8f7a8b7f9210c4 */
-+    mem = dontneed_page;
++    pthread_mutex_lock(&dummy_page_mutex);
++    mem = dummy_page;
 +    if (!mem)
 +    {
++        /* Allocate one page of memory that we can call mprotect() on */
 +        mem = anon_mmap_alloc( page_size, PROT_READ | PROT_WRITE );
 +        if (mem == MAP_FAILED)
 +            goto failed;
++        /* Lock page into memory so that it is not unmapped between the calls to mprotect() below */
 +        if (mlock( mem, page_size ))
-+        {
-+            munmap( mem, page_size );
 +            goto failed;
-+        }
-+        dontneed_page = mem;
++        dummy_page = mem;
 +    }
-+    *mem = 3;
-+    ret = !madvise( mem, page_size, MADV_DONTNEED );
-+failed:
-+    pthread_mutex_unlock(&dontneed_page_mutex);
-+    return ret;
-+}
-+#else
-+static int try_madvise( void ) { return 0; }
++    /* Make dummy page writable */
++    success = !mprotect( mem, page_size, PROT_READ | PROT_WRITE );
++    if (!success)
++        goto failed;
++    /* Make the page dirty to prevent the kernel from skipping the global TLB flush */
++    InterlockedIncrement((volatile LONG*)mem);
++    /* Change the page protection to PROT_NONE to force the kernel to send an IPI to all threads of this process,
++       which has the side effect of executing a memory barrier in those threads */
++    success = !mprotect( mem, page_size, PROT_NONE );
++#if !defined(__i386__) && !defined(__x86_64__)
++    /* Some ARMv8 processors can broadcast TLB invalidations using the TLBI instruction,
++       the madvise trick does not work on those. Print a fixme on all non-x86 architectures. */
++    if (success && !once++)
++        FIXME( "memory barrier may not work on this platform\n" );
 +#endif
-+
-+
-+static NTSTATUS do_apc_memorybarrier( void )
- {
-     static pthread_mutex_t apc_memorybarrier_mutex = PTHREAD_MUTEX_INITIALIZER;
-     NTSTATUS status;
-@@ -6379,6 +6414,17 @@ NTSTATUS WINAPI NtFlushProcessWriteBuffers(void)
- }
- 
- 
-+/**********************************************************************
-+ *           NtFlushProcessWriteBuffers  (NTDLL.@)
-+ */
-+NTSTATUS WINAPI NtFlushProcessWriteBuffers(void)
-+{
-+    if (try_madvise())
-+        return;
-+    return do_apc_memorybarrier();
++failed:
++    pthread_mutex_unlock(&dummy_page_mutex);
++    return success;
 +}
 +
 +
  /**********************************************************************
-  *           NtCreatePagingFile  (NTDLL.@)
+  *           NtFlushProcessWriteBuffers  (NTDLL.@)
   */
+ NTSTATUS WINAPI NtFlushProcessWriteBuffers(void)
+ {
+     static int once = 0;
+-    if (!once++) FIXME( "stub\n" );
+-    return STATUS_SUCCESS;
++    if (try_mprotect())
++        return STATUS_SUCCESS;
++    if (!once++) FIXME( "no implementation available on this platform\n" );
++    return STATUS_NOT_IMPLEMENTED;
+ }
+ 
+ 
+-- 
+GitLab
 
 
-From ceee6622d2ca31187c1d9d29dc1f591f7be8f734 Mon Sep 17 00:00:00 2001
+From 5014d210649a65e6e46c1dd3363e65d1a304eb5f Mon Sep 17 00:00:00 2001
 From: Torge Matthies <tmatthies@codeweavers.com>
-Date: Wed, 7 Sep 2022 16:10:53 +0200
-Subject: [PATCH 4/5] ntdll: Add sys_membarrier-based fast path to
+Date: Tue, 20 Feb 2024 16:45:49 +0100
+Subject: [PATCH 2/4] ntdll: Add sys_membarrier-based implementation of
  NtFlushProcessWriteBuffers.
 
 Uses the MEMBARRIER_CMD_PRIVATE_EXPEDITED membarrier command introduced in Linux 4.14.
 ---
- dlls/ntdll/unix/virtual.c | 49 ++++++++++++++++++++++++++++++++++++++-
- 1 file changed, 48 insertions(+), 1 deletion(-)
+ dlls/ntdll/unix/virtual.c | 47 +++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 47 insertions(+)
 
 diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
-index 11111111111..11111111111 100644
+index 219a0339933..8c53ce00e9f 100644
 --- a/dlls/ntdll/unix/virtual.c
 +++ b/dlls/ntdll/unix/virtual.c
 @@ -39,6 +39,9 @@
@@ -522,39 +112,32 @@ index 11111111111..11111111111 100644
  #ifdef HAVE_SYS_SYSCTL_H
  # include <sys/sysctl.h>
  #endif
-@@ -230,10 +233,16 @@ struct range_entry
+@@ -219,6 +222,11 @@ struct range_entry
  static struct range_entry *free_ranges;
  static struct range_entry *free_ranges_end;
  
--#if defined(__linux__) && (defined(__i386__) || defined(__x86_64__))
-+#ifdef __linux__
-+#ifdef __NR_membarrier
++#if defined(__linux__) && defined(__NR_membarrier)
 +static BOOL membarrier_exp_available;
 +static pthread_once_t membarrier_init_once = PTHREAD_ONCE_INIT;
 +#endif
-+#if defined(__i386__) || defined(__x86_64__)
- static void *dontneed_page;
- static pthread_mutex_t dontneed_page_mutex = PTHREAD_MUTEX_INITIALIZER;
- #endif
-+#endif
++
+ static void *dummy_page;
+ static pthread_mutex_t dummy_page_mutex = PTHREAD_MUTEX_INITIALIZER;
  
- 
- static inline BOOL is_beyond_limit( const void *addr, size_t size, const void *limit )
-@@ -6350,6 +6359,42 @@ NTSTATUS WINAPI NtFlushInstructionCache( HANDLE handle, const void *addr, SIZE_T
+@@ -6076,6 +6084,43 @@ NTSTATUS WINAPI NtFlushInstructionCache( HANDLE handle, const void *addr, SIZE_T
  }
  
  
 +#if defined(__linux__) && defined(__NR_membarrier)
++
 +#define MEMBARRIER_CMD_QUERY                        0x00
 +#define MEMBARRIER_CMD_PRIVATE_EXPEDITED            0x08
 +#define MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED   0x10
-+
 +
 +static int membarrier( int cmd, unsigned int flags, int cpu_id )
 +{
 +    return syscall( __NR_membarrier, cmd, flags, cpu_id );
 +}
-+
 +
 +static void membarrier_init( void )
 +{
@@ -567,45 +150,49 @@ index 11111111111..11111111111 100644
 +        membarrier_exp_available = !membarrier( MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED, 0, 0 );
 +}
 +
-+
-+static int try_exp_membarrier( void )
++static BOOL try_exp_membarrier( void )
 +{
 +    pthread_once(&membarrier_init_once, membarrier_init);
 +    if (!membarrier_exp_available)
-+        return 0;
++        return FALSE;
 +    return !membarrier( MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0, 0 );
 +}
-+#else
-+static int try_exp_membarrier( void ) { return 0; }
-+#endif
++
++#else /* defined(__linux__) && defined(__NR_membarrier) */
++
++static BOOL try_exp_membarrier( void ) { return 0; }
++
++#endif /* defined(__linux__) && defined(__NR_membarrier) */
 +
 +
- #if defined(__linux__) && (defined(__i386__) || defined(__x86_64__))
- static int try_madvise( void )
+ static BOOL try_mprotect( void )
  {
-@@ -6419,6 +6464,8 @@ static NTSTATUS do_apc_memorybarrier( void )
-  */
+ #if !defined(__i386__) && !defined(__x86_64__)
+@@ -6124,6 +6169,8 @@ failed:
  NTSTATUS WINAPI NtFlushProcessWriteBuffers(void)
  {
+     static int once = 0;
 +    if (try_exp_membarrier())
-+        return;
-     if (try_madvise())
-         return;
++        return STATUS_SUCCESS;
+     if (try_mprotect())
+         return STATUS_SUCCESS;
+     if (!once++) FIXME( "no implementation available on this platform\n" );
+-- 
+GitLab
 
 
-     return do_apc_memorybarrier();
-From 0ae80583212d85416339156e5838d670902eccd9 Mon Sep 17 00:00:00 2001
+From 1dff2a4385d92b9afba435e0a6f2c2116de162a2 Mon Sep 17 00:00:00 2001
 From: Torge Matthies <tmatthies@codeweavers.com>
-Date: Wed, 7 Sep 2022 16:10:53 +0200
-Subject: [PATCH 5/5] ntdll: Add thread_get_register_pointer_values-based fast
- path for NtFlushProcessWriteBuffers.
+Date: Tue, 20 Feb 2024 16:45:49 +0100
+Subject: [PATCH 3/4] ntdll: Add thread_get_register_pointer_values-based
+ implementation of NtFlushProcessWriteBuffers.
 
 ---
- dlls/ntdll/unix/virtual.c | 58 +++++++++++++++++++++++++++++++++++++++
- 1 file changed, 58 insertions(+)
+ dlls/ntdll/unix/virtual.c | 64 +++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 64 insertions(+)
 
 diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
-index 11111111111..11111111111 100644
+index 8c53ce00e9f..155367b605f 100644
 --- a/dlls/ntdll/unix/virtual.c
 +++ b/dlls/ntdll/unix/virtual.c
 @@ -65,6 +65,9 @@
@@ -617,20 +204,20 @@ index 11111111111..11111111111 100644
 +# include <mach/vm_map.h>
  #endif
  
- #include <sys/uio.h>
-@@ -233,6 +236,11 @@ struct range_entry
+ #include "ntstatus.h"
+@@ -222,6 +225,11 @@ struct range_entry
  static struct range_entry *free_ranges;
  static struct range_entry *free_ranges_end;
  
 +#ifdef __APPLE__
-+static kern_return_t (*pthread_get_register_pointer_values)( thread_t, uintptr_t*, size_t*, uintptr_t* );
++static kern_return_t (*p_thread_get_register_pointer_values)( thread_t, uintptr_t*, size_t*, uintptr_t* );
 +static pthread_once_t tgrpvs_init_once = PTHREAD_ONCE_INIT;
 +#endif
 +
- #ifdef __linux__
- #ifdef __NR_membarrier
+ #if defined(__linux__) && defined(__NR_membarrier)
  static BOOL membarrier_exp_available;
-@@ -6359,6 +6367,54 @@ NTSTATUS WINAPI NtFlushInstructionCache( HANDLE handle, const void *addr, SIZE_T
+ static pthread_once_t membarrier_init_once = PTHREAD_ONCE_INIT;
+@@ -6084,6 +6092,60 @@ NTSTATUS WINAPI NtFlushInstructionCache( HANDLE handle, const void *addr, SIZE_T
  }
  
  
@@ -638,62 +225,68 @@ index 11111111111..11111111111 100644
 +
 +static void tgrpvs_init( void )
 +{
-+    pthread_get_register_pointer_values = dlsym( RTLD_DEFAULT, "thread_get_register_pointer_values" );
++    p_thread_get_register_pointer_values = dlsym( RTLD_DEFAULT, "thread_get_register_pointer_values" );
 +}
 +
-+static int try_mach_tgrpvs( void )
++static BOOL try_mach_tgrpvs( void )
 +{
 +    /* Taken from https://github.com/dotnet/runtime/blob/7be37908e5a1cbb83b1062768c1649827eeaceaa/src/coreclr/pal/src/thread/process.cpp#L2799 */
-+    mach_msg_type_number_t count, i;
++    mach_msg_type_number_t count, i = 0;
 +    thread_act_array_t threads;
++    BOOL success = TRUE;
 +    kern_return_t kret;
-+    int ret = 0;
 +
 +    pthread_once(&tgrpvs_init_once, tgrpvs_init);
-+    if (!pthread_get_register_pointer_values)
-+        return 0;
++    if (!p_thread_get_register_pointer_values)
++        return FALSE;
 +
++    /* Get references to all threads of this process */
 +    kret = task_threads( mach_task_self(), &threads, &count );
 +    if (kret)
-+        return 0;
++        return FALSE;
 +
-+    for (i = 0; i < count; i++)
++    /* Iterate through the threads in the list */
++    while (i < count)
 +    {
 +        uintptr_t reg_values[128];
 +        size_t reg_count = ARRAY_SIZE( reg_values );
 +        uintptr_t sp;
 +
-+        kret = pthread_get_register_pointer_values( threads[i], &sp, &reg_count, reg_values );
-+        if (kret)
-+            goto fail;
++        /* Request the thread's register pointer values to force the thread to go through a memory barrier */
++        kret = p_thread_get_register_pointer_values( threads[i], &sp, &reg_count, reg_values );
++        /* This function always fails when querying Rosetta's exception handling thread, so we only treat
++           KERN_INSUFFICIENT_BUFFER_SIZE as an error, like .NET core does. */
++        if (kret == KERN_INSUFFICIENT_BUFFER_SIZE)
++            success = FALSE;
 +
-+        mach_port_deallocate( mach_task_self(), threads[i] );
++        /* Deallocate thread reference once we're done with it */
++        mach_port_deallocate( mach_task_self(), threads[i++] );
 +    }
-+    ret = 1;
-+fail:
-+    for (; i < count; i++)
-+        mach_port_deallocate( mach_task_self(), threads[i] );
++
++    /* Deallocate thread list */
 +    vm_deallocate( mach_task_self(), (vm_address_t)threads, count * sizeof(threads[0]) );
-+    return ret;
++    return success;
 +}
 +
-+#else
-+static int try_mach_tgrpvs( void ) { return 0; }
-+#endif
++#else /* defined(__APPLE__) */
++
++static BOOL try_mach_tgrpvs( void ) { return 0; }
++
++#endif /* defined(__APPLE__) */
 +
 +
  #if defined(__linux__) && defined(__NR_membarrier)
+ 
  #define MEMBARRIER_CMD_QUERY                        0x00
- #define MEMBARRIER_CMD_PRIVATE_EXPEDITED            0x08
-@@ -6464,6 +6520,8 @@ static NTSTATUS do_apc_memorybarrier( void )
-  */
+@@ -6169,6 +6231,8 @@ failed:
  NTSTATUS WINAPI NtFlushProcessWriteBuffers(void)
  {
+     static int once = 0;
 +    if (try_mach_tgrpvs())
-+        return;
++        return STATUS_SUCCESS;
      if (try_exp_membarrier())
-         return;
-     if (try_madvise())
+         return STATUS_SUCCESS;
+     if (try_mprotect())
 -- 
-0.0.0
+GitLab
 

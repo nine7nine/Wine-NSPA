@@ -1,0 +1,220 @@
+--- a/dlls/ntdll/unix/server.c	2024-06-04 10:19:50.605832101 -0500
++++ b/dlls/ntdll/unix/server.c	2024-06-04 10:20:08.088272443 -0500
+@@ -132,6 +132,8 @@ static int fd_socket = -1;  /* socket to
+ static int initial_cwd = -1;
+ static pid_t server_pid;
+ pi_mutex_t fd_cache_mutex = PI_MUTEX_INIT(0);
++pi_mutex_t shm_mtx = PI_MUTEX_INIT(0);
++pi_cond_t shm_cond = PI_COND_INIT(0);
+ 
+ /* atomically exchange a 64-bit value */
+ static inline LONG64 interlocked_xchg64( LONG64 *dest, LONG64 val )
+@@ -228,9 +230,14 @@ static unsigned int send_request_shm( co
+         }
+     }
+ 
+-    while (InterlockedCompareExchange( (void*)&request_shm->futex, 1, 0 ) != 0)
+-        YieldProcessor();
+-    syscall( __NR_futex, &request_shm->futex, FUTEX_WAKE, 1, NULL, NULL, 0 );
++    pi_mutex_lock(&shm_mtx);
++    while (InterlockedCompareExchange((void*)&request_shm->futex, 1, 0) != 0)
++    {
++        pi_cond_wait(&shm_cond, &shm_mtx);
++    }
++    pi_mutex_unlock(&shm_mtx);
++
++    syscall(__NR_futex, &request_shm->futex, FUTEX_WAKE, 1, NULL, NULL, 0);
+     return STATUS_SUCCESS;
+ }
+ 
+@@ -253,24 +260,34 @@ static inline unsigned int wait_reply_sh
+     {
+         if (val == -1)
+             abort_thread(0);
+-        syscall( __NR_futex, &request_shm->futex, FUTEX_WAIT, val, NULL, NULL, 0 );
++        syscall(__NR_futex, &request_shm->futex, FUTEX_WAIT, val, NULL, NULL, 0);
+     }
+ 
+-    memcpy( &req->u.reply, (void*)&request_shm->u.reply, sizeof(req->u.reply) );
++    memcpy(&req->u.reply, (void*)&request_shm->u.reply, sizeof(req->u.reply));
+     if (req->u.reply.reply_header.reply_size)
+     {
+         if (req->u.reply.reply_header.reply_size > copy_limit)
+         {
+-            memcpy( req->reply_data, data_ptr, copy_limit );
+-            read_reply_data( (char*)req->reply_data + copy_limit,
+-                             req->u.reply.reply_header.reply_size - copy_limit );
++            memcpy(req->reply_data, data_ptr, copy_limit);
++            read_reply_data((char*)req->reply_data + copy_limit,
++                            req->u.reply.reply_header.reply_size - copy_limit);
+         }
+         else
+-            memcpy( req->reply_data, data_ptr, req->u.reply.reply_header.reply_size );
++        {
++            memcpy(req->reply_data, data_ptr, req->u.reply.reply_header.reply_size);
++        }
+     }
++
++    // Signal the condition variable after processing is done
++    pi_mutex_lock(&shm_mtx);
++    request_shm->futex = 0;
++    pi_cond_signal(&shm_cond, &shm_mtx);
++    pi_mutex_unlock(&shm_mtx);
++
+     return req->u.reply.reply_header.error;
+ }
+ 
++
+ #endif /* defined(__linux__) */
+ 
+ 
+--- a/server/thread.h	2024-06-04 12:34:34.756086003 -0500
++++ b/server/thread.h	2024-06-04 12:34:06.842930243 -0500
+@@ -22,6 +22,7 @@
+ #define __WINE_SERVER_THREAD_H
+ 
+ #include "object.h"
++#include <rtpi.h>
+ 
+ /* thread structure */
+ 
+@@ -94,6 +95,8 @@ struct thread
+     int                    request_shm_fd; /* request shared memory fd */
+     volatile struct request_shm *request_shm; /* shared memory for receiving and sending client requests/replies */
+     int                    request_shm_thread_running;
++    pi_mutex_t            tshm_mtx;
++    pi_cond_t             tshm_cond;
+ #endif
+     enum run_state         state;         /* running state */
+     int                    exit_code;     /* thread exit code */
+
+--- a/server/thread.c.	2024-06-04 12:40:33.495923308 -0500
++++ b/server/thread.c	2024-06-04 12:39:35.716643997 -0500
+@@ -85,6 +85,8 @@ static int get_priority( const char *var
+ #define O_NOATIME 0x40000
+ #endif
+ 
++pi_mutex_t tshm_mtx = PI_MUTEX_INIT(0);
++pi_cond_t tshm_cond = PI_COND_INIT(0);
+ 
+ /* thread queues */
+ 
+@@ -374,60 +374,77 @@ static void *request_shm_thread(void *pa
+     volatile struct request_shm *request_shm;
+     unsigned long generation = 0;
+ 
+-    pi_mutex_lock( &global_lock );
++    pi_mutex_lock(&global_lock);
+     request_shm_fd = thread->request_shm_fd;
+     request_shm = thread->request_shm;
+-    pi_mutex_unlock( &global_lock );
++    pi_mutex_unlock(&global_lock);
+ 
+     for (;;)
+     {
+         int val;
+ 
++        pi_mutex_lock(&thread->tshm_mtx);
+         while ((val = request_shm->futex) != 1)
+         {
+-           if (val == -1)
++            if (val == -1)
++            {
++                pi_mutex_unlock(&thread->tshm_mtx);
+                 goto done;
++            }
+             else if (val != 0)
+-                fatal_protocol_error( thread, "unknown futex state %d\n", val );
+-            syscall( __NR_futex, &request_shm->futex, FUTEX_WAIT, val, NULL, NULL, 0 );
++            {
++                pi_mutex_unlock(&thread->tshm_mtx);
++                fatal_protocol_error(thread, "unknown futex state %d\n", val);
++            }
++            syscall(__NR_futex, &request_shm->futex, FUTEX_WAIT, val, NULL, NULL, 0);
++            pi_cond_wait(&thread->tshm_cond, &thread->tshm_mtx);
+         }
++        pi_mutex_unlock(&thread->tshm_mtx);
+ 
+-        pi_mutex_lock( &global_lock );
++        pi_mutex_lock(&global_lock);
+         generation = poll_generation;
+ 
+         val = request_shm->futex;
+         if (val != 1)
+         {
+             if (val != -1)
+-                fatal_protocol_error( thread, "unknown futex state %d\n", val );
++                fatal_protocol_error(thread, "unknown futex state %d\n", val);
+             goto done_locked;
+         }
+ 
+         __asm__ __volatile__ ("" ::: "memory");
+-        handle_shm_request( thread, (struct request_shm *)request_shm );
++        handle_shm_request(thread, (struct request_shm *)request_shm);
+         __asm__ __volatile__ ("" ::: "memory");
+ 
+         request_shm_fd = thread->request_shm_fd;
+         request_shm = thread->request_shm;
+         if (!request_shm_fd || !request_shm)
+             goto done_locked;
+-        val = __sync_val_compare_and_swap( &request_shm->futex, 1, 0 );
++
++        pi_mutex_lock(&thread->tshm_mtx);
++        val = __sync_val_compare_and_swap(&request_shm->futex, 1, 0);
+         if (val != 1 && val != -1)
+-            fatal_protocol_error( thread, "unknown futex state %d\n", val );
+-        pi_mutex_unlock( &global_lock );
+-        syscall( __NR_futex, &request_shm->futex, FUTEX_WAKE, 1, NULL, NULL, 0 );
++        {
++            pi_mutex_unlock(&thread->tshm_mtx);
++            fatal_protocol_error(thread, "unknown futex state %d\n", val);
++        }
++        pi_cond_signal(&thread->tshm_cond, &thread->tshm_mtx);
++        pi_mutex_unlock(&thread->tshm_mtx);
++
++        pi_mutex_unlock(&global_lock);
++        syscall(__NR_futex, &request_shm->futex, FUTEX_WAKE, 1, NULL, NULL, 0);
+         if (poll_generation != generation)
+             force_exit_poll();
+     }
+ 
+ done:
+-    pi_mutex_lock( &global_lock );
++    pi_mutex_lock(&global_lock);
+ done_locked:
+-    if (request_shm_fd != -1) close( request_shm_fd );
+-    if (request_shm) munmap( (void*)request_shm, REQUEST_SHM_SIZE );
+-    release_object( thread );
+-    pi_mutex_unlock( &global_lock );
+-   if (poll_generation != generation)
++    if (request_shm_fd != -1) close(request_shm_fd);
++    if (request_shm) munmap((void*)request_shm, REQUEST_SHM_SIZE);
++    release_object(thread);
++    pi_mutex_unlock(&global_lock);
++    if (poll_generation != generation)
+         force_exit_poll();
+     return NULL;
+ }
+@@ -659,13 +676,16 @@ static void cleanup_thread( struct threa
+ #ifdef __linux__
+     if (thread->request_shm)
+     {
+-        __atomic_exchange_n( &thread->request_shm->futex, -1, __ATOMIC_SEQ_CST );
+-        syscall( __NR_futex, &thread->request_shm->futex, FUTEX_WAKE, 1, NULL, NULL, 0 );
++        __atomic_exchange_n(&thread->request_shm->futex, -1, __ATOMIC_SEQ_CST);
++        syscall(__NR_futex, &thread->request_shm->futex, FUTEX_WAKE, 1, NULL, NULL, 0);
++        pi_mutex_lock(&thread->tshm_mtx);
++        pi_cond_signal(&thread->tshm_cond, &thread->tshm_mtx);
++        pi_mutex_unlock(&thread->tshm_mtx);
+     }
+     if (!thread->request_shm_thread_running)
+     {
+-        if (thread->request_shm_fd != -1) close( thread->request_shm_fd );
+-        if (thread->request_shm) munmap( (void*)thread->request_shm, REQUEST_SHM_SIZE );
++        if (thread->request_shm_fd != -1) close(thread->request_shm_fd);
++        if (thread->request_shm) munmap((void*)thread->request_shm, REQUEST_SHM_SIZE);
+     }
+ #endif
+     cleanup_clipboard_thread(thread);
+
+

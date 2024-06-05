@@ -1,0 +1,197 @@
+From 68948aa9ee736e0529cd58d3a37454805481aa90 Mon Sep 17 00:00:00 2001
+From: Torge Matthies <openglfreak@googlemail.com>
+Date: Sun, 21 Nov 2021 18:11:58 +0100
+Subject: [PATCH 1/1] ntdll: Use fewer atomics in SRW locks.
+
+Original concept by Richard Yao <ryao@gentoo.org>.
+
+Rebased on Wine-NSPA-8.19 (but acutally more like 9.x+)
+
+---
+ dlls/ntdll/sync.c | 132 +++++++++++++++++++---------------------------
+ 1 file changed, 53 insertions(+), 79 deletions(-)
+
+--- a/dlls/ntdll/sync.c	2024-05-09 19:50:04.488949390 -0500
++++ b/dlls/ntdll/sync.c	2024-05-09 19:49:39.817380271 -0500
+@@ -562,35 +562,30 @@ void WINAPI RtlInitializeSRWLock( RTL_SR
+ void WINAPI RtlAcquireSRWLockExclusive( RTL_SRWLOCK *lock )
+ {
+     union { RTL_SRWLOCK *rtl; struct srw_lock *s; LONG *l; } u = { lock };
++    union { struct srw_lock s; LONG l; } old, new;
+ 
+     InterlockedExchangeAdd16( &u.s->exclusive_waiters, 2 );
+ 
++    old.l = *u.l;
++    if (old.s.owners)
++        old.l = InterlockedOr( u.l, 0 );
+     for (;;)
+     {
+-        union { struct srw_lock s; LONG l; } old, new;
+-        BOOL wait;
+-
+-        do
++        if (old.s.owners)
+         {
+-            old.s = *u.s;
+-            new.s = old.s;
+-
+-            if (!old.s.owners)
+-            {
+-                /* Not locked exclusive or shared. We can try to grab it. */
+-                new.s.owners = 1;
+-                new.s.exclusive_waiters -= 2;
+-                new.s.exclusive_waiters |= 1;
+-                wait = FALSE;
+-            }
+-            else
+-            {
+-                wait = TRUE;
+-            }
+-        } while (InterlockedCompareExchange( u.l, new.l, old.l ) != old.l);
++            RtlWaitOnAddress( &u.s->owners, &old.s.owners, sizeof(short), NULL );
++            old.l = *u.l;
++            continue;
++        }
+ 
+-        if (!wait) return;
+-        RtlWaitOnAddress( &u.s->owners, &new.s.owners, sizeof(short), NULL );
++        /* Not locked exclusive or shared. We can try to grab it. */
++        new.s = old.s;
++        new.s.owners = -1;
++        --new.s.exclusive_waiters;
++        new.l = InterlockedCompareExchange( u.l, new.l, old.l );
++        if (new.l == old.l)
++            break;
++        old.l = new.l;
+     }
+ }
+ 
+@@ -604,32 +599,29 @@ void WINAPI RtlAcquireSRWLockExclusive(
+ void WINAPI RtlAcquireSRWLockShared( RTL_SRWLOCK *lock )
+ {
+     union { RTL_SRWLOCK *rtl; struct srw_lock *s; LONG *l; } u = { lock };
++    union { struct srw_lock s; LONG l; } old, new;
++ 
++    old.l = *u.l;
++    if (old.s.owners == -1 || old.s.exclusive_waiters)
++        old.l = InterlockedOr( u.l, 0 );
+ 
+     for (;;)
+     {
+-        union { struct srw_lock s; LONG l; } old, new;
+-        BOOL wait;
+-
+-        do
++        if (old.s.owners == -1 || old.s.exclusive_waiters)
+         {
+-            old.s = *u.s;
+-            new = old;
+-
+-            if (!old.s.exclusive_waiters)
+-            {
+-                /* Not locked exclusive, and no exclusive waiters.
+-                 * We can try to grab it. */
+-                ++new.s.owners;
+-                wait = FALSE;
+-            }
+-            else
+-            {
+-                wait = TRUE;
+-            }
+-        } while (InterlockedCompareExchange( u.l, new.l, old.l ) != old.l);
++            RtlWaitOnAddress( u.s, &old.s, sizeof(struct srw_lock), NULL );
++            old.l = *u.l;
++            continue;
++        }
+ 
+-        if (!wait) return;
+-        RtlWaitOnAddress( u.s, &new.s, sizeof(struct srw_lock), NULL );
++        /* Not locked exclusive, and no exclusive waiters.
++         * We can try to grab it. */
++        new.s = old.s;
++        ++new.s.owners;
++        new.l = InterlockedCompareExchange( u.l, new.l, old.l );
++        if (new.l == old.l)
++            break;
++        old.l = new.l;
+     }
+ }
+ 
+@@ -692,27 +684,16 @@ BOOLEAN WINAPI RtlTryAcquireSRWLockExclu
+ {
+     union { RTL_SRWLOCK *rtl; struct srw_lock *s; LONG *l; } u = { lock };
+     union { struct srw_lock s; LONG l; } old, new;
+-    BOOLEAN ret;
+-
+-    do
+-    {
+-        old.s = *u.s;
+-        new.s = old.s;
+-
+-        if (!old.s.owners)
+-        {
+-            /* Not locked exclusive or shared. We can try to grab it. */
+-            new.s.owners = 1;
+-            new.s.exclusive_waiters |= 1;
+-            ret = TRUE;
+-        }
+-        else
+-        {
+-            ret = FALSE;
+-        }
+-    } while (InterlockedCompareExchange( u.l, new.l, old.l ) != old.l);
+-
+-    return ret;
++    old.s = *u.s;
++    if (old.s.owners)
++        old.l = InterlockedOr( u.l, 0 );
++    if (old.s.owners)
++        return FALSE;
++
++    /* Not locked exclusive or shared. We can try to grab it. */
++    new.s = old.s;
++    new.s.owners = -1;
++    return InterlockedCompareExchange( u.l, new.l, old.l ) == old.l;
+ }
+ 
+ /***********************************************************************
+@@ -722,27 +703,17 @@ BOOLEAN WINAPI RtlTryAcquireSRWLockShare
+ {
+     union { RTL_SRWLOCK *rtl; struct srw_lock *s; LONG *l; } u = { lock };
+     union { struct srw_lock s; LONG l; } old, new;
+-    BOOLEAN ret;
+-
+-    do
+-    {
+-        old.s = *u.s;
+-        new.s = old.s;
+-
+-        if (!old.s.exclusive_waiters)
+-        {
+-            /* Not locked exclusive, and no exclusive waiters.
+-             * We can try to grab it. */
+-            ++new.s.owners;
+-            ret = TRUE;
+-        }
+-        else
+-        {
+-            ret = FALSE;
+-        }
+-    } while (InterlockedCompareExchange( u.l, new.l, old.l ) != old.l);
+-
+-    return ret;
++    old.s = *u.s;
++    if (old.s.owners == -1 || old.s.exclusive_waiters)
++        old.l = InterlockedOr( u.l, 0 );
++    if (old.s.owners == -1 || old.s.exclusive_waiters)
++        return FALSE;
++
++    /* Not locked exclusive, and no exclusive waiters.
++     * We can try to grab it. */
++    new.s = old.s;
++    ++new.s.owners;
++    return InterlockedCompareExchange( u.l, new.l, old.l ) == old.l;
+ }
+ 
+ /***********************************************************************
+

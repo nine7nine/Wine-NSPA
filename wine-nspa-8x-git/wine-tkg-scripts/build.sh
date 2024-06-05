@@ -27,7 +27,9 @@ _prebuild_common() {
 
 	# compiler flags
 	if [ "$_LOCAL_OPTIMIZED" = "true" ]; then
-	  export CFLAGS="${_GCC_FLAGS}"
+	  # GCC-14.x is failing on -Wreturn-mismatch && Wincompatible-pointer-types
+	  # Previously, this wasn't a compilation failure. For now, just make it work.
+	  export CFLAGS="${_GCC_FLAGS} -Wno-return-mismatch -Wno-incompatible-pointer-types"
 	  export CXXFLAGS="${_GCC_FLAGS}"
 	  export LDFLAGS="${_LD_FLAGS}"
 	  # Workaround for building legacy trees with mingw GCC11
