@@ -5,7 +5,7 @@
  static pid_t server_pid;
  pi_mutex_t fd_cache_mutex = PI_MUTEX_INIT(0);
 +pi_mutex_t shm_mtx = PI_MUTEX_INIT(0);
-+pi_cond_t shm_cond = PI_COND_INIT(0);
++pi_cond_t shm_cond = PI_COND_INIT(1);
  
  /* atomically exchange a 64-bit value */
  static inline LONG64 interlocked_xchg64( LONG64 *dest, LONG64 val )
@@ -82,8 +82,8 @@
      int                    request_shm_fd; /* request shared memory fd */
      volatile struct request_shm *request_shm; /* shared memory for receiving and sending client requests/replies */
      int                    request_shm_thread_running;
-+    pi_mutex_t            tshm_mtx;
-+    pi_cond_t             tshm_cond;
++    pi_mutex_t            shm_mtx;
++    pi_cond_t             shm_cond;
  #endif
      enum run_state         state;         /* running state */
      int                    exit_code;     /* thread exit code */
@@ -94,8 +94,8 @@
  #define O_NOATIME 0x40000
  #endif
  
-+pi_mutex_t tshm_mtx = PI_MUTEX_INIT(0);
-+pi_cond_t tshm_cond = PI_COND_INIT(0);
++pi_mutex_t shm_mtx = PI_MUTEX_INIT(0);
++pi_cond_t shm_cond = PI_COND_INIT(1);
  
  /* thread queues */
  
@@ -114,26 +114,26 @@
      {
          int val;
  
-+        pi_mutex_lock(&thread->tshm_mtx);
++        pi_mutex_lock(&thread->shm_mtx);
          while ((val = request_shm->futex) != 1)
          {
 -           if (val == -1)
 +            if (val == -1)
 +            {
-+                pi_mutex_unlock(&thread->tshm_mtx);
++                pi_mutex_unlock(&thread->shm_mtx);
                  goto done;
 +            }
              else if (val != 0)
 -                fatal_protocol_error( thread, "unknown futex state %d\n", val );
 -            syscall( __NR_futex, &request_shm->futex, FUTEX_WAIT, val, NULL, NULL, 0 );
 +            {
-+                pi_mutex_unlock(&thread->tshm_mtx);
++                pi_mutex_unlock(&thread->shm_mtx);
 +                fatal_protocol_error(thread, "unknown futex state %d\n", val);
 +            }
 +            syscall(__NR_futex, &request_shm->futex, FUTEX_WAIT, val, NULL, NULL, 0);
-+            pi_cond_wait(&thread->tshm_cond, &thread->tshm_mtx);
++            pi_cond_wait(&shm_cond, &thread->shm_mtx);
          }
-+        pi_mutex_unlock(&thread->tshm_mtx);
++        pi_mutex_unlock(&thread->shm_mtx);
  
 -        pi_mutex_lock( &global_lock );
 +        pi_mutex_lock(&global_lock);
@@ -159,18 +159,18 @@
              goto done_locked;
 -        val = __sync_val_compare_and_swap( &request_shm->futex, 1, 0 );
 +
-+        pi_mutex_lock(&thread->tshm_mtx);
++        pi_mutex_lock(&thread->shm_mtx);
 +        val = __sync_val_compare_and_swap(&request_shm->futex, 1, 0);
          if (val != 1 && val != -1)
 -            fatal_protocol_error( thread, "unknown futex state %d\n", val );
 -        pi_mutex_unlock( &global_lock );
 -        syscall( __NR_futex, &request_shm->futex, FUTEX_WAKE, 1, NULL, NULL, 0 );
 +        {
-+            pi_mutex_unlock(&thread->tshm_mtx);
++            pi_mutex_unlock(&thread->shm_mtx);
 +            fatal_protocol_error(thread, "unknown futex state %d\n", val);
 +        }
-+        pi_cond_signal(&thread->tshm_cond, &thread->tshm_mtx);
-+        pi_mutex_unlock(&thread->tshm_mtx);
++        pi_cond_signal(&shm_cond, &thread->shm_mtx);
++        pi_mutex_unlock(&thread->shm_mtx);
 +
 +        pi_mutex_unlock(&global_lock);
 +        syscall(__NR_futex, &request_shm->futex, FUTEX_WAKE, 1, NULL, NULL, 0);
@@ -203,9 +203,9 @@
 -        syscall( __NR_futex, &thread->request_shm->futex, FUTEX_WAKE, 1, NULL, NULL, 0 );
 +        __atomic_exchange_n(&thread->request_shm->futex, -1, __ATOMIC_SEQ_CST);
 +        syscall(__NR_futex, &thread->request_shm->futex, FUTEX_WAKE, 1, NULL, NULL, 0);
-+        pi_mutex_lock(&thread->tshm_mtx);
-+        pi_cond_signal(&thread->tshm_cond, &thread->tshm_mtx);
-+        pi_mutex_unlock(&thread->tshm_mtx);
++        pi_mutex_lock(&thread->shm_mtx);
++        pi_cond_signal(&shm_cond, &thread->shm_mtx);
++        pi_mutex_unlock(&thread->shm_mtx);
      }
      if (!thread->request_shm_thread_running)
      {
@@ -217,4 +217,55 @@
  #endif
      cleanup_clipboard_thread(thread);
 
+--- a/server/thread.c	2024-06-10 18:51:52.852409269 -0500
++++ b/server/thread.c	2024-06-10 18:51:42.880383692 -0500
+@@ -385,24 +385,17 @@ static void *request_shm_thread(void *pa
+     {
+         int val;
+ 
+-        pi_mutex_lock(&thread->shm_mtx);
+         while ((val = request_shm->futex) != 1)
+         {
+             if (val == -1)
+-            {
+-                pi_mutex_unlock(&thread->shm_mtx);
+                 goto done;
+-            }
+-            else if (val != 0)
+-            {
+-                pi_mutex_unlock(&thread->shm_mtx);
++            if (val != 0)
+                 fatal_protocol_error(thread, "unknown futex state %d\n", val);
+-            }
+             syscall(__NR_futex, &request_shm->futex, FUTEX_WAIT, val, NULL, NULL, 0);
+             pi_cond_wait(&shm_cond, &thread->shm_mtx);
+         }
+-        pi_mutex_unlock(&thread->shm_mtx);
+ 
++        // Lock to ensure no other thread modifies the futex value
+         pi_mutex_lock(&global_lock);
+         generation = poll_generation;
+ 
+@@ -423,18 +416,16 @@ static void *request_shm_thread(void *pa
+         if (!request_shm_fd || !request_shm)
+             goto done_locked;
+ 
+-        pi_mutex_lock(&thread->shm_mtx);
+         val = __sync_val_compare_and_swap(&request_shm->futex, 1, 0);
+         if (val != 1 && val != -1)
+         {
+-            pi_mutex_unlock(&thread->shm_mtx);
+             fatal_protocol_error(thread, "unknown futex state %d\n", val);
+         }
+-        pi_cond_signal(&shm_cond, &thread->shm_mtx);
+-        pi_mutex_unlock(&thread->shm_mtx);
+ 
+-        pi_mutex_unlock(&global_lock);
+         syscall(__NR_futex, &request_shm->futex, FUTEX_WAKE, 1, NULL, NULL, 0);
++        pi_cond_signal(&shm_cond, &thread->shm_mtx);
++        pi_mutex_unlock(&global_lock);
++
+         if (poll_generation != generation)
+             force_exit_poll();
+     }
 

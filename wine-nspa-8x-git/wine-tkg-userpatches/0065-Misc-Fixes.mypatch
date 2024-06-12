@@ -2598,3 +2598,315 @@ index 9b7c4ea2cd9..ff3f28d93e1 100644
  
      if (unix_cp.CodePage != CP_UTF8)
      {
+
+From 9ec501141e153aa01bcd6e4ce3846d1a4f786d51 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Tue, 4 Jun 2024 22:40:46 +0200
+Subject: [PATCH] server: Avoid calling set_event from within
+ msg_queue_add_queue.
+
+---
+ server/queue.c  | 10 ++++++++--
+ server/thread.c |  8 ++++++--
+ server/user.h   |  1 +
+ 3 files changed, 15 insertions(+), 4 deletions(-)
+
+diff --git a/server/queue.c b/server/queue.c
+index e881e40271d..7a1a8b6ece6 100644
+--- a/server/queue.c
++++ b/server/queue.c
+@@ -1098,7 +1098,6 @@ static int is_queue_hung( struct msg_queue *queue )
+ static int msg_queue_add_queue( struct object *obj, struct wait_queue_entry *entry )
+ {
+     struct msg_queue *queue = (struct msg_queue *)obj;
+-    struct process *process = get_wait_queue_thread(entry)->process;
+ 
+     /* a thread can only wait on its own queue */
+     if (get_wait_queue_thread(entry)->queue != queue)
+@@ -1106,7 +1105,6 @@ static int msg_queue_add_queue( struct object *obj, struct wait_queue_entry *ent
+         set_error( STATUS_ACCESS_DENIED );
+         return 0;
+     }
+-    if (process->idle_event && !(queue->wake_mask & QS_SMRESULT)) set_event( process->idle_event );
+ 
+     if (queue->fd && list_empty( &obj->wait_queue ))  /* first on the queue */
+         set_fd_events( queue->fd, POLLIN );
+@@ -1255,6 +1253,14 @@ static int check_queue_input_window( struct msg_queue *queue, user_handle_t wind
+     return ret;
+ }
+ 
++/* check if the thread queue is idle and set the process idle event if so */
++void check_thread_queue_idle( struct thread *thread )
++{
++    struct msg_queue *queue = thread->queue;
++    if ((queue->wake_mask & QS_SMRESULT)) return;
++    if (thread->process->idle_event) set_event( thread->process->idle_event );
++}
++
+ /* make sure the specified thread has a queue */
+ int init_thread_queue( struct thread *thread )
+ {
+diff --git a/server/thread.c b/server/thread.c
+index 55bd63d3030..6542e1584ab 100644
+--- a/server/thread.c
++++ b/server/thread.c
+@@ -778,7 +778,7 @@ static int wait_on( const select_op_t *select_op, unsigned int count, struct obj
+ {
+     struct thread_wait *wait;
+     struct wait_queue_entry *entry;
+-    unsigned int i;
++    unsigned int i, idle = 0;
+ 
+     if (!(wait = mem_alloc( FIELD_OFFSET(struct thread_wait, queues[count]) ))) return 0;
+     wait->next    = current->wait;
+@@ -802,8 +802,12 @@ static int wait_on( const select_op_t *select_op, unsigned int count, struct obj
+             end_wait( current, get_error() );
+             return 0;
+         }
++
++        if (obj == (struct object *)current->queue) idle = 1;
+     }
+-    return 1;
++
++    if (idle) check_thread_queue_idle( current );
++    return current->wait ? 1 : 0;
+ }
+ 
+ static int wait_on_handles( const select_op_t *select_op, unsigned int count, const obj_handle_t *handles,
+diff --git a/server/user.h b/server/user.h
+index d805a179d16..703a55d5009 100644
+--- a/server/user.h
++++ b/server/user.h
+@@ -113,6 +113,7 @@ extern void set_queue_hooks( struct thread *thread, struct hook_table *hooks );
+ extern void inc_queue_paint_count( struct thread *thread, int incr );
+ extern void queue_cleanup_window( struct thread *thread, user_handle_t win );
+ extern int init_thread_queue( struct thread *thread );
++extern void check_thread_queue_idle( struct thread *thread );
+ extern int attach_thread_input( struct thread *thread_from, struct thread *thread_to );
+ extern void detach_thread_input( struct thread *thread_from );
+ extern void set_clip_rectangle( struct desktop *desktop, const rectangle_t *rect,
+-- 
+GitLab
+
+From c4c30d4615e0f991ce38d53cf71bc63f4df50a3f Mon Sep 17 00:00:00 2001
+From: Dmitry Timoshkov <dmitry@baikal.ru>
+Date: Tue, 4 Jun 2024 16:17:24 +0300
+Subject: [PATCH] server: Remove limitation for waiting on idle_event of the
+ current process.
+
+Signed-off-by: Dmitry Timoshkov <dmitry@baikal.ru>
+---
+ server/process.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/server/process.c b/server/process.c
+index f6d1641cb94..733b0288f72 100644
+--- a/server/process.c
++++ b/server/process.c
+@@ -1686,7 +1686,7 @@ DECL_HANDLER(get_process_idle_event)
+     reply->event = 0;
+     if ((process = get_process_from_handle( req->handle, PROCESS_QUERY_INFORMATION )))
+     {
+-        if (process->idle_event && process != current->process)
++        if (process->idle_event)
+             reply->event = alloc_handle( current->process, process->idle_event,
+                                          EVENT_ALL_ACCESS, 0 );
+         release_object( process );
+-- 
+GitLab
+
+From 8dbda2116167c42ba8a35b8abd28731576d37fc4 Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Thu, 16 May 2024 21:27:08 -0600
+Subject: [PATCH] ntdll: Fill object pointer in NtQueryInformation(
+ SystemHandleInformation / SystemExtendedHandleInformation ).
+
+CW-Bug-Id: #23813
+---
+ dlls/ntdll/tests/info.c  | 37 +++++++++++++++++++++++++++++++------
+ dlls/ntdll/unix/system.c |  4 ++--
+ server/handle.c          |  1 +
+ server/protocol.def      |  2 ++
+ tools/make_requests      |  2 +-
+ 5 files changed, 37 insertions(+), 9 deletions(-)
+
+diff --git a/dlls/ntdll/unix/system.c b/dlls/ntdll/unix/system.c
+index 0e77e7d7b14..3ca2e88447b 100644
+--- a/dlls/ntdll/unix/system.c
++++ b/dlls/ntdll/unix/system.c
+@@ -3188,7 +3188,7 @@ NTSTATUS WINAPI NtQuerySystemInformation( SYSTEM_INFORMATION_CLASS class,
+                     shi->Handle[i].AccessMask   = handle_info[i].access;
+                     shi->Handle[i].HandleFlags  = handle_info[i].attributes;
+                     shi->Handle[i].ObjectType   = handle_info[i].type;
+-                    /* FIXME: Fill out ObjectPointer */
++                    shi->Handle[i].ObjectPointer = wine_server_get_ptr( handle_info[i].object );
+                 }
+             }
+             else if (ret == STATUS_BUFFER_TOO_SMALL)
+@@ -3409,7 +3409,7 @@ NTSTATUS WINAPI NtQuerySystemInformation( SYSTEM_INFORMATION_CLASS class,
+                     shi->Handles[i].GrantedAccess    = handle_info[i].access;
+                     shi->Handles[i].HandleAttributes = handle_info[i].attributes;
+                     shi->Handles[i].ObjectTypeIndex  = handle_info[i].type;
+-                    /* FIXME: Fill out Object */
++                    shi->Handles[i].Object           = wine_server_get_ptr( handle_info[i].object );
+                 }
+             }
+             else if (ret == STATUS_BUFFER_TOO_SMALL)
+diff --git a/server/handle.c b/server/handle.c
+index 48b5d8101bb..79c0f3f0dff 100644
+--- a/server/handle.c
++++ b/server/handle.c
+@@ -855,6 +855,7 @@ static int enum_handles( struct process *process, void *user )
+         handle->access     = entry->access & ~RESERVED_ALL;
+         handle->type       = entry->ptr->ops->type->index;
+         handle->attributes = 0;
++        handle->object     = (client_ptr_t)(ULONG_PTR)entry->ptr | (client_ptr_t)0xffff800000000000;
+         if (entry->access & RESERVED_INHERIT) handle->attributes |= OBJ_INHERIT;
+         if (entry->access & RESERVED_CLOSE_PROTECT) handle->attributes |= OBJ_PROTECT_CLOSE;
+         info->count--;
+diff --git a/server/protocol.def b/server/protocol.def
+index d611701e0ab..302563cbe66 100644
+--- a/server/protocol.def
++++ b/server/protocol.def
+@@ -3459,11 +3459,13 @@ enum caret_state
+ 
+ struct handle_info
+ {
++    client_ptr_t object;
+     process_id_t owner;
+     obj_handle_t handle;
+     unsigned int access;
+     unsigned int attributes;
+     unsigned int type;
++    unsigned int __pad;
+ };
+ 
+ /* Return a list of all opened handles */
+diff --git a/tools/make_requests b/tools/make_requests
+index b450e22c2b8..9dc259b9e94 100755
+--- a/tools/make_requests
++++ b/tools/make_requests
+@@ -64,7 +64,7 @@ my %formats =
+     "startup_info_t"           => [  96,  4 ],
+     "user_apc_t"               => [  40,  8 ],
+     "struct filesystem_event"  => [ 12, 4 ],
+-    "struct handle_info"       => [ 20, 4 ],
++    "struct handle_info"       => [ 32, 8 ],
+     "struct luid_attr"         => [ 12, 4 ],
+     "struct object_attributes" => [ 16, 4 ],
+     "struct object_type_info"  => [ 44, 4 ],
+
+From 09edd1391979bf41fe6c99f34488823cef0280a6 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Pawe=C5=82=20Ulita?= <pawelulita@fastmail.com>
+Date: Sun, 12 Nov 2023 15:21:27 +0100
+Subject: [PATCH] user32: Add stubs for GetWindowDpiHostingBehavior and
+ SetThreadDpiHostingBehavior.
+
+This prevents Native Instruments Kontakt 7 from crashing on start-up.
+---
+ dlls/user32/sysparams.c |  9 +++++++++
+ dlls/user32/user32.spec |  2 ++
+ dlls/user32/win.c       | 10 ++++++++++
+ include/windef.h        |  6 ++++++
+ include/winuser.h       |  2 ++
+ 5 files changed, 29 insertions(+)
+
+diff --git a/dlls/user32/sysparams.c b/dlls/user32/sysparams.c
+index 5ededfee62a..bc78c1fef88 100644
+--- a/dlls/user32/sysparams.c
++++ b/dlls/user32/sysparams.c
+@@ -746,6 +746,15 @@ DPI_AWARENESS_CONTEXT WINAPI SetThreadDpiAwarenessContext( DPI_AWARENESS_CONTEXT
+     return ULongToHandle( prev );
+ }
+ 
++/**********************************************************************
++ *              SetThreadDpiHostingBehavior   (USER32.@)
++ */
++DPI_HOSTING_BEHAVIOR WINAPI SetThreadDpiHostingBehavior( DPI_HOSTING_BEHAVIOR value )
++{
++    FIXME("(%d): stub\n", value);
++    return DPI_HOSTING_BEHAVIOR_DEFAULT;
++}
++
+ /***********************************************************************
+  *		MonitorFromRect (USER32.@)
+  */
+diff --git a/dlls/user32/user32.spec b/dlls/user32/user32.spec
+index 96e6e1a7d6b..9f9f03041b4 100644
+--- a/dlls/user32/user32.spec
++++ b/dlls/user32/user32.spec
+@@ -410,6 +410,7 @@
+ @ stdcall GetWindowDC(long) NtUserGetWindowDC
+ @ stdcall GetWindowDisplayAffinity(long ptr)
+ @ stdcall GetWindowDpiAwarenessContext(long)
++@ stdcall GetWindowDpiHostingBehavior(long)
+ @ stdcall GetWindowInfo(long ptr)
+ @ stdcall GetWindowLongA(long long)
+ @ stdcall -arch=win64 GetWindowLongPtrA(long long)
+@@ -719,6 +720,7 @@
+ @ stdcall SetTaskmanWindow (long)
+ @ stdcall SetThreadDesktop(long) NtUserSetThreadDesktop
+ @ stdcall SetThreadDpiAwarenessContext(ptr)
++@ stdcall SetThreadDpiHostingBehavior(ptr)
+ @ stdcall SetTimer(long long long ptr)
+ @ stdcall SetUserObjectInformationA(long long ptr long)
+ @ stdcall SetUserObjectInformationW(long long ptr long) NtUserSetObjectInformation
+diff --git a/dlls/user32/win.c b/dlls/user32/win.c
+index 6459ddf9f28..b8c04047333 100644
+--- a/dlls/user32/win.c
++++ b/dlls/user32/win.c
+@@ -616,6 +616,16 @@ DPI_AWARENESS_CONTEXT WINAPI GetWindowDpiAwarenessContext( HWND hwnd )
+ }
+ 
+ 
++/***********************************************************************
++ *		GetWindowDpiHostingBehavior  (USER32.@)
++ */
++DPI_HOSTING_BEHAVIOR WINAPI GetWindowDpiHostingBehavior( HWND hwnd )
++{
++    FIXME("(%p): stub\n", hwnd);
++    return DPI_HOSTING_BEHAVIOR_DEFAULT;
++}
++
++
+ static LONG_PTR get_window_long_ptr( HWND hwnd, int offset, LONG_PTR ret, BOOL ansi )
+ {
+     if (offset == DWLP_DLGPROC && NtUserGetDialogInfo( hwnd ))
+diff --git a/include/windef.h b/include/windef.h
+index b22e15c4dbf..78e4f56052c 100644
+--- a/include/windef.h
++++ b/include/windef.h
+@@ -439,4 +439,10 @@ typedef enum DPI_AWARENESS
+ }
+ #endif
+ 
++typedef enum {
++  DPI_HOSTING_BEHAVIOR_INVALID = -1,
++  DPI_HOSTING_BEHAVIOR_DEFAULT = 0,
++  DPI_HOSTING_BEHAVIOR_MIXED = 1
++} DPI_HOSTING_BEHAVIOR;
++
+ #endif /* _WINDEF_ */
+diff --git a/include/winuser.h b/include/winuser.h
+index 73e7919aaea..ee0f05e1cb8 100644
+--- a/include/winuser.h
++++ b/include/winuser.h
+@@ -4296,6 +4296,7 @@ WINUSERAPI DWORD       WINAPI GetWindowContextHelpId(HWND);
+ WINUSERAPI HDC         WINAPI GetWindowDC(HWND);
+ WINUSERAPI BOOL        WINAPI GetWindowDisplayAffinity(HWND,DWORD*);
+ WINUSERAPI DPI_AWARENESS_CONTEXT WINAPI GetWindowDpiAwarenessContext(HWND);
++WINUSERAPI DPI_HOSTING_BEHAVIOR WINAPI GetWindowDpiHostingBehavior(HWND);
+ WINUSERAPI BOOL        WINAPI GetWindowFeedbackSetting(HWND,FEEDBACK_TYPE,DWORD,UINT32*,void*);
+ WINUSERAPI BOOL        WINAPI GetWindowInfo(HWND, PWINDOWINFO);
+ WINUSERAPI LONG        WINAPI GetWindowLongA(HWND,INT);
+@@ -4608,6 +4609,7 @@ WINUSERAPI BOOL        WINAPI SetSystemMenu(HWND,HMENU);
+ WINUSERAPI UINT_PTR    WINAPI SetSystemTimer(HWND,UINT_PTR,UINT,void*);
+ WINUSERAPI BOOL        WINAPI SetThreadDesktop(HDESK);
+ WINUSERAPI DPI_AWARENESS_CONTEXT WINAPI SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT);
++WINUSERAPI DPI_HOSTING_BEHAVIOR WINAPI SetThreadDpiHostingBehavior(DPI_HOSTING_BEHAVIOR);
+ WINUSERAPI UINT_PTR    WINAPI SetTimer(HWND,UINT_PTR,UINT,TIMERPROC);
+ WINUSERAPI BOOL        WINAPI SetUserObjectInformationA(HANDLE,INT,LPVOID,DWORD);
+ WINUSERAPI BOOL        WINAPI SetUserObjectInformationW(HANDLE,INT,LPVOID,DWORD);
+-- 
+GitLab
+
