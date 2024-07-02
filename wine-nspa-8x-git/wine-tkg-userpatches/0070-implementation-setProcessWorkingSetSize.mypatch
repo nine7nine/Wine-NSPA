@@ -1,0 +1,190 @@
+--- a/dlls/ntdll/unix/process.c	2024-07-01 20:18:59.774163595 -0500
++++ b/dlls/ntdll/unix/process.c	2024-07-01 20:18:35.207073046 -0500
+@@ -25,6 +25,8 @@
+ 
+ #include "config.h"
+ 
++#include <sys/resource.h>
++#include <sys/mman.h>
+ #include <errno.h>
+ #include <fcntl.h>
+ #include <signal.h>
+@ -1616,40 +1616,55 @@ NTSTATUS WINAPI NtQueryInformationProces
+         break;
+ 
+     case ProcessQuotaLimits:
+-        {
+-            QUOTA_LIMITS_EX qlimits;
++    {
++        QUOTA_LIMITS_EX qlimits;
+ 
+-            FIXME( "ProcessQuotaLimits (%p,%p,0x%08x,%p) stub\n", handle, info, (int)size, ret_len );
++        FIXME("ProcessQuotaLimits (%p,%p,0x%08x,%p) stub\n", handle, info, (int)length, ret_len);
+ 
+-            if (size == sizeof(QUOTA_LIMITS) || size == sizeof(QUOTA_LIMITS_EX))
++        if (length == sizeof(QUOTA_LIMITS) || length == sizeof(QUOTA_LIMITS_EX))
++        {
++            if (!handle)
+             {
+-                if (!handle) ret = STATUS_INVALID_HANDLE;
+-                else
++                ret = STATUS_INVALID_HANDLE;
++            }
++            else
++            {
++                memset(&qlimits, 0, sizeof(qlimits));
++                /* FIXME: SetProcessWorkingSetSize can also set the quota values.
++                            Quota Limits should be stored inside the process. */
++                qlimits.PagedPoolLimit = (SIZE_T)-1;
++                qlimits.NonPagedPoolLimit = (SIZE_T)-1;
++                /* Default minimum working set size is 204800 bytes (50 Pages) */
++                qlimits.MinimumWorkingSetSize = 204800;
++                /* Default maximum working set size is 1413120 bytes (345 Pages) */
++                qlimits.MaximumWorkingSetSize = 1413120;
++                qlimits.PagefileLimit = (SIZE_T)-1;
++                qlimits.TimeLimit.QuadPart = -1;
++                if (length == sizeof(QUOTA_LIMITS_EX))
++                {
++                    qlimits.WorkingSetLimit = (SIZE_T)-1;
++                    qlimits.Flags = QUOTA_LIMITS_HARDWS_MIN_DISABLE | QUOTA_LIMITS_HARDWS_MAX_DISABLE;
++                }
++                len = length;
++                if (len != sizeof(QUOTA_LIMITS)) len = sizeof(QUOTA_LIMITS_EX);
++                memcpy(info, &qlimits, len);
++
++                if (length == sizeof(QUOTA_LIMITS_EX))
+                 {
+-                    memset(&qlimits, 0, sizeof(qlimits));
+-                    /* FIXME: SetProcessWorkingSetSize can also set the quota values.
+-                                Quota Limits should be stored inside the process. */
+-                    qlimits.PagedPoolLimit = (SIZE_T)-1;
+-                    qlimits.NonPagedPoolLimit = (SIZE_T)-1;
+-                    /* Default minimum working set size is 204800 bytes (50 Pages) */
+-                    qlimits.MinimumWorkingSetSize = 204800;
+-                    /* Default maximum working set size is 1413120 bytes (345 Pages) */
+-                    qlimits.MaximumWorkingSetSize = 1413120;
+-                    qlimits.PagefileLimit = (SIZE_T)-1;
+-                    qlimits.TimeLimit.QuadPart = -1;
+-                    if (size == sizeof(QUOTA_LIMITS_EX))
++                    ret = set_working_set_limits(qlimits.MinimumWorkingSetSize, qlimits.MaximumWorkingSetSize);
++                    if (!NT_SUCCESS(ret))
+                     {
+-                        qlimits.WorkingSetLimit = (SIZE_T)-1;
+-                        qlimits.Flags = QUOTA_LIMITS_HARDWS_MIN_DISABLE|QUOTA_LIMITS_HARDWS_MAX_DISABLE;
++                        return ret;
+                     }
+-                    len = size;
+-                    if (len != sizeof(QUOTA_LIMITS)) len = sizeof(QUOTA_LIMITS_EX);
+-                    memcpy(info, &qlimits, len);
+                 }
+             }
+-            else ret = STATUS_INFO_LENGTH_MISMATCH;
+-            break;
+         }
++        else
++        {
++            ret = STATUS_INFO_LENGTH_MISMATCH;
++        }
++        break;
++    }
+ 
+     default:
+         FIXME("(%p,info_class=%d,%p,0x%08x,%p) Unknown information class\n",
+@@ -1655,6 +1674,63 @@ NTSTATUS WINAPI NtQueryInformationProces
+     return ret;
+ }
+ 
++NTSTATUS set_working_set_limits(SIZE_T minset, SIZE_T maxset)
++{
++    struct rlimit limits;
++
++    if (minset == (SIZE_T)-1 && maxset == (SIZE_T)-1)
++    {
++        if (munlockall() == -1)
++        {
++            switch(errno)
++            {
++                case ENOSYS:
++                    return STATUS_INVALID_FUNCTION;
++                default:
++                    return STATUS_UNSUCCESSFUL;
++            }
++        }
++        limits.rlim_cur = 0;
++        limits.rlim_max = 0;
++    }
++    else
++    {
++        limits.rlim_cur = maxset;
++        limits.rlim_max = maxset;
++    }
++    
++    if (setrlimit(RLIMIT_MEMLOCK, &limits) == -1)
++    {
++        switch(errno)
++        {
++            case EINVAL:
++                return STATUS_INVALID_PARAMETER;
++            case EPERM:
++                return STATUS_ACCESS_DENIED;
++            default:
++                return STATUS_UNSUCCESSFUL;
++        }
++    }
++
++    // Lock the memory if the limits are successfully set
++    if (maxset != (SIZE_T)-1)
++    {
++        if (mlockall(MCL_CURRENT | MCL_FUTURE) == -1)
++        {
++            switch(errno)
++            {
++                case ENOMEM:
++                    return STATUS_NO_MEMORY;
++                case EPERM:
++                    return STATUS_ACCESS_DENIED;
++                default:
++                    return STATUS_UNSUCCESSFUL;
++            }
++        }
++    }
++    
++    return STATUS_SUCCESS;
++}
+ 
+ /**********************************************************************
+  *           NtSetInformationProcess  (NTDLL.@)
+--- a/dlls/kernelbase/process.c	2024-07-01 20:23:54.211232770 -0500
++++ b/dlls/kernelbase/process.c	2024-07-01 20:23:42.521190782 -0500
+@@ -1380,6 +1380,30 @@ BOOL WINAPI DECLSPEC_HOTPATCH SetProcess
+ BOOL WINAPI DECLSPEC_HOTPATCH SetProcessWorkingSetSizeEx( HANDLE process, SIZE_T minset,
+                                                           SIZE_T maxset, DWORD flags )
+ {
++    QUOTA_LIMITS_EX qlimits;
++    NTSTATUS status;
++
++    // Only allow setting working set size for the current process
++    if (process != GetCurrentProcess())
++    {
++        SetLastError(ERROR_INVALID_PARAMETER);
++        return FALSE;
++    }
++
++    // Initialize the QUOTA_LIMITS_EX structure
++    memset(&qlimits, 0, sizeof(qlimits));
++    qlimits.MinimumWorkingSetSize = minset;
++    qlimits.MaximumWorkingSetSize = maxset;
++    qlimits.Flags = flags;
++
++    // Call NtSetInformationProcess to set the working set limits
++    status = NtSetInformationProcess(process, ProcessQuotaLimits, &qlimits, sizeof(qlimits));
++    if (!NT_SUCCESS(status))
++    {
++        SetLastError(RtlNtStatusToDosError(status));
++        return FALSE;
++    }
++
+     return TRUE;
+ }
+ 
+

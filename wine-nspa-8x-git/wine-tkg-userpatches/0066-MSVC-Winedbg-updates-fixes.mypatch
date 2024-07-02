@@ -17178,3 +17178,97 @@ index 5d9dd5c1a74..88ed59adad9 100644
  @ stdcall __std_submit_threadpool_work(ptr)
 -- 
 GitLab
+
+From 98e74c7842d124aa475c8cb9e5b47a34b96e0f63 Mon Sep 17 00:00:00 2001
+From: Piotr Caban <piotr@codeweavers.com>
+Date: Tue, 11 Jun 2024 19:18:53 +0200
+Subject: [PATCH 1/6] msvcp140: Use _get_stream_buffer_pointers() to access
+ FILE internal buffers.
+
+---
+ dlls/msvcp90/ios.c     | 16 +++++++++++++---
+ dlls/msvcp90/locale.c  |  1 -
+ dlls/msvcp90/msvcp90.h |  5 +++++
+ dlls/msvcp90/string.c  |  1 -
+ 4 files changed, 18 insertions(+), 5 deletions(-)
+
+diff --git a/dlls/msvcp90/ios.c b/dlls/msvcp90/ios.c
+index d81e6367878..1bf1a41cca4 100644
+--- a/dlls/msvcp90/ios.c
++++ b/dlls/msvcp90/ios.c
+@@ -17,7 +17,6 @@
+  */
+ 
+ #include <stdarg.h>
+-#include <stdio.h>
+ #include <limits.h>
+ #include <share.h>
+ 
+@@ -3028,8 +3027,19 @@ void __thiscall basic_filebuf_char__Init(basic_filebuf_char *this, FILE *file, b
+ 
+     basic_streambuf_char__Init_empty(&this->base);
+     if(file)
+-        basic_streambuf_char__Init(&this->base, &file->_base, &file->_ptr,
+-                &file->_cnt, &file->_base, &file->_ptr, &file->_cnt);
++    {
++        char **base, **ptr;
++        int *cnt;
++
++#if _MSVCP_VER >= 140
++        _get_stream_buffer_pointers(file, &base, &ptr, &cnt);
++#else
++        base = &file->_base;
++        ptr = &file->_ptr;
++        cnt = &file->_cnt;
++#endif
++        basic_streambuf_char__Init(&this->base, base, ptr, cnt, base, ptr, cnt);
++    }
+ }
+ 
+ /* ?_Initcvt@?$basic_filebuf@DU?$char_traits@D@std@@@std@@IAEXPAV?$codecvt@DDH@2@@Z */
+diff --git a/dlls/msvcp90/locale.c b/dlls/msvcp90/locale.c
+index 4eaf679139c..28a0db9d3bd 100644
+--- a/dlls/msvcp90/locale.c
++++ b/dlls/msvcp90/locale.c
+@@ -24,7 +24,6 @@
+ #include "limits.h"
+ #include "math.h"
+ #include "mbctype.h"
+-#include "stdio.h"
+ #include "wchar.h"
+ #include "wctype.h"
+ #include "uchar.h"
+diff --git a/dlls/msvcp90/msvcp90.h b/dlls/msvcp90/msvcp90.h
+index 54c66952a60..23ce63947e5 100644
+--- a/dlls/msvcp90/msvcp90.h
++++ b/dlls/msvcp90/msvcp90.h
+@@ -17,6 +17,7 @@
+  */
+ 
+ #include "stdbool.h"
++#include <stdio.h>
+ #include "stdlib.h"
+ #include "windef.h"
+ #include "winbase.h"
+@@ -736,3 +737,7 @@ void __cdecl DECLSPEC_NORETURN _Xruntime_error(const char*);
+ void DECLSPEC_NORETURN throw_exception(const char*);
+ void DECLSPEC_NORETURN throw_failure(const char*);
+ void DECLSPEC_NORETURN throw_range_error(const char*);
++
++#if _MSVCP_VER >= 140
++int CDECL _get_stream_buffer_pointers(FILE*,char***,char***,int**);
++#endif
+diff --git a/dlls/msvcp90/string.c b/dlls/msvcp90/string.c
+index 3384069bd03..10fae252380 100644
+--- a/dlls/msvcp90/string.c
++++ b/dlls/msvcp90/string.c
+@@ -19,7 +19,6 @@
+ #include <stdarg.h>
+ 
+ #include "msvcp90.h"
+-#include "stdio.h"
+ 
+ #include "windef.h"
+ #include "winbase.h"
+-- 
+GitLab

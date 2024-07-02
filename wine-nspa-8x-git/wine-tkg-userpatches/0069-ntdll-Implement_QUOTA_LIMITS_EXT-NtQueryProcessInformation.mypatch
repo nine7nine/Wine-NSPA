@@ -1,0 +1,320 @@
+From ea4ba2f7de2d761f4f2e30f4ef146731d0b8d08c Mon Sep 17 00:00:00 2001
+From: Vijay Kiran Kamuju <infyquest@gmail.com>
+Date: Sat, 9 Mar 2024 20:51:08 +0100
+Subject: [PATCH] ntdll: Add NtQueryInformationProcess(ProcessQuotaLimits)
+ stub.
+
+Based on a patch by Qian Hong.
+
+Wine-Bug: https://bugs.winehq.org/show_bug.cgi?id=44812
+Signed-off-by: Gijs Vermeulen <gijsvrm@gmail.com>
+---
+ dlls/ntdll/unix/process.c | 30 +++++++++++++++++++++++++++++-
+ dlls/wow64/process.c      | 22 +++++++++++++++++++++-
+ dlls/wow64/struct32.h     | 10 ++++++++++
+ 3 files changed, 60 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/ntdll/unix/process.c b/dlls/ntdll/unix/process.c
+index 2c6dc1b43ccd..cc2d820e7237 100644
+--- a/dlls/ntdll/unix/process.c
++++ b/dlls/ntdll/unix/process.c
+@@ -1124,7 +1124,6 @@ NTSTATUS WINAPI NtQueryInformationProcess( HANDLE handle, PROCESSINFOCLASS class
+ 
+     switch (class)
+     {
+-    UNIMPLEMENTED_INFO_CLASS(ProcessQuotaLimits);
+     UNIMPLEMENTED_INFO_CLASS(ProcessBasePriority);
+     UNIMPLEMENTED_INFO_CLASS(ProcessRaisePriority);
+     UNIMPLEMENTED_INFO_CLASS(ProcessExceptionPort);
+@@ -1580,6 +1579,35 @@ NTSTATUS WINAPI NtQueryInformationProcess( HANDLE handle, PROCESSINFOCLASS class
+         else ret = STATUS_INVALID_PARAMETER;
+         break;
+ 
++    case ProcessQuotaLimits:
++        {
++            QUOTA_LIMITS qlimits;
++
++            FIXME( "ProcessQuotaLimits (%p,%p,0x%08x,%p) stub\n", handle, info, (int)size, ret_len );
++
++            len = sizeof(QUOTA_LIMITS);
++            if (size == len)
++            {
++                if (!handle) ret = STATUS_INVALID_HANDLE;
++                else
++                {
++                    /* FIXME: SetProcessWorkingSetSize can also set the quota values.
++                                Quota Limits should be stored inside the process. */
++                    qlimits.PagedPoolLimit = (SIZE_T)-1;
++                    qlimits.NonPagedPoolLimit = (SIZE_T)-1;
++                    /* Default minimum working set size is 204800 bytes (50 Pages) */
++                    qlimits.MinimumWorkingSetSize = 204800;
++                    /* Default maximum working set size is 1413120 bytes (345 Pages) */
++                    qlimits.MaximumWorkingSetSize = 1413120;
++                    qlimits.PagefileLimit = (SIZE_T)-1;
++                    qlimits.TimeLimit.QuadPart = -1;
++                    memcpy(info, &qlimits, len);
++                }
++            }
++            else ret = STATUS_INFO_LENGTH_MISMATCH;
++            break;
++        }
++
+     default:
+         FIXME("(%p,info_class=%d,%p,0x%08x,%p) Unknown information class\n",
+               handle, class, info, (int)size, ret_len );
+diff --git a/dlls/wow64/process.c b/dlls/wow64/process.c
+index 8b543d2a8598..3150ad4b2f6c 100644
+--- a/dlls/wow64/process.c
++++ b/dlls/wow64/process.c
+@@ -252,7 +252,6 @@ static void put_ps_attributes( PS_ATTRIBUTE_LIST32 *attr32, const PS_ATTRIBUTE_L
+     }
+ }
+ 
+-
+ void put_vm_counters( VM_COUNTERS_EX32 *info32, const VM_COUNTERS_EX *info, ULONG size )
+ {
+     info32->PeakVirtualSize            = info->PeakVirtualSize;
+@@ -566,6 +565,27 @@ NTSTATUS WINAPI wow64_NtQueryInformationProcess( UINT *args )
+         /* FIXME: check buffer alignment */
+         return NtQueryInformationProcess( handle, class, ptr, len, retlen );
+ 
++    case ProcessQuotaLimits:  /* QUOTA_LIMITS */
++        if (len == sizeof(QUOTA_LIMITS32))
++        {
++            QUOTA_LIMITS info;
++            QUOTA_LIMITS32 *info32 = ptr;
++
++            if (!(status = NtQueryInformationProcess( handle, class, &info, sizeof(info), NULL )))
++            {
++                info32->PagedPoolLimit        = info.PagedPoolLimit;
++                info32->NonPagedPoolLimit     = info.NonPagedPoolLimit;
++                info32->MinimumWorkingSetSize = info.MinimumWorkingSetSize;
++                info32->MaximumWorkingSetSize = info.MaximumWorkingSetSize;
++                info32->PagefileLimit         = info.PagefileLimit;
++                info32->TimeLimit             = info.TimeLimit;
++                if (retlen) *retlen = len;
++            }
++            return status;
++        }
++        if (retlen) *retlen = sizeof(QUOTA_LIMITS32);
++        return STATUS_INFO_LENGTH_MISMATCH;
++
+     case ProcessVmCounters:  /* VM_COUNTERS_EX */
+         if (len == sizeof(VM_COUNTERS32) || len == sizeof(VM_COUNTERS_EX32))
+         {
+diff --git a/dlls/wow64/struct32.h b/dlls/wow64/struct32.h
+index 2c4cf4f9e3ce..9535fba3a843 100644
+--- a/dlls/wow64/struct32.h
++++ b/dlls/wow64/struct32.h
+@@ -728,4 +728,14 @@ typedef struct
+     ULONG Thread;
+ } PROCESS_ACCESS_TOKEN32;
+ 
++typedef struct
++{
++    ULONG PagedPoolLimit;
++    ULONG NonPagedPoolLimit;
++    ULONG MinimumWorkingSetSize;
++    ULONG MaximumWorkingSetSize;
++    ULONG PagefileLimit;
++    LARGE_INTEGER TimeLimit;
++} QUOTA_LIMITS32;
++
+ #endif /* __WOW64_STRUCT32_H */
+
+
+From e126c6ac0deda7cdf1b774b8f33e838889cc9689 Mon Sep 17 00:00:00 2001
+From: Vijay Kiran Kamuju <infyquest@gmail.com>
+Date: Wed, 17 Apr 2024 18:20:36 +0200
+Subject: [PATCH 1/2] ntdll: Implement QUOTA_LIMITS_EX for
+ NtQueryProcessInformation(ProcessQuotaLimits).
+
+---
+ dlls/ntdll/unix/process.c | 13 ++++++++++---
+ dlls/wow64/process.c      | 34 ++++++++++++++++++++++----------
+ dlls/wow64/struct32.h     | 25 ++++++++++++++++++++++++
+ 4 files changed, 100 insertions(+), 13 deletions(-)
+
+diff --git a/dlls/ntdll/unix/process.c b/dlls/ntdll/unix/process.c
+index cc2d820e723..7e9f6776157 100644
+--- a/dlls/ntdll/unix/process.c
++++ b/dlls/ntdll/unix/process.c
+@@ -1581,16 +1581,16 @@ NTSTATUS WINAPI NtQueryInformationProcess( HANDLE handle, PROCESSINFOCLASS class
+ 
+     case ProcessQuotaLimits:
+         {
+-            QUOTA_LIMITS qlimits;
++            QUOTA_LIMITS_EX qlimits;
+ 
+             FIXME( "ProcessQuotaLimits (%p,%p,0x%08x,%p) stub\n", handle, info, (int)size, ret_len );
+ 
+-            len = sizeof(QUOTA_LIMITS);
+-            if (size == len)
++            if (size == sizeof(QUOTA_LIMITS) || size == sizeof(QUOTA_LIMITS_EX))
+             {
+                 if (!handle) ret = STATUS_INVALID_HANDLE;
+                 else
+                 {
++                    memset(&qlimits, 0, sizeof(qlimits));
+                     /* FIXME: SetProcessWorkingSetSize can also set the quota values.
+                                 Quota Limits should be stored inside the process. */
+                     qlimits.PagedPoolLimit = (SIZE_T)-1;
+@@ -1601,6 +1601,13 @@ NTSTATUS WINAPI NtQueryInformationProcess( HANDLE handle, PROCESSINFOCLASS class
+                     qlimits.MaximumWorkingSetSize = 1413120;
+                     qlimits.PagefileLimit = (SIZE_T)-1;
+                     qlimits.TimeLimit.QuadPart = -1;
++                    if (size == sizeof(QUOTA_LIMITS_EX))
++                    {
++                        qlimits.WorkingSetLimit = (SIZE_T)-1;
++                        qlimits.Flags = QUOTA_LIMITS_HARDWS_MIN_DISABLE|QUOTA_LIMITS_HARDWS_MAX_DISABLE;
++                    }
++                    len = size;
++                    if (len != sizeof(QUOTA_LIMITS)) len = sizeof(QUOTA_LIMITS_EX);
+                     memcpy(info, &qlimits, len);
+                 }
+             }
+diff --git a/dlls/wow64/process.c b/dlls/wow64/process.c
+index 4a769c042c5..37d10d6a3c2 100644
+--- a/dlls/wow64/process.c
++++ b/dlls/wow64/process.c
+@@ -252,6 +252,25 @@ static void put_ps_attributes( PS_ATTRIBUTE_LIST32 *attr32, const PS_ATTRIBUTE_L
+     }
+ }
+ 
++void put_quota_limits( QUOTA_LIMITS_EX32 *info32, const QUOTA_LIMITS_EX *info, ULONG size )
++{
++    info32->PagedPoolLimit        = info->PagedPoolLimit;
++    info32->NonPagedPoolLimit     = info->NonPagedPoolLimit;
++    info32->MinimumWorkingSetSize = info->MinimumWorkingSetSize;
++    info32->MaximumWorkingSetSize = info->MaximumWorkingSetSize;
++    info32->PagefileLimit         = info->PagefileLimit;
++    info32->TimeLimit             = info->TimeLimit;
++    if (size == sizeof(QUOTA_LIMITS_EX32))
++    {
++	info32->WorkingSetLimit   = info->WorkingSetLimit;
++	info32->Reserved2         = info->Reserved2;
++	info32->Reserved3         = info->Reserved3;
++	info32->Reserved4         = info->Reserved4;
++	info32->Flags             = info->Flags;
++	info32->CpuRateLimit.RateData = info->CpuRateLimit.RateData;
++    }
++}
++
+ void put_vm_counters( VM_COUNTERS_EX32 *info32, const VM_COUNTERS_EX *info, ULONG size )
+ {
+     info32->PeakVirtualSize            = info->PeakVirtualSize;
+@@ -566,24 +585,19 @@ NTSTATUS WINAPI wow64_NtQueryInformationProcess( UINT *args )
+         return NtQueryInformationProcess( handle, class, ptr, len, retlen );
+ 
+     case ProcessQuotaLimits:  /* QUOTA_LIMITS */
+-        if (len == sizeof(QUOTA_LIMITS32))
++        if (len == sizeof(QUOTA_LIMITS32) || len == sizeof(QUOTA_LIMITS_EX32))
+         {
+-            QUOTA_LIMITS info;
+-            QUOTA_LIMITS32 *info32 = ptr;
++            QUOTA_LIMITS_EX info;
++            QUOTA_LIMITS_EX32 *info32 = ptr;
+ 
+             if (!(status = NtQueryInformationProcess( handle, class, &info, sizeof(info), NULL )))
+             {
+-                info32->PagedPoolLimit        = info.PagedPoolLimit;
+-                info32->NonPagedPoolLimit     = info.NonPagedPoolLimit;
+-                info32->MinimumWorkingSetSize = info.MinimumWorkingSetSize;
+-                info32->MaximumWorkingSetSize = info.MaximumWorkingSetSize;
+-                info32->PagefileLimit         = info.PagefileLimit;
+-                info32->TimeLimit             = info.TimeLimit;
++                put_quota_limits( info32, &info, len );
+                 if (retlen) *retlen = len;
+             }
+             return status;
+         }
+-        if (retlen) *retlen = sizeof(QUOTA_LIMITS32);
++        if (retlen) *retlen = sizeof(QUOTA_LIMITS_EX32);
+         return STATUS_INFO_LENGTH_MISMATCH;
+ 
+     case ProcessVmCounters:  /* VM_COUNTERS_EX */
+diff --git a/dlls/wow64/struct32.h b/dlls/wow64/struct32.h
+index 9535fba3a84..7ab2abf2c6d 100644
+--- a/dlls/wow64/struct32.h
++++ b/dlls/wow64/struct32.h
+@@ -738,4 +738,29 @@ typedef struct
+     LARGE_INTEGER TimeLimit;
+ } QUOTA_LIMITS32;
+ 
++typedef union
++{
++    ULONG RateData;
++    struct
++    {
++        ULONG   RatePercent:7;
++        ULONG   Reserved0:25;
++    };
++} RATE_QUOTA_LIMIT32;
++
++typedef struct
++{
++    ULONG PagedPoolLimit;
++    ULONG NonPagedPoolLimit;
++    ULONG MinimumWorkingSetSize;
++    ULONG MaximumWorkingSetSize;
++    ULONG PagefileLimit;
++    LARGE_INTEGER TimeLimit;
++    ULONG WorkingSetLimit;
++    ULONG Reserved2;
++    ULONG Reserved3;
++    ULONG Reserved4;
++    ULONG Flags;
++    RATE_QUOTA_LIMIT32 CpuRateLimit;
++} QUOTA_LIMITS_EX32;
+ #endif /* __WOW64_STRUCT32_H */
+-- 
+GitLab
+
+
+From bbfd8fee0143e43df4dbe7deef6fc1b8870d2b77 Mon Sep 17 00:00:00 2001
+From: Vijay Kiran Kamuju <infyquest@gmail.com>
+Date: Wed, 17 Apr 2024 18:22:06 +0200
+Subject: [PATCH 2/2] kernelbase: Implement GetProcessWorkingSetSizeEx().
+
+---
+ dlls/kernelbase/process.c | 17 +++++++++++------
+ 1 file changed, 11 insertions(+), 6 deletions(-)
+
+diff --git a/dlls/kernelbase/process.c b/dlls/kernelbase/process.c
+index 775512e7f0d..e4b06a4b451 100644
+--- a/dlls/kernelbase/process.c
++++ b/dlls/kernelbase/process.c
+@@ -27,6 +27,7 @@
+ #include "winbase.h"
+ #include "winnls.h"
+ #include "wincontypes.h"
++#include "winnt.h"
+ #include "winternl.h"
+ 
+ #include "kernelbase.h"
+@@ -975,12 +976,16 @@ DWORD WINAPI DECLSPEC_HOTPATCH GetProcessVersion( DWORD pid )
+ BOOL WINAPI DECLSPEC_HOTPATCH GetProcessWorkingSetSizeEx( HANDLE process, SIZE_T *minset,
+                                                           SIZE_T *maxset, DWORD *flags)
+ {
+-    FIXME( "(%p,%p,%p,%p): stub\n", process, minset, maxset, flags );
+-    /* 32 MB working set size */
+-    if (minset) *minset = 32*1024*1024;
+-    if (maxset) *maxset = 32*1024*1024;
+-    if (flags) *flags = QUOTA_LIMITS_HARDWS_MIN_DISABLE | QUOTA_LIMITS_HARDWS_MAX_DISABLE;
+-    return TRUE;
++    QUOTA_LIMITS_EX qlimits;
++    NTSTATUS status;
++
++    TRACE( "(%p,%p,%p,%p): stub\n", process, minset, maxset, flags );
++
++    status = NtQueryInformationProcess( process, ProcessQuotaLimits, &qlimits, sizeof(qlimits), NULL );
++    if(minset) *minset = qlimits.MinimumWorkingSetSize;
++    if(maxset) *maxset = qlimits.MaximumWorkingSetSize;
++    if(flags) *flags = qlimits.Flags;
++    return set_ntstatus( status );
+ }
+ 
+ 
+-- 
+GitLab
+
