@@ -1,0 +1,165 @@
+From: Jordan Johnston <johnstonljordan@gmail.com>
+Subject: [PATCH] ntdll: Implement dynamic Spin & Adaptive Yield
+Date: Wed,  3 July 2024 21:02:18 +0900
+
+ This patch is partially based on Jangwoong Kim's' dynamic
+ spinning patch (RTL_CRITICAL_SECTION_FLAG_DYNAMIC_SPIN). However,
+ I have refactored it, while also adding Adaptive Yielding.
+
+ This implements a yielding strategy that adapts dynamically to 
+ the level of contention. Benefit: This reduces CPU contention by
+ progressively increasing the delay during high contention periods,
+ allowing other threads to make progress and reducing the chances
+ of busy-waiting.
+
+Signed-off-by: Jordan Johnston <johnstonljordan@gmail.com>
+---
+ dlls/ntdll/sync.c | 52 ++++++++++++++++++++++++++++++++++++++++-------
+ 1 file changed, 45 insertions(+), 7 deletions(-)
+
+diff --git a/dlls/ntdll/sync.c b/dlls/ntdll/sync.c
+index 11111111111..11111111111 100644
+--- a/dlls/ntdll/sync.c
++++ b/dlls/ntdll/sync.c
+@@ -27,6 +27,7 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <time.h>
++#include <unistd.h>
+ 
+ #include "ntstatus.h"
+ #define WIN32_NO_STATUS
+@@ -45,6 +46,36 @@ static const char *debugstr_timeout( con
+     return wine_dbgstr_longlong( timeout->QuadPart );
+ }
+ 
++#define MAX_ADAPTIVE_SPIN_COUNT 4000
++#define DEFAULT_ADAPTIVE_SPIN_COUNT 4000
++#define MIN(a, b) (((a) < (b)) ? (a) : (b))
++#define ADJUSTMENT_DIVISOR 10
++#define MAX_SPIN_THRESHOLD 10000
++
++static DWORD adjust_spin_count(DWORD current_spin, LONG adjustment)
++{
++    LONG new_spin_count = current_spin + adjustment;
++    return (new_spin_count < 0) ? 0 : MIN(new_spin_count, MAX_ADAPTIVE_SPIN_COUNT);
++}
++
++static void adaptive_yield(DWORD iteration)
++{
++    if (iteration < MAX_SPIN_THRESHOLD)
++    {
++        // Yield the processor to allow other threads to run
++        YieldProcessor();
++    }
++    else
++    {
++        // Busy-wait loop to simulate sleep
++        DWORD delay = (iteration / MAX_SPIN_THRESHOLD) * ADJUSTMENT_DIVISOR;
++        for (DWORD i = 0; i < delay; i++)
++        {
++            YieldProcessor();
++        }
++    }
++}
++
+ /******************************************************************
+  *              RtlRunOnceInitialize (NTDLL.@)
+  */
+@@ -223,9 +254,15 @@ NTSTATUS WINAPI RtlInitializeCriticalSec
+  */
+ NTSTATUS WINAPI RtlInitializeCriticalSectionEx( RTL_CRITICAL_SECTION *crit, ULONG spincount, ULONG flags )
+ {
+-    if (flags & (RTL_CRITICAL_SECTION_FLAG_DYNAMIC_SPIN|RTL_CRITICAL_SECTION_FLAG_STATIC_INIT))
++    if (flags & RTL_CRITICAL_SECTION_FLAG_STATIC_INIT)
+         FIXME("(%p,%lu,0x%08lx) semi-stub\n", crit, spincount, flags);
+ 
++    if (!spincount)
++    {
++        flags |= RTL_CRITICAL_SECTION_FLAG_DYNAMIC_SPIN;
++        spincount = DEFAULT_ADAPTIVE_SPIN_COUNT;
++    }
++
+     /* FIXME: if RTL_CRITICAL_SECTION_FLAG_STATIC_INIT is given, we should use
+      * memory from a static pool to hold the debug info. Then heap.c could pass
+      * this flag rather than initialising the process heap CS by hand. If this
+@@ -249,12 +286,19 @@ NTSTATUS WINAPI RtlInitializeCriticalSec
+             memset( crit->DebugInfo->Spare, 0, sizeof(crit->DebugInfo->Spare) );
+         }
+     }
+-    crit->LockCount      = -1;
++
++    crit->LockCount     = -1;
+     crit->RecursionCount = 0;
+     crit->OwningThread   = 0;
+     crit->LockSemaphore  = 0;
++    spincount &= ~RTL_CRITICAL_SECTION_FLAG_DYNAMIC_SPIN;
++    if (flags & RTL_CRITICAL_SECTION_FLAG_DYNAMIC_SPIN)
++    {
++        spincount = MIN(spincount, MAX_ADAPTIVE_SPIN_COUNT);
++        spincount |= RTL_CRITICAL_SECTION_FLAG_DYNAMIC_SPIN;
++    }
+     if (NtCurrentTeb()->Peb->NumberOfProcessors <= 1) spincount = 0;
+-    crit->SpinCount = spincount & ~0x80000000;
++    crit->SpinCount = spincount;
+     return STATUS_SUCCESS;
+ }
+ 
+@@ -357,17 +401,43 @@ NTSTATUS WINAPI RtlEnterCriticalSection(
+ {
+     if (crit->SpinCount)
+     {
+-        ULONG count;
++        DWORD spincount = *(volatile DWORD*)&crit->SpinCount;
++        DWORD count;
+ 
+         if (RtlTryEnterCriticalSection( crit )) return STATUS_SUCCESS;
+-        for (count = crit->SpinCount; count > 0; count--)
++
++        if (spincount & RTL_CRITICAL_SECTION_FLAG_DYNAMIC_SPIN)
+         {
+-            if (crit->LockCount > 0) break;  /* more than one waiter, don't bother spinning */
+-            if (crit->LockCount == -1)       /* try again */
++            DWORD max_count = MIN(spincount * 2, MAX_ADAPTIVE_SPIN_COUNT);
++            LONG adjustment;
++            spincount &= ~RTL_CRITICAL_SECTION_FLAG_DYNAMIC_SPIN;
++
++            for (count = 0; count < max_count; count++)
+             {
+-                if (InterlockedCompareExchange( &crit->LockCount, 0, -1 ) == -1) goto done;
++                if (crit->LockCount == -1 && InterlockedCompareExchange( &crit->LockCount, 0, -1 ) == -1)
++                {
++                    adjustment = (LONG)(count - spincount) / ADJUSTMENT_DIVISOR;
++                    spincount = *(volatile DWORD*)&crit->SpinCount & ~RTL_CRITICAL_SECTION_FLAG_DYNAMIC_SPIN;
++                    crit->SpinCount = adjust_spin_count(spincount, adjustment);
++                    goto done;
++                }
++                adaptive_yield(count);
++            }
++            adjustment = (LONG)(count - spincount) / ADJUSTMENT_DIVISOR;
++            spincount = *(volatile DWORD*)&crit->SpinCount & ~RTL_CRITICAL_SECTION_FLAG_DYNAMIC_SPIN;
++            crit->SpinCount = adjust_spin_count(spincount, adjustment);
++        }
++        else
++        {
++            for (count = spincount; count > 0; count--)
++            {
++                if (crit->LockCount > 0) break;  /* more than one waiter, don't bother spinning */
++                if (crit->LockCount == -1)       /* try again */
++                {
++                    if (InterlockedCompareExchange( &crit->LockCount, 0, -1 ) == -1) goto done;
++                }
++                adaptive_yield(spincount - count);
+             }
+-            YieldProcessor();
+         }
+     }
+ 
+@@ -379,7 +449,6 @@ NTSTATUS WINAPI RtlEnterCriticalSection(
+             return STATUS_SUCCESS;
+         }
+ 
+-        /* Now wait for it */
+         RtlpWaitForCriticalSection( crit );
+     }
+ done:
