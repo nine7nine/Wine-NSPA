@@ -87,10 +87,15 @@ _prebuild_common() {
 	    _configure_args32+=(--without-pulse)
 	  fi
 
-	  # Wayland driver
-	  if [ "$_wayland_driver" = "true" ]; then
-	    _configure_args64+=(--with-wayland --with-vulkan)
-	    _configure_args32+=(--with-wayland --with-vulkan)
+	  # Wayland Support
+	  if [ "$_wayland" = "true" ]; then
+	    _configure_args64+=(--with-wayland)
+	    _configure_args32+=(--with-wayland)
+	  fi
+	  # Vulkan Support
+	  if [ "$_vulkan" = "true" ]; then
+	    _configure_args64+=(--with-vulkan)
+	    _configure_args32+=(--with-vulkan)
 	  fi
 	fi
 

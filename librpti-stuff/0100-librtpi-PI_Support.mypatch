@@ -1029,6 +1029,7 @@ diff -Npur a/dlls/win32u/dce.c b/dlls/win32u/dce.c
 --- a/dlls/win32u/dce.c	2024-05-01 15:47:17.671125622 -0500
 +++ b/dlls/win32u/dce.c	2024-05-01 15:50:03.421915861 -0500
 @@ -25,6 +25,7 @@
+ @@ -25,6 +25,7 @@
  
  #include <assert.h>
  #include <pthread.h>
@@ -1090,7 +1091,52 @@ diff -Npur a/dlls/win32u/dce.c b/dlls/win32u/dce.c
  
      reset_bounds( &impl->bounds );
  
-@@ -383,10 +379,10 @@ void register_window_surface( struct win
+@@ -376,7 +373,7 @@ BOOL create_dib_surface( HDC hdc, const
+ struct shm_window_surface
+ {
+     struct window_surface header;
+-    pthread_mutex_t mutex;
++    pi_mutex_t mutex;
+     RECT        bounds;
+     HANDLE      section;
+     HWND        hwnd;
+@@ -392,13 +389,13 @@ static struct shm_window_surface *get_sh
+ static void shm_surface_lock( struct window_surface *window_surface )
+ {
+     struct shm_window_surface *surface = get_shm_surface( window_surface );
+-    pthread_mutex_lock( &surface->mutex );
++    pi_mutex_lock( &surface->mutex );
+ }
+ 
+ static void shm_surface_unlock( struct window_surface *window_surface )
+ {
+     struct shm_window_surface *surface = get_shm_surface( window_surface );
+-    pthread_mutex_unlock( &surface->mutex );
++    pi_mutex_unlock( &surface->mutex );
+ }
+ 
+ static void *shm_surface_get_bitmap_info( struct window_surface *window_surface,
+@@ -472,7 +469,6 @@ struct window_surface *create_shm_surfac
+     OBJECT_ATTRIBUTES attr = { .Length = sizeof(OBJECT_ATTRIBUTES) };
+     struct shm_window_surface *surface;
+     LARGE_INTEGER section_size;
+-    pthread_mutexattr_t pthread_attr;
+     HANDLE parent_process;
+     CLIENT_ID cid;
+     SIZE_T view_size = 0;
+@@ -511,10 +507,7 @@ struct window_surface *create_shm_surfac
+     surface->hwnd         = window;
+     surface->parent       = parent;
+ 
+-    pthread_mutexattr_init( &pthread_attr );
+-    pthread_mutexattr_settype( &pthread_attr, pthread_mutex_RECURSIVE );
+-    pthread_mutex_init( &surface->mutex, &pthread_attr );
+-    pthread_mutexattr_destroy( &pthread_attr );
++    pi_mutex_init( &surface->mutex, 0 );
+ 
+     reset_bounds( &surface->bounds );
+ 
+@@ -615,10 +608,10 @@ void register_window_surface( struct win
      if (old == &dummy_surface) old = NULL;
      if (new == &dummy_surface) new = NULL;
      if (old == new) return;
@@ -1103,7 +1149,7 @@ diff -Npur a/dlls/win32u/dce.c b/dlls/win32u/dce.c
  }
  
  /*******************************************************************
-@@ -400,7 +396,7 @@ void flush_window_surfaces( BOOL idle )
+@@ -632,7 +625,7 @@ void flush_window_surfaces( BOOL idle )
      DWORD now;
      struct window_surface *surface;
  
@@ -1112,7 +1158,7 @@ diff -Npur a/dlls/win32u/dce.c b/dlls/win32u/dce.c
      now = NtGetTickCount();
      if (idle) last_idle = now;
      /* if not idle, we only flush if there's evidence that the app never goes idle */
-@@ -409,7 +405,7 @@ void flush_window_surfaces( BOOL idle )
+@@ -641,7 +634,7 @@ void flush_window_surfaces( BOOL idle )
      LIST_FOR_EACH_ENTRY( surface, &window_surfaces, struct window_surface, entry )
          surface->funcs->flush( surface );
  done:
@@ -4702,6 +4748,9 @@ diff -Npur a/dlls/winevulkan/Makefile.in b/dlls/winevulkan/Makefile.in
  
  C_SRCS = \
  	loader.c \
+
+// rwlocks are crap on RT, use fine-grained locking per-node for Vulkan
+
 diff -Npur a/dlls/winevulkan/vulkan_private.h b/dlls/winevulkan/vulkan_private.h
 --- a/dlls/winevulkan/vulkan_private.h	2024-05-01 15:46:47.308975547 -0500
 +++ b/dlls/winevulkan/vulkan_private.h	2024-05-01 15:50:01.897908792 -0500
@@ -4713,6 +4762,77 @@ diff -Npur a/dlls/winevulkan/vulkan_private.h b/dlls/winevulkan/vulkan_private.h
  
  #include "vulkan_loader.h"
  #include "vulkan_thunks.h"
+--- a/dlls/winevulkan/vulkan_private.h	2024-07-05 11:27:42.571168997 -0500
++++ b/dlls/winevulkan/vulkan_private.h	2024-07-05 11:27:34.307129754 -0500
+@@ -37,6 +37,7 @@ struct wine_vk_mapping
+     struct list link;
+     uint64_t native_handle;
+     uint64_t wine_wrapped_handle;
++    pi_mutex_t lock;
+ };
+ 
+ struct wine_cmd_buffer
+--- a/dlls/winevulkan/vulkan.c	2024-07-05 11:27:31.204115016 -0500
++++ b/dlls/winevulkan/vulkan.c	2024-07-05 11:26:38.617864960 -0500
+@@ -64,16 +64,18 @@ static const struct vulkan_funcs *vk_fun
+     wine_vk_add_handle_mapping((instance), (uintptr_t)(client_handle), (uintptr_t)(native_handle), &(object)->mapping)
+ #define WINE_VK_ADD_NON_DISPATCHABLE_MAPPING(instance, client_handle, native_handle, object) \
+     wine_vk_add_handle_mapping((instance), (uintptr_t)(client_handle), (native_handle), &(object)->mapping)
+-static void  wine_vk_add_handle_mapping(struct wine_instance *instance, uint64_t wrapped_handle,
++static void wine_vk_add_handle_mapping(struct wine_instance *instance, uint64_t wrapped_handle,
+         uint64_t native_handle, struct wine_vk_mapping *mapping)
+ {
+     if (instance->enable_wrapper_list)
+     {
+         mapping->native_handle = native_handle;
+         mapping->wine_wrapped_handle = wrapped_handle;
+-        pthread_rwlock_wrlock(&instance->wrapper_lock);
++        pi_mutex_init(&mapping->lock, 0);
++        
++        pi_mutex_lock(&instance->wrapper_lock);
+         list_add_tail(&instance->wrappers, &mapping->link);
+-        pthread_rwlock_unlock(&instance->wrapper_lock);
++        pi_mutex_unlock(&instance->wrapper_lock);
+     }
+ }
+ 
+@@ -83,9 +85,12 @@ static void wine_vk_remove_handle_mappin
+ {
+     if (instance->enable_wrapper_list)
+     {
+-        pthread_rwlock_wrlock(&instance->wrapper_lock);
++        pi_mutex_lock(&mapping->lock);
++        pi_mutex_lock(&instance->wrapper_lock);
+         list_remove(&mapping->link);
+-        pthread_rwlock_unlock(&instance->wrapper_lock);
++        pi_mutex_unlock(&instance->wrapper_lock);
++        pi_mutex_unlock(&mapping->lock);
++        pi_mutex_destroy(&mapping->lock);
+     }
+ }
+ 
+@@ -94,16 +99,18 @@ static uint64_t wine_vk_get_wrapper(stru
+     struct wine_vk_mapping *mapping;
+     uint64_t result = 0;
+ 
+-    pthread_rwlock_rdlock(&instance->wrapper_lock);
++    pi_mutex_lock(&instance->wrapper_lock);
+     LIST_FOR_EACH_ENTRY(mapping, &instance->wrappers, struct wine_vk_mapping, link)
+     {
++        pi_mutex_lock(&mapping->lock);
+         if (mapping->native_handle == native_handle)
+         {
+             result = mapping->wine_wrapped_handle;
+-            break;
+         }
++        pi_mutex_unlock(&mapping->lock);
+     }
+-    pthread_rwlock_unlock(&instance->wrapper_lock);
++    pi_mutex_unlock(&instance->wrapper_lock);
++
+     return result;
+ }
+ 
 diff -Npur a/dlls/winewayland.drv/display.c b/dlls/winewayland.drv/display.c
 --- a/dlls/winewayland.drv/display.c	2024-05-01 15:46:47.321975612 -0500
 +++ b/dlls/winewayland.drv/display.c	2024-05-01 15:50:03.717917234 -0500

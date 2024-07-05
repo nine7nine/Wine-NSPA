@@ -1,0 +1,432 @@
+// Backported from Wine-9.12 and squashed.
+
+diff --git a/dlls/wow64/virtual.c b/dlls/wow64/virtual.c
+index 412c79abb140..7ccdd0dc65c2 100644
+--- a/dlls/wow64/virtual.c
++++ b/dlls/wow64/virtual.c
+@@ -622,6 +622,8 @@ NTSTATUS WINAPI wow64_NtQueryVirtualMemory( UINT *args )
+         MEMORY_WORKING_SET_EX_INFORMATION *info;
+         ULONG i, count = len / sizeof(*info32);
+ 
++        if (len < sizeof(*info32)) return STATUS_INFO_LENGTH_MISMATCH;
++
+         info = Wow64AllocateTemp( count * sizeof(*info) );
+         for (i = 0; i < count; i++) info[i].VirtualAddress = ULongToPtr( info32[i].VirtualAddress );
+         if (!(status = NtQueryVirtualMemory( handle, addr, class, info, count * sizeof(*info), &res_len )))
+@@ -633,7 +635,7 @@ NTSTATUS WINAPI wow64_NtQueryVirtualMemory( UINT *args )
+         break;
+     }
+ 
+-    case MemoryImageInformation: /* MEMORY_IMAEG_INFORMATION */
++    case MemoryImageInformation: /* MEMORY_IMAGE_INFORMATION */
+     {
+         if (len < sizeof(MEMORY_IMAGE_INFORMATION32)) return STATUS_INFO_LENGTH_MISMATCH;
+ 
+
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index 3ba8093d995a..dce03c2c3b56 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -2209,7 +2209,7 @@ done:
+  * Get the size of the committed range with equal masked vprot bytes starting at base.
+  * Also return the protections for the first page.
+  */
+-static SIZE_T get_committed_size( struct file_view *view, void *base, BYTE *vprot, BYTE vprot_mask )
++static SIZE_T get_committed_size( struct file_view *view, void *base, size_t max_size, BYTE *vprot, BYTE vprot_mask )
+ {
+     SIZE_T offset, size;
+ 
+@@ -2228,7 +2228,7 @@ static SIZE_T get_committed_size( struct
+             req->offset = offset;
+             if (!wine_server_call( req ))
+             {
+-                size = reply->size;
++                size = min( reply->size, max_size );
+                 if (reply->committed)
+                 {
+                     *vprot |= VPROT_COMMITTED;
+@@ -2240,7 +2240,7 @@ static SIZE_T get_committed_size( struct
+ 
+         if (!size || !(vprot_mask & ~VPROT_COMMITTED)) return size;
+     }
+-    else size = view->size - offset;
++    else size = min( view->size - offset, max_size );
+ 
+     return get_vprot_range_size( base, size, vprot_mask, vprot );
+ }
+@@ -5043,7 +5043,7 @@ NTSTATUS WINAPI NtProtectVirtualMemory(
+     if ((view = find_view( base, size )))
+     {
+         /* Make sure all the pages are committed */
+-        if (get_committed_size( view, base, &vprot, VPROT_COMMITTED ) >= size && (vprot & VPROT_COMMITTED))
++        if (get_committed_size( view, base, ~(size_t)0, &vprot, VPROT_COMMITTED ) >= size && (vprot & VPROT_COMMITTED))
+         {
+             old = get_win32_prot( vprot, view->protect );
+             status = set_protection( view, base, size, new_prot );
+@@ -5120,6 +5120,7 @@ static unsigned int fill_basic_memory_in
+          * so that the app doesn't believe it's fully available */
+         {
+             struct reserved_area *area;
++            BOOL in_reserved = FALSE;
+ 
+             LIST_FOR_EACH_ENTRY( area, &reserved_areas, struct reserved_area, entry )
+             {
+@@ -5134,6 +5135,7 @@ static unsigned int fill_basic_memory_in
+                 if (area_start <= base || area_start <= (char *)address_space_start)
+                 {
+                     if (area_end < alloc_end) info->RegionSize = area_end - base;
++                    in_reserved = TRUE;
+                     break;
+                 }
+                 /* report the remaining part of the 64K after the view as free */
+@@ -5144,18 +5146,22 @@ static unsigned int fill_basic_memory_in
+                     if (base < next)
+                     {
+                         info->RegionSize = min( next, alloc_end ) - base;
++                        in_reserved = TRUE;
+                         break;
+                     }
+                     else alloc_base = base;
+                 }
+                 /* pretend it's allocated */
+                 if (area_start < alloc_end) info->RegionSize = area_start - base;
++                break;
++            }
++            if (!in_reserved)
++            {
+                 info->State             = MEM_RESERVE;
+                 info->Protect           = PAGE_NOACCESS;
+                 info->AllocationBase    = alloc_base;
+                 info->AllocationProtect = PAGE_NOACCESS;
+                 info->Type              = MEM_PRIVATE;
+-                break;
+             }
+         }
+ #endif
+@@ -5165,7 +5171,7 @@ static unsigned int fill_basic_memory_in
+         BYTE vprot;
+ 
+         info->AllocationBase = alloc_base;
+-        info->RegionSize = get_committed_size( view, base, &vprot, ~VPROT_WRITEWATCH );
++        info->RegionSize = get_committed_size( view, base, ~(size_t)0, &vprot, ~VPROT_WRITEWATCH );
+         info->State = (vprot & VPROT_COMMITTED) ? MEM_COMMIT : MEM_RESERVE;
+         info->Protect = (vprot & VPROT_COMMITTED) ? get_win32_prot( vprot, view->protect ) : 0;
+         info->AllocationProtect = get_win32_prot( view->protect, view->protect );
+@@ -5251,119 +5257,227 @@ static unsigned int get_memory_region_in
+     return STATUS_SUCCESS;
+ }
+ 
+-static NTSTATUS get_working_set_ex( HANDLE process, LPCVOID addr,
+-                                    MEMORY_WORKING_SET_EX_INFORMATION *info,
+-                                    SIZE_T len, SIZE_T *res_len )
++struct working_set_info_ref
+ {
+-#if !defined(HAVE_LIBPROCSTAT)
+-    static int pagemap_fd = -2;
+-#endif
+-    MEMORY_WORKING_SET_EX_INFORMATION *p;
+-    sigset_t sigset;
+-
+-    if (process != NtCurrentProcess())
+-    {
+-        FIXME( "(process=%p,addr=%p) Unimplemented information class: MemoryWorkingSetExInformation\n", process, addr );
+-        return STATUS_INVALID_INFO_CLASS;
+-    }
++    char *addr;
++    SIZE_T orig_index;
++};
+ 
+ #if defined(HAVE_LIBPROCSTAT)
++struct fill_working_set_info_data
++{
++    struct procstat *pstat;
++    struct kinfo_proc *kip;
++    unsigned int vmentry_count;
++    struct kinfo_vmentry *vmentries;
++};
++
++static void init_fill_working_set_info_data( struct fill_working_set_info_data *d, char *end )
++{
++    unsigned int proc_count;
++
++    d->kip = NULL;
++    d->vmentry_count = 0;
++    d->vmentries = NULL;
++
++    if ((d->pstat = procstat_open_sysctl()))
++        d->kip = procstat_getprocs( d->pstat, KERN_PROC_PID, getpid(), &proc_count );
++    if (d->kip)
++        d->vmentries = procstat_getvmmap( d->pstat, d->kip, &d->vmentry_count );
++    if (!d->vmentries)
++        WARN( "couldn't get process vmmap, errno %d\n", errno );
++}
++
++static void free_fill_working_set_info_data( struct fill_working_set_info_data *d )
++{
++    if (d->vmentries)
++        procstat_freevmmap( d->pstat, d->vmentries );
++    if (d->kip)
++        procstat_freeprocs( d->pstat, d->kip );
++    if (d->pstat)
++        procstat_close( d->pstat );
++}
++
++static void fill_working_set_info( struct fill_working_set_info_data *d, struct file_view *view, BYTE vprot,
++                                   struct working_set_info_ref *ref, SIZE_T count,
++                                   MEMORY_WORKING_SET_EX_INFORMATION *info )
++{
++    SIZE_T i;
++    int j;
++
++    for (i = 0; i < count; ++i)
+     {
+-        struct procstat *pstat;
+-        unsigned int proc_count;
+-        struct kinfo_proc *kip = NULL;
+-        unsigned int vmentry_count = 0;
+-        struct kinfo_vmentry *vmentries = NULL;
+-
+-        pstat = procstat_open_sysctl();
+-        if (pstat)
+-            kip = procstat_getprocs( pstat, KERN_PROC_PID, getpid(), &proc_count );
+-        if (kip)
+-            vmentries = procstat_getvmmap( pstat, kip, &vmentry_count );
+-        if (vmentries == NULL)
+-            WARN( "couldn't get process vmmap, errno %d\n", errno );
++        MEMORY_WORKING_SET_EX_INFORMATION *p = &info[ref[i].orig_index];
++        struct kinfo_vmentry *entry = NULL;
+ 
+-        server_enter_uninterrupted_section( &virtual_mutex, &sigset );
+-        for (p = info; (UINT_PTR)(p + 1) <= (UINT_PTR)info + len; p++)
++        for (j = 0; j < d->vmentry_count; j++)
+         {
+-             int i;
+-             struct kinfo_vmentry *entry = NULL;
+-             BYTE vprot;
+-             struct file_view *view;
+-
+-             memset( &p->VirtualAttributes, 0, sizeof(p->VirtualAttributes) );
+-             if ((view = find_view( p->VirtualAddress, 0 )) &&
+-                 get_committed_size( view, p->VirtualAddress, &vprot, VPROT_COMMITTED ) &&
+-                 (vprot & VPROT_COMMITTED))
+-             {
+-                 for (i = 0; i < vmentry_count && entry == NULL; i++)
+-                 {
+-                     if (vmentries[i].kve_start <= (ULONG_PTR)p->VirtualAddress && (ULONG_PTR)p->VirtualAddress <= vmentries[i].kve_end)
+-                         entry = &vmentries[i];
+-                 }
+-
+-                 p->VirtualAttributes.Valid = !(vprot & VPROT_GUARD) && (vprot & 0x0f) && entry && entry->kve_type != KVME_TYPE_SWAP;
+-                 p->VirtualAttributes.Shared = !is_view_valloc( view );
+-                 if (p->VirtualAttributes.Shared && p->VirtualAttributes.Valid)
+-                     p->VirtualAttributes.ShareCount = 1; /* FIXME */
+-                 if (p->VirtualAttributes.Valid)
+-                     p->VirtualAttributes.Win32Protection = get_win32_prot( vprot, view->protect );
+-             }
++            if (d->vmentries[j].kve_start <= (ULONG_PTR)p->VirtualAddress && (ULONG_PTR)p->VirtualAddress <= d->vmentries[j].kve_end)
++            {
++                entry = &d->vmentries[j];
++                break;
++            }
+         }
+-        server_leave_uninterrupted_section( &virtual_mutex, &sigset );
+ 
+-        if (vmentries)
+-            procstat_freevmmap( pstat, vmentries );
+-        if (kip)
+-            procstat_freeprocs( pstat, kip );
+-        if (pstat)
+-            procstat_close( pstat );
++        p->VirtualAttributes.Valid = !(vprot & VPROT_GUARD) && (vprot & 0x0f) && entry && entry->kve_type != KVME_TYPE_SWAP;
++        p->VirtualAttributes.Shared = !is_view_valloc( view );
++        if (p->VirtualAttributes.Shared && p->VirtualAttributes.Valid)
++            p->VirtualAttributes.ShareCount = 1; /* FIXME */
++        if (p->VirtualAttributes.Valid)
++            p->VirtualAttributes.Win32Protection = get_win32_prot( vprot, view->protect );
+     }
++}
+ #else
+-    server_enter_uninterrupted_section( &virtual_mutex, &sigset );
+-    if (pagemap_fd == -2)
+-    {
++static int pagemap_fd = -2;
++
++struct fill_working_set_info_data
++{
++    UINT64 pm_buffer[256];
++    SIZE_T buffer_start;
++    ssize_t buffer_len;
++    SIZE_T end_page;
++};
++
++static void init_fill_working_set_info_data( struct fill_working_set_info_data *d, char *end )
++{
++    d->buffer_start = 0;
++    d->buffer_len = 0;
++    d->end_page = (UINT_PTR)end >> page_shift;
++    memset( d->pm_buffer, 0, sizeof(d->pm_buffer) );
++
++    if (pagemap_fd != -2) return;
++
+ #ifdef O_CLOEXEC
+-        if ((pagemap_fd = open( "/proc/self/pagemap", O_RDONLY | O_CLOEXEC, 0 )) == -1 && errno == EINVAL)
++    if ((pagemap_fd = open( "/proc/self/pagemap", O_RDONLY | O_CLOEXEC, 0 )) == -1 && errno == EINVAL)
+ #endif
+-            pagemap_fd = open( "/proc/self/pagemap", O_RDONLY, 0 );
++        pagemap_fd = open( "/proc/self/pagemap", O_RDONLY, 0 );
+ 
+-        if (pagemap_fd == -1) WARN( "unable to open /proc/self/pagemap\n" );
+-        else fcntl(pagemap_fd, F_SETFD, FD_CLOEXEC);  /* in case O_CLOEXEC isn't supported */
+-    }
++    if (pagemap_fd == -1) WARN( "unable to open /proc/self/pagemap\n" );
++    else fcntl(pagemap_fd, F_SETFD, FD_CLOEXEC);  /* in case O_CLOEXEC isn't supported */
++}
+ 
+-    for (p = info; (UINT_PTR)(p + 1) <= (UINT_PTR)info + len; p++)
+-    {
+-        BYTE vprot;
+-        UINT64 pagemap;
+-        struct file_view *view;
++static void free_fill_working_set_info_data( struct fill_working_set_info_data *d )
++{
++}
++
++static void fill_working_set_info( struct fill_working_set_info_data *d, struct file_view *view, BYTE vprot,
++                                   struct working_set_info_ref *ref, SIZE_T count,
++                                   MEMORY_WORKING_SET_EX_INFORMATION *info )
++{
++    MEMORY_WORKING_SET_EX_INFORMATION *p;
++    UINT64 pagemap;
++    SIZE_T i, page;
++    ssize_t len;
+ 
+-        memset( &p->VirtualAttributes, 0, sizeof(p->VirtualAttributes) );
++    for (i = 0; i < count; ++i)
++    {
++        page = (UINT_PTR)ref[i].addr >> page_shift;
++        p = &info[ref[i].orig_index];
+ 
+-        if ((view = find_view( p->VirtualAddress, 0 )) &&
+-            get_committed_size( view, p->VirtualAddress, &vprot, VPROT_COMMITTED ) &&
+-            (vprot & VPROT_COMMITTED))
++        assert(page >= d->buffer_start);
++        if (page >= d->buffer_start + d->buffer_len)
+         {
+-            if (pagemap_fd == -1 ||
+-                pread( pagemap_fd, &pagemap, sizeof(pagemap), ((UINT_PTR)p->VirtualAddress >> page_shift) * sizeof(pagemap) ) != sizeof(pagemap))
++            d->buffer_start = page;
++            len = min( sizeof(d->pm_buffer), (d->end_page - page) * sizeof(pagemap) );
++            if (pagemap_fd != -1)
+             {
+-                /* If we don't have pagemap information, default to invalid. */
+-                pagemap = 0;
++                d->buffer_len = pread( pagemap_fd, d->pm_buffer, len, page * sizeof(pagemap) );
++                if (d->buffer_len != len)
++                {
++                    d->buffer_len = max( d->buffer_len, 0 );
++                    memset( d->pm_buffer + d->buffer_len / sizeof(pagemap), 0, len - d->buffer_len );
++                }
+             }
++            d->buffer_len = len / sizeof(pagemap);
++        }
++        pagemap = d->pm_buffer[page - d->buffer_start];
++
++        p->VirtualAttributes.Valid = !(vprot & VPROT_GUARD) && (vprot & 0x0f) && (pagemap >> 63);
++        p->VirtualAttributes.Shared = !is_view_valloc( view ) && ((pagemap >> 61) & 1);
++        if (p->VirtualAttributes.Shared && p->VirtualAttributes.Valid)
++            p->VirtualAttributes.ShareCount = 1; /* FIXME */
++        if (p->VirtualAttributes.Valid)
++            p->VirtualAttributes.Win32Protection = get_win32_prot( vprot, view->protect );
++    }
++}
++#endif
++
++static int compare_working_set_info_ref( const void *a, const void *b )
++{
++    const struct working_set_info_ref *r1 = a, *r2 = b;
++
++    if (r1->addr < r2->addr) return -1;
++    return r1->addr > r2->addr;
++}
+ 
+-            p->VirtualAttributes.Valid = !(vprot & VPROT_GUARD) && (vprot & 0x0f) && (pagemap >> 63);
+-            p->VirtualAttributes.Shared = (!is_view_valloc( view ) && ((pagemap >> 61) & 1)) || ((view->protect & VPROT_WRITECOPY) && !(vprot & VPROT_WRITTEN));
+-            if (p->VirtualAttributes.Shared && p->VirtualAttributes.Valid)
+-                p->VirtualAttributes.ShareCount = 1; /* FIXME */
+-            if (p->VirtualAttributes.Valid)
+-                p->VirtualAttributes.Win32Protection = get_win32_prot( vprot, view->protect );
++static NTSTATUS get_working_set_ex( HANDLE process, LPCVOID addr,
++                                    MEMORY_WORKING_SET_EX_INFORMATION *info,
++                                    SIZE_T len, SIZE_T *res_len )
++{
++    struct working_set_info_ref ref_buffer[256], *ref = ref_buffer, *r;
++    struct fill_working_set_info_data data;
++    char *start, *end;
++    SIZE_T i, count;
++    struct file_view *view, *prev_view;
++    sigset_t sigset;
++    BYTE vprot;
++
++    if (process != NtCurrentProcess())
++    {
++        FIXME( "(process=%p,addr=%p) Unimplemented information class: MemoryWorkingSetExInformation\n", process, addr );
++        return STATUS_INVALID_INFO_CLASS;
++    }
++
++    if (len < sizeof(*info)) return STATUS_INFO_LENGTH_MISMATCH;
++
++    count = len / sizeof(*info);
++
++    if (count > ARRAY_SIZE(ref_buffer)) ref = malloc( count * sizeof(*ref) );
++    for (i = 0; i < count; ++i)
++    {
++        ref[i].orig_index = i;
++        ref[i].addr = ROUND_ADDR( info[i].VirtualAddress, page_mask );
++        info[i].VirtualAttributes.Flags = 0;
++    }
++    qsort( ref, count, sizeof(*ref), compare_working_set_info_ref );
++    start = ref[0].addr;
++    end = ref[count - 1].addr + page_size;
++
++    server_enter_uninterrupted_section( &virtual_mutex, &sigset );
++    init_fill_working_set_info_data( &data, end );
++
++    view = find_view_range( start, end - start );
++    while (view && (char *)view->base > start)
++    {
++        prev_view = RB_ENTRY_VALUE( rb_prev( &view->entry ), struct file_view, entry );
++        if (!prev_view || (char *)prev_view->base + prev_view->size <= start) break;
++        view = prev_view;
++     }
++
++    r = ref;
++    while (view && (char *)view->base < end)
++    {
++        if (start < (char *)view->base) start = view->base;
++        while (r != ref + count && r->addr < start) ++r;
++        while (start != (char *)view->base + view->size && r != ref + count
++               && r->addr < (char *)view->base + view->size)
++        {
++            start += get_committed_size( view, start, end - start, &vprot, ~VPROT_WRITEWATCH );
++            i = 0;
++            while (r + i != ref + count && r[i].addr < start) ++i;
++            if (vprot & VPROT_COMMITTED) fill_working_set_info( &data, view, vprot, r, i, info );
++            r += i;
+         }
++        if (r == ref + count) break;
++        view = RB_ENTRY_VALUE( rb_next( &view->entry ), struct file_view, entry );
+     }
++
++     free_fill_working_set_info_data( &data );
++    if (ref != ref_buffer) free( ref );
+     server_leave_uninterrupted_section( &virtual_mutex, &sigset );
+-#endif
+ 
+     if (res_len)
+-        *res_len = (UINT_PTR)p - (UINT_PTR)info;
++        *res_len = len;
+     return STATUS_SUCCESS;
+ }
+ 
+
+
