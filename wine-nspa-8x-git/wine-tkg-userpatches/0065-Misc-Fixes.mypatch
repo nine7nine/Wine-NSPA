@@ -3796,3 +3796,169 @@ index 75e6319c007e..5bdeef4c1bc2 100644
              free_reserved_memory( 0, (char *)0x7ffe0000 );
  #endif
      }
+
+
+From c8fea585605008c499a125f6f2f61bbb7f662bee Mon Sep 17 00:00:00 2001
+From: Alexandre Julliard <julliard@winehq.org>
+Date: Tue, 18 Jun 2024 12:08:03 +0200
+Subject: [PATCH] kernelbase: Make memory writable in WriteProcessMemory if
+ necessary.
+
+(cherry picked from commit 6ea77ec0864eb7870ce3418bf828077c2a072413)
+
+CW-Bug-Id: #23951
+---
+ dlls/kernel32/tests/virtual.c |  2 --
+ dlls/kernelbase/memory.c      | 44 ++++++++++++++++++++++++++++++++++-
+ dlls/ntdll/tests/wow64.c      |  2 +-
+ include/winnt.h               | 40 ++++++++++++++++++++++---------
+ 4 files changed, 73 insertions(+), 15 deletions(-)
+
+diff --git a/dlls/kernelbase/memory.c b/dlls/kernelbase/memory.c
+index 4f4bba9a13b..d552e5b81d8 100644
+--- a/dlls/kernelbase/memory.c
++++ b/dlls/kernelbase/memory.c
+@@ -46,6 +46,9 @@ WINE_DECLARE_DEBUG_CHANNEL(globalmem);
+  * Virtual memory functions
+  ***********************************************************************/
+ 
++static const SIZE_T page_mask = 0xfff;
++#define ROUND_ADDR(addr) ((void *)((UINT_PTR)(addr) & ~page_mask))
++#define ROUND_SIZE(addr,size) (((SIZE_T)(size) + ((UINT_PTR)(addr) & page_mask) + page_mask) & ~page_mask)
+ 
+ /***********************************************************************
+  *             DiscardVirtualMemory   (kernelbase.@)
+@@ -537,7 +540,46 @@ BOOL WINAPI DECLSPEC_HOTPATCH VirtualUnlock( void *addr, SIZE_T size )
+ BOOL WINAPI DECLSPEC_HOTPATCH WriteProcessMemory( HANDLE process, void *addr, const void *buffer,
+                                                   SIZE_T size, SIZE_T *bytes_written )
+ {
+-    return set_ntstatus( NtWriteVirtualMemory( process, addr, buffer, size, bytes_written ));
++    DWORD old_prot, prot = PAGE_TARGETS_NO_UPDATE | PAGE_ENCLAVE_NO_CHANGE | PAGE_EXECUTE_WRITECOPY;
++    MEMORY_BASIC_INFORMATION info;
++    void *base_addr;
++    SIZE_T region_size;
++    NTSTATUS status;
++
++    if (!VirtualQueryEx( process, addr, &info, sizeof(info) )) return FALSE;
++
++    switch (info.Protect)
++    {
++    case PAGE_READWRITE:
++    case PAGE_WRITECOPY:
++    case PAGE_EXECUTE_READWRITE:
++    case PAGE_EXECUTE_WRITECOPY:
++        /* already writable */
++        if ((status = NtWriteVirtualMemory( process, addr, buffer, size, bytes_written ))) break;
++        NtFlushInstructionCache( process, addr, size );
++        break;
++
++    case PAGE_EXECUTE:
++    case PAGE_EXECUTE_READ:
++        /* make it writable */
++        base_addr = ROUND_ADDR( addr );
++        region_size = ROUND_SIZE( addr, size );
++        region_size = min( region_size,  (char *)info.BaseAddress + info.RegionSize - (char *)base_addr );
++        status = NtProtectVirtualMemory( process, &base_addr, &region_size, prot, &old_prot );
++        if (status) break;
++        status = NtWriteVirtualMemory( process, addr, buffer, size, bytes_written );
++        if (!status) NtFlushInstructionCache( process, addr, size );
++        prot = PAGE_TARGETS_NO_UPDATE | PAGE_ENCLAVE_NO_CHANGE | old_prot;
++        NtProtectVirtualMemory( process, &base_addr, &region_size, prot, &old_prot );
++        break;
++
++    default:
++        /* not writable */
++        status = STATUS_ACCESS_VIOLATION;
++        break;
++    }
++
++    return set_ntstatus( status );
+ }
+ 
+ 
+diff --git a/include/winnt.h b/include/winnt.h
+index 7f2a5f7b18b..228cdff8af9 100644
+--- a/include/winnt.h
++++ b/include/winnt.h
+@@ -815,17 +815,35 @@ typedef struct DECLSPEC_ALIGN(8) MEM_EXTENDED_PARAMETER {
+ #define MEM_EXTENDED_PARAMETER_EC_CODE                  0x00000040
+ #define MEM_EXTENDED_PARAMETER_IMAGE_NO_HPAT            0x00000080
+ 
+-#define	PAGE_NOACCESS		0x01
+-#define	PAGE_READONLY		0x02
+-#define	PAGE_READWRITE		0x04
+-#define	PAGE_WRITECOPY		0x08
+-#define	PAGE_EXECUTE		0x10
+-#define	PAGE_EXECUTE_READ	0x20
+-#define	PAGE_EXECUTE_READWRITE	0x40
+-#define	PAGE_EXECUTE_WRITECOPY	0x80
+-#define	PAGE_GUARD		0x100
+-#define	PAGE_NOCACHE		0x200
+-#define	PAGE_WRITECOMBINE	0x400
++#define PAGE_NOACCESS                   0x00000001
++#define PAGE_READONLY                   0x00000002
++#define PAGE_READWRITE                  0x00000004
++#define PAGE_WRITECOPY                  0x00000008
++#define PAGE_EXECUTE                    0x00000010
++#define PAGE_EXECUTE_READ               0x00000020
++#define PAGE_EXECUTE_READWRITE          0x00000040
++#define PAGE_EXECUTE_WRITECOPY          0x00000080
++#define PAGE_GUARD                      0x00000100
++#define PAGE_NOCACHE                    0x00000200
++#define PAGE_WRITECOMBINE               0x00000400
++#define PAGE_GRAPHICS_NOACCESS          0x00000800
++#define PAGE_GRAPHICS_READONLY          0x00001000
++#define PAGE_GRAPHICS_READWRITE         0x00002000
++#define PAGE_GRAPHICS_EXECUTE           0x00004000
++#define PAGE_GRAPHICS_EXECUTE_READ      0x00008000
++#define PAGE_GRAPHICS_EXECUTE_READWRITE 0x00010000
++#define PAGE_GRAPHICS_COHERENT          0x00020000
++#define PAGE_GRAPHICS_NOCACHE           0x00040000
++#define PAGE_ENCLAVE_MASK               0x10000000
++#define PAGE_ENCLAVE_UNVALIDATED        0x20000000
++#define PAGE_ENCLAVE_NO_CHANGE          0x20000000
++#define PAGE_TARGETS_NO_UPDATE          0x40000000
++#define PAGE_TARGETS_INVALID            0x40000000
++#define PAGE_REVERT_TO_FILE_MAP         0x80000000
++#define PAGE_ENCLAVE_THREAD_CONTROL     0x80000000
++#define PAGE_ENCLAVE_DECOMMIT           (PAGE_ENCLAVE_MASK | 0)
++#define PAGE_ENCLAVE_SS_FIRST           (PAGE_ENCLAVE_MASK | 1)
++#define PAGE_ENCLAVE_SS_REST            (PAGE_ENCLAVE_MASK | 2)
+ 
+ #define MEM_COMMIT               0x00001000
+ #define MEM_RESERVE              0x00002000
+
+From 25891ee1f6dc401adc06c4ebc8db2a2f3c612616 Mon Sep 17 00:00:00 2001
+From: Alexandre Julliard <julliard@winehq.org>
+Date: Wed, 19 Jun 2024 21:00:46 +0200
+Subject: [PATCH] kernelbase: Don't use WRITECOPY protection on anonymous
+ mappings.
+
+(cherry picked from commit 2ac86fb8c3295886026ba0aaf7d2b38e81f343e6)
+
+CW-Bug-Id: #23951
+---
+ dlls/kernelbase/memory.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/kernelbase/memory.c b/dlls/kernelbase/memory.c
+index faa6bd7d5ee..46b155b7a47 100644
+--- a/dlls/kernelbase/memory.c
++++ b/dlls/kernelbase/memory.c
+@@ -540,7 +540,7 @@ BOOL WINAPI DECLSPEC_HOTPATCH VirtualUnl
+ BOOL WINAPI DECLSPEC_HOTPATCH WriteProcessMemory( HANDLE process, void *addr, const void *buffer,
+                                                   SIZE_T size, SIZE_T *bytes_written )
+ {
+-    DWORD old_prot, prot = PAGE_TARGETS_NO_UPDATE | PAGE_ENCLAVE_NO_CHANGE | PAGE_EXECUTE_WRITECOPY;
++    DWORD old_prot, prot = PAGE_TARGETS_NO_UPDATE | PAGE_ENCLAVE_NO_CHANGE;
+     MEMORY_BASIC_INFORMATION info;
+     void *base_addr;
+     SIZE_T region_size;
+@@ -565,6 +565,7 @@ BOOL WINAPI DECLSPEC_HOTPATCH WriteProce
+         base_addr = ROUND_ADDR( addr );
+         region_size = ROUND_SIZE( addr, size );
+         region_size = min( region_size,  (char *)info.BaseAddress + info.RegionSize - (char *)base_addr );
++        prot |= (info.Type == MEM_PRIVATE) ? PAGE_EXECUTE_READWRITE : PAGE_EXECUTE_WRITECOPY;
+         status = NtProtectVirtualMemory( process, &base_addr, &region_size, prot, &old_prot );
+         if (status) break;
+         status = NtWriteVirtualMemory( process, addr, buffer, size, bytes_written );
