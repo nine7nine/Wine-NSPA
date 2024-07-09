@@ -1,0 +1,452 @@
+From 520b7c6d83f4d50b4ee9577a6d36c431cf7040ec Mon Sep 17 00:00:00 2001
+From: Yuxuan Shui <yshui@codeweavers.com>
+Date: Mon, 18 Mar 2024 15:45:57 +0000
+Subject: [PATCH 3/8] shell32: PathResolve(file, NULL, ...) should not look in
+ the current directory.
+
+Unless it's explicitly specified.
+---
+ dlls/shell32/shellpath.c       |  4 ++--
+ dlls/shell32/tests/shellpath.c | 34 +++++++++++++++++++++++++++++++++-
+ 2 files changed, 35 insertions(+), 3 deletions(-)
+
+diff --git a/dlls/shell32/shellpath.c b/dlls/shell32/shellpath.c
+index 015d7cdd4e2..e7d4e181682 100644
+--- a/dlls/shell32/shellpath.c
++++ b/dlls/shell32/shellpath.c
+@@ -695,7 +695,7 @@ static BOOL PathResolveA(char *path, const char **dirs, DWORD flags)
+     {
+         if (PathFindOnPathExA(path, dirs, dwWhich))
+             return TRUE;
+-        if (PathFileExistsDefExtA(path, dwWhich))
++        if (!is_file_spec && PathFileExistsDefExtA(path, dwWhich))
+             return TRUE;
+         if (!is_file_spec) GetFullPathNameA(path, MAX_PATH, path, NULL);
+         SetLastError(ERROR_FILE_NOT_FOUND);
+@@ -724,7 +724,7 @@ static BOOL PathResolveW(WCHAR *path, const WCHAR **dirs, DWORD flags)
+     {
+         if (PathFindOnPathExW(path, dirs, dwWhich))
+             return TRUE;
+-        if (PathFileExistsDefExtW(path, dwWhich))
++        if (!is_file_spec && PathFileExistsDefExtW(path, dwWhich))
+             return TRUE;
+         if (!is_file_spec) GetFullPathNameW(path, MAX_PATH, path, NULL);
+         SetLastError(ERROR_FILE_NOT_FOUND);
+
+From 5426e597bbbeabc74dbb39d2379e055dee82eca8 Mon Sep 17 00:00:00 2001
+From: Yuxuan Shui <yshui@codeweavers.com>
+Date: Mon, 18 Mar 2024 16:52:45 +0000
+Subject: [PATCH 4/8] shell32: Make sure PathResolve can find files in the
+ current directory.
+
+Previously looking for file that does exist in current directory will fail because of the early
+`!PathFileExists(path)` check, even when the current directory is specified in `dirs`.
+---
+ dlls/shell32/shellpath.c       |  4 ++--
+ dlls/shell32/tests/shellpath.c | 16 +++++++++++++++-
+ 2 files changed, 17 insertions(+), 3 deletions(-)
+
+diff --git a/dlls/shell32/shellpath.c b/dlls/shell32/shellpath.c
+index e7d4e181682..9b527b35ac4 100644
+--- a/dlls/shell32/shellpath.c
++++ b/dlls/shell32/shellpath.c
+@@ -691,7 +691,7 @@ static BOOL PathResolveA(char *path, const char **dirs, DWORD flags)
+ 
+     TRACE("(%s,%p,0x%08lx)\n", debugstr_a(path), dirs, flags);
+ 
+-    if (flags & PRF_VERIFYEXISTS && !PathFileExistsA(path))
++    if (flags & PRF_VERIFYEXISTS)
+     {
+         if (PathFindOnPathExA(path, dirs, dwWhich))
+             return TRUE;
+@@ -720,7 +720,7 @@ static BOOL PathResolveW(WCHAR *path, const WCHAR **dirs, DWORD flags)
+ 
+     TRACE("(%s,%p,0x%08lx)\n", debugstr_w(path), dirs, flags);
+ 
+-    if (flags & PRF_VERIFYEXISTS && !PathFileExistsW(path))
++    if (flags & PRF_VERIFYEXISTS)
+     {
+         if (PathFindOnPathExW(path, dirs, dwWhich))
+             return TRUE;
+
+From f59947bc10a85ac39945f7513d15b6c893243beb Mon Sep 17 00:00:00 2001
+From: Yuxuan Shui <yshui@codeweavers.com>
+Date: Mon, 18 Mar 2024 17:02:01 +0000
+Subject: [PATCH 5/8] shell32: PathResolve should be able to find files that
+ already have extensions.
+
+Setting dwWhich to 0xff forces extensions to be appended, even when the file name already includes
+an extension. This causes PathResolve to fail in some cases where the file does exist.
+---
+ dlls/shell32/shellpath.c       | 4 ++--
+ dlls/shell32/tests/shellpath.c | 5 +++++
+ 2 files changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/shell32/shellpath.c b/dlls/shell32/shellpath.c
+index 9b527b35ac4..5d7f9d48ebd 100644
+--- a/dlls/shell32/shellpath.c
++++ b/dlls/shell32/shellpath.c
+@@ -687,7 +687,7 @@ BOOL WINAPI PathFileExistsDefExtW(LPWSTR,DWORD);
+ static BOOL PathResolveA(char *path, const char **dirs, DWORD flags)
+ {
+     BOOL is_file_spec = PathIsFileSpecA(path);
+-    DWORD dwWhich = flags & PRF_DONTFINDLNK ? 0xf : 0xff;
++    DWORD dwWhich = flags & PRF_DONTFINDLNK ? 0xf : 0xbf;
+ 
+     TRACE("(%s,%p,0x%08lx)\n", debugstr_a(path), dirs, flags);
+ 
+@@ -716,7 +716,7 @@ static BOOL PathResolveA(char *path, const char **dirs, DWORD flags)
+ static BOOL PathResolveW(WCHAR *path, const WCHAR **dirs, DWORD flags)
+ {
+     BOOL is_file_spec = PathIsFileSpecW(path);
+-    DWORD dwWhich = flags & PRF_DONTFINDLNK ? 0xf : 0xff;
++    DWORD dwWhich = flags & PRF_DONTFINDLNK ? 0xf : 0xbf;
+ 
+     TRACE("(%s,%p,0x%08lx)\n", debugstr_w(path), dirs, flags);
+ 
+
+From a1d0e21b0add05fc1a37a4abe2a3beeea6abc497 Mon Sep 17 00:00:00 2001
+From: Yuxuan Shui <yshui@codeweavers.com>
+Date: Mon, 18 Mar 2024 17:53:18 +0000
+Subject: [PATCH 6/8] shell32: PathResolve should remove trailing dot.
+
+---
+ dlls/shell32/shellpath.c       | 24 ++++++++++++++++++------
+ dlls/shell32/tests/shellpath.c |  1 +
+ 2 files changed, 19 insertions(+), 6 deletions(-)
+
+diff --git a/dlls/shell32/shellpath.c b/dlls/shell32/shellpath.c
+index 5d7f9d48ebd..e32bf5a50dc 100644
+--- a/dlls/shell32/shellpath.c
++++ b/dlls/shell32/shellpath.c
+@@ -694,10 +694,16 @@ static BOOL PathResolveA(char *path, const char **dirs, DWORD flags)
+     if (flags & PRF_VERIFYEXISTS)
+     {
+         if (PathFindOnPathExA(path, dirs, dwWhich))
++        {
++            if (!PathIsFileSpecA(path)) GetFullPathNameA(path, MAX_PATH, path, NULL);
+             return TRUE;
+-        if (!is_file_spec && PathFileExistsDefExtA(path, dwWhich))
+-            return TRUE;
+-        if (!is_file_spec) GetFullPathNameA(path, MAX_PATH, path, NULL);
++        }
++        if (!is_file_spec)
++        {
++            GetFullPathNameA(path, MAX_PATH, path, NULL);
++            if (PathFileExistsDefExtA(path, dwWhich))
++                return TRUE;
++        }
+         SetLastError(ERROR_FILE_NOT_FOUND);
+         return FALSE;
+     }
+@@ -723,10 +729,16 @@ static BOOL PathResolveW(WCHAR *path, const WCHAR **dirs, DWORD flags)
+     if (flags & PRF_VERIFYEXISTS)
+     {
+         if (PathFindOnPathExW(path, dirs, dwWhich))
++        {
++            if (!PathIsFileSpecW(path)) GetFullPathNameW(path, MAX_PATH, path, NULL);
+             return TRUE;
+-        if (!is_file_spec && PathFileExistsDefExtW(path, dwWhich))
+-            return TRUE;
+-        if (!is_file_spec) GetFullPathNameW(path, MAX_PATH, path, NULL);
++        }
++        if (!is_file_spec)
++        {
++            GetFullPathNameW(path, MAX_PATH, path, NULL);
++            if (PathFileExistsDefExtW(path, dwWhich))
++                return TRUE;
++        }
+         SetLastError(ERROR_FILE_NOT_FOUND);
+         return FALSE;
+     }
+-- 
+GitLab
+
+
+From 1bc7db2e7d2c50a42c8340aa875893df970d4a8f Mon Sep 17 00:00:00 2001
+From: Yuxuan Shui <yshui@codeweavers.com>
+Date: Mon, 18 Mar 2024 18:24:52 +0000
+Subject: [PATCH 7/8] shell32: Fix FindExecutable search path.
+
+It should look in the currect working directory, instead of the directory where the current
+executable is in.
+---
+ dlls/shell32/shlexec.c       | 20 ++++++++++++++------
+ dlls/shell32/tests/shlexec.c |  2 +-
+ 2 files changed, 15 insertions(+), 7 deletions(-)
+
+diff --git a/dlls/shell32/shlexec.c b/dlls/shell32/shlexec.c
+index abb519e260d..9aa7963b71c 100644
+--- a/dlls/shell32/shlexec.c
++++ b/dlls/shell32/shlexec.c
+@@ -48,6 +48,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(exec);
+ 
+ typedef UINT_PTR (*SHELL_ExecuteW32)(const WCHAR *lpCmd, WCHAR *env, BOOL shWait,
+ 			    const SHELLEXECUTEINFOW *sei, LPSHELLEXECUTEINFOW sei_out);
++extern BOOL WINAPI PathResolveAW(void *path, const void **paths, DWORD flags);
+ 
+ static inline BOOL isSpace(WCHAR c)
+ {
+@@ -599,6 +600,8 @@ static UINT SHELL_FindExecutable(LPCWSTR lpPath, LPCWSTR lpFile, LPCWSTR lpVerb,
+     WCHAR *tok;              /* token pointer */
+     WCHAR xlpFile[256];      /* result of SearchPath */
+     DWORD attribs;           /* file attributes */
++    WCHAR curdir[MAX_PATH];
++    const WCHAR *search_paths[3] = {0};
+ 
+     TRACE("%s\n", debugstr_w(lpFile));
+ 
+@@ -623,18 +626,23 @@ static UINT SHELL_FindExecutable(LPCWSTR lpPath, LPCWSTR lpFile, LPCWSTR lpVerb,
+         return 33;
+     }
+ 
+-    if (SearchPathW(lpPath, lpFile, L".exe", ARRAY_SIZE(xlpFile), xlpFile, NULL))
++    if (lpPath && *lpPath)
+     {
+-        TRACE("SearchPathW returned non-zero\n");
+-        lpFile = xlpFile;
+-        /* The file was found in the application-supplied default directory (or the system search path) */
++        search_paths[0] = lpPath;
++        search_paths[1] = curdir;
+     }
+-    else if (lpPath && SearchPathW(NULL, lpFile, L".exe", ARRAY_SIZE(xlpFile), xlpFile, NULL))
++    else
++        search_paths[0] = curdir;
++    GetCurrentDirectoryW(MAX_PATH, curdir);
++    lstrcpyW(xlpFile, lpFile);
++    if (PathResolveAW(xlpFile, (const void **)search_paths, PRF_TRYPROGRAMEXTENSIONS | PRF_VERIFYEXISTS))
+     {
+         TRACE("SearchPathW returned non-zero\n");
+         lpFile = xlpFile;
+-        /* The file was found in one of the directories in the system-wide search path */
++        /* The file was found in lpPath or one of the directories in the system-wide search path */
+     }
++    else
++        xlpFile[0] = '\0';
+ 
+     attribs = GetFileAttributesW(lpFile);
+     if (attribs!=INVALID_FILE_ATTRIBUTES && (attribs&FILE_ATTRIBUTE_DIRECTORY))
+-- 
+GitLab
+
+
+From 85d029e3b01f6dd35a86cc07796af982d66e4a03 Mon Sep 17 00:00:00 2001
+From: Yuxuan Shui <yshui@codeweavers.com>
+Date: Mon, 18 Mar 2024 18:32:00 +0000
+Subject: [PATCH 8/8] shell32: Rely solely on SHELL_FindExecutable for
+ ShellExecute.
+
+This does two things:
+
+1. ShellExecute no longer searches in the directory where the current executable is in.
+2. We always CreateProcess with a fully qualified path, so we CreateProcess won't do its own path
+   resolution.
+
+Serendipitously this also fixes some existing todos in tests.
+---
+ dlls/shell32/shlexec.c       | 24 +-----------------------
+ dlls/shell32/tests/shlexec.c |  8 +++-----
+ 2 files changed, 4 insertions(+), 28 deletions(-)
+
+diff --git a/dlls/shell32/shlexec.c b/dlls/shell32/shlexec.c
+index 9aa7963b71c..f09b6d4daf3 100644
+--- a/dlls/shell32/shlexec.c
++++ b/dlls/shell32/shlexec.c
+@@ -1823,30 +1823,8 @@ static BOOL SHELL_execute( LPSHELLEXECUTEINFOW sei, SHELL_ExecuteW32 execfunc )
+         wcmd = malloc(len * sizeof(WCHAR));
+         wcmdLen = len;
+     }
+-    lstrcpyW(wcmd, wszApplicationName);
+-    if (sei_tmp.lpDirectory)
+-    {
+-        LPCWSTR searchPath[] = {
+-            sei_tmp.lpDirectory,
+-            NULL
+-        };
+-        PathFindOnPathW(wcmd, searchPath);
+-    }
+-    retval = SHELL_quote_and_execute( wcmd, wszParameters, L"",
+-                                      wszApplicationName, NULL, &sei_tmp,
+-                                      sei, execfunc );
+-    if (retval > 32) {
+-        free(wszApplicationName);
+-        if (wszParameters != parametersBuffer)
+-            free(wszParameters);
+-        if (wszDir != dirBuffer)
+-            free(wszDir);
+-        if (wcmd != wcmdBuffer)
+-            free(wcmd);
+-        return TRUE;
+-    }
+ 
+-    /* Else, try to find the executable */
++    /* try to find the executable */
+     wcmd[0] = '\0';
+     retval = SHELL_FindExecutable(sei_tmp.lpDirectory, lpFile, sei_tmp.lpVerb, wcmd, wcmdLen, wszKeyname, &env, sei_tmp.lpIDList, sei_tmp.lpParameters);
+     if (retval > 32)  /* Found */
+-- 
+GitLab
+
+From 20f8758e1ffc2257f814a403f1dba029e18831f7 Mon Sep 17 00:00:00 2001
+From: Yuxuan Shui <yshui@codeweavers.com>
+Date: Mon, 25 Mar 2024 12:38:39 +0000
+Subject: [PATCH 1/3] shell32: Fix a trace log message.
+
+---
+ dlls/shell32/shlexec.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/dlls/shell32/shlexec.c b/dlls/shell32/shlexec.c
+index f09b6d4daf3..804aa38a904 100644
+--- a/dlls/shell32/shlexec.c
++++ b/dlls/shell32/shlexec.c
+@@ -637,7 +637,7 @@ static UINT SHELL_FindExecutable(LPCWSTR lpPath, LPCWSTR lpFile, LPCWSTR lpVerb,
+     lstrcpyW(xlpFile, lpFile);
+     if (PathResolveAW(xlpFile, (const void **)search_paths, PRF_TRYPROGRAMEXTENSIONS | PRF_VERIFYEXISTS))
+     {
+-        TRACE("SearchPathW returned non-zero\n");
++        TRACE("PathResolveAW returned non-zero\n");
+         lpFile = xlpFile;
+         /* The file was found in lpPath or one of the directories in the system-wide search path */
+     }
+-- 
+GitLab
+
+
+From 9bd7fab471eb60f07f59947af0fef3254644a8ae Mon Sep 17 00:00:00 2001
+From: Yuxuan Shui <yshui@codeweavers.com>
+Date: Mon, 25 Mar 2024 13:35:08 +0000
+Subject: [PATCH 2/3] shell32: Use full path to current directory for finding
+ executables.
+
+So that the path returned by SHELL_FindExecutable would be fully qualified, otherwise CreateProcess
+will do its own path resolution which is not what we want.
+---
+ dlls/shell32/shlexec.c | 14 +++++++++++++-
+ 1 file changed, 13 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/shell32/shlexec.c b/dlls/shell32/shlexec.c
+index 804aa38a904..9704f9d8f06 100644
+--- a/dlls/shell32/shlexec.c
++++ b/dlls/shell32/shlexec.c
+@@ -1797,10 +1797,10 @@ static BOOL SHELL_execute( LPSHELLEXECUTEINFOW sei, SHELL_ExecuteW32 execfunc )
+ 
+     if (*sei_tmp.lpDirectory)
+     {
++        LPWSTR buf;
+         len = ExpandEnvironmentStringsW(sei_tmp.lpDirectory, NULL, 0);
+         if (len > 0)
+         {
+-            LPWSTR buf;
+             len++;
+             buf = malloc(len * sizeof(WCHAR));
+             ExpandEnvironmentStringsW(sei_tmp.lpDirectory, buf, len);
+@@ -1809,6 +1809,18 @@ static BOOL SHELL_execute( LPSHELLEXECUTEINFOW sei, SHELL_ExecuteW32 execfunc )
+             wszDir = buf;
+             sei_tmp.lpDirectory = wszDir;
+         }
++
++        len = GetFullPathNameW(sei_tmp.lpDirectory, 0, NULL, NULL);
++        if (len > 0)
++        {
++            len++;
++            buf = malloc(len * sizeof(WCHAR));
++            GetFullPathNameW(sei_tmp.lpDirectory, len, buf, NULL);
++            if (wszDir != dirBuffer)
++                    free(wszDir);
++            wszDir = buf;
++            sei_tmp.lpDirectory = wszDir;
++        }
+     }
+ 
+     /* Else, try to execute the filename */
+-- 
+GitLab
+
+
+From a2548c8db3096963012939c82e340f6b867f3efd Mon Sep 17 00:00:00 2001
+From: Yuxuan Shui <yshui@codeweavers.com>
+Date: Mon, 25 Mar 2024 13:39:17 +0000
+Subject: [PATCH 3/3] shell32: Restore the ability of running native unix
+ programs with ShellExecute.
+
+For ShellExecute, if the specified file is found, we will try running it anyway, even if it doesn't
+have a "program" extension.
+
+Windows associations will take precedence over this.
+---
+ dlls/shell32/shlexec.c | 23 ++++++++++++++++++++---
+ 1 file changed, 20 insertions(+), 3 deletions(-)
+
+diff --git a/dlls/shell32/shlexec.c b/dlls/shell32/shlexec.c
+index 9704f9d8f06..d2fe3caed88 100644
+--- a/dlls/shell32/shlexec.c
++++ b/dlls/shell32/shlexec.c
+@@ -579,6 +579,7 @@ static UINT SHELL_FindExecutableByVerb(LPCWSTR lpVerb, LPWSTR key, LPWSTR classn
+  *
+  * Utility for code sharing between FindExecutable and ShellExecute
+  * in:
++ *      lpPath the path to search for the file
+  *      lpFile the name of a file
+  *      lpVerb the operation on it (open)
+  * out:
+@@ -639,6 +640,7 @@ static UINT SHELL_FindExecutable(LPCWSTR lpPath, LPCWSTR lpFile, LPCWSTR lpVerb,
+     {
+         TRACE("PathResolveAW returned non-zero\n");
+         lpFile = xlpFile;
++        lstrcpyW(lpResult, xlpFile);
+         /* The file was found in lpPath or one of the directories in the system-wide search path */
+     }
+     else
+@@ -696,7 +698,6 @@ static UINT SHELL_FindExecutable(LPCWSTR lpPath, LPCWSTR lpFile, LPCWSTR lpVerb,
+ 
+                 if (wcsicmp(tok, &extension[1]) == 0) /* have to skip the leading "." */
+                 {
+-                    lstrcpyW(lpResult, xlpFile);
+                     /* Need to perhaps check that the file has a path
+                      * attached */
+                     TRACE("found %s\n", debugstr_w(lpResult));
+@@ -781,7 +782,7 @@ static UINT SHELL_FindExecutable(LPCWSTR lpPath, LPCWSTR lpFile, LPCWSTR lpVerb,
+         }
+     }
+ 
+-    TRACE("returning %s\n", debugstr_w(lpResult));
++    TRACE("returning path %s, retval %d\n", debugstr_w(lpResult), retval);
+     return retval;
+ }
+ 
+@@ -1817,7 +1818,7 @@ static BOOL SHELL_execute( LPSHELLEXECUTEINFOW sei, SHELL_ExecuteW32 execfunc )
+             buf = malloc(len * sizeof(WCHAR));
+             GetFullPathNameW(sei_tmp.lpDirectory, len, buf, NULL);
+             if (wszDir != dirBuffer)
+-                    free(wszDir);
++                free(wszDir);
+             wszDir = buf;
+             sei_tmp.lpDirectory = wszDir;
+         }
+@@ -1885,6 +1886,22 @@ static BOOL SHELL_execute( LPSHELLEXECUTEINFOW sei, SHELL_ExecuteW32 execfunc )
+         lstrcatW(lpstrTmpFile, lpFile);
+         retval = (UINT_PTR)ShellExecuteW(sei_tmp.hwnd, sei_tmp.lpVerb, lpstrTmpFile, NULL, NULL, 0);
+     }
++    else if (retval == SE_ERR_NOASSOC && SHGetFileInfoW(wcmd, 0, NULL, 0, SHGFI_EXETYPE) == 0)
++    {
++        /* File found, but no association. And no other cases fit, this could be a
++           unix programs, try running it. We have to do this in a "catch-all" fashion because
++           unix program can have any extensions. However, things get more complicated because
++           the file we find could be a Windows executable without the proper extensions, it could
++           be seen as unexpected if we start it, so we special case it here. */
++        UINT exec_retval;
++        TRACE("No association found, trying as Unix binary %s\n", debugstr_w(wcmd));
++        exec_retval = SHELL_quote_and_execute( wcmd, wszParameters, wszKeyname,
++                                               wszApplicationName, env, &sei_tmp,
++                                               sei, execfunc );
++        TRACE("Unix binary returned %u\n", exec_retval);
++        if (exec_retval > 32)
++            retval = exec_retval;
++    }
+ 
+ end:
+     TRACE("retval %Iu\n", retval);
+-- 
+GitLab
+
