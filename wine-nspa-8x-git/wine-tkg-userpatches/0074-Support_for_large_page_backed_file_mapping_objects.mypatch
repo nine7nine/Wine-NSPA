@@ -1,0 +1,1846 @@
+From 9aaa9e5cbf7947c11c0b73bfce519eeabd76fc24 Mon Sep 17 00:00:00 2001
+From: Vibhav Pant <vibhavp@gmail.com>
+Date: Thu, 6 Jun 2024 19:18:50 +0530
+Subject: [PATCH 1/8] server: Require SeLockMemoryPrivilege to create large
+ page mappings.
+
+Also, add SeLockMemoryPrivilege to the list of admin privileges.
+---
+ server/mapping.c  | 6 ++++++
+ server/security.h | 1 +
+ server/token.c    | 2 ++
+ 3 files changed, 9 insertions(+)
+
+diff --git a/server/mapping.c b/server/mapping.c
+index 92eb0c9f076..8f7103dcf14 100644
+--- a/server/mapping.c
++++ b/server/mapping.c
+@@ -1442,6 +1442,12 @@ DECL_HANDLER(create_mapping)
+ 
+     if (!objattr) return;
+ 
++    if ((req->flags & SEC_LARGE_PAGES) && !thread_single_check_privilege( current, SeLockMemoryPrivilege ))
++    {
++        set_error( STATUS_PRIVILEGE_NOT_HELD );
++        return;
++    }
++
+     if ((mapping = create_mapping( root, &name, objattr->attributes, req->size, req->flags,
+                                    req->file_handle, req->file_access, sd )))
+     {
+diff --git a/server/security.h b/server/security.h
+index f4dff679179..7a135e90928 100644
+--- a/server/security.h
++++ b/server/security.h
+@@ -23,6 +23,7 @@
+ 
+ #include <sys/types.h>
+ 
++extern const struct luid SeLockMemoryPrivilege;
+ extern const struct luid SeIncreaseQuotaPrivilege;
+ extern const struct luid SeSecurityPrivilege;
+ extern const struct luid SeTakeOwnershipPrivilege;
+diff --git a/server/token.c b/server/token.c
+index da7f0bb7ff2..b1fd23af492 100644
+--- a/server/token.c
++++ b/server/token.c
+@@ -42,6 +42,7 @@
+ 
+ #define MAX_SUBAUTH_COUNT 1
+ 
++const struct luid SeLockMemoryPrivilege           = {  4,  0};
+ const struct luid SeIncreaseQuotaPrivilege        = {  5, 0 };
+ const struct luid SeTcbPrivilege                  = {  7, 0 };
+ const struct luid SeSecurityPrivilege             = {  8, 0 };
+@@ -782,6 +783,7 @@ struct token *token_create_admin( unsigned primary, int impersonation_level, int
+         { SeManageVolumePrivilege, 0 },
+         { SeImpersonatePrivilege, SE_PRIVILEGE_ENABLED },
+         { SeCreateGlobalPrivilege, SE_PRIVILEGE_ENABLED },
++        { SeLockMemoryPrivilege, SE_PRIVILEGE_ENABLED },
+     };
+     /* note: we don't include non-builtin groups here for the user -
+      * telling us these is the job of a client-side program */
+-- 
+GitLab
+
+
+From b18c4705216eff216a7b5f4a38990f207c537760 Mon Sep 17 00:00:00 2001
+From: Vibhav Pant <vibhavp@gmail.com>
+Date: Thu, 6 Jun 2024 19:19:51 +0530
+Subject: [PATCH 2/8] server: Set LargePageMinimum in _KUSER_SHARED_DATA on
+ Linux.
+
+On Linux, get the minimum supported hugepage size from directory entries /sys/kernel/mm/hugepages,
+and set the LargePageMinimum field in user_shared_data to it, if supported.
+---
+ server/mapping.c | 75 ++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 75 insertions(+)
+
+diff --git a/server/mapping.c b/server/mapping.c
+index 8f7103dcf14..30be548fd53 100644
+--- a/server/mapping.c
++++ b/server/mapping.c
+@@ -29,6 +29,14 @@
+ #include <sys/stat.h>
+ #include <sys/mman.h>
+ #include <unistd.h>
++#ifdef HAVE_MEMFD_CREATE
++#include <linux/memfd.h>
++#endif
++#ifdef __linux__ /* For detecting hugepage support. */
++#include <dirent.h>
++#include <errno.h>
++#include <limits.h>
++#endif
+ 
+ #include "ntstatus.h"
+ #define WIN32_NO_STATUS
+@@ -1414,6 +1422,66 @@ obj_locator_t get_shared_object_locator( const volatile void *object_shm )
+     return locator;
+ }
+ 
++#ifdef __linux__
++static size_t linux_get_min_hugepage_size( void )
++{
++    DIR *sysfs_hugepages;
++    struct dirent *supported_size;
++    size_t min_size = 0;
++    size_t total_supported_sizes = 0;
++
++    errno = 0;
++    sysfs_hugepages = opendir("/sys/kernel/mm/hugepages");
++    if (sysfs_hugepages == NULL)
++    {
++        return -1;
++    }
++
++    while(1)
++    {
++        long hugepage_size;
++
++        supported_size = readdir( sysfs_hugepages );
++        if ( supported_size == NULL )
++        {
++            break;
++        }
++        if (strncmp( supported_size->d_name, "hugepages-", 10) != 0)
++        {
++            continue;
++        }
++        errno = 0;
++        hugepage_size = strtol( &supported_size->d_name[10], NULL, 10 );
++        if (hugepage_size == 0 || hugepage_size == LONG_MAX || hugepage_size == LONG_MIN)
++        {
++            if (errno != 0)
++            {
++                fprintf( stderr,
++                         "could not parse page size from directory entry '%s': %s\n",
++                         supported_size->d_name, strerror( errno ) );
++            }
++            continue;
++        }
++        hugepage_size *= 1024;
++        min_size = ( total_supported_sizes == 0 )
++                       ? hugepage_size
++                       : ( hugepage_size < min_size ? hugepage_size : min_size );
++        total_supported_sizes++;
++    }
++
++    closedir(sysfs_hugepages);
++    return min_size;
++}
++#endif /* __linux__ */
++
++static size_t get_min_large_page_size( void )
++{
++#ifdef __linux__
++    return linux_get_min_hugepage_size();
++#endif
++    return 0;
++}
++
+ struct object *create_user_data_mapping( struct object *root, const struct unicode_str *name,
+                                         unsigned int attr, const struct security_descriptor *sd )
+ {
+@@ -1425,8 +1493,15 @@ struct object *create_user_data_mapping( struct object *root, const struct unico
+     ptr = mmap( NULL, mapping->size, PROT_WRITE, MAP_SHARED, get_unix_fd( mapping->fd ), 0 );
+     if (ptr != MAP_FAILED)
+     {
++        ULONG min_large_page_size;
++
+         user_shared_data = ptr;
+         user_shared_data->SystemCall = 1;
++        min_large_page_size = get_min_large_page_size();
++        if (min_large_page_size != 0)
++        {
++            user_shared_data->LargePageMinimum = min_large_page_size;
++        }
+     }
+     return &mapping->obj;
+ }
+-- 
+GitLab
+
+
+From 71b41289c3fa36d28ae8c4ca9b2c9920bc5d288f Mon Sep 17 00:00:00 2001
+From: Vibhav Pant <vibhavp@gmail.com>
+Date: Thu, 6 Jun 2024 19:22:19 +0530
+Subject: [PATCH 3/8] kernelbase: Implement GetLargePageMinimum by returning
+ the value of LargePageMinimum in _KUSER_SHARED_DATA.
+
+---
+ dlls/kernelbase/memory.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/kernelbase/memory.c b/dlls/kernelbase/memory.c
+index 46b155b7a47..f5a1358b0e9 100644
+--- a/dlls/kernelbase/memory.c
++++ b/dlls/kernelbase/memory.c
+@@ -41,6 +41,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(heap);
+ WINE_DECLARE_DEBUG_CHANNEL(virtual);
+ WINE_DECLARE_DEBUG_CHANNEL(globalmem);
+ 
++static const struct _KUSER_SHARED_DATA *user_shared_data = (struct _KUSER_SHARED_DATA *)0x7ffe0000;
+ 
+ 
+ static CROSS_PROCESS_WORK_LIST *open_cross_process_connection( HANDLE process )
+@@ -143,7 +144,7 @@ BOOL WINAPI DECLSPEC_HOTPATCH FlushInstructionCache( HANDLE process, LPCVOID add
+  */
+ SIZE_T WINAPI GetLargePageMinimum(void)
+ {
+-    return 2 * 1024 * 1024;
++    return user_shared_data->LargePageMinimum;
+ }
+ 
+ 
+-- 
+GitLab
+
+
+From 6a75681eab97af5af4e78a1ce8642d0c04c6ff7a Mon Sep 17 00:00:00 2001
+From: Vibhav Pant <vibhavp@gmail.com>
+Date: Thu, 6 Jun 2024 19:26:33 +0530
+Subject: [PATCH 4/8] server: Use memfd to back anonymous mappings on Linux.
+
+On Linux, try creating a memfd first to implement create_temp_file. If a large page mapping is
+requested (SEC_LARGE_PAGES), create a memfd with the MFD_HUGETLB flags. If SEC_COMMIT is passed,
+allocate sufficient space to back the mapping with posix_fallocate.
+
+Additionally, ensure when SEC_LARGE_PAGES is requested, ensure that SEC_COMMIT is passed as well.
+---
+ configure           |  12 +++++
+ configure.ac        |   2 +
+ include/config.h.in |   6 +++
+ server/mapping.c    | 118 ++++++++++++++++++++++++++++++++++++++++++--
+ 4 files changed, 134 insertions(+), 4 deletions(-)
+
+diff --git a/configure b/configure
+index 9ef4dfef5a4..24ff184de39 100755
+--- a/configure
++++ b/configure
+@@ -7986,6 +7986,12 @@ if test "x$ac_cv_header_linux_major_h" = xyes
+ then :
+   printf "%s\n" "#define HAVE_LINUX_MAJOR_H 1" >>confdefs.h
+ 
++fi
++ac_fn_c_check_header_compile "$LINENO" "linux/memfd.h" "ac_cv_header_linux_memfd_h" "$ac_includes_default"
++if test "x$ac_cv_header_linux_memfd_h" = xyes
++then :
++  printf "%s\n" "#define HAVE_LINUX_MEMFD_H 1" >>confdefs.h
++
+ fi
+ ac_fn_c_check_header_compile "$LINENO" "linux/param.h" "ac_cv_header_linux_param_h" "$ac_includes_default"
+ if test "x$ac_cv_header_linux_param_h" = xyes
+@@ -20812,6 +20818,12 @@ if test "x$ac_cv_func_mach_continuous_time" = xyes
+ then :
+   printf "%s\n" "#define HAVE_MACH_CONTINUOUS_TIME 1" >>confdefs.h
+ 
++fi
++ac_fn_c_check_func "$LINENO" "memfd_create" "ac_cv_func_memfd_create"
++if test "x$ac_cv_func_memfd_create" = xyes
++then :
++  printf "%s\n" "#define HAVE_MEMFD_CREATE 1" >>confdefs.h
++
+ fi
+ ac_fn_c_check_func "$LINENO" "pipe2" "ac_cv_func_pipe2"
+ if test "x$ac_cv_func_pipe2" = xyes
+diff --git a/configure.ac b/configure.ac
+index 6f48132b22a..092ca64849e 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -380,6 +380,7 @@ AC_CHECK_HEADERS(\
+ 	linux/input.h \
+ 	linux/ioctl.h \
+ 	linux/major.h \
++        linux/memfd.h \
+ 	linux/param.h \
+ 	linux/serial.h \
+ 	linux/types.h \
+@@ -2078,6 +2079,7 @@ AC_CHECK_FUNCS(\
+ 	getrandom \
+ 	kqueue \
+ 	mach_continuous_time \
++        memfd_create \
+ 	pipe2 \
+ 	port_create \
+ 	posix_fadvise \
+diff --git a/include/config.h.in b/include/config.h.in
+index aa066a87ad7..bbd5a57a280 100644
+--- a/include/config.h.in
++++ b/include/config.h.in
+@@ -180,6 +180,9 @@
+ /* Define to 1 if you have the <linux/major.h> header file. */
+ #undef HAVE_LINUX_MAJOR_H
+ 
++/* Define to 1 if you have the <linux/memfd.h> header file. */
++#undef HAVE_LINUX_MEMFD_H
++
+ /* Define to 1 if you have the <linux/param.h> header file. */
+ #undef HAVE_LINUX_PARAM_H
+ 
+@@ -219,6 +222,9 @@
+ /* Define to 1 if you have the <mach-o/loader.h> header file. */
+ #undef HAVE_MACH_O_LOADER_H
+ 
++/* Define to 1 if you have the 'memfd_create' function. */
++#undef HAVE_MEMFD_CREATE
++
+ /* Define to 1 if you have the <mntent.h> header file. */
+ #undef HAVE_MNTENT_H
+ 
+diff --git a/server/mapping.c b/server/mapping.c
+index 30be548fd53..04b35d6ec4a 100644
+--- a/server/mapping.c
++++ b/server/mapping.c
+@@ -355,13 +355,117 @@ static int check_current_dir_for_exec(void)
+     return (ret != MAP_FAILED);
+ }
+ 
++#ifdef HAVE_MEMFD_CREATE
++static void make_memfd_name( const char *prefix, ULONG sec_flags, char *dest )
++{
++    /* memfd names are restricted to 250 bytes including \0, but are only meant for debugging, with
++     * duplicate names not causing any side-effects. */
++
++    if (prefix != NULL)
++    {
++        snprintf( dest, 250, "map-%s-%x", prefix, (int)sec_flags );
++    }
++    else
++    {
++        snprintf( dest, 250, "map-%x", (int)sec_flags );
++    }
++}
++
++static int create_memfd( ULONG file_access, ULONG sec_flags, file_pos_t new_size, int *err )
++{
++    int fd;
++    off_t size = new_size;
++    char memfd_name[256];
++    unsigned int memfd_flags = MFD_ALLOW_SEALING;
++    unsigned int seal_flags = F_SEAL_SEAL | F_SEAL_WRITE;
++
++#ifdef HAVE_POSIX_FALLOCATE
++    if (sizeof(file_pos_t) > sizeof(off_t) && size != new_size)
++    {
++        *err = EINVAL;
++        return -1;
++    }
++#endif
++#ifdef MFD_EXEC
++    memfd_flags |= MFD_EXEC;
++#endif
++
++    make_memfd_name( NULL, sec_flags, memfd_name );
++
++    if (sec_flags & SEC_LARGE_PAGES)
++    {
++        memfd_flags |= MFD_HUGETLB;
++    }
++    fd = memfd_create( memfd_name, memfd_flags );
++    if (fd == -1)
++    {
++        if (errno == EINVAL && (sec_flags & SEC_LARGE_PAGES))
++        {
++            /* MFD_HUGETLB & MFD_ALLOW_SEALING is only available in Linux >= 4.16. Lets try creating
++             * one without HUGETLB */
++            fd = memfd_create( memfd_name, memfd_flags & ~MFD_HUGETLB );
++            if (fd == -1)
++            {
++                *err = errno;
++                return -1;
++            }
++        }
++        else
++        {
++            *err = errno;
++            return -1;
++        }
++    }
++#ifdef HAVE_POSIX_FALLOCATE
++    if (sec_flags & SEC_COMMIT)
++    {
++        *err = posix_fallocate( fd, 0, size );
++        if (*err != 0)
++        {
++            close( fd );
++            return -1;
++        }
++    }
++#endif
++    if (ftruncate( fd, size ) == -1)
++    {
++        *err = errno;
++        close( fd );
++        return -1;
++    }
++    if (file_access & FILE_WRITE_DATA)
++    {
++        seal_flags &= ~F_SEAL_WRITE;
++    }
++
++    if (fcntl( fd, F_ADD_SEALS, F_SEAL_SEAL, seal_flags ) == -1)
++    {
++        *err = errno;
++        close( fd );
++        return -1;
++    }
++    return fd;
++}
++#endif /* defined(HAVE_MEMFD_CREATE) */
++
+ /* create a temp file for anonymous mappings */
+-static int create_temp_file( file_pos_t size )
++static int create_temp_file( ULONG file_access, ULONG sec_flags, file_pos_t size )
+ {
+     static int temp_dir_fd = -1;
+     char tmpfn[16];
+     int fd;
+ 
++#ifdef HAVE_MEMFD_CREATE
++    int err = 0;
++
++    fd = create_memfd( file_access, sec_flags, size, &err);
++    if (fd != -1)
++    {
++        return fd;
++    }
++
++#endif
++
+     if (temp_dir_fd == -1)
+     {
+         temp_dir_fd = server_dir_fd;
+@@ -646,7 +750,7 @@ static int build_shared_mapping( struct mapping *mapping, int fd,
+ 
+     /* create a temp file for the mapping */
+ 
+-    if ((shared_fd = create_temp_file( total_size )) == -1) return 0;
++    if ((shared_fd = create_temp_file( FILE_WRITE_DATA, 0, total_size )) == -1) return 0;
+     if (!(file = create_file_for_fd( shared_fd, FILE_GENERIC_READ|FILE_GENERIC_WRITE, 0 ))) return 0;
+ 
+     if (!(buffer = malloc( max_size ))) goto error;
+@@ -978,7 +1082,12 @@ static struct ranges *create_ranges(void)
+ 
+ static unsigned int get_mapping_flags( obj_handle_t handle, unsigned int flags )
+ {
+-    switch (flags & (SEC_IMAGE | SEC_RESERVE | SEC_COMMIT | SEC_FILE))
++    if (flags & SEC_LARGE_PAGES)
++    {
++        if (!(flags & SEC_COMMIT))
++            goto error;
++    }
++    switch (flags & (SEC_IMAGE | SEC_RESERVE | SEC_COMMIT | SEC_FILE ))
+     {
+     case SEC_IMAGE:
+         if (flags & (SEC_WRITECOMBINE | SEC_LARGE_PAGES)) break;
+@@ -993,6 +1102,7 @@ static unsigned int get_mapping_flags( obj_handle_t handle, unsigned int flags )
+         if (handle) return SEC_FILE | (flags & (SEC_NOCACHE | SEC_WRITECOMBINE));
+         return flags;
+     }
++error:
+     set_error( STATUS_INVALID_PARAMETER );
+     return 0;
+ }
+@@ -1082,7 +1192,7 @@ static struct mapping *create_mapping( struct object *root, const struct unicode
+         }
+         if ((flags & SEC_RESERVE) && !(mapping->committed = create_ranges())) goto error;
+         mapping->size = (mapping->size + page_mask) & ~((mem_size_t)page_mask);
+-        if ((unix_fd = create_temp_file( mapping->size )) == -1) goto error;
++        if ((unix_fd = create_temp_file( file_access, flags, mapping->size )) == -1) goto error;
+         if (!(mapping->fd = create_anonymous_fd( &mapping_fd_ops, unix_fd, &mapping->obj,
+                                                  FILE_SYNCHRONOUS_IO_NONALERT ))) goto error;
+         allow_fd_caching( mapping->fd );
+-- 
+GitLab
+
+
+From 8d969bd183f3513bb39210e8a0b175a1e4a8151a Mon Sep 17 00:00:00 2001
+From: Vibhav Pant <vibhavp@gmail.com>
+Date: Thu, 6 Jun 2024 19:34:28 +0530
+Subject: [PATCH 5/8] ntdll: Support allocating virtual memory, creating and
+ mapping files backed by large/huge pages.
+
+---
+ dlls/ntdll/tests/virtual.c     |  86 ++++++++++++
+ dlls/ntdll/unix/server.c       |   2 +-
+ dlls/ntdll/unix/sync.c         |  15 +-
+ dlls/ntdll/unix/unix_private.h |   9 +-
+ dlls/ntdll/unix/virtual.c      | 243 ++++++++++++++++++++++++++-------
+ 5 files changed, 299 insertions(+), 56 deletions(-)
+
+diff --git a/dlls/ntdll/tests/virtual.c b/dlls/ntdll/tests/virtual.c
+index 3628cec89e8..99bd134b599 100644
+--- a/dlls/ntdll/tests/virtual.c
++++ b/dlls/ntdll/tests/virtual.c
+@@ -46,6 +46,8 @@ static NTSTATUS (WINAPI *pNtMapViewOfSectionEx)(HANDLE, HANDLE, PVOID *, const L
+ static NTSTATUS (WINAPI *pNtSetInformationVirtualMemory)(HANDLE, VIRTUAL_MEMORY_INFORMATION_CLASS,
+                                                          ULONG_PTR, PMEMORY_RANGE_ENTRY,
+                                                          PVOID, ULONG);
++static SIZE_T(WINAPI *pGetLargePageMinimum)(void);
++static NTSTATUS (WINAPI *pRtlAdjustPrivilege)(ULONG,BOOLEAN,BOOLEAN,PBOOLEAN);
+ 
+ static const BOOL is_win64 = sizeof(void*) != sizeof(int);
+ static BOOL is_wow64;
+@@ -703,6 +705,87 @@ static void test_NtAllocateVirtualMemoryEx(void)
+        "Unexpected status %08lx.\n", status);
+ }
+ 
++static void test_NtAllocateVirtualMemoryEx_large_pages(void)
++{
++    SIZE_T size;
++    HANDLE token;
++    HANDLE process_token;
++    BOOLEAN enabled;
++    NTSTATUS status;
++
++    if (!pGetLargePageMinimum)
++    {
++        win_skip( "No GetLargePageMinimum support.\n" );
++        return;
++    }
++    if (!pRtlAdjustPrivilege)
++    {
++        win_skip( "No RtlAdjustPrivilege support.\n" );
++        return;
++    }
++
++    size = pGetLargePageMinimum();
++    if (size == 0)
++    {
++        trace( "No large pages support, skipping test.\n" );
++        return;
++    }
++    ok( OpenProcessToken( GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY, &process_token ),
++        "OpenProcessToken failed (%ld)\n", GetLastError() );
++    ok( DuplicateToken( process_token, SecurityImpersonation, &token ),
++       "DuplicateToken failed (%ld)\n", GetLastError() );
++    ok( ImpersonateLoggedOnUser( token ), "ImpersonateLoggedOnUser failed (%ld)\n",
++        GetLastError() );
++    status = pRtlAdjustPrivilege( SE_LOCK_MEMORY_PRIVILEGE, TRUE, TRUE, &enabled );
++    if (status != STATUS_SUCCESS)
++    {
++        trace( "Couldn't get SE_LOCK_MEMORY_PRIVILEGE (%ld), skipping large page file "
++               "mapping test.\n",
++               status );
++    }
++    else
++    {
++        MEM_EXTENDED_PARAMETER ex;
++        void *addr = NULL;
++
++        memset(&ex, 0, sizeof(ex));
++        ex.Type = MemExtendedParameterAttributeFlags;
++        ex.ULong64 = MEM_EXTENDED_PARAMETER_NONPAGED_LARGE;
++
++        status = pNtAllocateVirtualMemoryEx( NtCurrentProcess(), &addr, &size,
++                                             MEM_COMMIT | MEM_RESERVE | MEM_LARGE_PAGES,
++                                             PAGE_READWRITE, &ex, 1 );
++        ok(status == STATUS_SUCCESS || (addr == NULL && status == STATUS_NO_MEMORY), "NtAllocateVirtualMemoryEx failed (%08lx)\n", status);
++        if (addr)
++        {
++            size = 0;
++            status = NtFreeVirtualMemory(NtCurrentProcess(), &addr, &size, MEM_RELEASE);
++            ok(status == STATUS_SUCCESS, "NtFreeVirtualMemory failed (%08lx)\n", status);
++        }
++
++        size = ((SIZE_T)1 * 1024 * 1024 * 1024); /* 1 GiB */
++        ex.Type = MemExtendedParameterAttributeFlags;
++        ex.ULong64 = MEM_EXTENDED_PARAMETER_NONPAGED_HUGE;
++        addr = NULL;
++        status = pNtAllocateVirtualMemoryEx( NtCurrentProcess(), &addr, &size,
++                                             MEM_COMMIT | MEM_RESERVE | MEM_LARGE_PAGES,
++                                             PAGE_READWRITE, &ex, 1 );
++        if (is_wow64)
++            ok( status == STATUS_SUCCESS || (addr == NULL && (status == STATUS_CONFLICTING_ADDRESSES || status == STATUS_NO_MEMORY)),
++                "NtAllocateVirtualMemoryEx failed unexpectedly (%08lx)\n", status );
++        else
++            ok( status == STATUS_SUCCESS || (addr == NULL && status == STATUS_NO_MEMORY),
++               "NtAllocateVirtualMemoryEx failed unexpectedly (%08lx)\n", status );
++        if (addr)
++        {
++            size = 0;
++            status = NtFreeVirtualMemory(NtCurrentProcess(), &addr, &size, MEM_RELEASE);
++            ok(status == STATUS_SUCCESS, "NtFreeVirtualMemory failed (%08lx)\n", status);
++        }
++    }
++    ok( RevertToSelf(), "RevertToSelf failed (%ld)\n", GetLastError() );
++}
++
+ static void test_NtAllocateVirtualMemoryEx_address_requirements(void)
+ {
+     MEM_EXTENDED_PARAMETER ext[2];
+@@ -2726,6 +2809,7 @@ START_TEST(virtual)
+     mod = GetModuleHandleA("kernel32.dll");
+     pIsWow64Process = (void *)GetProcAddress(mod, "IsWow64Process");
+     pGetEnabledXStateFeatures = (void *)GetProcAddress(mod, "GetEnabledXStateFeatures");
++    pGetLargePageMinimum = (void *)GetProcAddress(mod, "GetLargePageMinimum");
+     mod = GetModuleHandleA("ntdll.dll");
+     pRtlCreateUserStack = (void *)GetProcAddress(mod, "RtlCreateUserStack");
+     pRtlCreateUserThread = (void *)GetProcAddress(mod, "RtlCreateUserThread");
+@@ -2737,6 +2821,7 @@ START_TEST(virtual)
+     pNtAllocateVirtualMemoryEx = (void *)GetProcAddress(mod, "NtAllocateVirtualMemoryEx");
+     pNtMapViewOfSectionEx = (void *)GetProcAddress(mod, "NtMapViewOfSectionEx");
+     pNtSetInformationVirtualMemory = (void *)GetProcAddress(mod, "NtSetInformationVirtualMemory");
++    pRtlAdjustPrivilege = (void *)GetProcAddress(mod, "RtlAdjustPrivilege");
+ 
+     NtQuerySystemInformation(SystemBasicInformation, &sbi, sizeof(sbi), NULL);
+     trace("system page size %#lx\n", sbi.PageSize);
+@@ -2746,6 +2831,7 @@ START_TEST(virtual)
+     test_NtAllocateVirtualMemory();
+     test_NtAllocateVirtualMemoryEx();
+     test_NtAllocateVirtualMemoryEx_address_requirements();
++    test_NtAllocateVirtualMemoryEx_large_pages();
+     test_NtFreeVirtualMemory();
+     test_RtlCreateUserStack();
+     test_NtMapViewOfSection();
+diff --git a/dlls/ntdll/unix/server.c b/dlls/ntdll/unix/server.c
+index f3ffd99c3fc..d97576fe906 100644
+--- a/dlls/ntdll/unix/server.c
++++ b/dlls/ntdll/unix/server.c
+@@ -1019,7 +1019,7 @@ static BOOL add_fd_to_cache( HANDLE handle, int fd, enum server_fd_type type,
+         else
+         {
+             void *ptr = anon_mmap_alloc( FD_CACHE_BLOCK_SIZE * sizeof(union fd_cache_entry),
+-                                         PROT_READ | PROT_WRITE );
++                                         PROT_READ | PROT_WRITE, LARGE_PAGES_NONE );
+             if (ptr == MAP_FAILED) return FALSE;
+             fd_cache[entry] = ptr;
+         }
+diff --git a/dlls/ntdll/unix/sync.c b/dlls/ntdll/unix/sync.c
+index 1d66f0d974f..3d62c5a1e60 100644
+--- a/dlls/ntdll/unix/sync.c
++++ b/dlls/ntdll/unix/sync.c
+@@ -2058,6 +2058,19 @@ NTSTATUS WINAPI NtCreateSection( HANDLE *handle, ACCESS_MASK access, const OBJEC
+ 
+     *handle = 0;
+ 
++    if (sec_flags & SEC_LARGE_PAGES)
++    {
++        SIZE_T min_size = user_shared_data->LargePageMinimum;
++        if (file != NULL || size == NULL)
++        {
++            return STATUS_INVALID_PARAMETER;
++        }
++
++        if (min_size == 0 || size->QuadPart % min_size != 0)
++        {
++            return STATUS_INVALID_PARAMETER;
++        }
++    }
+     switch (protect & 0xff)
+     {
+     case PAGE_READONLY:
+@@ -2442,7 +2455,7 @@ static union tid_alert_entry *get_tid_alert_entry( HANDLE tid )
+     if (!tid_alert_blocks[block_idx])
+     {
+         static const size_t size = TID_ALERT_BLOCK_SIZE * sizeof(union tid_alert_entry);
+-        void *ptr = anon_mmap_alloc( size, PROT_READ | PROT_WRITE );
++        void *ptr = anon_mmap_alloc( size, PROT_READ | PROT_WRITE, LARGE_PAGES_NONE );
+         if (ptr == MAP_FAILED) return NULL;
+         if (InterlockedCompareExchangePointer( (void **)&tid_alert_blocks[block_idx], ptr, NULL ))
+             munmap( ptr, size ); /* someone beat us to it */
+diff --git a/dlls/ntdll/unix/unix_private.h b/dlls/ntdll/unix/unix_private.h
+index 6cd88a5acc0..a8b438aa65f 100644
+--- a/dlls/ntdll/unix/unix_private.h
++++ b/dlls/ntdll/unix/unix_private.h
+@@ -151,6 +151,13 @@ static const SIZE_T kernel_stack_size =
+ static const SIZE_T min_kernel_stack  = 0x2000;
+ static const LONG teb_offset = 0x2000;
+ 
++enum large_pages_type
++{
++    LARGE_PAGES_NONE = 0,
++    LARGE_PAGES_LARGE = 1,
++    LARGE_PAGES_HUGE = 2
++};
++
+ #define FILE_WRITE_TO_END_OF_FILE      ((LONGLONG)-1)
+ #define FILE_USE_FILE_POINTER_POSITION ((LONGLONG)-2)
+ 
+@@ -257,7 +264,7 @@ extern unsigned int alloc_object_attribu
+ extern NTSTATUS system_time_precise( void *args ) DECLSPEC_HIDDEN;
+ 
+ extern void *anon_mmap_fixed( void *start, size_t size, int prot, int flags ) DECLSPEC_HIDDEN;
+-extern void *anon_mmap_alloc( size_t size, int prot ) DECLSPEC_HIDDEN;
++extern void *anon_mmap_alloc( size_t size, int prot, enum large_pages_type ) DECLSPEC_HIDDEN;
+ extern void virtual_init(void) DECLSPEC_HIDDEN;
+ extern ULONG_PTR get_system_affinity_mask(void) DECLSPEC_HIDDEN;
+ extern void virtual_get_system_info( SYSTEM_BASIC_INFORMATION *info, BOOL wow64 ) DECLSPEC_HIDDEN;
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index 3981905bcd3..0e5917403f9 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -195,6 +195,13 @@ static struct list teb_list = LIST_INIT( teb_list );
+ #define MAP_NORESERVE 0
+ #endif
+ 
++#if defined( MAP_HUGETLB ) && defined( MAP_LOCKED )
++#define MMAP_LARGE_PAGES_FLAG (MAP_HUGETLB | MAP_LOCKED)
++#else
++#define MMAP_LARGE_PAGES_FLAG 0
++#endif
++#define HUGE_PAGE_SIZE (1 * 1024 * 1024 * 1024)
++
+ #ifdef _WIN64  /* on 64-bit the page protection bytes use a 2-level table */
+ static const size_t pages_vprot_shift = 20;
+ static const size_t pages_vprot_mask = (1 << 20) - 1;
+@@ -225,6 +232,26 @@ static inline BOOL is_beyond_limit( const void *addr, size_t size, const void *l
+     return (addr >= limit || (const char *)addr + size > (const char *)limit);
+ }
+ 
++static int mmap_large_pages_flags( enum large_pages_type type )
++{
++    switch (type)
++    {
++#ifdef MAP_HUGE_SHIFT
++        case LARGE_PAGES_LARGE:
++        {
++            DWORD log2;
++            BitScanReverse( &log2, user_shared_data->LargePageMinimum | 1 );
++            return MMAP_LARGE_PAGES_FLAG | ( log2 << MAP_HUGE_SHIFT );
++        }
++        case LARGE_PAGES_HUGE: /* On Windows, "huge" pages are 1 GiB*/
++            return MMAP_LARGE_PAGES_FLAG | ( 30 << MAP_HUGE_SHIFT );
++#endif
++        case LARGE_PAGES_NONE:
++        default:
++            return 0;
++    }
++}
++
+ /* mmap() anonymous memory at a fixed address */
+ void *anon_mmap_fixed( void *start, size_t size, int prot, int flags )
+ {
+@@ -232,12 +259,11 @@ void *anon_mmap_fixed( void *start, size_t size, int prot, int flags )
+ }
+ 
+ /* allocate anonymous mmap() memory at any address */
+-void *anon_mmap_alloc( size_t size, int prot )
++void *anon_mmap_alloc( size_t size, int prot, enum large_pages_type type )
+ {
+-    return mmap( NULL, size, prot, MAP_PRIVATE | MAP_ANON, -1, 0 );
++    return mmap( NULL, size, prot, MAP_PRIVATE | MAP_ANON | mmap_large_pages_flags( type ), -1, 0 );
+ }
+ 
+-
+ static void mmap_add_reserved_area( void *addr, SIZE_T size )
+ {
+     struct reserved_area *area;
+@@ -1004,7 +1030,7 @@ static BOOL alloc_pages_vprot( const void *addr, size_t size )
+     for (i = idx >> pages_vprot_shift; i < (end + pages_vprot_mask) >> pages_vprot_shift; i++)
+     {
+         if (pages_vprot[i]) continue;
+-        if ((ptr = anon_mmap_alloc( pages_vprot_mask + 1, PROT_READ | PROT_WRITE )) == MAP_FAILED)
++        if ((ptr = anon_mmap_alloc( pages_vprot_mask + 1, PROT_READ | PROT_WRITE, LARGE_PAGES_NONE )) == MAP_FAILED)
+         {
+             ERR( "anon mmap error %s for vprot table, size %08lx\n", strerror(errno), pages_vprot_mask + 1 );
+             return FALSE;
+@@ -1282,13 +1308,14 @@ static struct wine_rb_entry *find_view_inside_range( void **base_ptr, void **end
+  * retrying inside it, and return where it actually succeeded, or NULL.
+  */
+ static void* try_map_free_area( void *base, void *end, ptrdiff_t step,
+-                                void *start, size_t size, int unix_prot )
++                               void *start, size_t size, int unix_prot, enum large_pages_type type )
+ {
+     void *ptr;
++    int flags = mmap_large_pages_flags(type);
+ 
+     while (start && base <= start && (char*)start + size <= (char*)end)
+     {
+-        if ((ptr = anon_mmap_tryfixed( start, size, unix_prot, 0 )) != MAP_FAILED) return start;
++        if ((ptr = anon_mmap_tryfixed( start, size, unix_prot, flags )) != MAP_FAILED) return start;
+         TRACE( "Found free area is already mapped, start %p.\n", start );
+         if (errno != EEXIST)
+         {
+@@ -1313,7 +1340,7 @@ static void* try_map_free_area( void *base, void *end, ptrdiff_t step,
+  * Find a free area between views inside the specified range and map it.
+  * virtual_mutex must be held by caller.
+  */
+-static void *map_free_area( void *base, void *end, size_t size, int top_down, int unix_prot, size_t align_mask )
++static void *map_free_area( void *base, void *end, size_t size, int top_down, int unix_prot, size_t align_mask, BOOL large_pages )
+ {
+     struct wine_rb_entry *first = find_view_inside_range( &base, &end, top_down );
+     ptrdiff_t step = top_down ? -(align_mask + 1) : (align_mask + 1);
+@@ -1328,7 +1355,7 @@ static void *map_free_area( void *base, void *end, size_t size, int top_down, in
+         {
+             struct file_view *view = WINE_RB_ENTRY_VALUE( first, struct file_view, entry );
+             if ((start = try_map_free_area( (char *)view->base + view->size, (char *)start + size, step,
+-                                            start, size, unix_prot ))) break;
++                                            start, size, unix_prot, large_pages ))) break;
+             start = ROUND_ADDR( (char *)view->base - size, align_mask );
+             /* stop if remaining space is not large enough */
+             if (!start || start >= end || start < base) return NULL;
+@@ -1344,7 +1371,7 @@ static void *map_free_area( void *base, void *end, size_t size, int top_down, in
+         {
+             struct file_view *view = WINE_RB_ENTRY_VALUE( first, struct file_view, entry );
+             if ((start = try_map_free_area( start, view->base, step,
+-                                            start, size, unix_prot ))) break;
++                                            start, size, unix_prot, large_pages ))) break;
+             start = ROUND_ADDR( (char *)view->base + view->size + align_mask, align_mask );
+             /* stop if remaining space is not large enough */
+             if (!start || start >= end || (char *)end - (char *)start < size) return NULL;
+@@ -1353,7 +1380,7 @@ static void *map_free_area( void *base, void *end, size_t size, int top_down, in
+     }
+ 
+     if (!first)
+-        start = try_map_free_area( base, end, step, start, size, unix_prot );
++        start = try_map_free_area( base, end, step, start, size, unix_prot, large_pages );
+ 
+     if (!start)
+         ERR( "couldn't map free area in range %p-%p, size %p\n", base, end, (void *)size );
+@@ -1494,7 +1521,7 @@ static struct file_view *alloc_view(void)
+     }
+     if (view_block_start == view_block_end)
+     {
+-        void *ptr = anon_mmap_alloc( view_block_size, PROT_READ | PROT_WRITE );
++        void *ptr = anon_mmap_alloc( view_block_size, PROT_READ | PROT_WRITE, LARGE_PAGES_NONE );
+         if (ptr == MAP_FAILED) return NULL;
+         view_block_start = ptr;
+         view_block_end = view_block_start + view_block_size / sizeof(*view_block_start);
+@@ -1871,10 +1898,11 @@ static void *find_reserved_free_area_outside_preloader( void *start, void *end,
+  * virtual_mutex must be held by caller.
+  */
+ static void *map_reserved_area( void *limit_low, void *limit_high, size_t size, int top_down,
+-                                int unix_prot, size_t align_mask )
++                                int unix_prot, size_t align_mask, enum large_pages_type type )
+ {
+     void *ptr = NULL;
+     struct reserved_area *area = LIST_ENTRY( ptr, struct reserved_area, entry );
++    int flags = mmap_large_pages_flags( type );
+ 
+     if (top_down)
+     {
+@@ -1906,7 +1934,7 @@ static void *map_reserved_area( void *limit_low, void *limit_high, size_t size,
+             if (ptr) break;
+         }
+     }
+-    if (ptr && anon_mmap_fixed( ptr, size, unix_prot, 0 ) != ptr) ptr = NULL;
++    if (ptr && anon_mmap_fixed( ptr, size, unix_prot, flags ) != ptr) ptr = NULL;
+     return ptr;
+ }
+ 
+@@ -1916,12 +1944,13 @@ static void *map_reserved_area( void *limit_low, void *limit_high, size_t size,
+  * Map a memory area at a fixed address.
+  * virtual_mutex must be held by caller.
+  */
+-static NTSTATUS map_fixed_area( void *base, size_t size, unsigned int vprot )
++static NTSTATUS map_fixed_area( void *base, size_t size, unsigned int vprot, enum large_pages_type type )
+ {
+     int unix_prot = get_unix_prot(vprot);
+     struct reserved_area *area;
+     NTSTATUS status;
+     char *start = base, *end = (char *)base + size;
++    int flags = mmap_large_pages_flags( type );
+ 
+     if (find_view_range( base, size )) return STATUS_CONFLICTING_ADDRESSES;
+ 
+@@ -1934,19 +1963,19 @@ static NTSTATUS map_fixed_area( void *base, size_t size, unsigned int vprot )
+         if (area_end <= start) continue;
+         if (area_start > start)
+         {
+-            if (anon_mmap_tryfixed( start, area_start - start, unix_prot, 0 ) == MAP_FAILED) goto failed;
++            if (anon_mmap_tryfixed( start, area_start - start, unix_prot, flags ) == MAP_FAILED) goto failed;
+             start = area_start;
+         }
+         if (area_end >= end)
+         {
+-            if (anon_mmap_fixed( start, end - start, unix_prot, 0 ) == MAP_FAILED) goto failed;
++            if (anon_mmap_fixed( start, end - start, unix_prot, flags ) == MAP_FAILED) goto failed;
+             return STATUS_SUCCESS;
+         }
+-        if (anon_mmap_fixed( start, area_end - start, unix_prot, 0 ) == MAP_FAILED) goto failed;
++        if (anon_mmap_fixed( start, area_end - start, unix_prot, flags ) == MAP_FAILED) goto failed;
+         start = area_end;
+     }
+ 
+-    if (anon_mmap_tryfixed( start, end - start, unix_prot, 0 ) == MAP_FAILED) goto failed;
++    if (anon_mmap_tryfixed( start, end - start, unix_prot, flags ) == MAP_FAILED) goto failed;
+     return STATUS_SUCCESS;
+ 
+ failed:
+@@ -1973,13 +2002,16 @@ failed:
+  * virtual_mutex must be held by caller.
+  */
+ static NTSTATUS map_view( struct file_view **view_ret, void *base, size_t size,
+-                          unsigned int alloc_type, unsigned int vprot,
+-                          ULONG_PTR limit_low, ULONG_PTR limit_high, size_t align_mask )
++                          unsigned int alloc_type, unsigned int vprot, ULONG_PTR limit_low,
++                          ULONG_PTR limit_high, size_t align_mask,
++                          enum large_pages_type large_pages_type )
+ {
+     int top_down = alloc_type & MEM_TOP_DOWN;
+     void *ptr;
+     NTSTATUS status;
++    BOOL large_pages = large_pages_type != LARGE_PAGES_NONE;
+ 
++    if (large_pages) vprot |= SEC_LARGE_PAGES;
+     if (alloc_type & MEM_REPLACE_PLACEHOLDER)
+     {
+         struct file_view *view;
+@@ -1997,6 +2029,16 @@ static NTSTATUS map_view( struct file_view **view_ret, void *base, size_t size,
+         return STATUS_SUCCESS;
+     }
+ 
++    if (large_pages)
++    {
++        SIZE_T aligned_to = large_pages_type == LARGE_PAGES_LARGE
++                                ? user_shared_data->LargePageMinimum
++                                : HUGE_PAGE_SIZE;
++        if (size == 0) return STATUS_INVALID_PARAMETER;
++        if (size == 0 || user_shared_data->LargePageMinimum == 0 || size % aligned_to != 0)
++            return STATUS_INVALID_PARAMETER;
++    }
++
+     if (limit_high && limit_low >= limit_high) return STATUS_INVALID_PARAMETER;
+ 
+     if (base)
+@@ -2021,7 +2064,7 @@ static NTSTATUS map_view( struct file_view **view_ret, void *base, size_t size,
+         if (limit_low && (void *)limit_low > start) start = (void *)limit_low;
+         if (limit_high && (void *)limit_high < end) end = (char *)limit_high + 1;
+ 
+-        if ((ptr = map_reserved_area( start, end, size, top_down, get_unix_prot(vprot), align_mask )))
++        if ((ptr = map_reserved_area( start, end, size, top_down, get_unix_prot(vprot), align_mask, large_pages_type )))
+         {
+             TRACE( "got mem in reserved area %p-%p\n", ptr, (char *)ptr + size );
+             goto done;
+@@ -2029,7 +2072,7 @@ static NTSTATUS map_view( struct file_view **view_ret, void *base, size_t size,
+ 
+         if (start > address_space_start || end < host_addr_space_limit || top_down)
+         {
+-            if (!(ptr = map_free_area( start, end, size, top_down, get_unix_prot(vprot), align_mask )))
++            if (!(ptr = map_free_area( start, end, size, top_down, get_unix_prot(vprot), align_mask, large_pages_type )))
+                 return STATUS_NO_MEMORY;
+             TRACE( "got mem with map_free_area %p-%p\n", ptr, (char *)ptr + size );
+             goto done;
+@@ -2037,7 +2080,7 @@ static NTSTATUS map_view( struct file_view **view_ret, void *base, size_t size,
+ 
+         for (;;)
+         {
+-            if ((ptr = anon_mmap_alloc( view_size, get_unix_prot(vprot) )) == MAP_FAILED)
++            if ((ptr = anon_mmap_alloc( view_size, get_unix_prot(vprot), large_pages_type )) == MAP_FAILED)
+             {
+                 status = (errno == ENOMEM) ? STATUS_NO_MEMORY : STATUS_INVALID_PARAMETER;
+                 ERR( "anon mmap error %s, size %p, unix_prot %#x\n",
+@@ -2055,6 +2098,18 @@ static NTSTATUS map_view( struct file_view **view_ret, void *base, size_t size,
+ done:
+     status = create_view( view_ret, ptr, size, vprot );
+     if (status != STATUS_SUCCESS) unmap_area( ptr, size );
++    if (large_pages && mlock(ptr, size) != 0)
++    {
++        unmap_area( ptr, size );
++        switch (errno)
++        {
++        case EPERM:
++            status = STATUS_ACCESS_DENIED;
++            break;
++        default:
++            status = STATUS_NO_MEMORY;
++        }
++    }
+     return status;
+ }
+ 
+@@ -2082,10 +2137,17 @@ static NTSTATUS map_file_into_view( struct file_view *view, int fd, size_t start
+         prot |= PROT_EXEC;
+     }
+ 
++#ifdef MAP_LOCKED
++    if (vprot & SEC_LARGE_PAGES)
++    {
++        flags |= MAP_LOCKED;
++    }
++#endif
+     /* only try mmap if media is not removable (or if we require write access) */
+     if (!removable || (flags & MAP_SHARED))
+     {
+-        if (mmap( (char *)view->base + start, size, prot, flags, fd, offset ) != MAP_FAILED)
++        ptr = mmap( (char *)view->base + start, size, prot, flags, fd, offset );
++        if (ptr != MAP_FAILED)
+             goto done;
+ 
+         switch (errno)
+@@ -2118,8 +2180,14 @@ static NTSTATUS map_file_into_view( struct file_view *view, int fd, size_t start
+     }
+ 
+     /* Reserve the memory with an anonymous mmap */
+-    ptr = anon_mmap_fixed( (char *)view->base + start, size, PROT_READ | PROT_WRITE, 0 );
+-    if (ptr == MAP_FAILED)
++    ptr = anon_mmap_fixed( (char *)view->base + start, size, PROT_READ | PROT_WRITE,
++#ifdef MAP_LOCKED
++                           vprot & SEC_LARGE_PAGES ? MAP_LOCKED : 0
++#else
++                           0
++#endif
++    );
++    if ( ptr == MAP_FAILED )
+     {
+         ERR( "anon mmap error %s, range %p-%p\n",
+              strerror(errno), (char *)view->base + start, (char *)view->base + start + size );
+@@ -2130,6 +2198,16 @@ static NTSTATUS map_file_into_view( struct file_view *view, int fd, size_t start
+     if (prot != (PROT_READ|PROT_WRITE)) mprotect( ptr, size, prot );  /* Set the right protection */
+ done:
+     set_page_vprot( (char *)view->base + start, size, vprot );
++    if ( vprot & SEC_LARGE_PAGES && mlock( ptr, size ) != 0 )
++    {
++        switch (errno)
++        {
++            case EPERM:
++                return STATUS_ACCESS_DENIED;
++            default:
++                return STATUS_NO_MEMORY;
++        }
++    }
+     return STATUS_SUCCESS;
+ }
+ 
+@@ -2370,7 +2448,7 @@ static NTSTATUS allocate_dos_memory( struct file_view **view, unsigned int vprot
+     if (mmap_is_in_reserved_area( low_64k, dosmem_size - 0x10000 ) != 1)
+     {
+         addr = anon_mmap_tryfixed( low_64k, dosmem_size - 0x10000, unix_prot, 0 );
+-        if (addr == MAP_FAILED) return map_view( view, NULL, dosmem_size, 0, vprot, 0, 0, 0 );
++        if (addr == MAP_FAILED) return map_view( view, NULL, dosmem_size, 0, vprot, 0, 0, 0, LARGE_PAGES_NONE );
+     }
+ 
+     /* now try to allocate the low 64K too */
+@@ -3008,7 +3086,7 @@ static NTSTATUS map_image_view( struct file_view **view_ret, pe_image_info_t *im
+     }
+     if (base)
+     {
+-        status = map_view( view_ret, base, size, alloc_type, vprot, limit_low, limit_high, 0 );
++        status = map_view( view_ret, base, size, alloc_type, vprot, limit_low, limit_high, 0, LARGE_PAGES_NONE );
+         if (!status) return status;
+     }
+ 
+@@ -3026,13 +3104,13 @@ static NTSTATUS map_image_view( struct file_view **view_ret, pe_image_info_t *im
+     }
+     if (start < end && (start != limit_low || end != limit_high))
+     {
+-        status = map_view( view_ret, NULL, size, top_down ? MEM_TOP_DOWN : 0, vprot, start, end, 0 );
++        status = map_view( view_ret, NULL, size, top_down ? MEM_TOP_DOWN : 0, vprot, start, end, 0, LARGE_PAGES_NONE );
+         if (!status) return status;
+     }
+ 
+     /* then any suitable address */
+ 
+-    return map_view( view_ret, NULL, size, top_down ? MEM_TOP_DOWN : 0, vprot, limit_low, limit_high, 0 );
++    return map_view( view_ret, NULL, size, top_down ? MEM_TOP_DOWN : 0, vprot, limit_low, limit_high, 0, LARGE_PAGES_NONE );
+ }
+ 
+ 
+@@ -3179,6 +3257,16 @@ static unsigned int virtual_map_section( HANDLE handle, PVOID *addr_ptr, ULONG_P
+     base = *addr_ptr;
+     offset.QuadPart = offset_ptr ? offset_ptr->QuadPart : 0;
+     if (offset.QuadPart >= full_size) return STATUS_INVALID_PARAMETER;
++
++    if (sec_flags & SEC_LARGE_PAGES)
++    {
++        if (!*size_ptr || user_shared_data->LargePageMinimum == 0 ||
++            *size_ptr % user_shared_data->LargePageMinimum != 0)
++            return STATUS_INVALID_PARAMETER;
++        if (base && ((UINT_PTR)base % user_shared_data->LargePageMinimum != 0))
++            return STATUS_INVALID_PARAMETER;
++    }
++
+     if (*size_ptr)
+     {
+         size = *size_ptr;
+@@ -3204,7 +3292,9 @@ static unsigned int virtual_map_section( HANDLE handle, PVOID *addr_ptr, ULONG_P
+ 
+     server_enter_uninterrupted_section( &virtual_mutex, &sigset );
+ 
+-    res = map_view( &view, base, size, alloc_type, vprot, limit_low, limit_high, 0 );
++    res = map_view( &view, base, size, alloc_type, vprot, limit_low, limit_high,
++                   sec_flags & SEC_LARGE_PAGES ? ( user_shared_data->LargePageMinimum - 1 ) : 0,
++                   sec_flags & SEC_LARGE_PAGES ? LARGE_PAGES_LARGE : LARGE_PAGES_NONE );
+     if (res) goto done;
+ 
+     TRACE( "handle=%p size=%lx offset=%s\n", handle, size, wine_dbgstr_longlong(offset.QuadPart) );
+@@ -3270,7 +3360,7 @@ static void *alloc_virtual_heap( SIZE_T size )
+         mmap_remove_reserved_area( ret, size );
+         return ret;
+     }
+-    return anon_mmap_alloc( size, PROT_READ | PROT_WRITE );
++    return anon_mmap_alloc( size, PROT_READ | PROT_WRITE, LARGE_PAGES_NONE );
+ }
+ 
+ /***********************************************************************
+@@ -3856,7 +3946,7 @@ NTSTATUS virtual_alloc_thread_stack( INITIAL_TEB *stack, ULONG_PTR limit_low, UL
+     server_enter_uninterrupted_section( &virtual_mutex, &sigset );
+ 
+     status = map_view( &view, NULL, size, 0, VPROT_READ | VPROT_WRITE | VPROT_COMMITTED,
+-                       limit_low, limit_high, 0 );
++                       limit_low, limit_high, 0, LARGE_PAGES_NONE );
+     if (status != STATUS_SUCCESS) goto done;
+ 
+ #ifdef VALGRIND_STACK_REGISTER
+@@ -4470,33 +4560,60 @@ static NTSTATUS allocate_virtual_memory( void **ret, SIZE_T *size_ptr, ULONG typ
+     sigset_t sigset;
+     SIZE_T size = *size_ptr;
+     NTSTATUS status = STATUS_SUCCESS;
++    enum large_pages_type large_pages_type = LARGE_PAGES_NONE;
++
++    if (type & MEM_LARGE_PAGES)
++    {
++        if (attributes & MEM_EXTENDED_PARAMETER_NONPAGED_HUGE) large_pages_type = LARGE_PAGES_HUGE;
++        else large_pages_type = LARGE_PAGES_LARGE;
++    }
+ 
+     /* Round parameters to a page boundary */
+ 
+     if (is_beyond_limit( 0, size, working_set_limit )) return STATUS_WORKING_SET_LIMIT_RANGE;
+-
++    if (large_pages_type != LARGE_PAGES_NONE)
++    {
++        SIZE_T aligned_to = large_pages_type == LARGE_PAGES_LARGE
++                                ? user_shared_data->LargePageMinimum
++                                : HUGE_PAGE_SIZE;
++        if (size == 0 || user_shared_data->LargePageMinimum == 0) return STATUS_INVALID_PARAMETER;
++        if (size % aligned_to != 0) return STATUS_INVALID_PARAMETER;
++        if (!(type & (MEM_RESERVE | MEM_COMMIT))) return STATUS_INVALID_PARAMETER;
++    }
+     if (*ret)
+     {
+-        if (type & MEM_RESERVE && !(type & MEM_REPLACE_PLACEHOLDER)) /* Round down to 64k boundary */
+-            base = ROUND_ADDR( *ret, granularity_mask );
++        if (large_pages_type != LARGE_PAGES_NONE)
++        {
++            SIZE_T aligned_to = large_pages_type == LARGE_PAGES_LARGE
++                                    ? user_shared_data->LargePageMinimum
++                                    : HUGE_PAGE_SIZE;
++            base = *ret;
++            if ((UINT_PTR)base % aligned_to != 0)
++                return STATUS_INVALID_PARAMETER;
++        }
+         else
+-            base = ROUND_ADDR( *ret, page_mask );
+-        size = (((UINT_PTR)*ret + size + page_mask) & ~page_mask) - (UINT_PTR)base;
+-
+-        /* disallow low 64k, wrap-around and kernel space */
+-        if (((char *)base < (char *)0x10000) ||
+-            ((char *)base + size < (char *)base) ||
+-            is_beyond_limit( base, size, address_space_limit ))
+         {
+-            /* address 1 is magic to mean DOS area */
+-            if (!base && *ret == (void *)1 && size == 0x110000) is_dos_memory = TRUE;
+-            else return STATUS_INVALID_PARAMETER;
++            if (type & MEM_RESERVE &&
++                !(type & MEM_REPLACE_PLACEHOLDER )) /* Round down to 64k boundary */
++                base = ROUND_ADDR( *ret, granularity_mask );
++            else
++                base = ROUND_ADDR( *ret, page_mask );
++            size = (((UINT_PTR)*ret + size + page_mask) & ~page_mask) - (UINT_PTR)base;
++
++            /* disallow low 64k, wrap-around and kernel space */
++            if (((char *)base < (char *)0x10000 ) || ((char *)base + size < (char *)base) ||
++                is_beyond_limit( base, size, address_space_limit ))
++            {
++                /* address 1 is magic to mean DOS area */
++                if (!base && *ret == (void *)1 && size == 0x110000) is_dos_memory = TRUE;
++                else return STATUS_INVALID_PARAMETER;
++            }
+         }
+     }
+     else
+     {
+         base = NULL;
+-        size = (size + page_mask) & ~page_mask;
++        if (large_pages_type == LARGE_PAGES_NONE) size = (size + page_mask) & ~page_mask;
+     }
+ 
+     /* Compute the alloc type flags */
+@@ -4526,8 +4643,27 @@ static NTSTATUS allocate_virtual_memory( void **ret, SIZE_T *size_ptr, ULONG typ
+ 
+             if (vprot & VPROT_WRITECOPY) status = STATUS_INVALID_PAGE_PROTECTION;
+             else if (is_dos_memory) status = allocate_dos_memory( &view, vprot );
+-            else status = map_view( &view, base, size, type, vprot, limit_low, limit_high,
+-                                    align ? align - 1 : granularity_mask );
++            else
++            {
++                if (!align)
++                {
++                    switch (large_pages_type)
++                    {
++                        case LARGE_PAGES_LARGE:
++                            align = user_shared_data->LargePageMinimum - 1;
++                            break;
++                        case LARGE_PAGES_HUGE:
++                            align = HUGE_PAGE_SIZE - 1;
++                            break;
++                        default:
++                        case LARGE_PAGES_NONE:
++                            align = granularity_mask;
++                    }
++                }
++                else align--;
++                status = map_view( &view, base, size, type, vprot, limit_low, limit_high, align,
++                                   large_pages_type );
++            }
+ 
+             if (status == STATUS_SUCCESS) base = view->base;
+         }
+@@ -4535,7 +4671,7 @@ static NTSTATUS allocate_virtual_memory( void **ret, SIZE_T *size_ptr, ULONG typ
+     else if (type & MEM_RESET)
+     {
+         if (!(view = find_view( base, size ))) status = STATUS_NOT_MAPPED_VIEW;
+-        else madvise( base, size, MADV_DONTNEED );
++        else if (madvise( base, size, MADV_DONTNEED ) == -1) status = STATUS_INVALID_ADDRESS;
+     }
+     else  /* commit the pages */
+     {
+@@ -4584,7 +4720,7 @@ static NTSTATUS allocate_virtual_memory( void **ret, SIZE_T *size_ptr, ULONG typ
+ NTSTATUS WINAPI NtAllocateVirtualMemory( HANDLE process, PVOID *ret, ULONG_PTR zero_bits,
+                                          SIZE_T *size_ptr, ULONG type, ULONG protect )
+ {
+-    static const ULONG type_mask = MEM_COMMIT | MEM_RESERVE | MEM_TOP_DOWN | MEM_WRITE_WATCH | MEM_RESET;
++    static const ULONG type_mask = MEM_COMMIT | MEM_RESERVE | MEM_TOP_DOWN | MEM_WRITE_WATCH | MEM_RESET | MEM_LARGE_PAGES;
+     ULONG_PTR limit;
+ 
+     TRACE("%p %p %08lx %x %08x\n", process, *ret, *size_ptr, (int)type, (int)protect );
+@@ -4724,7 +4860,8 @@ NTSTATUS WINAPI NtAllocateVirtualMemoryEx( HANDLE process, PVOID *ret, SIZE_T *s
+                                            ULONG count )
+ {
+     static const ULONG type_mask = MEM_COMMIT | MEM_RESERVE | MEM_TOP_DOWN | MEM_WRITE_WATCH
+-                                   | MEM_RESET | MEM_RESERVE_PLACEHOLDER | MEM_REPLACE_PLACEHOLDER;
++                                   | MEM_RESET | MEM_RESERVE_PLACEHOLDER | MEM_REPLACE_PLACEHOLDER
++                                   | MEM_LARGE_PAGES;
+     ULONG_PTR limit_low = 0;
+     ULONG_PTR limit_high = 0;
+     ULONG_PTR align = 0;
+-- 
+GitLab
+
+
+From b174cc13e34117809c32cf49675374c2c60bfb36 Mon Sep 17 00:00:00 2001
+From: Vibhav Pant <vibhavp@gmail.com>
+Date: Thu, 6 Jun 2024 19:40:20 +0530
+Subject: [PATCH 6/8] kernel32: Add tests for large pages support.
+
+---
+ dlls/kernel32/tests/virtual.c | 165 ++++++++++++++++++++++++++++++++++
+ 1 file changed, 165 insertions(+)
+
+diff --git a/dlls/kernel32/tests/virtual.c b/dlls/kernel32/tests/virtual.c
+index 5fa8a1b5266..5919fdfbe66 100644
+--- a/dlls/kernel32/tests/virtual.c
++++ b/dlls/kernel32/tests/virtual.c
+@@ -38,6 +38,8 @@
+ static HINSTANCE hkernel32, hkernelbase, hntdll;
+ static SYSTEM_INFO si;
+ static BOOL is_wow64;
++static SIZE_T(WINAPI *pGetLargePageMinimum)(void);
++static NTSTATUS (WINAPI *pRtlAdjustPrivilege)(ULONG,BOOLEAN,BOOLEAN,PBOOLEAN);
+ static UINT   (WINAPI *pGetWriteWatch)(DWORD,LPVOID,SIZE_T,LPVOID*,ULONG_PTR*,ULONG*);
+ static UINT   (WINAPI *pResetWriteWatch)(LPVOID,SIZE_T);
+ static NTSTATUS (WINAPI *pNtAreMappedFilesTheSame)(PVOID,PVOID);
+@@ -54,6 +56,7 @@ static NTSTATUS (WINAPI *pNtProtectVirtualMemory)(HANDLE, PVOID *, SIZE_T *, ULO
+ static NTSTATUS (WINAPI *pNtReadVirtualMemory)(HANDLE,const void *,void *,SIZE_T, SIZE_T *);
+ static NTSTATUS (WINAPI *pNtWriteVirtualMemory)(HANDLE, void *, const void *, SIZE_T, SIZE_T *);
+ static BOOL  (WINAPI *pPrefetchVirtualMemory)(HANDLE, ULONG_PTR, PWIN32_MEMORY_RANGE_ENTRY, ULONG);
++static LPVOID(WINAPI *pVirtualAlloc2)(HANDLE, void *, SIZE_T, DWORD, DWORD, MEM_EXTENDED_PARAMETER *, ULONG);
+ 
+ /* ############################### */
+ 
+@@ -559,6 +562,126 @@ static void test_VirtualAlloc(void)
+     ok(VirtualFree(addr1, 0, MEM_RELEASE), "VirtualFree failed\n");
+ }
+ 
++static void test_with_large_pages( void (*test)(SIZE_T large_page_min) )
++{
++    SIZE_T size;
++    NTSTATUS status;
++    HANDLE process_token;
++    HANDLE token;
++    BOOLEAN enabled;
++
++    if (!pGetLargePageMinimum)
++    {
++        win_skip( "No GetLargePageMinimum support.\n" );
++        return;
++    }
++    if (!pRtlAdjustPrivilege)
++    {
++        win_skip( "No RtlAdjustPrivilege support.\n" );
++        return;
++    }
++
++    size = pGetLargePageMinimum();
++    if (size == 0)
++    {
++        trace( "No large pages support, skipping test.\n" );
++        return;
++    }
++    ok( OpenProcessToken( GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY, &process_token ),
++        "OpenProcessToken failed (%ld)\n", GetLastError() );
++    ok( DuplicateToken( process_token, SecurityImpersonation, &token ),
++       "DuplicateToken failed (%ld)\n", GetLastError() );
++    ok( ImpersonateLoggedOnUser( token ), "ImpersonateLoggedOnUser failed (%ld)\n",
++        GetLastError() );
++    status = pRtlAdjustPrivilege( SE_LOCK_MEMORY_PRIVILEGE, TRUE, TRUE, &enabled );
++    if (status != STATUS_SUCCESS)
++    {
++        trace( "Couldn't get SE_LOCK_MEMORY_PRIVILEGE (%ld), skipping test",
++               status );
++    }
++    else
++    {
++        test(size);
++    }
++    ok( RevertToSelf(), "RevertToSelf failed (%ld)\n", GetLastError() );
++}
++
++static void test_large_pages_VirtualAlloc(SIZE_T size)
++{
++    void *addr;
++
++    SetLastError( 0xdeadbeef );
++    addr = VirtualAlloc( NULL, 0, MEM_LARGE_PAGES | MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE );
++    ok( addr == NULL && GetLastError() == ERROR_INVALID_PARAMETER,
++        "VirtualAlloc should fail with %d (got %ld)\n", ERROR_INVALID_PARAMETER, GetLastError() );
++
++    SetLastError( 0xdeadbeef );
++    addr =
++        VirtualAlloc( NULL, size - 1, MEM_LARGE_PAGES | MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE );
++    ok( addr == NULL && GetLastError() == ERROR_INVALID_PARAMETER,
++        "VirtualAlloc should fail with %d (got %ld)\n", ERROR_INVALID_PARAMETER, GetLastError() );
++
++    SetLastError( 0xdeadbeef );
++    addr = VirtualAlloc( NULL, size, MEM_LARGE_PAGES, PAGE_READWRITE );
++    ok( addr == NULL && GetLastError() == ERROR_INVALID_PARAMETER,
++        "VirtualAlloc should fail with %d (got %ld)\n", ERROR_INVALID_PARAMETER, GetLastError() );
++
++    SetLastError( 0xdeadbeef );
++    addr = VirtualAlloc( NULL, size, MEM_LARGE_PAGES | MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE );
++    ok( addr != NULL || GetLastError() == ERROR_NOT_ENOUGH_MEMORY, "VirtualAlloc failed (%ld)\n",
++        GetLastError() );
++    if ( addr != NULL )
++    {
++        SetLastError( 0xdeadbeef );
++        ok( VirtualFree( addr, 0, MEM_RELEASE ), "VirtualFree failed (%ld)\n", GetLastError() );
++    }
++
++    SetLastError( 0xdeadbeef );
++    addr = VirtualAlloc( (void *)( (UINT_PTR)addr - 1 ), size,
++                         MEM_LARGE_PAGES | MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE );
++    ok( addr == NULL && GetLastError() == ERROR_INVALID_PARAMETER,
++        "VirtualAlloc should fail with %d (got %ld)\n", ERROR_INVALID_PARAMETER, GetLastError() );
++
++    SetLastError( 0xdeadbeef );
++    addr = VirtualAlloc( addr, size, MEM_LARGE_PAGES | MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE );
++    ok( addr != NULL || GetLastError() == ERROR_NOT_ENOUGH_MEMORY, "VirtualAlloc failed (%ld)\n",
++       GetLastError() );
++    if (addr != NULL)
++    {
++        SetLastError( 0xdeadbeef );
++        ok( VirtualFree( addr, 0, MEM_RELEASE ), "VirtualFree failed (%ld)\n", GetLastError() );
++    }
++}
++
++static void test_large_pages_VirtualAlloc2( SIZE_T size )
++{
++    void *addr;
++    MEM_EXTENDED_PARAMETER ex;
++
++    if (!pVirtualAlloc2)
++    {
++        win_skip( "No VirtualAlloc2 support.\n" );
++        return;
++    }
++    memset( &ex, 0, sizeof( ex ) );
++    ex.Type = MemExtendedParameterAttributeFlags;
++    ex.ULong64 = MEM_EXTENDED_PARAMETER_NONPAGED_LARGE;
++
++    addr = pVirtualAlloc2( NULL, NULL, size, MEM_LARGE_PAGES | MEM_RESERVE | MEM_COMMIT,
++                          PAGE_READWRITE, NULL, 0 );
++    ok( addr != NULL || GetLastError() == ERROR_NOT_ENOUGH_MEMORY, "VirtualAlloc2 failed (%ld)\n",
++        GetLastError() );
++    if ( addr )
++        ok( VirtualFree( addr, 0, MEM_RELEASE ), "VirtualFree failed (%ld)\n", GetLastError() );
++
++    addr = pVirtualAlloc2( NULL, NULL, size, MEM_LARGE_PAGES | MEM_RESERVE | MEM_COMMIT,
++                           PAGE_READWRITE, &ex, 1 );
++    ok( addr != NULL || GetLastError() == ERROR_NOT_ENOUGH_MEMORY, "VirtualAlloc2 failed (%ld)\n",
++        GetLastError() );
++    if ( addr )
++        ok( VirtualFree( addr, 0, MEM_RELEASE ), "VirtualFree failed (%ld)\n", GetLastError() );
++}
++
+ static void test_MapViewOfFile(void)
+ {
+     static const char testfile[] = "testfile.xxx";
+@@ -1328,6 +1451,42 @@ static void test_MapViewOfFile(void)
+     DeleteFileA(testfile);
+ }
+ 
++static void test_large_pages_file_mapping( SIZE_T size )
++{
++    HANDLE file;
++    DWORD err;
++
++    file = CreateFileMappingW( INVALID_HANDLE_VALUE, NULL,
++                               PAGE_READWRITE | SEC_LARGE_PAGES | SEC_COMMIT, 0, size - 1, NULL );
++    err = GetLastError();
++    ok( file == NULL && err == ERROR_INVALID_PARAMETER,
++        "CreateFileMappingW should fail with ERROR_INVALID_PARAMETER (got %ld instead)\n", err );
++    if (file != NULL) CloseHandle( file );
++
++    file = CreateFileMappingW( INVALID_HANDLE_VALUE, NULL,
++                               PAGE_READWRITE | SEC_LARGE_PAGES | SEC_COMMIT, 0, size * 2, NULL );
++    ok( file != NULL, "CreateFileMappingW failed (%ld)\n", GetLastError() );
++    if (file != NULL)
++    {
++        void *addr;
++        addr = MapViewOfFile( file, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, size * 2 );
++        ok( addr != NULL || GetLastError() == ERROR_NOT_ENOUGH_MEMORY, "MapViewOfFile failed (%ld)\n", GetLastError() );
++        UnmapViewOfFile( addr );
++        CloseHandle( file );
++    }
++
++    file = CreateFileMappingW( INVALID_HANDLE_VALUE, NULL,
++                               PAGE_READWRITE | SEC_LARGE_PAGES | SEC_RESERVE, 0, size, NULL );
++    err = GetLastError();
++    ok( file == NULL && err == ERROR_INVALID_PARAMETER,
++        "CreateFileMappingW should have failed with ERROR_INVALID_PARAMETER (got %ld "
++        "instead)\n",
++        err );
++    if (file != NULL) CloseHandle( file );
++
++    ok( RevertToSelf(), "RevertToSelf failed (%ld)\n", GetLastError() );
++}
++
+ 
+ static void test_NtAreMappedFilesTheSame(void)
+ {
+@@ -4408,6 +4567,8 @@ START_TEST(virtual)
+     hkernelbase = GetModuleHandleA("kernelbase.dll");
+     hntdll    = GetModuleHandleA("ntdll.dll");
+ 
++    pGetLargePageMinimum = (void *)GetProcAddress(hkernel32, "GetLargePageMinimum");
++    pRtlAdjustPrivilege = (void *)GetProcAddress(hntdll, "RtlAdjustPrivilege");
+     pGetWriteWatch = (void *) GetProcAddress(hkernel32, "GetWriteWatch");
+     pResetWriteWatch = (void *) GetProcAddress(hkernel32, "ResetWriteWatch");
+     pGetProcessDEPPolicy = (void *)GetProcAddress( hkernel32, "GetProcessDEPPolicy" );
+@@ -4423,6 +4584,7 @@ START_TEST(virtual)
+     pNtReadVirtualMemory = (void *)GetProcAddress( hntdll, "NtReadVirtualMemory" );
+     pNtWriteVirtualMemory = (void *)GetProcAddress( hntdll, "NtWriteVirtualMemory" );
+     pPrefetchVirtualMemory = (void *)GetProcAddress( hkernelbase, "PrefetchVirtualMemory" );
++    pVirtualAlloc2 = (void *)GetProcAddress(hkernelbase, "VirtualAlloc2");
+ 
+     GetSystemInfo(&si);
+     trace("system page size %#lx\n", si.dwPageSize);
+@@ -4435,10 +4597,13 @@ START_TEST(virtual)
+     test_shared_memory_ro(FALSE, FILE_MAP_COPY|FILE_MAP_WRITE);
+     test_mappings();
+     test_CreateFileMapping_protection();
++    test_with_large_pages(test_large_pages_file_mapping);
+     test_VirtualAlloc_protection();
+     test_VirtualProtect();
+     test_VirtualAllocEx();
+     test_VirtualAlloc();
++    test_with_large_pages(test_large_pages_VirtualAlloc);
++    test_with_large_pages(test_large_pages_VirtualAlloc2);
+     test_MapViewOfFile();
+     test_NtAreMappedFilesTheSame();
+     test_CreateFileMapping();
+-- 
+GitLab
+
+
+From e16e7309d00b7208e691148bce502b27a0ee6d65 Mon Sep 17 00:00:00 2001
+From: Vibhav Pant <vibhavp@gmail.com>
+Date: Tue, 18 Jun 2024 18:10:02 +0530
+Subject: [PATCH 7/8] ntdll: Use PAGEMAP_SCAN ioctl to implement
+ get_working_set_ex, if available.
+
+---
+ configure                 | 10 ++++++
+ configure.ac              |  1 +
+ dlls/ntdll/unix/virtual.c | 65 ++++++++++++++++++++++++++++++++++++---
+ include/config.h.in       |  3 ++
+ 4 files changed, 74 insertions(+), 5 deletions(-)
+
+diff --git a/configure b/configure
+index 24ff184de39..86599b3fd44 100755
+--- a/configure
++++ b/configure
+@@ -21064,6 +21064,16 @@ then :
+ printf "%s\n" "#define HAVE_REQUEST_SENSE 1" >>confdefs.h
+ 
+ 
++fi
++
++ac_fn_c_check_type "$LINENO" "struct pm_scan_arg" "ac_cv_type_struct_pm_scan_arg" "#include <linux/fs.h>
++"
++if test "x$ac_cv_type_struct_pm_scan_arg" = xyes
++then :
++
++printf "%s\n" "#define HAVE_STRUCT_PM_SCAN_ARG 1" >>confdefs.h
++
++
+ fi
+ 
+ 
+diff --git a/configure.ac b/configure.ac
+index 092ca64849e..178f91e6e7d 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -2119,6 +2119,7 @@ dnl **** Check for types ****
+ 
+ AC_C_INLINE
+ AC_CHECK_TYPES([request_sense],,,[#include <linux/cdrom.h>])
++AC_CHECK_TYPES([struct pm_scan_arg],,,[#include <linux/fs.h>])
+ 
+ AC_CHECK_TYPES([struct xinpgen],,,
+ [#include <sys/types.h>
+diff --git a/include/config.h.in b/include/config.h.in
+index bbd5a57a280..54816765623 100644
+--- a/include/config.h.in
++++ b/include/config.h.in
+@@ -450,6 +450,9 @@
+ /* Define to 1 if 'mt_gstat' is a member of 'struct mtget'. */
+ #undef HAVE_STRUCT_MTGET_MT_GSTAT
+ 
++/* Define to 1 if the system has the type `struct pm_scan_arg'. */
++#undef HAVE_STRUCT_PM_SCAN_ARG
++
+ /* Define to 1 if 'sin6_scope_id' is a member of 'struct sockaddr_in6'. */
+ #undef HAVE_STRUCT_SOCKADDR_IN6_SIN6_SCOPE_ID
+ 
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index 0e5917403f9..38acadb793c 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -2120,7 +2120,8 @@ static NTSTATUS map_view( struct file_vi
+         if (is_beyond_limit( base, size, address_space_limit )) return STATUS_WORKING_SET_LIMIT_RANGE;
+         if (limit_low && base < (void *)limit_low) return STATUS_CONFLICTING_ADDRESSES;
+         if (limit_high && is_beyond_limit( base, size, (void *)limit_high )) return STATUS_CONFLICTING_ADDRESSES;
+-        if ((status = map_fixed_area( base, size, vprot ))) return status;
++        if (large_pages && ((UINT_PTR)base % user_shared_data->LargePageMinimum) != 0) return STATUS_INVALID_PARAMETER;
++        if ((status = map_fixed_area( base, size, vprot, large_pages_type ))) return status;
+         if (is_beyond_limit( base, size, working_set_limit )) working_set_limit = address_space_limit;
+         ptr = base;
+     }
+@@ -5438,37 +5439,65 @@ static void free_fill_working_set_info_d
+         procstat_close( d->pstat );
+ }
+ 
+-static void fill_working_set_info( struct fill_working_set_info_data *d, struct file_view *view, BYTE vprot,
+-                                   struct working_set_info_ref *ref, SIZE_T count,
+-                                   MEMORY_WORKING_SET_EX_INFORMATION *info )
+-{
+-    SIZE_T i;
+-    int j;
++static NTSTATUS get_working_set_ex( HANDLE process, LPCVOID addr,
++                                    MEMORY_WORKING_SET_EX_INFORMATION *info,
++                                    SIZE_T len, SIZE_T *res_len )
++{
++    struct working_set_info_ref ref_buffer[256], *ref = ref_buffer;
++    struct fill_working_set_info_data data;
++    char *start, *end;
++    SIZE_T i, count;
++    struct file_view *view, *prev_view;
++    sigset_t sigset;
++    BYTE vprot;
+ 
++    if (process != NtCurrentProcess())
++    {
++        FIXME( "(process=%p,addr=%p) Unimplemented information class: MemoryWorkingSetExInformation\n", process, addr );
++        return STATUS_INVALID_INFO_CLASS;
++    }
++
++    if (len < sizeof(*info)) return STATUS_INFO_LENGTH_MISMATCH;
++
++    count = len / sizeof(*info);
++
++    if (count > ARRAY_SIZE(ref_buffer)) ref = malloc( count * sizeof(*ref) );
+     for (i = 0; i < count; ++i)
+     {
+-        MEMORY_WORKING_SET_EX_INFORMATION *p = &info[ref[i].orig_index];
+-        struct kinfo_vmentry *entry = NULL;
++        ref[i].orig_index = i;
++        ref[i].addr = ROUND_ADDR( info[i].VirtualAddress, page_mask );
++        info[i].VirtualAttributes.Flags = 0;
++    }
++    qsort( ref, count, sizeof(*ref), compare_working_set_info_ref );
++    start = ref[0].addr;
++    end = ref[count - 1].addr + page_size;
+ 
+-        for (j = 0; j < d->vmentry_count; j++)
+-        {
+-            if (d->vmentries[j].kve_start <= (ULONG_PTR)p->VirtualAddress && (ULONG_PTR)p->VirtualAddress <= d->vmentries[j].kve_end)
+-            {
+-                entry = &d->vmentries[j];
+-                break;
+-            }
+-        }
++    server_enter_uninterrupted_section( &virtual_mutex, &sigset );
++    init_fill_working_set_info_data( &data, end );
+ 
+-        p->VirtualAttributes.Valid = !(vprot & VPROT_GUARD) && (vprot & 0x0f) && entry && entry->kve_type != KVME_TYPE_SWAP;
+-        p->VirtualAttributes.Shared = !is_view_valloc( view );
+-        if (p->VirtualAttributes.Shared && p->VirtualAttributes.Valid)
+-            p->VirtualAttributes.ShareCount = 1; /* FIXME */
+-        if (p->VirtualAttributes.Valid)
+-            p->VirtualAttributes.Win32Protection = get_win32_prot( vprot, view->protect );
++    view = find_view_range( start, end - start );
++    while (view && (char *)view->base > start)
++    {
++        prev_view = RB_ENTRY_VALUE( rb_prev( &view->entry ), struct file_view, entry );
++        if (!prev_view || (char *)prev_view->base + prev_view->size <= start) break;
++        view = prev_view;
+     }
++
++    fill_working_set_info(&data, view, vprot, ref, count, info);
++
++    free_fill_working_set_info_data( &data );
++    if (ref != ref_buffer) free( ref );
++    server_leave_uninterrupted_section( &virtual_mutex, &sigset );
++
++    if (res_len)
++        *res_len = len;
++    return STATUS_SUCCESS;
+ }
+ #else
+ static int pagemap_fd = -2;
++#ifdef HAVE_STRUCT_PM_SCAN_ARG
++    BOOL pagemap_ioctl_avail = TRUE;
++#endif
+ 
+ struct fill_working_set_info_data
+ {
+
+-- 
+GitLab
+
+
+From a0bf2535a0b40934ab5e71018bd0dcb522d73545 Mon Sep 17 00:00:00 2001
+From: Vibhav Pant <vibhavp@gmail.com>
+Date: Tue, 25 Jun 2024 13:27:41 +0530
+Subject: [PATCH 8/8] psapi: Add tests for querying information for large
+ pages.
+
+---
+ dlls/psapi/tests/Makefile.in  |  2 +-
+ dlls/psapi/tests/psapi_main.c | 75 +++++++++++++++++++++++++++++++++--
+ 2 files changed, 73 insertions(+), 4 deletions(-)
+
+diff --git a/dlls/psapi/tests/Makefile.in b/dlls/psapi/tests/Makefile.in
+index c22fe61ef67..0ff885b524b 100644
+--- a/dlls/psapi/tests/Makefile.in
++++ b/dlls/psapi/tests/Makefile.in
+@@ -1,5 +1,5 @@
+ TESTDLL   = psapi.dll
+-IMPORTS   = psapi user32
++IMPORTS   = psapi user32 kernelbase
+ 
+ SOURCES = \
+ 	psapi_main.c
+diff --git a/dlls/psapi/tests/psapi_main.c b/dlls/psapi/tests/psapi_main.c
+index e7e5e5f04e6..57bfb699d44 100644
+--- a/dlls/psapi/tests/psapi_main.c
++++ b/dlls/psapi/tests/psapi_main.c
+@@ -41,6 +41,8 @@ static BOOL  (WINAPI *pIsWow64Process)(HANDLE, BOOL *);
+ static BOOL  (WINAPI *pWow64DisableWow64FsRedirection)(void **);
+ static BOOL  (WINAPI *pWow64RevertWow64FsRedirection)(void *);
+ static BOOL  (WINAPI *pQueryWorkingSetEx)(HANDLE, PVOID, DWORD);
++static SIZE_T(WINAPI *pGetLargePageMinimum)(void);
++static NTSTATUS (WINAPI *pRtlAdjustPrivilege)(ULONG,BOOLEAN,BOOLEAN,PBOOLEAN);
+ 
+ static BOOL wow64;
+ static char** main_argv;
+@@ -53,6 +55,8 @@ static BOOL init_func_ptrs(void)
+     pWow64DisableWow64FsRedirection = (void *)GetProcAddress(GetModuleHandleA("kernel32.dll"), "Wow64DisableWow64FsRedirection");
+     pWow64RevertWow64FsRedirection = (void *)GetProcAddress(GetModuleHandleA("kernel32.dll"), "Wow64RevertWow64FsRedirection");
+     pQueryWorkingSetEx = (void *)GetProcAddress(GetModuleHandleA("psapi.dll"), "QueryWorkingSetEx");
++    pGetLargePageMinimum = (void *)GetProcAddress(GetModuleHandleA("kernel32.dll"), "GetLargePageMinimum");
++    pRtlAdjustPrivilege = (void *)GetProcAddress(GetModuleHandleA("ntdll.dll"), "RtlAdjustPrivilege");
+     return TRUE;
+ }
+ 
+@@ -1015,7 +1019,7 @@ static void test_GetModuleFileNameEx(void)
+             return;
+     ok(ret == strlen(szModExPath), "szModExPath=\"%s\" ret=%ld\n", szModExPath, ret);
+     GetModuleFileNameA(NULL, szModPath, sizeof(szModPath));
+-    ok(!strncmp(szModExPath, szModPath, MAX_PATH), 
++    ok(!strncmp(szModExPath, szModPath, MAX_PATH),
+        "szModExPath=\"%s\" szModPath=\"%s\"\n", szModExPath, szModPath);
+ 
+     SetLastError(0xdeadbeef);
+@@ -1119,7 +1123,7 @@ static void test_ws_functions(void)
+     SetLastError(0xdeadbeef);
+     ret = InitializeProcessForWsWatch(ws_handle);
+     ok(ret == 1, "failed with %ld\n", GetLastError());
+-    
++
+     addr = VirtualAlloc(NULL, 1, MEM_COMMIT, PAGE_READWRITE);
+     if(!addr)
+         return;
+@@ -1145,7 +1149,7 @@ static void test_ws_functions(void)
+ 
+ 	todo_wine ok(0, "GetWsChanges didn't find our page\n");
+     }
+-    
++
+ free_page:
+     VirtualFree(addr, 0, MEM_RELEASE);
+ }
+@@ -1237,6 +1241,70 @@ static void test_QueryWorkingSetEx(void)
+     check_QueryWorkingSetEx(addr, "valloc,free", FALSE, 0, 0, FALSE);
+ }
+ 
++static void test_large_pages( void )
++{
++    SIZE_T size;
++    NTSTATUS status;
++    HANDLE process_token;
++    HANDLE token;
++    BOOLEAN enabled;
++
++    if (!pGetLargePageMinimum)
++    {
++        win_skip( "No GetLargePageMinimum support.\n" );
++        return;
++    }
++    if (!pRtlAdjustPrivilege)
++    {
++        win_skip( "No RtlAdjustPrivilege support.\n" );
++        return;
++    }
++
++    size = pGetLargePageMinimum();
++    if (size == 0)
++    {
++        trace( "No large pages support, skipping test.\n" );
++        return;
++    }
++    ok( OpenProcessToken( GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY, &process_token ),
++        "OpenProcessToken failed (%ld)\n", GetLastError() );
++    ok( DuplicateToken( process_token, SecurityImpersonation, &token ),
++       "DuplicateToken failed (%ld)\n", GetLastError() );
++    ok( ImpersonateLoggedOnUser( token ), "ImpersonateLoggedOnUser failed (%ld)\n",
++        GetLastError() );
++    status = pRtlAdjustPrivilege( SE_LOCK_MEMORY_PRIVILEGE, TRUE, TRUE, &enabled );
++    if (status != STATUS_SUCCESS)
++    {
++        trace( "Couldn't get SE_LOCK_MEMORY_PRIVILEGE (%ld), skipping large page file "
++               "mapping test.\n",
++               status );
++    }
++    else
++    {
++        void *addr;
++
++        SetLastError( 0xdeadbeef );
++        addr =
++            VirtualAlloc( NULL, size, MEM_LARGE_PAGES | MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE );
++        ok( addr != NULL || GetLastError() == ERROR_NOT_ENOUGH_MEMORY, "VirtualAlloc failed (%ld)\n", GetLastError() );
++        if (addr != NULL)
++        {
++            PSAPI_WORKING_SET_EX_INFORMATION info = { 0 };
++
++            info.VirtualAddress = addr;
++            SetLastError( 0xdeadbeef );
++            ok( QueryWorkingSetEx( GetCurrentProcess(), &info, sizeof( info ) ),
++                "QueryWorkingSet failed (%ld)\n", GetLastError() );
++            ok( info.VirtualAttributes.Valid, "Expected VirtualAttributes.Valid to be TRUE\n" );
++            ok( info.VirtualAttributes.LargePage, "Expected VirtualAttributes.Large to be TRUE\n" );
++            ok( info.VirtualAttributes.Locked, "Expected VirtualAttributes.Locked to be TRUE\n" );
++            SetLastError( 0xdeadbeef );
++            ok( VirtualFree( addr, 0, MEM_RELEASE ), "VirtualFree failed (%ld)\n", GetLastError() );
++        }
++    }
++    ok( RevertToSelf(), "RevertToSelf failed (%ld)\n", GetLastError() );
++}
++
+ START_TEST(psapi_main)
+ {
+     DWORD pid = GetCurrentProcessId();
+@@ -1268,6 +1336,7 @@ START_TEST(psapi_main)
+     test_GetModuleBaseName();
+     test_QueryWorkingSetEx();
+     test_ws_functions();
++    test_large_pages();
+ 
+     CloseHandle(hpSR);
+     CloseHandle(hpQI);
+-- 
+GitLab
+
+// fixups
+
+--- a/dlls/ntdll/unix/esync.c	2024-07-08 22:05:26.292640895 -0500
++++ b/dlls/ntdll/unix/esync.c	2024-07-08 22:05:15.928602730 -0500
+@@ -175,7 +175,7 @@ static struct esync *add_to_list( HANDLE
+         else
+         {
+             void *ptr = anon_mmap_alloc( ESYNC_LIST_BLOCK_SIZE * sizeof(struct esync),
+-                                         PROT_READ | PROT_WRITE );
++                                         PROT_READ | PROT_WRITE, LARGE_PAGES_NONE );
+             if (ptr == MAP_FAILED) return FALSE;
+             esync_list[entry] = ptr;
+         }
+--- a/dlls/ntdll/unix/fsync.c	2024-07-08 22:05:41.461696753 -0500
++++ b/dlls/ntdll/unix/fsync.c	2024-07-08 22:02:55.528085732 -0500
+@@ -299,7 +299,7 @@ static void add_to_list( HANDLE handle,
+         else
+         {
+             void *ptr = anon_mmap_alloc( FSYNC_LIST_BLOCK_SIZE * sizeof(*fsync_list[entry]),
+-                                         PROT_READ | PROT_WRITE );
++                                         PROT_READ | PROT_WRITE, LARGE_PAGES_NONE );
+             if (ptr == MAP_FAILED) return;
+             if (__sync_val_compare_and_swap( &fsync_list[entry], NULL, ptr ))
+                 munmap( ptr, FSYNC_LIST_BLOCK_SIZE * sizeof(*fsync_list[entry]) );
+
+--- a/dlls/ntdll/unix/virtual.c	2024-07-08 22:20:11.466900563 -0500
++++ b/dlls/ntdll/unix/virtual.c	2024-07-08 22:19:53.194833275 -0500
+@@ -4193,7 +4193,7 @@ NTSTATUS virtual_handle_fault( void *add
+             {
+                 static BYTE *temp_page = NULL;
+                 if (!temp_page)
+-                    temp_page = anon_mmap_alloc( page_size, PROT_READ | PROT_WRITE );
++                    temp_page = anon_mmap_alloc( page_size, PROT_READ | PROT_WRITE, LARGE_PAGES_NONE );
+ 
+                 /* original mapping is shared, replace with a private page */
+                 memcpy( temp_page, page, page_size );
+@@ -6706,7 +6706,7 @@ static BOOL try_mprotect( void )
+     if (!mem)
+     {
+         /* Allocate one page of memory that we can call mprotect() on */
+-        mem = anon_mmap_alloc( page_size, PROT_READ | PROT_WRITE );
++        mem = anon_mmap_alloc( page_size, PROT_READ | PROT_WRITE, LARGE_PAGES_NONE );
+         if (mem == MAP_FAILED)
+             goto failed;
+         /* Lock page into memory so that it is not unmapped between the calls to mprotect() below */
+
+--- a/server/mapping.c	2024-07-08 22:28:27.765728233 -0500
++++ b/server/mapping.c	2024-07-08 22:28:18.455693947 -0500
+@@ -1449,7 +1449,7 @@ struct object *create_user_data_mapping(
+ #ifdef __linux__
+ int create_request_shm( int *fd, struct request_shm **ptr )
+ {
+-    if ((*fd = create_temp_file( REQUEST_SHM_SIZE )) == -1) return 0;
++    if ((*fd = create_temp_file( FILE_WRITE_DATA, 0, REQUEST_SHM_SIZE )) == -1) return 0;
+ 
+     *ptr = mmap( NULL, REQUEST_SHM_SIZE, PROT_WRITE, MAP_SHARED, *fd, 0 );
+     if (*ptr == MAP_FAILED)
+
