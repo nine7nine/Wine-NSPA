@@ -1,0 +1,1099 @@
+From 6e111940ac2f6f198c2b6d9702f645699335d716 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Sat, 18 May 2024 17:34:13 +0200
+Subject: [PATCH] ntdll: Initialize unix_pid/tid to -1.
+
+---
+ dlls/ntdll/unix/thread.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/dlls/ntdll/unix/thread.c b/dlls/ntdll/unix/thread.c
+index 3d151e7b2b8..2ef57c975cb 100644
+--- a/dlls/ntdll/unix/thread.c
++++ b/dlls/ntdll/unix/thread.c
+@@ -1922,7 +1922,7 @@ static void set_native_thread_name( HANDLE handle, const UNICODE_STRING *name )
+ #ifdef linux
+     unsigned int status;
+     char path[64], nameA[64];
+-    int unix_pid, unix_tid, len, fd;
++    int unix_pid = -1, unix_tid = -1, len, fd;
+ 
+     SERVER_START_REQ( get_thread_times )
+     {
+
+From f763cf97dc4d50972620ad4f2e6371a7b478c8ad Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Mon, 25 Sep 2023 20:50:20 +0200
+Subject: [PATCH] ntdll: Break up snprintf calls for __wine_dbg_header fields.
+
+---
+ dlls/ntdll/thread.c     | 15 ++++++++-------
+ dlls/ntdll/unix/debug.c | 15 ++++++++-------
+ dlls/winecrt0/debug.c   | 14 +++++++-------
+ 3 files changed, 23 insertions(+), 21 deletions(-)
+
+diff --git a/dlls/ntdll/thread.c b/dlls/ntdll/thread.c
+index 26cf99cdad0..6fb4128284d 100644
+--- a/dlls/ntdll/thread.c
++++ b/dlls/ntdll/thread.c
+@@ -135,7 +135,7 @@ int __cdecl __wine_dbg_header( enum __wine_debug_class cls, struct __wine_debug_
+ {
+     static const char * const classes[] = { "fixme", "err", "warn", "trace" };
+     struct debug_info *info = get_info();
+-    char *pos = info->output;
++    char *pos = info->output, *end = pos + sizeof(info->output);
+ 
+     if (!(__wine_dbg_get_channel_flags( channel ) & (1 << cls))) return -1;
+ 
+@@ -145,13 +145,14 @@ int __cdecl __wine_dbg_header( enum __wine_debug_class cls, struct __wine_debug_
+     if (TRACE_ON(timestamp))
+     {
+         ULONG ticks = NtGetTickCount();
+-        pos += sprintf( pos, "%3lu.%03lu:", ticks / 1000, ticks % 1000 );
++        pos += snprintf( pos, end - pos, "%3lu.%03lu:", ticks / 1000, ticks % 1000 );
+     }
+-    if (TRACE_ON(pid)) pos += sprintf( pos, "%04lx:", GetCurrentProcessId() );
+-    pos += sprintf( pos, "%04lx:", GetCurrentThreadId() );
+-    if (function && cls < ARRAY_SIZE( classes ))
+-        pos += snprintf( pos, sizeof(info->output) - (pos - info->output), "%s:%s:%s ",
+-                         classes[cls], channel->name, function );
++    if (TRACE_ON(pid)) pos += snprintf( pos, end - pos, "%04lx:", GetCurrentProcessId() );
++    pos += snprintf( pos, end - pos, "%04lx:", GetCurrentThreadId() );
++    if (cls < ARRAY_SIZE( classes )) pos += snprintf( pos, end - pos, "%s:", classes[cls] );
++    pos += snprintf( pos, end - pos, "%s:", channel->name );
++    if (function) pos += snprintf( pos, end - pos, "%s ", function );
++
+     info->out_pos = pos - info->output;
+     return info->out_pos;
+ }
+diff --git a/dlls/ntdll/unix/debug.c b/dlls/ntdll/unix/debug.c
+index e73ee05fc03..bc2efa33996 100644
+--- a/dlls/ntdll/unix/debug.c
++++ b/dlls/ntdll/unix/debug.c
+@@ -318,7 +318,7 @@ int __cdecl __wine_dbg_header( enum __wine_debug_class cls, struct __wine_debug_
+ {
+     static const char * const classes[] = { "fixme", "err", "warn", "trace" };
+     struct debug_info *info = get_info();
+-    char *pos = info->output;
++    char *pos = info->output, *end = pos + sizeof(info->output);
+ 
+     if (!(__wine_dbg_get_channel_flags( channel ) & (1 << cls))) return -1;
+ 
+@@ -330,14 +330,15 @@ int __cdecl __wine_dbg_header( enum __wine_debug_class cls, struct __wine_debug_
+         if (TRACE_ON(timestamp))
+         {
+             UINT ticks = NtGetTickCount();
+-            pos += snprintf( pos, sizeof(info->output) - (pos - info->output), "%3u.%03u:", ticks / 1000, ticks % 1000 );
++            pos += snprintf( pos, end - pos, "%3u.%03u:", ticks / 1000, ticks % 1000 );
+         }
+-        if (TRACE_ON(pid)) pos += snprintf( pos, sizeof(info->output) - (pos - info->output), "%04x:", (UINT)GetCurrentProcessId() );
+-        pos += snprintf( pos, sizeof(info->output) - (pos - info->output), "%04x:", (UINT)GetCurrentThreadId() );
++        if (TRACE_ON(pid)) pos += snprintf( pos, end - pos, "%04x:", (UINT)GetCurrentProcessId() );
++        pos += snprintf( pos, end - pos, "%04x:", (UINT)GetCurrentThreadId() );
+     }
+-    if (function && cls < ARRAY_SIZE( classes ))
+-        pos += snprintf( pos, sizeof(info->output) - (pos - info->output), "%s:%s:%s ",
+-                         classes[cls], channel->name, function );
++    if (cls < ARRAY_SIZE( classes )) pos += snprintf( pos, end - pos, "%s:", classes[cls] );
++    pos += snprintf( pos, end - pos, "%s:", channel->name );
++    if (function) pos += snprintf( pos, end - pos, "%s ", function );
++
+     info->out_pos = pos - info->output;
+     return info->out_pos;
+ }
+diff --git a/dlls/winecrt0/debug.c b/dlls/winecrt0/debug.c
+index 2ac4505fb85..6d95418fd77 100644
+--- a/dlls/winecrt0/debug.c
++++ b/dlls/winecrt0/debug.c
+@@ -182,7 +182,7 @@ static int __cdecl fallback__wine_dbg_header( enum __wine_debug_class cls,
+                                               struct __wine_debug_channel *channel,
+                                               const char *function )
+ {
+-    char buffer[200], *pos = buffer;
++    char buffer[200], *pos = buffer, *end = pos + sizeof(buffer);
+ 
+     if (!(__wine_dbg_get_channel_flags( channel ) & (1 << cls))) return -1;
+ 
+@@ -192,13 +192,13 @@ static int __cdecl fallback__wine_dbg_header( enum __wine_debug_class cls,
+     if (TRACE_ON(timestamp))
+     {
+         UINT ticks = GetTickCount();
+-        pos += sprintf( pos, "%3u.%03u:", ticks / 1000, ticks % 1000 );
++        pos += snprintf( pos, end - pos, "%3u.%03u:", ticks / 1000, ticks % 1000 );
+     }
+-    if (TRACE_ON(pid)) pos += sprintf( pos, "%04x:", (UINT)GetCurrentProcessId() );
+-    pos += sprintf( pos, "%04x:", (UINT)GetCurrentThreadId() );
+-    if (function && cls < ARRAY_SIZE( debug_classes ))
+-        snprintf( pos, sizeof(buffer) - (pos - buffer), "%s:%s:%s ",
+-                  debug_classes[cls], channel->name, function );
++    if (TRACE_ON(pid)) pos += snprintf( pos, end - pos, "%04x:", (UINT)GetCurrentProcessId() );
++    pos += snprintf( pos, end - pos, "%04x:", (UINT)GetCurrentThreadId() );
++    if (cls < ARRAY_SIZE( debug_classes )) pos += snprintf( pos, end - pos, "%s:", debug_classes[cls] );
++    pos += snprintf( pos, end - pos, "%s:", channel->name );
++    if (function) pos += snprintf( pos, end - pos, "%s ", function );
+ 
+     return fwrite( buffer, 1, strlen(buffer), stderr );
+ }
+
+From 16dd5637b524f8d67708a5a53376e26440c3fe1d Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Tue, 20 Sep 2022 19:38:14 +0200
+Subject: [PATCH] ntdll: Introduce struct __wine_debug_context for extensible
+ debug info.
+
+---
+ dlls/ntdll/thread.c     |  8 ++++++--
+ dlls/ntdll/unix/debug.c |  8 ++++++--
+ dlls/winecrt0/debug.c   | 20 +++++++++++---------
+ include/wine/debug.h    | 20 +++++++++++++++++---
+ 4 files changed, 40 insertions(+), 16 deletions(-)
+
+diff --git a/dlls/ntdll/thread.c b/dlls/ntdll/thread.c
+index 6fb4128284d..3599c848f6d 100644
+--- a/dlls/ntdll/thread.c
++++ b/dlls/ntdll/thread.c
+@@ -131,7 +131,7 @@ const char * __cdecl __wine_dbg_strdup( const char *str )
+  *		__wine_dbg_header  (NTDLL.@)
+  */
+ int __cdecl __wine_dbg_header( enum __wine_debug_class cls, struct __wine_debug_channel *channel,
+-                               const char *function )
++                               const struct __wine_debug_context *context )
+ {
+     static const char * const classes[] = { "fixme", "err", "warn", "trace" };
+     struct debug_info *info = get_info();
+@@ -151,7 +151,11 @@ int __cdecl __wine_dbg_header( enum __wine_debug_class cls, struct __wine_debug_
+     pos += snprintf( pos, end - pos, "%04lx:", GetCurrentThreadId() );
+     if (cls < ARRAY_SIZE( classes )) pos += snprintf( pos, end - pos, "%s:", classes[cls] );
+     pos += snprintf( pos, end - pos, "%s:", channel->name );
+-    if (function) pos += snprintf( pos, end - pos, "%s ", function );
++
++    if (context && context->compat)
++        pos += snprintf( pos, end - pos, "%s ", (const char *)context );
++    else if (context && context->version == WINE_DEBUG_CONTEXT_VERSION)
++        pos += snprintf( pos, end - pos, "%s ", context->function );
+ 
+     info->out_pos = pos - info->output;
+     return info->out_pos;
+diff --git a/dlls/ntdll/unix/debug.c b/dlls/ntdll/unix/debug.c
+index bc2efa33996..4397f912f39 100644
+--- a/dlls/ntdll/unix/debug.c
++++ b/dlls/ntdll/unix/debug.c
+@@ -314,7 +314,7 @@ int __cdecl __wine_dbg_output( const char *str )
+  *		__wine_dbg_header  (NTDLL.@)
+  */
+ int __cdecl __wine_dbg_header( enum __wine_debug_class cls, struct __wine_debug_channel *channel,
+-                               const char *function )
++                               const struct __wine_debug_context *context )
+ {
+     static const char * const classes[] = { "fixme", "err", "warn", "trace" };
+     struct debug_info *info = get_info();
+@@ -337,7 +337,11 @@ int __cdecl __wine_dbg_header( enum __wine_debug_class cls, struct __wine_debug_
+     }
+     if (cls < ARRAY_SIZE( classes )) pos += snprintf( pos, end - pos, "%s:", classes[cls] );
+     pos += snprintf( pos, end - pos, "%s:", channel->name );
+-    if (function) pos += snprintf( pos, end - pos, "%s ", function );
++
++    if (context && context->compat)
++        pos += snprintf( pos, end - pos, "%s ", (const char *)context );
++    else if (context && context->version == WINE_DEBUG_CONTEXT_VERSION)
++        pos += snprintf( pos, end - pos, "%s ", context->function );
+ 
+     info->out_pos = pos - info->output;
+     return info->out_pos;
+diff --git a/dlls/winecrt0/debug.c b/dlls/winecrt0/debug.c
+index 6d95418fd77..d7531b1e738 100644
+--- a/dlls/winecrt0/debug.c
++++ b/dlls/winecrt0/debug.c
+@@ -34,9 +34,8 @@ WINE_DECLARE_DEBUG_CHANNEL(timestamp);
+ static const char * (__cdecl *p__wine_dbg_strdup)( const char *str );
+ static int (__cdecl *p__wine_dbg_output)( const char *str );
+ static unsigned char (__cdecl *p__wine_dbg_get_channel_flags)( struct __wine_debug_channel *channel );
+-static int (__cdecl *p__wine_dbg_header)( enum __wine_debug_class cls,
+-                                          struct __wine_debug_channel *channel,
+-                                          const char *function );
++static int (__cdecl *p__wine_dbg_header)( enum __wine_debug_class cls, struct __wine_debug_channel *channel,
++                                          const struct __wine_debug_context *context );
+ 
+ static const char * const debug_classes[] = { "fixme", "err", "warn", "trace" };
+ 
+@@ -178,9 +177,8 @@ static int __cdecl fallback__wine_dbg_output( const char *str )
+     return fwrite( str, 1, len, stderr );
+ }
+ 
+-static int __cdecl fallback__wine_dbg_header( enum __wine_debug_class cls,
+-                                              struct __wine_debug_channel *channel,
+-                                              const char *function )
++static int __cdecl fallback__wine_dbg_header( enum __wine_debug_class cls, struct __wine_debug_channel *channel,
++                                              const struct __wine_debug_context *context )
+ {
+     char buffer[200], *pos = buffer, *end = pos + sizeof(buffer);
+ 
+@@ -198,7 +196,11 @@ static int __cdecl fallback__wine_dbg_header( enum __wine_debug_class cls,
+     pos += snprintf( pos, end - pos, "%04x:", (UINT)GetCurrentThreadId() );
+     if (cls < ARRAY_SIZE( debug_classes )) pos += snprintf( pos, end - pos, "%s:", debug_classes[cls] );
+     pos += snprintf( pos, end - pos, "%s:", channel->name );
+-    if (function) pos += snprintf( pos, end - pos, "%s ", function );
++
++    if (context && context->compat)
++        pos += snprintf( pos, end - pos, "%s ", (const char *)context );
++    else if (context && context->version == WINE_DEBUG_CONTEXT_VERSION)
++        pos += snprintf( pos, end - pos, "%s ", context->function );
+ 
+     return fwrite( buffer, 1, strlen(buffer), stderr );
+ }
+@@ -243,10 +245,10 @@ unsigned char __cdecl __wine_dbg_get_channel_flags( struct __wine_debug_channel
+ }
+ 
+ int __cdecl __wine_dbg_header( enum __wine_debug_class cls, struct __wine_debug_channel *channel,
+-                               const char *function )
++                               const struct __wine_debug_context *context )
+ {
+     LOAD_FUNC( __wine_dbg_header );
+-    return p__wine_dbg_header( cls, channel, function );
++    return p__wine_dbg_header( cls, channel, context );
+ }
+ 
+ #endif  /* __WINE_PE_BUILD */
+diff --git a/include/wine/debug.h b/include/wine/debug.h
+index ce5e141ccb7..aea4d026e1b 100644
+--- a/include/wine/debug.h
++++ b/include/wine/debug.h
+@@ -87,6 +87,14 @@ struct __wine_debug_channel
+        const enum __wine_debug_class __dbcl = __WINE_DBCL##dbcl; \
+        __WINE_DBG_LOG
+ 
++struct __wine_debug_context
++{
++    char compat; /* for backward compatibility */
++    int version; /* for forward compatibility */
++    const char *function;
++};
++#define WINE_DEBUG_CONTEXT_VERSION 1
++
+ #define __WINE_DBG_LOG(...) \
+    wine_dbg_log( __dbcl, __dbch, __func__, __VA_ARGS__); } } while(0)
+ 
+@@ -113,7 +121,7 @@ extern unsigned char __cdecl __wine_dbg_
+ extern const char * __cdecl __wine_dbg_strdup( const char *str );
+ extern int __cdecl __wine_dbg_output( const char *str );
+ extern int __cdecl __wine_dbg_header( enum __wine_debug_class cls, struct __wine_debug_channel *channel,
+-                                      const char *function );
++                                      const struct __wine_debug_context *context );
+ 
+ /*
+  * Exported definitions and macros
+@@ -178,14 +186,20 @@ static inline int __wine_dbg_cdecl wine_dbg_vlog( enum __wine_debug_class cls,
+                                                   struct __wine_debug_channel *channel,
+                                                   const char *function, const char *format, va_list args )
+ {
++    struct __wine_debug_context info =
++    {
++        .version = WINE_DEBUG_CONTEXT_VERSION,
++        .function = function,
++    };
++    struct __wine_debug_context *context = &info;
+     int ret;
+ 
+     if (*format == '\1')  /* special magic to avoid standard prefix */
+     {
+         format++;
+-        function = NULL;
++        context = NULL;
+     }
+-    if ((ret = __wine_dbg_header( cls, channel, function )) != -1) ret += wine_dbg_vprintf( format, args );
++    if ((ret = __wine_dbg_header( cls, channel, context )) != -1) ret += wine_dbg_vprintf( format, args );
+     return ret;
+ }
+ 
+
+From 0597db8bbfd906c9d53d4b2c31b0a9efafa39479 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Tue, 20 Sep 2022 19:38:14 +0200
+Subject: [PATCH] ntdll: Add file and line information in __wine_debug_context.
+
+---
+ dlls/msxml3/main.c           |  8 ++++----
+ dlls/ntdll/thread.c          | 14 ++++++++++++++
+ dlls/ntdll/unix/debug.c      | 14 ++++++++++++++
+ dlls/windowscodecs/libtiff.c |  4 ++--
+ dlls/winecrt0/debug.c        | 14 ++++++++++++++
+ include/wine/debug.h         | 34 +++++++++++++++++++---------------
+ 6 files changed, 67 insertions(+), 21 deletions(-)
+
+diff --git a/dlls/msxml3/main.c b/dlls/msxml3/main.c
+index 5e8de1676cf..33f87f8c846 100644
+--- a/dlls/msxml3/main.c
++++ b/dlls/msxml3/main.c
+@@ -74,7 +74,7 @@ void wineXmlCallbackLog(char const* caller, xmlErrorLevel lvl, char const* msg,
+     len = vsnprintf(buff, max_size, msg, ap);
+     if (len == -1 || len >= max_size) buff[max_size-1] = 0;
+ 
+-    wine_dbg_log(dbcl, &__wine_dbch_msxml, caller, "%s", buff);
++    wine_dbg_log(dbcl, &__wine_dbch_msxml, __FILE__, __LINE__, caller, "%s", buff);
+ }
+ 
+ void wineXmlCallbackError(char const* caller, xmlErrorPtr err)
+@@ -88,11 +88,11 @@ void wineXmlCallbackError(char const* caller, xmlErrorPtr err)
+     default:              dbcl = __WINE_DBCL_ERR; break;
+     }
+ 
+-    wine_dbg_log(dbcl, &__wine_dbch_msxml, caller, "error code %d", err->code);
++    wine_dbg_log(dbcl, &__wine_dbch_msxml, __FILE__, __LINE__, caller, "error code %d", err->code);
+     if (err->message)
+-        wine_dbg_log(dbcl, &__wine_dbch_msxml, caller, ": %s", err->message);
++        wine_dbg_log(dbcl, &__wine_dbch_msxml, __FILE__, __LINE__, caller, ": %s", err->message);
+     else
+-        wine_dbg_log(dbcl, &__wine_dbch_msxml, caller, "\n");
++        wine_dbg_log(dbcl, &__wine_dbch_msxml, __FILE__, __LINE__, caller, "\n");
+ }
+ 
+ /* Support for loading xml files from a Wine Windows drive */
+diff --git a/dlls/ntdll/thread.c b/dlls/ntdll/thread.c
+index 3599c848f6d..f51f8c7639d 100644
+--- a/dlls/ntdll/thread.c
++++ b/dlls/ntdll/thread.c
+@@ -34,6 +34,7 @@
+ WINE_DEFAULT_DEBUG_CHANNEL(thread);
+ WINE_DECLARE_DEBUG_CHANNEL(relay);
+ WINE_DECLARE_DEBUG_CHANNEL(pid);
++WINE_DECLARE_DEBUG_CHANNEL(source);
+ WINE_DECLARE_DEBUG_CHANNEL(timestamp);
+ 
+ struct _KUSER_SHARED_DATA *user_shared_data = (void *)0x7ffe0000;
+@@ -155,7 +156,20 @@ int __cdecl __wine_dbg_header( enum __wine_debug_class cls, struct __wine_debug_
+     if (context && context->compat)
+         pos += snprintf( pos, end - pos, "%s ", (const char *)context );
+     else if (context && context->version == WINE_DEBUG_CONTEXT_VERSION)
++    {
++        if (TRACE_ON(source))
++        {
++            const char *tmp, *file;
++
++            if ((tmp = strrchr( context->file, '/' ))) file = tmp + 1;
++            else if ((tmp = strrchr( context->file, '\\' ))) file = tmp + 1;
++            else file = context->file;
++
++            pos += snprintf( pos, end - pos, "%s:%d:", file, context->line );
++        }
++
+         pos += snprintf( pos, end - pos, "%s ", context->function );
++    }
+ 
+     info->out_pos = pos - info->output;
+     return info->out_pos;
+diff --git a/dlls/ntdll/unix/debug.c b/dlls/ntdll/unix/debug.c
+index 4397f912f39..9091e1f37a3 100644
+--- a/dlls/ntdll/unix/debug.c
++++ b/dlls/ntdll/unix/debug.c
+@@ -43,6 +43,7 @@
+ #include "wine/debug.h"
+ 
+ WINE_DECLARE_DEBUG_CHANNEL(pid);
++WINE_DECLARE_DEBUG_CHANNEL(source);
+ WINE_DECLARE_DEBUG_CHANNEL(timestamp);
+ WINE_DEFAULT_DEBUG_CHANNEL(ntdll);
+ 
+@@ -341,7 +342,20 @@ int __cdecl __wine_dbg_header( enum __wine_debug_class cls, struct __wine_debug_
+     if (context && context->compat)
+         pos += snprintf( pos, end - pos, "%s ", (const char *)context );
+     else if (context && context->version == WINE_DEBUG_CONTEXT_VERSION)
++    {
++        if (TRACE_ON(source))
++        {
++            const char *tmp, *file;
++
++            if ((tmp = strrchr( context->file, '/' ))) file = tmp + 1;
++            else if ((tmp = strrchr( context->file, '\\' ))) file = tmp + 1;
++            else file = context->file;
++
++            pos += snprintf( pos, end - pos, "%s:%d:", file, context->line );
++        }
++
+         pos += snprintf( pos, end - pos, "%s ", context->function );
++    }
+ 
+     info->out_pos = pos - info->output;
+     return info->out_pos;
+diff --git a/dlls/windowscodecs/libtiff.c b/dlls/windowscodecs/libtiff.c
+index 16701a258f9..1595e61b1cd 100644
+--- a/dlls/windowscodecs/libtiff.c
++++ b/dlls/windowscodecs/libtiff.c
+@@ -39,14 +39,14 @@ WINE_DECLARE_DEBUG_CHANNEL(tiff);
+ static void tiff_error_handler( const char *module, const char *format, va_list args )
+ {
+     if (!ERR_ON(tiff)) return;
+-    if (wine_dbg_vlog( __WINE_DBCL_ERR, &__wine_dbch_tiff, module, format, args ) != -1)
++    if (wine_dbg_vlog( __WINE_DBCL_ERR, &__wine_dbch_tiff, __FILE__, __LINE__, module, format, args ) != -1)
+         __wine_dbg_output( "\n" );
+ }
+ 
+ static void tiff_warning_handler( const char *module, const char *format, va_list args )
+ {
+     if (!WARN_ON(tiff)) return;
+-    if (wine_dbg_vlog( __WINE_DBCL_WARN, &__wine_dbch_tiff, module, format, args ) != -1)
++    if (wine_dbg_vlog( __WINE_DBCL_WARN, &__wine_dbch_tiff, __FILE__, __LINE__, module, format, args ) != -1)
+         __wine_dbg_output( "\n" );
+ }
+ 
+diff --git a/dlls/winecrt0/debug.c b/dlls/winecrt0/debug.c
+index d7531b1e738..a4fb3b3cdcf 100644
+--- a/dlls/winecrt0/debug.c
++++ b/dlls/winecrt0/debug.c
+@@ -29,6 +29,7 @@
+ #include "wine/heap.h"
+ 
+ WINE_DECLARE_DEBUG_CHANNEL(pid);
++WINE_DECLARE_DEBUG_CHANNEL(source);
+ WINE_DECLARE_DEBUG_CHANNEL(timestamp);
+ 
+ static const char * (__cdecl *p__wine_dbg_strdup)( const char *str );
+@@ -200,7 +201,20 @@ static int __cdecl fallback__wine_dbg_header( enum __wine_debug_class cls, struc
+     if (context && context->compat)
+         pos += snprintf( pos, end - pos, "%s ", (const char *)context );
+     else if (context && context->version == WINE_DEBUG_CONTEXT_VERSION)
++    {
++        if (TRACE_ON(source))
++        {
++            const char *tmp, *file;
++
++            if ((tmp = strrchr( context->file, '/' ))) file = tmp + 1;
++            else if ((tmp = strrchr( context->file, '\\' ))) file = tmp + 1;
++            else file = context->file;
++
++            pos += snprintf( pos, end - pos, "%s:%d:", file, context->line );
++        }
++
+         pos += snprintf( pos, end - pos, "%s ", context->function );
++    }
+ 
+     return fwrite( buffer, 1, strlen(buffer), stderr );
+ }
+diff --git a/include/wine/debug.h b/include/wine/debug.h
+index aea4d026e1b..1f802ecc0c4 100644
+--- a/include/wine/debug.h
++++ b/include/wine/debug.h
+@@ -92,11 +92,13 @@ struct __wine_debug_context
+     char compat; /* for backward compatibility */
+     int version; /* for forward compatibility */
+     const char *function;
++    const char *file;
++    int line;
+ };
+-#define WINE_DEBUG_CONTEXT_VERSION 1
++#define WINE_DEBUG_CONTEXT_VERSION 2
+ 
+ #define __WINE_DBG_LOG(...) \
+-   wine_dbg_log( __dbcl, __dbch, __func__, __VA_ARGS__); } } while(0)
++   wine_dbg_log( __dbcl, __dbch, __FILE__, __LINE__, __func__, __VA_ARGS__); } } while(0)
+ 
+ #if defined(__MINGW32__) || (!defined(__WINE_USE_MSVCRT) && (defined(__GNUC__) || defined(__clang__)))
+ #define __WINE_PRINTF_ATTR(fmt,args) __attribute__((format (printf,fmt,args)))
+@@ -179,17 +181,19 @@ static inline int __wine_dbg_cdecl wine_dbg_printf( const char *format, ... )
+     return ret;
+ }
+ 
+-static int __wine_dbg_cdecl wine_dbg_vlog( enum __wine_debug_class cls,
+-                                           struct __wine_debug_channel *channel, const char *func,
+-                                           const char *format, va_list args ) __WINE_PRINTF_ATTR(4,0);
+-static inline int __wine_dbg_cdecl wine_dbg_vlog( enum __wine_debug_class cls,
+-                                                  struct __wine_debug_channel *channel,
+-                                                  const char *function, const char *format, va_list args )
++static int __wine_dbg_cdecl wine_dbg_vlog( enum __wine_debug_class cls, struct __wine_debug_channel *channel,
++                                           const char *file, int line, const char *function,
++                                           const char *format, va_list args ) __WINE_PRINTF_ATTR(6,0);
++static inline int __wine_dbg_cdecl wine_dbg_vlog( enum __wine_debug_class cls, struct __wine_debug_channel *channel,
++                                                  const char *file, int line, const char *function,
++                                                  const char *format, va_list args )
+ {
+     struct __wine_debug_context info =
+     {
+         .version = WINE_DEBUG_CONTEXT_VERSION,
+         .function = function,
++        .file = file,
++        .line = line,
+     };
+     struct __wine_debug_context *context = &info;
+     int ret;
+@@ -203,18 +207,18 @@ static inline int __wine_dbg_cdecl wine_dbg_vlog( enum __wine_debug_class cls,
+     return ret;
+ }
+ 
+-static int __wine_dbg_cdecl wine_dbg_log( enum __wine_debug_class cls,
+-                                          struct __wine_debug_channel *channel, const char *func,
+-                                          const char *format, ... ) __WINE_PRINTF_ATTR(4,5);
+-static inline int __wine_dbg_cdecl wine_dbg_log( enum __wine_debug_class cls,
+-                                                 struct __wine_debug_channel *channel,
+-                                                 const char *function, const char *format, ... )
++static int __wine_dbg_cdecl wine_dbg_log( enum __wine_debug_class cls, struct __wine_debug_channel *channel,
++                                          const char *file, int line, const char *function,
++                                          const char *format, ... ) __WINE_PRINTF_ATTR(6,7);
++static inline int __wine_dbg_cdecl wine_dbg_log( enum __wine_debug_class cls, struct __wine_debug_channel *channel,
++                                                 const char *file, int line, const char *function,
++                                                 const char *format, ... )
+ {
+     va_list args;
+     int ret;
+ 
+     va_start( args, format );
+-    ret = wine_dbg_vlog( cls, channel, function, format, args );
++    ret = wine_dbg_vlog( cls, channel, file, line, function, format, args );
+     va_end( args );
+     return ret;
+ }
+
+From fe56c843de7f8a4619a724dec34c74a6283b5847 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Tue, 20 Sep 2022 21:59:36 +0200
+Subject: [PATCH] ntdll: Add return address information in
+ __wine_debug_context.
+
+---
+ dlls/msxml3/main.c           |  8 ++++----
+ dlls/ntdll/thread.c          |  2 ++
+ dlls/ntdll/unix/debug.c      |  2 ++
+ dlls/windowscodecs/libtiff.c |  4 ++--
+ dlls/winecrt0/debug.c        |  2 ++
+ include/wine/debug.h         | 26 +++++++++++++++++---------
+ 6 files changed, 29 insertions(+), 15 deletions(-)
+
+diff --git a/dlls/msxml3/main.c b/dlls/msxml3/main.c
+index 33f87f8c846..8cd9d6d8a2a 100644
+--- a/dlls/msxml3/main.c
++++ b/dlls/msxml3/main.c
+@@ -74,7 +74,7 @@ void wineXmlCallbackLog(char const* caller, xmlErrorLevel lvl, char const* msg,
+     len = vsnprintf(buff, max_size, msg, ap);
+     if (len == -1 || len >= max_size) buff[max_size-1] = 0;
+ 
+-    wine_dbg_log(dbcl, &__wine_dbch_msxml, __FILE__, __LINE__, caller, "%s", buff);
++    wine_dbg_log(dbcl, &__wine_dbch_msxml, __FILE__, __LINE__, caller, __WINE_DBG_RETADDR, "%s", buff);
+ }
+ 
+ void wineXmlCallbackError(char const* caller, xmlErrorPtr err)
+@@ -88,11 +88,11 @@ void wineXmlCallbackError(char const* caller, xmlErrorPtr err)
+     default:              dbcl = __WINE_DBCL_ERR; break;
+     }
+ 
+-    wine_dbg_log(dbcl, &__wine_dbch_msxml, __FILE__, __LINE__, caller, "error code %d", err->code);
++    wine_dbg_log(dbcl, &__wine_dbch_msxml, __FILE__, __LINE__, caller, __WINE_DBG_RETADDR, "error code %d", err->code);
+     if (err->message)
+-        wine_dbg_log(dbcl, &__wine_dbch_msxml, __FILE__, __LINE__, caller, ": %s", err->message);
++        wine_dbg_log(dbcl, &__wine_dbch_msxml, __FILE__, __LINE__, caller, __WINE_DBG_RETADDR, ": %s", err->message);
+     else
+-        wine_dbg_log(dbcl, &__wine_dbch_msxml, __FILE__, __LINE__, caller, "\n");
++        wine_dbg_log(dbcl, &__wine_dbch_msxml, __FILE__, __LINE__, caller, __WINE_DBG_RETADDR, "\n");
+ }
+ 
+ /* Support for loading xml files from a Wine Windows drive */
+diff --git a/dlls/ntdll/thread.c b/dlls/ntdll/thread.c
+index f51f8c7639d..99570f8b131 100644
+--- a/dlls/ntdll/thread.c
++++ b/dlls/ntdll/thread.c
+@@ -35,6 +35,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(thread);
+ WINE_DECLARE_DEBUG_CHANNEL(relay);
+ WINE_DECLARE_DEBUG_CHANNEL(pid);
+ WINE_DECLARE_DEBUG_CHANNEL(source);
++WINE_DECLARE_DEBUG_CHANNEL(retaddr);
+ WINE_DECLARE_DEBUG_CHANNEL(timestamp);
+ 
+ struct _KUSER_SHARED_DATA *user_shared_data = (void *)0x7ffe0000;
+@@ -157,6 +158,7 @@ int __cdecl __wine_dbg_header( enum __wine_debug_class cls, struct __wine_debug_
+         pos += snprintf( pos, end - pos, "%s ", (const char *)context );
+     else if (context && context->version == WINE_DEBUG_CONTEXT_VERSION)
+     {
++        if (TRACE_ON(retaddr)) pos += snprintf( pos, end - pos, "%012Ix:", (SIZE_T)context->retaddr );
+         if (TRACE_ON(source))
+         {
+             const char *tmp, *file;
+diff --git a/dlls/ntdll/unix/debug.c b/dlls/ntdll/unix/debug.c
+index 9091e1f37a3..0c180ca014e 100644
+--- a/dlls/ntdll/unix/debug.c
++++ b/dlls/ntdll/unix/debug.c
+@@ -44,6 +44,7 @@
+ 
+ WINE_DECLARE_DEBUG_CHANNEL(pid);
+ WINE_DECLARE_DEBUG_CHANNEL(source);
++WINE_DECLARE_DEBUG_CHANNEL(retaddr);
+ WINE_DECLARE_DEBUG_CHANNEL(timestamp);
+ WINE_DEFAULT_DEBUG_CHANNEL(ntdll);
+ 
+@@ -343,6 +344,7 @@ int __cdecl __wine_dbg_header( enum __wine_debug_class cls, struct __wine_debug_
+         pos += snprintf( pos, end - pos, "%s ", (const char *)context );
+     else if (context && context->version == WINE_DEBUG_CONTEXT_VERSION)
+     {
++        if (TRACE_ON(retaddr)) pos += snprintf( pos, end - pos, "%012zx:", (size_t)context->retaddr );
+         if (TRACE_ON(source))
+         {
+             const char *tmp, *file;
+diff --git a/dlls/windowscodecs/libtiff.c b/dlls/windowscodecs/libtiff.c
+index 1595e61b1cd..06b6ffaa339 100644
+--- a/dlls/windowscodecs/libtiff.c
++++ b/dlls/windowscodecs/libtiff.c
+@@ -39,14 +39,14 @@ WINE_DECLARE_DEBUG_CHANNEL(tiff);
+ static void tiff_error_handler( const char *module, const char *format, va_list args )
+ {
+     if (!ERR_ON(tiff)) return;
+-    if (wine_dbg_vlog( __WINE_DBCL_ERR, &__wine_dbch_tiff, __FILE__, __LINE__, module, format, args ) != -1)
++    if (wine_dbg_vlog( __WINE_DBCL_ERR, &__wine_dbch_tiff, __FILE__, __LINE__, module, __WINE_DBG_RETADDR, format, args ) != -1)
+         __wine_dbg_output( "\n" );
+ }
+ 
+ static void tiff_warning_handler( const char *module, const char *format, va_list args )
+ {
+     if (!WARN_ON(tiff)) return;
+-    if (wine_dbg_vlog( __WINE_DBCL_WARN, &__wine_dbch_tiff, __FILE__, __LINE__, module, format, args ) != -1)
++    if (wine_dbg_vlog( __WINE_DBCL_WARN, &__wine_dbch_tiff, __FILE__, __LINE__, module, __WINE_DBG_RETADDR, format, args ) != -1)
+         __wine_dbg_output( "\n" );
+ }
+ 
+diff --git a/dlls/winecrt0/debug.c b/dlls/winecrt0/debug.c
+index a4fb3b3cdcf..19b8728e710 100644
+--- a/dlls/winecrt0/debug.c
++++ b/dlls/winecrt0/debug.c
+@@ -30,6 +30,7 @@
+ 
+ WINE_DECLARE_DEBUG_CHANNEL(pid);
+ WINE_DECLARE_DEBUG_CHANNEL(source);
++WINE_DECLARE_DEBUG_CHANNEL(retaddr);
+ WINE_DECLARE_DEBUG_CHANNEL(timestamp);
+ 
+ static const char * (__cdecl *p__wine_dbg_strdup)( const char *str );
+@@ -202,6 +203,7 @@ static int __cdecl fallback__wine_dbg_header( enum __wine_debug_class cls, struc
+         pos += snprintf( pos, end - pos, "%s ", (const char *)context );
+     else if (context && context->version == WINE_DEBUG_CONTEXT_VERSION)
+     {
++        if (TRACE_ON(retaddr)) pos += snprintf( pos, end - pos, "%012Ix:", (SIZE_T)context->retaddr );
+         if (TRACE_ON(source))
+         {
+             const char *tmp, *file;
+diff --git a/include/wine/debug.h b/include/wine/debug.h
+index 1f802ecc0c4..5b338677ba6 100644
+--- a/include/wine/debug.h
++++ b/include/wine/debug.h
+@@ -94,11 +94,18 @@ struct __wine_debug_context
+     const char *function;
+     const char *file;
+     int line;
++    const void *retaddr;
+ };
+-#define WINE_DEBUG_CONTEXT_VERSION 2
++#define WINE_DEBUG_CONTEXT_VERSION 3
++
++#if defined(__GNUC__) || defined(__clang__)
++#define __WINE_DBG_RETADDR __builtin_extract_return_addr(__builtin_return_address(0))
++#else
++#define __WINE_DBG_RETADDR ((void *)0)
++#endif
+ 
+ #define __WINE_DBG_LOG(...) \
+-   wine_dbg_log( __dbcl, __dbch, __FILE__, __LINE__, __func__, __VA_ARGS__); } } while(0)
++   wine_dbg_log( __dbcl, __dbch, __FILE__, __LINE__, __func__, __WINE_DBG_RETADDR, __VA_ARGS__); } } while(0)
+ 
+ #if defined(__MINGW32__) || (!defined(__WINE_USE_MSVCRT) && (defined(__GNUC__) || defined(__clang__)))
+ #define __WINE_PRINTF_ATTR(fmt,args) __attribute__((format (printf,fmt,args)))
+@@ -182,10 +189,10 @@ static inline int __wine_dbg_cdecl wine_dbg_printf( const char *format, ... )
+ }
+ 
+ static int __wine_dbg_cdecl wine_dbg_vlog( enum __wine_debug_class cls, struct __wine_debug_channel *channel,
+-                                           const char *file, int line, const char *function,
+-                                           const char *format, va_list args ) __WINE_PRINTF_ATTR(6,0);
++                                           const char *file, int line, const char *function, const void *retaddr,
++                                           const char *format, va_list args ) __WINE_PRINTF_ATTR(7,0);
+ static inline int __wine_dbg_cdecl wine_dbg_vlog( enum __wine_debug_class cls, struct __wine_debug_channel *channel,
+-                                                  const char *file, int line, const char *function,
++                                                  const char *file, int line, const char *function, const void *retaddr,
+                                                   const char *format, va_list args )
+ {
+     struct __wine_debug_context info =
+@@ -194,6 +201,7 @@ static inline int __wine_dbg_cdecl wine_dbg_vlog( enum __wine_debug_class cls, s
+         .function = function,
+         .file = file,
+         .line = line,
++        .retaddr = retaddr,
+     };
+     struct __wine_debug_context *context = &info;
+     int ret;
+@@ -208,17 +216,17 @@ static inline int __wine_dbg_cdecl wine_dbg_vlog( enum __wine_debug_class cls, s
+ }
+ 
+ static int __wine_dbg_cdecl wine_dbg_log( enum __wine_debug_class cls, struct __wine_debug_channel *channel,
+-                                          const char *file, int line, const char *function,
+-                                          const char *format, ... ) __WINE_PRINTF_ATTR(6,7);
++                                          const char *file, int line, const char *function, const void *retaddr,
++                                          const char *format, ... ) __WINE_PRINTF_ATTR(7,8);
+ static inline int __wine_dbg_cdecl wine_dbg_log( enum __wine_debug_class cls, struct __wine_debug_channel *channel,
+-                                                 const char *file, int line, const char *function,
++                                                 const char *file, int line, const char *function, const void *retaddr,
+                                                  const char *format, ... )
+ {
+     va_list args;
+     int ret;
+ 
+     va_start( args, format );
+-    ret = wine_dbg_vlog( cls, channel, file, line, function, format, args );
++    ret = wine_dbg_vlog( cls, channel, file, line, function, retaddr, format, args );
+     va_end( args );
+     return ret;
+ }
+
+From 7aa5272150a5a197e4deff6af5531118894c72d4 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Mon, 25 Sep 2023 21:47:03 +0200
+Subject: [PATCH] ntdll: Print source and retaddr by default in debug traces.
+
+---
+ dlls/ntdll/thread.c     | 4 ++--
+ dlls/ntdll/unix/debug.c | 4 ++--
+ dlls/winecrt0/debug.c   | 4 ++--
+ 3 files changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/dlls/ntdll/thread.c b/dlls/ntdll/thread.c
+index 99570f8b131..8d724f0d36a 100644
+--- a/dlls/ntdll/thread.c
++++ b/dlls/ntdll/thread.c
+@@ -158,8 +158,8 @@ int __cdecl __wine_dbg_header( enum __wine_debug_class cls, struct __wine_debug_
+         pos += snprintf( pos, end - pos, "%s ", (const char *)context );
+     else if (context && context->version == WINE_DEBUG_CONTEXT_VERSION)
+     {
+-        if (TRACE_ON(retaddr)) pos += snprintf( pos, end - pos, "%012Ix:", (SIZE_T)context->retaddr );
+-        if (TRACE_ON(source))
++        if (1 || TRACE_ON(retaddr)) pos += snprintf( pos, end - pos, "%012Ix:", (SIZE_T)context->retaddr );
++        if (1 || TRACE_ON(source))
+         {
+             const char *tmp, *file;
+ 
+diff --git a/dlls/ntdll/unix/debug.c b/dlls/ntdll/unix/debug.c
+index 0c180ca014e..e1d855b4ae0 100644
+--- a/dlls/ntdll/unix/debug.c
++++ b/dlls/ntdll/unix/debug.c
+@@ -344,8 +344,8 @@ int __cdecl __wine_dbg_header( enum __wine_debug_class cls, struct __wine_debug_
+         pos += snprintf( pos, end - pos, "%s ", (const char *)context );
+     else if (context && context->version == WINE_DEBUG_CONTEXT_VERSION)
+     {
+-        if (TRACE_ON(retaddr)) pos += snprintf( pos, end - pos, "%012zx:", (size_t)context->retaddr );
+-        if (TRACE_ON(source))
++        if (1 || TRACE_ON(retaddr)) pos += snprintf( pos, end - pos, "%012zx:", (size_t)context->retaddr );
++        if (1 || TRACE_ON(source))
+         {
+             const char *tmp, *file;
+ 
+diff --git a/dlls/winecrt0/debug.c b/dlls/winecrt0/debug.c
+index 19b8728e710..fc049668304 100644
+--- a/dlls/winecrt0/debug.c
++++ b/dlls/winecrt0/debug.c
+@@ -203,8 +203,8 @@ static int __cdecl fallback__wine_dbg_header( enum __wine_debug_class cls, struc
+         pos += snprintf( pos, end - pos, "%s ", (const char *)context );
+     else if (context && context->version == WINE_DEBUG_CONTEXT_VERSION)
+     {
+-        if (TRACE_ON(retaddr)) pos += snprintf( pos, end - pos, "%012Ix:", (SIZE_T)context->retaddr );
+-        if (TRACE_ON(source))
++        if (1 || TRACE_ON(retaddr)) pos += snprintf( pos, end - pos, "%012Ix:", (SIZE_T)context->retaddr );
++        if (1 || TRACE_ON(source))
+         {
+             const char *tmp, *file;
+ 
+
+From c1febdea7e773bcc4e09fc36bb22453d4ee7add9 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Fri, 26 Nov 2021 09:02:03 +0100
+Subject: [PATCH] ntdll: Prepend unix pid / tid to the logs.
+
+---
+ dlls/ntdll/thread.c            | 4 ++--
+ dlls/ntdll/unix/debug.c        | 4 ++--
+ dlls/ntdll/unix/loader.c       | 2 ++
+ dlls/ntdll/unix/thread.c       | 2 ++
+ dlls/ntdll/unix/unix_private.h | 8 ++++++++
+ dlls/winecrt0/debug.c          | 4 ++--
+ 6 files changed, 18 insertions(+), 6 deletions(-)
+
+diff --git a/dlls/ntdll/thread.c b/dlls/ntdll/thread.c
+index 8d724f0d36a..31c8d99430e 100644
+--- a/dlls/ntdll/thread.c
++++ b/dlls/ntdll/thread.c
+@@ -149,8 +149,8 @@ int __cdecl __wine_dbg_header( enum __wine_debug_class cls, struct __wine_debug_
+         ULONG ticks = NtGetTickCount();
+         pos += snprintf( pos, end - pos, "%3lu.%03lu:", ticks / 1000, ticks % 1000 );
+     }
+-    if (TRACE_ON(pid)) pos += snprintf( pos, end - pos, "%04lx:", GetCurrentProcessId() );
+-    pos += snprintf( pos, end - pos, "%04lx:", GetCurrentThreadId() );
++    if (TRACE_ON(pid)) pos += snprintf( pos, end - pos, "%04x:%4u:", (UINT)GetCurrentProcessId(), (UINT)(ULONG_PTR)NtCurrentTeb()->SystemReserved1[0] );
++    pos += snprintf( pos, end - pos, "%04x:%4u:", (UINT)GetCurrentThreadId(), (UINT)(ULONG_PTR)NtCurrentTeb()->SystemReserved1[1] );
+     if (cls < ARRAY_SIZE( classes )) pos += snprintf( pos, end - pos, "%s:", classes[cls] );
+     pos += snprintf( pos, end - pos, "%s:", channel->name );
+ 
+diff --git a/dlls/ntdll/unix/debug.c b/dlls/ntdll/unix/debug.c
+index e1d855b4ae0..8c20a2393e1 100644
+--- a/dlls/ntdll/unix/debug.c
++++ b/dlls/ntdll/unix/debug.c
+@@ -334,8 +334,8 @@ int __cdecl __wine_dbg_header( enum __wine_debug_class cls, struct __wine_debug_
+             UINT ticks = NtGetTickCount();
+             pos += snprintf( pos, end - pos, "%3u.%03u:", ticks / 1000, ticks % 1000 );
+         }
+-        if (TRACE_ON(pid)) pos += snprintf( pos, end - pos, "%04x:", (UINT)GetCurrentProcessId() );
+-        pos += snprintf( pos, end - pos, "%04x:", (UINT)GetCurrentThreadId() );
++        if (TRACE_ON(pid)) pos += snprintf( pos, end - pos, "%04x:%4u:", (UINT)GetCurrentProcessId(), (UINT)(ULONG_PTR)NtCurrentTeb()->SystemReserved1[0] );
++        pos += snprintf( pos, end - pos, "%04x:%4u:", (UINT)GetCurrentThreadId(), (UINT)(ULONG_PTR)NtCurrentTeb()->SystemReserved1[1] );
+     }
+     if (cls < ARRAY_SIZE( classes )) pos += snprintf( pos, end - pos, "%s:", classes[cls] );
+     pos += snprintf( pos, end - pos, "%s:", channel->name );
+diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
+index 19fbfb2b68c..811925baac0 100644
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -1851,6 +1851,8 @@ static void start_main_thread(void)
+ 
+     signal_init_threading();
+     signal_alloc_thread( teb );
++    teb->SystemReserved1[0] = (void *)(ULONG_PTR)getpid();
++    teb->SystemReserved1[1] = (void *)(ULONG_PTR)gettid();
+     dbg_init();
+     startup_info_size = server_init_process();
+     virtual_map_user_shared_data();
+diff --git a/dlls/ntdll/unix/thread.c b/dlls/ntdll/unix/thread.c
+index 2ef57c975cb..010f5ebd45a 100644
+--- a/dlls/ntdll/unix/thread.c
++++ b/dlls/ntdll/unix/thread.c
+@@ -1112,6 +1112,8 @@ static void start_thread( TEB *teb )
+ 
+     thread_data->pthread_id = pthread_self();
+     pthread_setspecific( teb_key, teb );
++    teb->SystemReserved1[0] = (void *)(ULONG_PTR)getpid();
++    teb->SystemReserved1[1] = (void *)(ULONG_PTR)gettid();
+     server_init_thread( thread_data->start, &suspend );
+     signal_start_thread( thread_data->start, thread_data->param, suspend, teb );
+ }
+diff --git a/dlls/ntdll/unix/unix_private.h b/dlls/ntdll/unix/unix_private.h
+index 6cd88a5acc0..f45da08e531 100644
+--- a/dlls/ntdll/unix/unix_private.h
++++ b/dlls/ntdll/unix/unix_private.h
+@@ -29,6 +29,14 @@
+ #include "wine/list.h"
+ #include "wine/debug.h"
+ 
++#ifndef linux
++#ifdef HAVE_PTHREAD_GETTHREADID_NP
++#define gettid pthread_getthreadid_np
++#else
++static inline int gettid(void) { return 0; }
++#endif
++#endif
++
+ struct msghdr;
+ 
+ typedef struct
+diff --git a/dlls/winecrt0/debug.c b/dlls/winecrt0/debug.c
+index fc049668304..e36cfcb94eb 100644
+--- a/dlls/winecrt0/debug.c
++++ b/dlls/winecrt0/debug.c
+@@ -194,8 +194,8 @@ static int __cdecl fallback__wine_dbg_header( enum __wine_debug_class cls, struc
+         UINT ticks = GetTickCount();
+         pos += snprintf( pos, end - pos, "%3u.%03u:", ticks / 1000, ticks % 1000 );
+     }
+-    if (TRACE_ON(pid)) pos += snprintf( pos, end - pos, "%04x:", (UINT)GetCurrentProcessId() );
+-    pos += snprintf( pos, end - pos, "%04x:", (UINT)GetCurrentThreadId() );
++    if (TRACE_ON(pid)) pos += snprintf( pos, end - pos, "%04x:%4u:", (UINT)GetCurrentProcessId(), 0 );
++    pos += snprintf( pos, end - pos, "%04x:%4u:", (UINT)GetCurrentThreadId(), 0 );
+     if (cls < ARRAY_SIZE( debug_classes )) pos += snprintf( pos, end - pos, "%s:", debug_classes[cls] );
+     pos += snprintf( pos, end - pos, "%s:", channel->name );
+ 
+
+
+From afd7fdb50a33a50e8a6087007a7453b0b729ddd3 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Tue, 20 Sep 2022 21:47:07 +0200
+Subject: [PATCH] ntdll: Add +microsecs channel for precise timestamps.
+
+---
+ dlls/ntdll/thread.c     | 10 +++++++++-
+ dlls/ntdll/unix/debug.c | 10 +++++++++-
+ dlls/winecrt0/debug.c   | 11 ++++++++++-
+ 3 files changed, 28 insertions(+), 3 deletions(-)
+
+diff --git a/dlls/ntdll/thread.c b/dlls/ntdll/thread.c
+index 31c8d99430e..4d6122bb3a0 100644
+--- a/dlls/ntdll/thread.c
++++ b/dlls/ntdll/thread.c
+@@ -37,6 +37,7 @@ WINE_DECLARE_DEBUG_CHANNEL(pid);
+ WINE_DECLARE_DEBUG_CHANNEL(source);
+ WINE_DECLARE_DEBUG_CHANNEL(retaddr);
+ WINE_DECLARE_DEBUG_CHANNEL(timestamp);
++WINE_DECLARE_DEBUG_CHANNEL(microsecs);
+ 
+ struct _KUSER_SHARED_DATA *user_shared_data = (void *)0x7ffe0000;
+ 
+@@ -144,7 +145,14 @@ int __cdecl __wine_dbg_header( enum __wine_debug_class cls, struct __wine_debug_
+     /* only print header if we are at the beginning of the line */
+     if (info->out_pos) return 0;
+ 
+-    if (TRACE_ON(timestamp))
++    if (TRACE_ON(microsecs))
++    {
++        LARGE_INTEGER counter, frequency, microsecs;
++        NtQueryPerformanceCounter(&counter, &frequency);
++        microsecs.QuadPart = counter.QuadPart * 1000000 / frequency.QuadPart;
++        pos += sprintf( pos, "%3u.%06u:", (unsigned int)(microsecs.QuadPart / 1000000), (unsigned int)(microsecs.QuadPart % 1000000) );
++    }
++    else if (TRACE_ON(timestamp))
+     {
+         ULONG ticks = NtGetTickCount();
+         pos += snprintf( pos, end - pos, "%3lu.%03lu:", ticks / 1000, ticks % 1000 );
+diff --git a/dlls/ntdll/unix/debug.c b/dlls/ntdll/unix/debug.c
+index 8c20a2393e1..a6447a1282b 100644
+--- a/dlls/ntdll/unix/debug.c
++++ b/dlls/ntdll/unix/debug.c
+@@ -47,6 +47,7 @@ WINE_DECLARE_DEBUG_CHANNEL(source);
+ WINE_DECLARE_DEBUG_CHANNEL(retaddr);
+ WINE_DECLARE_DEBUG_CHANNEL(timestamp);
+ WINE_DEFAULT_DEBUG_CHANNEL(ntdll);
++WINE_DECLARE_DEBUG_CHANNEL(microsecs);
+ 
+ struct debug_info
+ {
+@@ -329,7 +330,14 @@ int __cdecl __wine_dbg_header( enum __wine_debug_class cls, struct __wine_debug_
+ 
+     if (init_done)
+     {
+-        if (TRACE_ON(timestamp))
++        if (TRACE_ON(microsecs))
++        {
++            LARGE_INTEGER counter, frequency, microsecs;
++            NtQueryPerformanceCounter(&counter, &frequency);
++            microsecs.QuadPart = counter.QuadPart * 1000000 / frequency.QuadPart;
++            pos += sprintf( pos, "%3u.%06u:", (unsigned int)(microsecs.QuadPart / 1000000), (unsigned int)(microsecs.QuadPart % 1000000) );
++        }
++        else if (TRACE_ON(timestamp))
+         {
+             UINT ticks = NtGetTickCount();
+             pos += snprintf( pos, end - pos, "%3u.%03u:", ticks / 1000, ticks % 1000 );
+diff --git a/dlls/winecrt0/debug.c b/dlls/winecrt0/debug.c
+index e36cfcb94eb..3b6d9ca02b4 100644
+--- a/dlls/winecrt0/debug.c
++++ b/dlls/winecrt0/debug.c
+@@ -32,6 +32,7 @@ WINE_DECLARE_DEBUG_CHANNEL(pid);
+ WINE_DECLARE_DEBUG_CHANNEL(source);
+ WINE_DECLARE_DEBUG_CHANNEL(retaddr);
+ WINE_DECLARE_DEBUG_CHANNEL(timestamp);
++WINE_DECLARE_DEBUG_CHANNEL(microsecs);
+ 
+ static const char * (__cdecl *p__wine_dbg_strdup)( const char *str );
+ static int (__cdecl *p__wine_dbg_output)( const char *str );
+@@ -189,7 +190,15 @@ static int __cdecl fallback__wine_dbg_header( enum __wine_debug_class cls, struc
+     /* skip header if partial line and no other thread came in between */
+     if (partial_line_tid == GetCurrentThreadId()) return 0;
+ 
+-    if (TRACE_ON(timestamp))
++    if (TRACE_ON(microsecs))
++    {
++        LARGE_INTEGER counter, microsecs, frequency = {0};
++        if (!frequency.QuadPart) QueryPerformanceFrequency(&frequency);
++        QueryPerformanceCounter(&counter);
++        microsecs.QuadPart = counter.QuadPart * 1000000 / frequency.QuadPart;
++        pos += sprintf( pos, "%3u.%06u:", (unsigned int)(microsecs.QuadPart / 1000000), (unsigned int)(microsecs.QuadPart % 1000000) );
++    }
++    else if (TRACE_ON(timestamp))
+     {
+         UINT ticks = GetTickCount();
+         pos += snprintf( pos, end - pos, "%3u.%03u:", ticks / 1000, ticks % 1000 );
+
+From a12414c50e1fa51990967687aa5ed0cc8bd25bd5 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Mon, 2 Nov 2020 13:21:49 +0100
+Subject: [PATCH] include: Add client-side request tracing.
+
+---
+ include/wine/server.h | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/include/wine/server.h b/include/wine/server.h
+index 081c71492fa..5c58bb714b7 100644
+--- a/include/wine/server.h
++++ b/include/wine/server.h
+@@ -26,6 +26,7 @@
+ #include <winbase.h>
+ #include <winternl.h>
+ #include <wine/server_protocol.h>
++#include <wine/debug.h>
+ 
+ /* client communication functions */
+ 
+@@ -149,6 +150,8 @@ static inline rectangle_t wine_server_rectangle( RECT rect )
+ 
+ #define SERVER_START_REQ(type) \
+     do { \
++        WINE_DECLARE_DEBUG_CHANNEL(client); \
++        static const char *const __req_name = #type; \
+         struct __server_request_info __req; \
+         struct type##_request * const req = &__req.u.req.type##_request; \
+         const struct type##_reply * const reply = &__req.u.reply.type##_reply; \
+@@ -156,10 +159,12 @@ static inline rectangle_t wine_server_rectangle( RECT rect )
+         __req.u.req.request_header.req = REQ_##type; \
+         __req.data_count = 0; \
+         (void)reply; \
++        TRACE_(client)("%s start\n", __req_name); \
+         do
+ 
+ #define SERVER_END_REQ \
+         while(0); \
++        TRACE_(client)("%s end\n", __req_name); \
+     } while(0)
+ 
+ 
+
+From 3811d2eb1b5a2916e0912d667fb93c1fcb3a68e2 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Wed, 29 Dec 2021 17:15:41 +0100
+Subject: [PATCH] server: Trace request time.
+
+---
+ server/trace.c | 15 ++++++++++++++-
+ 1 file changed, 14 insertions(+), 1 deletion(-)
+
+diff --git a/server/trace.c b/server/trace.c
+index 7a296b0f60f..c336db9324f 100644
+--- a/server/trace.c
++++ b/server/trace.c
+@@ -622,12 +622,13 @@ static void dump_varargs_bytes( const char *prefix, data_size_t size )
+     data_size_t len = min( 1024, size );
+ 
+     fprintf( stderr,"%s{", prefix );
++    fprintf( stderr, "total=%u,", size );
+     while (len > 0)
+     {
+         fprintf( stderr, "%02x", *data++ );
+         if (--len) fputc( ',', stderr );
+     }
+-    if (size > 1024) fprintf( stderr, "...(total %u)", size );
++    if (size > 1024) fprintf( stderr, "..." );
+     fputc( '}', stderr );
+     remove_data( size );
+ }
+@@ -5727,9 +5728,20 @@ static const char *get_status_name( unsigned int status )
+     return buffer;
+ }
+ 
++static void trace_current_time(BOOL diff)
++{
++    static timeout_t last_us;
++    timeout_t microsecs = monotonic_counter() / 10;
++    if (diff) microsecs -= last_us;
++    fprintf( stderr, "%6u.%06u:", (unsigned int)(microsecs / 1000000), (unsigned int)(microsecs % 1000000) );
++    if (diff) microsecs += last_us;
++    last_us = microsecs;
++}
++
+ void trace_request(void)
+ {
+     enum request req = current->req.request_header.req;
++    trace_current_time(FALSE);
+     if (req < REQ_NB_REQUESTS)
+     {
+         fprintf( stderr, "%04x: %s(", current->id, req_names[req] );
+@@ -5746,6 +5758,7 @@ void trace_request(void)
+ 
+ void trace_reply( enum request req, const union generic_reply *reply )
+ {
++    trace_current_time(TRUE);
+     if (req < REQ_NB_REQUESTS)
+     {
+         fprintf( stderr, "%04x: %s() = %s",
+

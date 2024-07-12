@@ -3962,3 +3962,319 @@ index faa6bd7d5ee..46b155b7a47 100644
          status = NtProtectVirtualMemory( process, &base_addr, &region_size, prot, &old_prot );
          if (status) break;
          status = NtWriteVirtualMemory( process, addr, buffer, size, bytes_written );
+
+From 73647adaef44a76e108a5c2e65d66aed3d1ca52a Mon Sep 17 00:00:00 2001
+From: Nikolay Sivov <nsivov@codeweavers.com>
+Date: Tue, 9 Jan 2024 15:07:00 +0100
+Subject: [PATCH 1/2] ntdll: Update RTL_HEAP_PARAMETERS definition.
+
+---
+ dlls/ntdll/heap.c      | 20 +++-----------------
+ include/winternl.h     | 22 +++++++++++++++++-----
+ tools/winapi/win32.api |  2 +-
+ 3 files changed, 21 insertions(+), 23 deletions(-)
+
+diff --git a/dlls/ntdll/heap.c b/dlls/ntdll/heap.c
+index 4dc3e7296b6..ec4e376bd4b 100644
+--- a/dlls/ntdll/heap.c
++++ b/dlls/ntdll/heap.c
+@@ -1490,23 +1490,9 @@ static void heap_set_debug_flags( HANDLE handle )
+ 
+ /***********************************************************************
+  *           RtlCreateHeap   (NTDLL.@)
+- *
+- * Create a new Heap.
+- *
+- * PARAMS
+- *  flags      [I] HEAP_ flags from "winnt.h"
+- *  addr       [I] Desired base address
+- *  totalSize  [I] Total size of the heap, or 0 for a growable heap
+- *  commitSize [I] Amount of heap space to commit
+- *  unknown    [I] Not yet understood
+- *  definition [I] Heap definition
+- *
+- * RETURNS
+- *  Success: A HANDLE to the newly created heap.
+- *  Failure: a NULL HANDLE.
+  */
+ HANDLE WINAPI RtlCreateHeap( ULONG flags, void *addr, SIZE_T total_size, SIZE_T commit_size,
+-                             void *unknown, RTL_HEAP_DEFINITION *definition )
++                             void *lock, RTL_HEAP_PARAMETERS *params )
+ {
+     struct entry *entry;
+     struct heap *heap;
+@@ -1514,8 +1500,8 @@ HANDLE WINAPI RtlCreateHeap( ULONG flags, void *addr, SIZE_T total_size, SIZE_T
+     SUBHEAP *subheap;
+     unsigned int i;
+ 
+-    TRACE( "flags %#lx, addr %p, total_size %#Ix, commit_size %#Ix, unknown %p, definition %p\n",
+-           flags, addr, total_size, commit_size, unknown, definition );
++    TRACE( "flags %#lx, addr %p, total_size %#Ix, commit_size %#Ix, lock %p, params %p\n",
++           flags, addr, total_size, commit_size, lock, params );
+ 
+     flags &= ~(HEAP_TAIL_CHECKING_ENABLED|HEAP_FREE_CHECKING_ENABLED);
+     if (process_heap) flags |= HEAP_PRIVATE;
+diff --git a/include/winternl.h b/include/winternl.h
+index ff8756211a1..b1687349ff6 100644
+--- a/include/winternl.h
++++ b/include/winternl.h
+@@ -2577,11 +2577,23 @@ typedef struct _PROCESS_STACK_ALLOCATION_INFORMATION_EX
+     PROCESS_STACK_ALLOCATION_INFORMATION AllocInfo;
+ } PROCESS_STACK_ALLOCATION_INFORMATION_EX, *PPROCESS_STACK_ALLOCATION_INFORMATION_EX;
+ 
+-typedef struct _RTL_HEAP_DEFINITION {
+-    ULONG Length; /* = sizeof(RTL_HEAP_DEFINITION) */
++typedef NTSTATUS (NTAPI RTL_HEAP_COMMIT_ROUTINE)(PVOID base, PVOID *address, PSIZE_T size);
++typedef RTL_HEAP_COMMIT_ROUTINE *PRTL_HEAP_COMMIT_ROUTINE;
+ 
+-    ULONG Unknown[11];
+-} RTL_HEAP_DEFINITION, *PRTL_HEAP_DEFINITION;
++typedef struct _RTL_HEAP_PARAMETERS
++{
++    ULONG Length;
++    SIZE_T SegmentReserve;
++    SIZE_T SegmentCommit;
++    SIZE_T DeCommitFreeblockThreshold;
++    SIZE_T DeCommitTotalFreeThreshold;
++    SIZE_T MaximumAllocationSize;
++    SIZE_T VirtualMemoryThreshold;
++    SIZE_T InitialCommit;
++    SIZE_T InitialReserve;
++    PRTL_HEAP_COMMIT_ROUTINE CommitRoutine;
++    SIZE_T Reserved[2];
++} RTL_HEAP_PARAMETERS, *PRTL_HEAP_PARAMETERS;
+ 
+ typedef struct _RTL_RWLOCK {
+     RTL_CRITICAL_SECTION rtlCS;
+@@ -4665,7 +4677,7 @@ NTSYSAPI NTSTATUS  WINAPI RtlCreateAcl(PACL,DWORD,DWORD);
+ NTSYSAPI NTSTATUS  WINAPI RtlCreateActivationContext(HANDLE*,const void*);
+ NTSYSAPI NTSTATUS  WINAPI RtlCreateAtomTable(ULONG,RTL_ATOM_TABLE*);
+ NTSYSAPI NTSTATUS  WINAPI RtlCreateEnvironment(BOOLEAN, PWSTR*);
+-NTSYSAPI HANDLE    WINAPI RtlCreateHeap(ULONG,PVOID,SIZE_T,SIZE_T,PVOID,PRTL_HEAP_DEFINITION);
++NTSYSAPI HANDLE    WINAPI RtlCreateHeap(ULONG,PVOID,SIZE_T,SIZE_T,PVOID,PRTL_HEAP_PARAMETERS);
+ NTSYSAPI NTSTATUS  WINAPI RtlCreateProcessParameters(RTL_USER_PROCESS_PARAMETERS**,const UNICODE_STRING*,const UNICODE_STRING*,const UNICODE_STRING*,const UNICODE_STRING*,PWSTR,const UNICODE_STRING*,const UNICODE_STRING*,const UNICODE_STRING*,const UNICODE_STRING*);
+ NTSYSAPI NTSTATUS  WINAPI RtlCreateProcessParametersEx(RTL_USER_PROCESS_PARAMETERS**,const UNICODE_STRING*,const UNICODE_STRING*,const UNICODE_STRING*,const UNICODE_STRING*,PWSTR,const UNICODE_STRING*,const UNICODE_STRING*,const UNICODE_STRING*,const UNICODE_STRING*,ULONG);
+ NTSYSAPI PDEBUG_BUFFER WINAPI RtlCreateQueryDebugBuffer(ULONG,BOOLEAN);
+diff --git a/tools/winapi/win32.api b/tools/winapi/win32.api
+index db3c8e7941e..9e40b61654a 100644
+--- a/tools/winapi/win32.api
++++ b/tools/winapi/win32.api
+@@ -3344,7 +3344,7 @@ POBJECT_ATTRIBUTES
+ PPRIVILEGE_SET
+ PRTL_BITMAP
+ PRTL_BITMAP_RUN
+-PRTL_HEAP_DEFINITION
++PRTL_HEAP_PARAMETERS
+ PRTL_QUERY_REGISTRY_TABLE
+ PRTL_THREAD_START_ROUTINE
+ PRTL_USER_PROCESS_PARAMETERS
+-- 
+GitLab
+
+From 2fc073591be28f4606a8818163c6bb4310e55096 Mon Sep 17 00:00:00 2001
+From: Daniel Lehman <dlehman25@gmail.com>
+Date: Fri, 1 Mar 2024 20:46:39 -0800
+Subject: [PATCH 1/2] ole32: Do not lock storage in read-only deny-write mode.
+
+---
+ dlls/ole32/storage32.c       | 8 +++++---
+ dlls/ole32/tests/storage32.c | 2 +-
+ 2 files changed, 6 insertions(+), 4 deletions(-)
+
+diff --git a/dlls/ole32/storage32.c b/dlls/ole32/storage32.c
+index 1bf08e45701..78e6de22be8 100644
+--- a/dlls/ole32/storage32.c
++++ b/dlls/ole32/storage32.c
+@@ -5036,7 +5036,7 @@ static HRESULT StorageImpl_GrabLocks(StorageImpl *This, DWORD openFlags)
+     ULARGE_INTEGER offset;
+     ULARGE_INTEGER cb;
+     DWORD share_mode = STGM_SHARE_MODE(openFlags);
+-    BOOL supported;
++    BOOL supported, ro_denyw;
+ 
+     if (openFlags & STGM_NOSNAPSHOT)
+     {
+@@ -5045,6 +5045,8 @@ static HRESULT StorageImpl_GrabLocks(StorageImpl *This, DWORD openFlags)
+         else if (share_mode != STGM_SHARE_EXCLUSIVE) share_mode = STGM_SHARE_DENY_WRITE;
+     }
+ 
++    ro_denyw = (STGM_ACCESS_MODE(openFlags) == STGM_READ) && (share_mode == STGM_SHARE_DENY_WRITE);
++
+     /* Wrap all other locking inside a single lock so we can check ranges safely */
+     offset.QuadPart = RANGELOCK_CHECKLOCKS;
+     cb.QuadPart = 1;
+@@ -5088,7 +5090,7 @@ static HRESULT StorageImpl_GrabLocks(StorageImpl *This, DWORD openFlags)
+             hr = StorageImpl_LockOne(This, RANGELOCK_PRIORITY2_FIRST, RANGELOCK_PRIORITY2_LAST);
+     }
+ 
+-    if (SUCCEEDED(hr) && (STGM_ACCESS_MODE(openFlags) != STGM_WRITE))
++    if (SUCCEEDED(hr) && (STGM_ACCESS_MODE(openFlags) != STGM_WRITE) && !ro_denyw)
+         hr = StorageImpl_LockOne(This, RANGELOCK_READ_FIRST, RANGELOCK_READ_LAST);
+ 
+     if (SUCCEEDED(hr) && (STGM_ACCESS_MODE(openFlags) != STGM_READ))
+@@ -5097,7 +5099,7 @@ static HRESULT StorageImpl_GrabLocks(StorageImpl *This, DWORD openFlags)
+     if (SUCCEEDED(hr) && (share_mode == STGM_SHARE_DENY_READ || share_mode == STGM_SHARE_EXCLUSIVE))
+         hr = StorageImpl_LockOne(This, RANGELOCK_DENY_READ_FIRST, RANGELOCK_DENY_READ_LAST);
+ 
+-    if (SUCCEEDED(hr) && (share_mode == STGM_SHARE_DENY_WRITE || share_mode == STGM_SHARE_EXCLUSIVE))
++    if (SUCCEEDED(hr) && (share_mode == STGM_SHARE_DENY_WRITE || share_mode == STGM_SHARE_EXCLUSIVE) && !ro_denyw)
+         hr = StorageImpl_LockOne(This, RANGELOCK_DENY_WRITE_FIRST, RANGELOCK_DENY_WRITE_LAST);
+ 
+     if (SUCCEEDED(hr) && (openFlags & STGM_NOSNAPSHOT) == STGM_NOSNAPSHOT)
+-- 
+GitLab
+
+From fa873804fbe58db16f57fae835c3c350bd767984 Mon Sep 17 00:00:00 2001
+From: Brendan McGrath <bmcgrath@codeweavers.com>
+Date: Wed, 20 Dec 2023 19:07:42 +1100
+Subject: [PATCH] server: Always release internal hardware messages.
+
+---
+ server/queue.c | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/server/queue.c b/server/queue.c
+index d3ca1172d91..ee8bdf34b7f 100644
+--- a/server/queue.c
++++ b/server/queue.c
+@@ -2193,6 +2193,11 @@ static int check_hw_message_filter( user_handle_t win, unsigned int msg_code,
+     }
+ }
+ 
++/* is this message an internal driver notification message */
++static inline BOOL is_internal_hardware_message( unsigned int message )
++{
++    return (message >= WM_WINE_FIRST_DRIVER_MSG && message <= WM_WINE_LAST_DRIVER_MSG);
++}
+ 
+ /* find a hardware message for the given queue */
+ static int get_hardware_message( struct thread *thread, unsigned int hw_id, user_handle_t filter_win,
+@@ -2287,7 +2292,8 @@ static int get_hardware_message( struct thread *thread, unsigned int hw_id, user
+ 
+         data->hw_id = msg->unique_id;
+         set_reply_data( msg->data, msg->data_size );
+-        if (get_hardware_msg_bit( msg->msg ) == QS_RAWINPUT && (flags & PM_REMOVE))
++        if ((get_hardware_msg_bit( msg->msg ) == QS_RAWINPUT && (flags & PM_REMOVE)) ||
++            is_internal_hardware_message( msg->msg ))
+             release_hardware_message( current->queue, data->hw_id );
+         return 1;
+     }
+-- 
+GitLab
+
+From a3f1091f8373a0cf13714368c513572b97ec8758 Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Wed, 10 Jul 2024 16:43:25 -0600
+Subject: [PATCH] server: Do not allow zero access mask when opening some
+ objects.
+
+CW-Bug-Id: #24016
+---
+ server/handle.c                | 11 ++++++++++-
+ server/handle.h                |  2 ++
+ server/process.c               |  2 +-
+ server/thread.c                |  2 +-
+ 6 files changed, 25 insertions(+), 17 deletions(-)
+
+diff --git a/server/handle.c b/server/handle.c
+index 79c0f3f0dff..a2f945ed254 100644
+--- a/server/handle.c
++++ b/server/handle.c
+@@ -290,6 +290,15 @@ obj_handle_t alloc_handle( struct process *process, void *ptr, unsigned int acce
+     return alloc_handle_entry( process, ptr, access, attr );
+ }
+ 
++/* allocate handle for opening an object by userspace request */
++obj_handle_t alloc_handle_user_open( struct process *process, void *obj, unsigned int access, unsigned int attr )
++{
++    if (access) return alloc_handle( process, obj, access, attr );
++
++    set_error( STATUS_ACCESS_DENIED );
++    return 0;
++}
++
+ /* allocate a global handle for an object, incrementing its refcount */
+ /* return the handle, or 0 on error */
+ static obj_handle_t alloc_global_handle_no_access_check( void *obj, unsigned int access )
+@@ -642,7 +651,7 @@ obj_handle_t open_object( struct process *process, obj_handle_t parent, unsigned
+ 
+     if ((obj = open_named_object( root, ops, name, attributes )))
+     {
+-        handle = alloc_handle( process, obj, access, attributes );
++        handle = alloc_handle_user_open( process, obj, access, attributes );
+         release_object( obj );
+     }
+     if (root) release_object( root );
+diff --git a/server/handle.h b/server/handle.h
+index 1d02e040258..ab8ee382297 100644
+--- a/server/handle.h
++++ b/server/handle.h
+@@ -38,6 +38,8 @@ extern obj_handle_t alloc_handle( struct process *process, void *obj,
+                                   unsigned int access, unsigned int attr );
+ extern obj_handle_t alloc_handle_no_access_check( struct process *process, void *ptr,
+                                                   unsigned int access, unsigned int attr );
++extern obj_handle_t alloc_handle_user_open( struct process *process, void *obj,
++                                            unsigned int access, unsigned int attr );
+ extern unsigned int close_handle( struct process *process, obj_handle_t handle );
+ extern struct object *get_handle_obj( struct process *process, obj_handle_t handle,
+                                       unsigned int access, const struct object_ops *ops );
+diff --git a/server/process.c b/server/process.c
+index 050950bc206..2e46f71f25d 100644
+--- a/server/process.c
++++ b/server/process.c
+@@ -1522,7 +1522,7 @@ DECL_HANDLER(open_process)
+     reply->handle = 0;
+     if (process)
+     {
+-        reply->handle = alloc_handle( current->process, process, req->access, req->attributes );
++        reply->handle = alloc_handle_user_open( current->process, process, req->access, req->attributes );
+         release_object( process );
+     }
+ }
+diff --git a/server/thread.c b/server/thread.c
+index 0620686399d..4eb5ec46d62 100644
+--- a/server/thread.c
++++ b/server/thread.c
+@@ -1738,7 +1738,7 @@ DECL_HANDLER(open_thread)
+     reply->handle = 0;
+     if (thread)
+     {
+-        reply->handle = alloc_handle( current->process, thread, req->access, req->attributes );
++        reply->handle = alloc_handle_user_open( current->process, thread, req->access, req->attributes );
+         release_object( thread );
+     }
+ }
+
+From 956d2328247657dcefd8508ee76684a6277d4013 Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Wed, 10 Jul 2024 16:53:49 -0600
+Subject: [PATCH] server: Skip inaccessible threads in (get_next_thread).
+
+CW-Bug-Id: #24016
+---
+ server/thread.c       | 10 +++++++---
+ 2 files changed, 8 insertions(+), 5 deletions(-)
+
+diff --git a/server/thread.c b/server/thread.c
+index 4eb5ec46d62..71e113692ab 100644
+--- a/server/thread.c
++++ b/server/thread.c
+@@ -2302,9 +2302,13 @@ DECL_HANDLER(get_next_thread)
+         thread = LIST_ENTRY( ptr, struct thread, entry );
+         if (thread->process == process)
+         {
+-            reply->handle = alloc_handle( current->process, thread, req->access, req->attributes );
+-            release_object( process );
+-            return;
++            reply->handle = alloc_handle_user_open( current->process, thread, req->access, req->attributes );
++            if (get_error() != STATUS_ACCESS_DENIED)
++            {
++                release_object( process );
++                return;
++            }
++            clear_error();
+         }
+         ptr = req->flags ? list_prev( &thread_list, &thread->entry )
+                          : list_next( &thread_list, &thread->entry );
+
+
