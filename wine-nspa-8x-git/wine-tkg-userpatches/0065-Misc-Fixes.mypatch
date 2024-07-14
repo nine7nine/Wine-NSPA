@@ -4277,4 +4277,152 @@ index 4eb5ec46d62..71e113692ab 100644
          ptr = req->flags ? list_prev( &thread_list, &thread->entry )
                           : list_next( &thread_list, &thread->entry );
 
+From 4c9b39964cbc8d034265249d3af2212fea657304 Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Tue, 28 Nov 2023 17:21:17 -0600
+Subject: [PATCH] ntdll: Implement
+ NtQueryInformationThread(ThreadIsTerminated).
+
+---
+ dlls/ntdll/tests/info.c        | 39 ++++++++++++++++++++++++++++++++++
+ dlls/ntdll/unix/thread.c       | 21 +++++++++++++++++-
+ dlls/wow64/process.c           |  1 +
+ include/wine/server_protocol.h |  6 ++++--
+ server/protocol.def            |  4 +++-
+ server/request.h               |  2 +-
+ server/thread.c                |  6 +++++-
+ server/trace.c                 |  2 +-
+ 8 files changed, 74 insertions(+), 7 deletions(-)
+
+diff --git a/dlls/ntdll/unix/thread.c b/dlls/ntdll/unix/thread.c
+index c4653c6a769..9e84ec3cc96 100644
+--- a/dlls/ntdll/unix/thread.c
++++ b/dlls/ntdll/unix/thread.c
+@@ -2143,6 +2143,25 @@ NTSTATUS WINAPI NtQueryInformationThread( HANDLE handle, THREADINFOCLASS class,
+         if (ret_len) *ret_len = sizeof(BOOL);
+         return STATUS_SUCCESS;
+ 
++    case ThreadIsTerminated:
++    {
++        ULONG terminated;
++
++        if (length != sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
++        SERVER_START_REQ( get_thread_info )
++        {
++            req->handle = wine_server_obj_handle( handle );
++            if (!(status = wine_server_call( req ))) terminated = !!(reply->flags & GET_THREAD_INFO_FLAG_TERMINATED);
++        }
++        SERVER_END_REQ;
++        if (!status)
++        {
++            *(ULONG *)data = terminated;
++            if (ret_len) *ret_len = sizeof(ULONG);
++        }
++        return status;
++    }
++
+     case ThreadSuspendCount:
+         if (length != sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
+         if (!data) return STATUS_ACCESS_VIOLATION;
+@@ -2196,7 +2215,7 @@ NTSTATUS WINAPI NtQueryInformationThread( HANDLE handle, THREADINFOCLASS class,
+             req->handle = wine_server_obj_handle( handle );
+             req->access = THREAD_QUERY_INFORMATION;
+             if ((status = wine_server_call( req ))) return status;
+-            *(BOOLEAN*)data = reply->dbg_hidden;
++            *(BOOLEAN*)data = !!(reply->flags & GET_THREAD_INFO_FLAG_DBG_HIDDEN);
+         }
+         SERVER_END_REQ;
+         if (ret_len) *ret_len = sizeof(BOOLEAN);
+diff --git a/dlls/wow64/process.c b/dlls/wow64/process.c
+index c144af7743c..817926d0f13 100644
+--- a/dlls/wow64/process.c
++++ b/dlls/wow64/process.c
+@@ -688,6 +688,7 @@ NTSTATUS WINAPI wow64_NtQueryInformationThread( UINT *args )
+     case ThreadEnableAlignmentFaultFixup:  /* set only */
+     case ThreadAmILastThread:  /* ULONG */
+     case ThreadIsIoPending:  /* ULONG */
++    case ThreadIsTerminated: /* ULONG */
+     case ThreadHideFromDebugger:  /* BOOLEAN */
+     case ThreadSuspendCount:  /* ULONG */
+     case ThreadPriorityBoost:   /* ULONG */
+diff --git a/include/wine/server_protocol.h b/include/wine/server_protocol.h
+index a392b532f4e..15156a12353 100644
+--- a/include/wine/server_protocol.h
++++ b/include/wine/server_protocol.h
+@@ -1162,10 +1162,12 @@ struct get_thread_info_reply
+     int          priority;
+     int          last;
+     int          suspend_count;
+-    int          dbg_hidden;
++    unsigned int flags;
+     data_size_t  desc_len;
+     /* VARARG(desc,unicode_str); */
+ };
++#define GET_THREAD_INFO_FLAG_DBG_HIDDEN 0x01
++#define GET_THREAD_INFO_FLAG_TERMINATED 0x02
+ 
+ 
+ 
+diff --git a/server/protocol.def b/server/protocol.def
+index e9195df6b65..b4d6d74d6fc 100644
+--- a/server/protocol.def
++++ b/server/protocol.def
+@@ -1085,10 +1085,12 @@ typedef struct
+     int          priority;      /* thread priority level */
+     int          last;          /* last thread in process */
+     int          suspend_count; /* thread suspend count */
+-    int          dbg_hidden;    /* thread hidden from debugger */
++    unsigned int flags;         /* GET_THREAD_INFO_FLAG_ flags */
+     data_size_t  desc_len;      /* description length in bytes */
+     VARARG(desc,unicode_str);   /* description string */
+ @END
++#define GET_THREAD_INFO_FLAG_DBG_HIDDEN 0x01
++#define GET_THREAD_INFO_FLAG_TERMINATED 0x02
+ 
+ 
+ /* Retrieve information about thread times */
+diff --git a/server/request.h b/server/request.h
+index d6043c5fdc3..89d5a621b16 100644
+--- a/server/request.h
++++ b/server/request.h
+@@ -860,7 +860,7 @@ C_ASSERT( FIELD_OFFSET(struct get_thread_info_reply, exit_code) == 40 );
+ C_ASSERT( FIELD_OFFSET(struct get_thread_info_reply, priority) == 44 );
+ C_ASSERT( FIELD_OFFSET(struct get_thread_info_reply, last) == 48 );
+ C_ASSERT( FIELD_OFFSET(struct get_thread_info_reply, suspend_count) == 52 );
+-C_ASSERT( FIELD_OFFSET(struct get_thread_info_reply, dbg_hidden) == 56 );
++C_ASSERT( FIELD_OFFSET(struct get_thread_info_reply, flags) == 56 );
+ C_ASSERT( FIELD_OFFSET(struct get_thread_info_reply, desc_len) == 60 );
+ C_ASSERT( sizeof(struct get_thread_info_reply) == 64 );
+ C_ASSERT( FIELD_OFFSET(struct get_thread_times_request, handle) == 12 );
+diff --git a/server/thread.c b/server/thread.c
+index 83ae381d5c5..50eddabe8eb 100644
+--- a/server/thread.c
++++ b/server/thread.c
+@@ -1496,8 +1496,12 @@ DECL_HANDLER(get_thread_info)
+         reply->affinity       = thread->affinity;
+         reply->last           = thread->process->running_threads == 1;
+         reply->suspend_count  = thread->suspend;
+-        reply->dbg_hidden     = thread->dbg_hidden;
+         reply->desc_len       = thread->desc_len;
++        reply->flags          = 0;
++        if (thread->dbg_hidden)
++            reply->flags |= GET_THREAD_INFO_FLAG_DBG_HIDDEN;
++        if (thread->state == TERMINATED)
++            reply->flags |= GET_THREAD_INFO_FLAG_TERMINATED;
+ 
+         if (thread->desc && get_reply_max_size())
+         {
+diff --git a/server/trace.c b/server/trace.c
+index 55ccefa1746..1b65d2b977e 100644
+--- a/server/trace.c
++++ b/server/trace.c
+@@ -1604,7 +1604,7 @@ static void dump_get_thread_info_reply( const struct get_thread_info_reply *req
+     fprintf( stderr, ", priority=%d", req->priority );
+     fprintf( stderr, ", last=%d", req->last );
+     fprintf( stderr, ", suspend_count=%d", req->suspend_count );
+-    fprintf( stderr, ", dbg_hidden=%d", req->dbg_hidden );
++    fprintf( stderr, ", flags=%08x", req->flags );
+     fprintf( stderr, ", desc_len=%u", req->desc_len );
+     dump_varargs_unicode_str( ", desc=", cur_size );
+ }
 
