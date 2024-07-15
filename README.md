@@ -30,7 +30,8 @@ _________________________
 * **Hacks to improve Wine for NSPA usage**
 * **Loader/vDSO performance Optimizations**
 * **Proton's CPU Topology Overrides**
-* **Winserver + Ntdll backports**
+* **Improved Debugging Support**
+* **Wineserver + Ntdll backports**
 * **MSVCRT backports/updates**
 * **IOSB backports/updates**
 
@@ -40,7 +41,7 @@ _________________________
 
 ### Pi Mutexes Support (Optional)
 
-I have been working on replacing Wine's pthread_mutex implementation with PI Mutexes, via Librpti: https://github.com/nine7nine/librtpi ... This means implementing Priority Inheritance within Winei-NSPA, which has some tangible benefits/advantages: 
+I have been working on replacing Wine's pthread_mutex implementation with PI Mutexes, via Librpti: https://github.com/nine7nine/librtpi ... This means implementing Priority Inheritance within Wine-NSPA, which has some tangible benefits/advantages: 
 
 __"...to bridge the gap between the glibc pthread implementation and a functionally correct priority inheritance for pthread locking primitives, such as pthread_mutex and pthread_condvar. Specifically, priority based wakeup is required for correct operation, in contrast to the more time-based ordered wakeup groups in the glibc pthread condvar implementation.".__
 
@@ -69,7 +70,46 @@ PKGBUILDs. You can find my archlinux package (sources) and kernel sources reposi
 
 _note: This is a Customized Realtime Linux kernel._
 
-I HIGHLY suggest that you use Linux-NSPA with Wine-NSPA over any other kernel. Vanilla distribution kernels are often not configured for optimal performance, and more often than not: are poorly configured for proaudio / realtime workloads.
+It is recommended to use my kernel (or another RT kernel, especially if using PI Mutexes). I do not use/test other kernels, especially not poorly configured distro kernels that aren't setup to be deterministic or offer low-latency.
+
+...and before anyone flames about this, or thinks I am flaming:
+
+__Stock Arch kernel (Cyclictest):__
+
+```
+# /dev/cpu_dma_latency set to 0us
+policy: fifo: loadavg: 3.10 1.11 0.40 1/437 3469           
+
+T: 0 ( 2745) P:90 I:200 C: 178254 Min:      1 Act:    2 Avg:    2 Max:     161
+T: 1 ( 2746) P:90 I:200 C: 178244 Min:      1 Act:    2 Avg:    2 Max:     212
+T: 2 ( 2747) P:90 I:200 C: 178235 Min:      1 Act:    2 Avg:    2 Max:     161
+T: 3 ( 2748) P:90 I:200 C: 178222 Min:      1 Act:    2 Avg:    2 Max:     510
+T: 4 ( 2749) P:90 I:200 C: 178213 Min:      1 Act:    2 Avg:    2 Max:     350
+T: 5 ( 2750) P:90 I:200 C: 178205 Min:      1 Act:    2 Avg:    2 Max:     548
+T: 6 ( 2751) P:90 I:200 C: 178199 Min:      1 Act:    2 Avg:    2 Max:     175
+T: 7 ( 2752) P:90 I:200 C: 178186 Min:      1 Act:    2 Avg:    2 Max:     619
+```
+
+__Linux-NSPA (Cyclictest):__
+
+```
+# /dev/cpu_dma_latency set to 0us
+policy: fifo: loadavg: 4.12 2.36 1.80 1/877 7224          
+
+T: 0 ( 7210) P:90 I:200 C:  38605 Min:      1 Act:    2 Avg:    2 Max:      44
+T: 1 ( 7211) P:90 I:200 C:  38583 Min:      1 Act:    1 Avg:    2 Max:      51
+T: 2 ( 7212) P:90 I:200 C:  38578 Min:      1 Act:    2 Avg:    2 Max:      55
+T: 3 ( 7213) P:90 I:200 C:  38564 Min:      1 Act:    1 Avg:    2 Max:      46
+T: 4 ( 7214) P:90 I:200 C:  38550 Min:      1 Act:    2 Avg:    2 Max:      43
+T: 5 ( 7215) P:90 I:200 C:  38538 Min:      1 Act:    2 Avg:    2 Max:      63
+T: 6 ( 7216) P:90 I:200 C:  38525 Min:      1 Act:    1 Avg:    1 Max:      43
+T: 7 ( 7217) P:90 I:200 C:  38513 Min:      1 Act:    1 Avg:    2 Max:      44
+```
+
+While not an extensive stresstest - you get the idea, stock kernels are non-deterministic.
+
+The differences are staggering.
+
 _________________________
 
 ## Windows DAW / Heavy ProAudio Application Support
