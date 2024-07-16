@@ -1,0 +1,801 @@
+// Wine-NSPA RT Implementation v4 (Wine-8.19+)
+//
+// Based partially on Wine-RT Patch, The Muse RT code, and also
+// Remi Bernon's (OG) Niceness Priority patch. Along with a
+// few other bits mixed in, modified and refactored by me.
+//
+// What does it do?
+//
+// - Implements RT && Niceness support within WineServer
+// - Implements RT support within Ntdll for most Wine Threads
+// - Implements RT support within Avrt for 'Pro Audio' MCSS threads
+// - Implements Scheduling Policy switches (FF, RR and TS)
+// - Provides several Environment Variables to allow run-time
+//   control over RT Scheduling. eg:
+//
+//   SRV_RT_POLICY=RR
+//   WINE_RT_PRIO=80
+//   WINE_RT_POLICY="RR"
+//   NTDLL_RT_PRIO=5
+//   NTDLL_RT_POLICY="RR"
+//
+//   NOTES:
+//
+//   1. THREAD_PRIORITY_TIME_CRITICAL is always SCHED_FIFO, as are
+//   certain RT threads assigned in ntdll. The rest are switchable but
+//   should be assigned SCHED_RR.
+//
+//   2. This (loosely) depends on Fsync && my Wine-NSPA tree for now.
+//
+//   TODO: Next Wine Rebase I will include the Wineserver multi-threaded
+//   code, plus the related RT code for that.. Not included here, as it
+//   requires a couple of other commits to be applied first.
+
+diff -Npur a/configure.ac b/configure.ac
+--- a/configure.ac	2024-07-16 09:07:44.274247379 -0500
++++ b/configure.ac	2024-07-16 09:05:19.490945721 -0500
+@@ -1440,7 +1440,7 @@ dnl **** Check for libdbus ****
+ if test "x$with_dbus" != "xno"
+ then
+     WINE_PACKAGE_FLAGS(DBUS,[dbus-1],,,,
+-        [AC_CHECK_HEADER([dbus/dbus.h],
++        [AC_CHECK_HEADERS([dbus/dbus.h],
+             [WINE_CHECK_SONAME(dbus-1, dbus_connection_close,,[DBUS_CFLAGS=""],[$DBUS_LIBS])],
+             [DBUS_CFLAGS=""])])
+ fi
+@@ -2129,6 +2129,25 @@ then
+   AC_DEFINE(HAVE_SCHED_SETAFFINITY, 1, [Define to 1 if you have the `sched_setaffinity' function.])
+ fi
+ 
++AC_CACHE_CHECK([for sched_setscheduler],wine_cv_have_sched_setscheduler,
++                AC_LINK_IFELSE([AC_LANG_PROGRAM(
++[[#define _GNU_SOURCE
++#include <sched.h>]], [[sched_setscheduler(0, 0, 0);]])],[wine_cv_have_sched_setscheduler=yes],[wine_cv_have_sched_setscheduler=no]))
++if test "$wine_cv_have_sched_setscheduler" = "yes"
++then
++  AC_DEFINE(HAVE_SCHED_SETSCHEDULER, 1, [Define to 1 if you have the `sched_setscheduler' function.])
++fi
++
++AC_CACHE_CHECK([for setpriority],wine_cv_have_setpriority,
++                AC_LINK_IFELSE([AC_LANG_PROGRAM(
++[[#define _GNU_SOURCE
++#include <sys/resource.h>
++#include <sys/time.h>]], [[setpriority(0, 0, 0);]])],[wine_cv_have_setpriority=yes],[wine_cv_have_setpriority=no]))
++if test "$wine_cv_have_setpriority" = "yes"
++then
++  AC_DEFINE(HAVE_SETPRIORITY, 1, [Define to 1 if you have the `setpriority' function.])
++fi
++
+ dnl **** Check for types ****
+ 
+ AC_C_INLINE
+diff -Npur a/dlls/avrt/main.c b/dlls/avrt/main.c
+--- a/dlls/avrt/main.c	2024-07-16 09:07:36.374231366 -0500
++++ b/dlls/avrt/main.c	2024-07-16 09:05:12.999931707 -0500
+@@ -71,6 +71,12 @@ HANDLE WINAPI AvSetMmThreadCharacteristi
+         return NULL;
+     }
+ 
++    if (!wcscmp(name, L"Audio") || !wcscmp(name, L"Pro Audio"))
++        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
++        
++    if (!wcscmp(name, L"Window Manager"))
++        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL);
++        
+     return (HANDLE)0x12345678;
+ }
+ 
+@@ -83,6 +89,7 @@ BOOL WINAPI AvQuerySystemResponsiveness(
+ BOOL WINAPI AvRevertMmThreadCharacteristics(HANDLE AvrtHandle)
+ {
+     FIXME("(%p): stub\n", AvrtHandle);
++    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL);
+     return TRUE;
+ }
+ 
+diff -Npur a/dlls/ntdll/unix/thread.c b/dlls/ntdll/unix/thread.c
+--- a/dlls/ntdll/unix/thread.c	2024-07-16 09:07:36.759232148 -0500
++++ b/dlls/ntdll/unix/thread.c	2024-07-16 09:05:13.010931731 -0500
+@@ -75,6 +75,64 @@ WINE_DEFAULT_DEBUG_CHANNEL(thread);
+ WINE_DECLARE_DEBUG_CHANNEL(seh);
+ WINE_DECLARE_DEBUG_CHANNEL(threadname);
+ 
++#define NSPA_RT_SYNC 1
++#if NSPA_RT_SYNC
++
++// We set threads' RT priority from within Ntdll.
++static int thread_kapc_priority = -1;
++static int thread_p_priority = -1;
++
++/* Gets the priority value from an environment variable */
++static int get_priority(const char *variable, int min, int max) {
++    const char *env = getenv(variable);
++    if (!env) return -1;
++
++    int val = atoi(env);
++    return (val >= min && val <= max) ? val : -1;
++}
++
++static int priority;
++static int fpriority;
++
++/* Sets the real-time priority for synchronization threads */
++int ntdll_set_sync_realtime(pthread_t pthread_id, int ntdll_rt_policy, int priority) {
++    const char *policyStr = getenv("NTDLL_RT_POLICY");
++    int min = sched_get_priority_min(SCHED_FIFO);
++    int max = sched_get_priority_max(SCHED_FIFO);
++
++    // Determine the scheduling policy
++    if (policyStr) {
++        if (strcmp(policyStr, "RR") == 0) ntdll_rt_policy = SCHED_RR;
++        else if (strcmp(policyStr, "FF") == 0) ntdll_rt_policy = SCHED_FIFO;
++        else if (strcmp(policyStr, "TS") == 0) ntdll_rt_policy = SCHED_OTHER;    
++    }
++
++    // Get the real-time priority
++    if ((thread_p_priority = get_priority("NTDLL_RT_PRIO", min, max - 1)) != -1) {
++        struct sched_param param;
++        param.sched_priority = thread_p_priority;
++        return pthread_setschedparam(pthread_id, ntdll_rt_policy | SCHED_RESET_ON_FORK, &param);
++    }
++    return -1; 
++}
++
++/* Sets the real-time priority for fsync threads */
++int ntdll_set_fsync_realtime(pthread_t pthread_id, int fifo, int fpriority) {
++    int min = sched_get_priority_min(SCHED_FIFO);
++    int max = sched_get_priority_max(SCHED_FIFO);
++    fifo = SCHED_FIFO;
++
++    // Get the fsync priority
++    if ((thread_kapc_priority = get_priority("WINE_RT_PRIO", min, max - 1)) != -1) {
++        thread_kapc_priority -= 2;
++        struct sched_param param;
++        param.sched_priority = thread_kapc_priority;
++        return pthread_setschedparam(pthread_id, fifo | SCHED_RESET_ON_FORK, &param);
++    }
++    return -1;
++}
++#endif
++
+ pthread_key_t teb_key = 0;
+ 
+ static LONG nb_threads = 1;
+@@ -1278,6 +1336,13 @@ NTSTATUS WINAPI NtCreateThreadEx( HANDLE
+     data_size_t len;
+     struct object_attributes *objattr;
+     struct ntdll_thread_data *thread_data;
++#if NSPA_RT_SYNC
++    // needed for setting RT for threads
++    struct sched_param parm;
++    int ntdll_rt_policy = 0;
++    pthread_attr_setschedpolicy (&pthread_attr, ntdll_rt_policy);
++    pthread_attr_setschedparam (&pthread_attr, &parm);
++#endif
+     DWORD tid = 0;
+     int request_pipe[2];
+     TEB *teb;
+@@ -1393,6 +1458,46 @@ done:
+         return status;
+     }
+     if (attr_list) update_attr_list( attr_list, &teb->ClientId, teb );
++    
++#if NSPA_RT_SYNC
++    // Give pthread_create a chance to call start_thread (pthread_info.entry),
++    // which gets the tid via pthread_functions.init_current_teb
++    // 
++    // Catch all Synchronization Threads;
++    pthread_t validPIDThread = thread_data->pthread_id;
++    pthread_t validIDXThread = thread_data->fsync_apc_idx;
++                                
++    if (validIDXThread || validPIDThread == 0) {
++        for (int i = 0; i < 100; ++i) {
++            validIDXThread = thread_data->fsync_apc_idx;
++            validPIDThread = thread_data->pthread_id;
++                               
++            if (validIDXThread || validPIDThread == 0)
++                usleep(300);
++        }
++    }
++    
++    if (validPIDThread != 0) {
++        // Fail on / filter out unsupported threads;
++        if (handle == GetCurrentThread() && (validPIDThread != thread_data->pthread_id)) { 
++            return status;
++        }
++
++        // Set RT for most threads)
++        pthread_attr_setinheritsched(&pthread_attr, PTHREAD_EXPLICIT_SCHED);
++        ntdll_set_sync_realtime(validPIDThread, ntdll_rt_policy | SCHED_RESET_ON_FORK, priority);
++    } else if (validIDXThread != 0) {
++        // Fail on / filter out unsupported threads;
++        if (handle == GetCurrentThread() && (validIDXThread != thread_data->fsync_apc_idx)) { 
++            return status;
++        }
++
++        // Set RT for fsync threads
++        pthread_attr_setinheritsched(&pthread_attr, PTHREAD_EXPLICIT_SCHED);
++        // Hardcoded to SCHED_FIFO (=> WINE_RT_PRIO priority)
++        ntdll_set_fsync_realtime(validIDXThread, SCHED_FIFO | SCHED_RESET_ON_FORK, fpriority);
++    }
++#endif
+     return STATUS_SUCCESS;
+ }
+ 
+diff -Npur a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+--- a/dlls/ntdll/unix/virtual.c	2024-07-16 09:07:43.615246045 -0500
++++ b/dlls/ntdll/unix/virtual.c	2024-07-16 09:05:13.000931709 -0500
+@@ -3662,8 +3662,10 @@ static TEB *init_teb( void *ptr, BOOL is
+     teb->StaticUnicodeString.Buffer = teb->StaticUnicodeBuffer;
+     teb->StaticUnicodeString.MaximumLength = sizeof(teb->StaticUnicodeBuffer);
+     thread_data = (struct ntdll_thread_data *)&teb->GdiTebBatch;
+-    thread_data->esync_apc_fd = -1;
++    // needed for thread data (ntdll-rt stuff)
++    thread_data->esync_apc_fd = 0;
+     thread_data->fsync_apc_idx = 0;
++    thread_data->pthread_id  =  0;
+     thread_data->request_fd = -1;
+     thread_data->reply_fd   = -1;
+     thread_data->wait_fd[0] = -1;
+diff -Npur a/include/config.h.in b/include/config.h.in
+--- a/include/config.h.in	2024-07-16 09:07:43.362245533 -0500
++++ b/include/config.h.in	2024-07-16 09:05:19.392945528 -0500
+@@ -33,6 +33,9 @@
+ /* Define to 1 if you have the <cups/ppd.h> header file. */
+ #undef HAVE_CUPS_PPD_H
+ 
++/* Define to 1 if you have the <dbus/dbus.h> header file. */
++#undef HAVE_DBUS_DBUS_H
++
+ /* Define to 1 if you have the 'dladdr1' function. */
+ #undef HAVE_DLADDR1
+ 
+@@ -360,6 +369,9 @@
+ /* Define to 1 if you have the `sched_setaffinity' function. */
+ #undef HAVE_SCHED_SETAFFINITY
+ 
++/* Define to 1 if you have the `sched_setscheduler' function. */
++#undef HAVE_SCHED_SETSCHEDULER
++
+ /* Define to 1 if you have the 'sched_yield' function. */
+ #undef HAVE_SCHED_YIELD
+ 
+@@ -378,6 +390,9 @@
+ /* Define to 1 if you have the <SDL.h> header file. */
+ #undef HAVE_SDL_H
+ 
++/* Define to 1 if you have the `setpriority' function. */
++#undef HAVE_SETPRIORITY
++
+ /* Define to 1 if you have the 'setproctitle' function. */
+ #undef HAVE_SETPROCTITLE
+ 
+diff -Npur a/server/main.c b/server/main.c
+--- a/server/main.c	2024-07-16 09:07:43.620246055 -0500
++++ b/server/main.c	2024-07-16 09:05:13.001931711 -0500
+@@ -242,6 +242,7 @@ int main( int argc, char *argv[] )
+ 
+     if (debug_level) fprintf( stderr, "wineserver: starting (pid=%ld)\n", (long) getpid() );
+     set_current_time();
++    init_scheduler();
+     init_signals();
+     init_memory();
+     init_directories( load_intl_file() );
+diff -Npur a/server/Makefile.in b/server/Makefile.in
+diff -Npur a/server/Makefile.in b/server/Makefile.in
+--- a/server/Makefile.in	2022-12-03 21:24:19.335823199 -0500
++++ b/server/Makefile.in	2022-12-03 21:08:58.831502872 -0500
+@@ -32,6 +32,7 @@ C_SRCS = \
+ 	region.c \
+ 	registry.c \
+ 	request.c \
++	scheduler.c \
+ 	semaphore.c \
+ 	serial.c \
+ 	signal.c \
+@@ -51,6 +52,6 @@ MANPAGES = \
+ 	wineserver.fr.UTF-8.man.in \
+ 	wineserver.man.in
+ 
+-UNIX_LIBS = $(LDEXECFLAGS) $(RT_LIBS) $(INOTIFY_LIBS) $(PROCSTAT_LIBS)
++UNIX_LIBS = $(LDEXECFLAGS) $(RT_LIBS) $(INOTIFY_LIBS) $(PROCSTAT_LIBS) $(DBUS_LIBS)
+ 
+ unicode_EXTRADEFS = -DNLSDIR="\"${nlsdir}\"" -DBIN_TO_NLSDIR=\"`${MAKEDEP} -R ${bindir} ${nlsdir}`\"
+diff -Npur a/server/process.c b/server/process.c
+--- a/server/process.c	2024-07-16 09:07:43.344245496 -0500
++++ b/server/process.c	2024-07-16 09:05:13.001931711 -0500
+@@ -1638,6 +1638,24 @@ DECL_HANDLER(get_process_vm_counters)
+     release_object( process );
+ }
+ 
++static void set_process_priority( struct process *process, int priority )
++{
++    struct thread *thread;
++
++    if (!process->running_threads)
++    {
++        set_error( STATUS_PROCESS_IS_TERMINATING );
++        return;
++    }
++
++    LIST_FOR_EACH_ENTRY( thread, &process->thread_list, struct thread, proc_entry )
++    {
++        set_thread_priority( thread, thread->priority );
++    }
++
++    process->priority = priority;
++}
++
+ static void set_process_affinity( struct process *process, affinity_t affinity )
+ {
+     struct thread *thread;
+@@ -1663,7 +1681,7 @@ DECL_HANDLER(set_process_info)
+ 
+     if ((process = get_process_from_handle( req->handle, PROCESS_SET_INFORMATION )))
+     {
+-        if (req->mask & SET_PROCESS_INFO_PRIORITY) process->priority = req->priority;
++        if (req->mask & SET_PROCESS_INFO_PRIORITY) set_process_priority( process, req->priority );
+         if (req->mask & SET_PROCESS_INFO_AFFINITY) set_process_affinity( process, req->affinity );
+         release_object( process );
+     }
+diff -Npur a/server/scheduler.c b/server/scheduler.c
+--- a/server/scheduler.c	1969-12-31 19:00:00.000000000 -0500
++++ b/server/scheduler.c	2024-07-16 09:05:13.008931726 -0500
+@@ -0,0 +1,194 @@
++/*
++ * Scheduler priority management
++ *
++ * Copyright (C) 2015 Joakim Hernberg
++ * Copyright (C) 2015 Sebastian Lackner
++ * Copyright (C) 2024 Jordan Johnston
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++ */
++
++#include "config.h"
++
++#define _GNU_SOURCE  /* for SCHED_BATCH, SCHED_IDLE */
++#include <assert.h>
++#include <stdio.h>
++#include <stdarg.h>
++#include <stddef.h>
++#ifdef HAVE_SYS_RESOURCE_H
++# include <sys/resource.h>
++#endif
++#ifdef HAVE_SCHED_H
++# include <sched.h>
++#endif
++#ifndef SCHED_RESET_ON_FORK
++# define SCHED_RESET_ON_FORK 0x40000000
++#endif
++#ifndef SCHED_IDLE
++ #define SCHED_IDLE 5
++#endif
++
++#include "ntstatus.h"
++#define WIN32_NO_STATUS
++#include "winternl.h"
++#include "thread.h"
++#include <unistd.h>
++#include <pthread.h>
++
++#if defined(__linux__) && defined(HAVE_SYS_RESOURCE_H) && defined(HAVE_SCHED_H)
++
++// define these for RT code
++static int srv_rt_policy = -1;
++static int thread_base_priority = -1;
++static int wine_rt_policy = -1;
++
++/* gets the priority value from an environment variable */
++static int get_priority( const char *variable, int min, int max )
++{
++    const char *env = getenv( variable );
++    if (!env) return -1;
++
++    int val = atoi(env);
++    if (val >= min && val <= max) return val;
++    
++    fprintf(stderr, "wineserver: %s should be between %d and %d\n", variable, min, max);
++    return -1;
++}
++
++/* retrieves the scheduler policy from an environment variable */
++static int get_scheduler_policy( const char *variable )
++{
++    const char *policyStr = getenv( variable );
++    if (policyStr)
++    {
++        if (strcmp(policyStr, "RR") == 0) return SCHED_RR;
++        if (strcmp(policyStr, "FF") == 0) return SCHED_FIFO;
++        if (strcmp(policyStr, "TS") == 0) return SCHED_OTHER;
++    }
++    return -1; // Default policy
++}
++
++/* initializes the scheduler */
++void init_scheduler( void )
++{
++    pthread_attr_t pthread_attr;
++    struct sched_param param = {0};
++    int min = sched_get_priority_min(SCHED_FIFO);
++    int max = sched_get_priority_max(SCHED_FIFO);
++    if (min == -1 || max == -1) return;
++
++    srv_rt_policy = get_scheduler_policy("SRV_RT_POLICY");
++    if (srv_rt_policy == -1) srv_rt_policy = SCHED_OTHER; // Default policy if not set
++
++    /* change the wineserver nice priority */
++    setpriority( PRIO_PROCESS, getpid(), -20 );
++
++    /* change the wineserver priority */
++    int priority = get_priority( "WINE_RT_PRIO", min, max - 1 );
++    if (priority != -1)
++    {
++        param.sched_priority = priority - 1;
++
++        pthread_attr_init(&pthread_attr);
++        pthread_attr_setschedpolicy(&pthread_attr, srv_rt_policy);
++        pthread_attr_setschedparam(&pthread_attr, &param);
++        pthread_attr_setinheritsched(&pthread_attr, PTHREAD_EXPLICIT_SCHED);
++        pthread_attr_setscope(&pthread_attr, PTHREAD_SCOPE_SYSTEM);
++
++        pthread_setschedparam(pthread_self(), srv_rt_policy | SCHED_RESET_ON_FORK, &param);
++    }
++
++    /* determine base priority which will be used for all threads */
++    priority = get_priority( "WINE_RT_PRIO", min, max );
++    if (priority != -1)
++    {
++        thread_base_priority = priority - 1;
++        if (debug_level)
++            fprintf(stderr, "wineserver: initialized max user thread priority to %d\n", thread_base_priority);
++    }
++}
++
++/* sets the scheduler priority of a windows thread */
++void set_scheduler_priority( struct thread *thread )
++{
++    if (thread_base_priority == -1 || thread->unix_tid == -1 || thread->fsync_idx == -1) return;
++
++    wine_rt_policy = get_scheduler_policy( "WINE_RT_POLICY" );
++    if (wine_rt_policy == -1) wine_rt_policy = SCHED_OTHER; // Default policy if not set
++
++    struct sched_param param = {0};
++
++    // Priority adjustment mappings
++    const int priority_adjustments[] = {
++        -2,  // THREAD_PRIORITY_TIME_CRITICAL
++        -4,  // THREAD_PRIORITY_HIGHEST
++        -6,  // THREAD_PRIORITY_ABOVE_NORMAL
++        -8,  // THREAD_PRIORITY_NORMAL
++        -10, // THREAD_PRIORITY_BELOW_NORMAL
++        -12, // THREAD_PRIORITY_LOWEST
++         0   // THREAD_PRIORITY_IDLE
++    };
++
++    // Determine the priority adjustment index
++    int priority_index = 6; // Default to THREAD_PRIORITY_IDLE adjustment
++    // NOTE: PROCESS_PRIOCLASS_REALTIME can be grabbed here (Surprisingly && Necessary!)
++    if (thread->priority >= THREAD_PRIORITY_TIME_CRITICAL && PROCESS_PRIOCLASS_REALTIME) priority_index = 0;
++    else if (thread->priority >= THREAD_PRIORITY_HIGHEST && PROCESS_PRIOCLASS_REALTIME) priority_index = 1;
++    else if (thread->priority >= THREAD_PRIORITY_ABOVE_NORMAL && PROCESS_PRIOCLASS_REALTIME) priority_index = 2;
++    else if (thread->priority >= THREAD_PRIORITY_NORMAL && PROCESS_PRIOCLASS_REALTIME) priority_index = 3;
++    else if (thread->priority >= THREAD_PRIORITY_BELOW_NORMAL && PROCESS_PRIOCLASS_REALTIME) priority_index = 4;
++    else if (thread->priority >= THREAD_PRIORITY_LOWEST && PROCESS_PRIOCLASS_REALTIME) priority_index = 5;
++
++    // Adjust the scheduler parameters based on priority
++    if (priority_index < 6) { // Not THREAD_PRIORITY_IDLE
++        param.sched_priority = thread_base_priority + priority_adjustments[priority_index];
++        if (thread->priority >= THREAD_PRIORITY_TIME_CRITICAL) {
++            wine_rt_policy = SCHED_FIFO;
++        }
++    } else { // THREAD_PRIORITY_IDLE
++        wine_rt_policy = SCHED_OTHER;
++    }
++
++    if (sched_setscheduler(thread->unix_tid, wine_rt_policy | SCHED_RESET_ON_FORK, &param) == -1)
++    {
++        static int once;
++        if (debug_level || !once++)
++            fprintf(stderr, "%04x: failed to change priority to %d/%d\n", thread->id, wine_rt_policy, param.sched_priority);
++        return;
++    }
++
++    if (sched_setscheduler(thread->fsync_idx, wine_rt_policy | SCHED_RESET_ON_FORK, &param) == -1)
++    {
++        static int once;
++        if (debug_level || !once++)
++            fprintf(stderr, "%04x: failed to change priority to %d/%d\n", thread->id, wine_rt_policy, param.sched_priority);
++        return;
++    }
++
++    if (debug_level)
++        fprintf(stderr, "%04x: changed priority to %d/%d\n", thread->id, wine_rt_policy, param.sched_priority);
++}
++
++#else
++
++void init_scheduler( void )
++{
++}
++
++void set_scheduler_priority( struct thread *thread )
++{
++}
++
++#endif
+diff -Npur a/server/thread.c b/server/thread.c
+--- a/server/thread.c	2024-07-16 09:07:43.620246055 -0500
++++ b/server/thread.c	2024-07-16 09:05:13.008931726 -0500
+@@ -27,6 +27,7 @@
+ #include <stdarg.h>
+ #include <stdio.h>
+ #include <stdlib.h>
++#include <stddef.h>
+ #include <string.h>
+ #include <sys/types.h>
+ #include <unistd.h>
+@@ -37,6 +38,11 @@
+ #define _WITH_CPU_SET_T
+ #include <sched.h>
+ #endif
++#include <sys/time.h>
++#include <sys/resource.h>
++
++#define HAVE_SCHED_SETSCHEDULER 1
++#define HAVE_SETPRIORITY 1
+ 
+ #include "ntstatus.h"
+ #define WIN32_NO_STATUS
+@@ -53,6 +59,22 @@
+ #include "esync.h"
+ #include "fsync.h"
+ 
++static int thread_base_priority = -1;
++
++/* gets the priority value from an environment variable */
++static int get_priority( const char *variable, int min, int max )
++{
++    const char *env;
++    int val;
++
++    env = getenv( variable );
++    if (!env) return -1;
++
++    val = atoi( env );
++    if (val >= min && val <= max) return val;
++    fprintf( stderr, "wineserver: %s should be between %d and %d\n", variable, min, max );
++    return -1;
++}
+ 
+ /* thread queues */
+ 
+@@ -116,7 +138,6 @@ static const struct object_ops thread_ap
+     thread_apc_destroy          /* destroy */
+ };
+ 
+-
+ /* thread CPU context */
+ 
+ struct context
+@@ -253,6 +274,7 @@ static inline void init_thread_structure
+     thread->state           = RUNNING;
+     thread->exit_code       = 0;
+     thread->priority        = 0;
++    thread->priority_applied = 0;
+     thread->suspend         = 0;
+     thread->dbg_hidden      = 0;
+     thread->desktop_users   = 0;
+@@ -351,6 +373,7 @@ struct thread *create_thread( int fd, st
+     thread->process = (struct process *)grab_object( process );
+     thread->desktop = 0;
+     thread->affinity = process->affinity;
++    thread->priority = process->priority;
+     if (!current) current = thread;
+ 
+     list_add_tail( &thread_list, &thread->entry );
+@@ -651,6 +674,128 @@ affinity_t get_thread_affinity( struct t
+ #define THREAD_PRIORITY_REALTIME_HIGHEST 6
+ #define THREAD_PRIORITY_REALTIME_LOWEST -7
+ 
++#if defined(HAVE_SCHED_SETSCHEDULER) || defined(HAVE_SETPRIORITY) 
++static int get_unix_priority(int priority_class, int priority) {
++    int min = sched_get_priority_min(SCHED_FIFO);
++    int max = sched_get_priority_max(SCHED_FIFO);
++    int base_priority = get_priority("WINE_RT_PRIO", min, max);
++    int get_priority(const char *variable, int min, int max);
++
++    // Priority mappings based on process priority class
++    int priority_map[6][7] = {
++        // PROCESS_PRIOCLASS_IDLE
++        { 15, 10, 8, 6, 4, 2, -15 },
++        // PROCESS_PRIOCLASS_BELOW_NORMAL
++        { 15, 8, 6, 4, 2, 0, -15 },
++        // PROCESS_PRIOCLASS_NORMAL
++        { 15, 4, 2, 0, -2, -4, -15 },
++        // PROCESS_PRIOCLASS_ABOVE_NORMAL
++        { 15, 0, -2, -4, -6, -8, -15 },
++        // PROCESS_PRIOCLASS_HIGH
++        { 15, -2, -4, -6, -8, -10, -15 },
++        // PROCESS_PRIOCLASS_REALTIME
++        { 0, -10, -8, -6, -4, -2, thread_base_priority }
++    };
++
++    // Map priority to array index
++    int priority_index = -1;
++    switch (priority) {
++        case THREAD_PRIORITY_IDLE:           priority_index = 0; break;
++        case THREAD_PRIORITY_LOWEST:         priority_index = 1; break;
++        case THREAD_PRIORITY_BELOW_NORMAL:   priority_index = 2; break;
++        case THREAD_PRIORITY_NORMAL:         priority_index = 3; break;
++        case THREAD_PRIORITY_ABOVE_NORMAL:   priority_index = 4; break;
++        case THREAD_PRIORITY_HIGHEST:        priority_index = 5; break;
++        case THREAD_PRIORITY_TIME_CRITICAL:  priority_index = 6; break;
++        default: return 0; // Handle unexpected priority values
++    }
++
++    // Ensure the priority class is within bounds
++    if (priority_class < 0 || priority_class >= sizeof(priority_map) / sizeof(priority_map[0])) {
++        return 0;
++    }
++
++    return priority_map[priority_class][priority_index];
++}
++#endif
++
++#define THREAD_PRIORITY_REALTIME_HIGHEST 6
++#define THREAD_PRIORITY_REALTIME_LOWEST -7
++
++static int wine_rt_policy = -1;
++
++int set_thread_priority( struct thread* thread, int priority )
++{
++    // Get RT policy
++    const char *policyStr = getenv("WINE_RT_POLICY");
++    // Set Min, Max Priority 
++    int max = THREAD_PRIORITY_HIGHEST;
++    int min = THREAD_PRIORITY_LOWEST;
++    if (thread->process->priority == PROCESS_PRIOCLASS_REALTIME)
++    {
++        max = THREAD_PRIORITY_REALTIME_HIGHEST;
++        min = THREAD_PRIORITY_REALTIME_LOWEST;
++    }
++
++    if ((priority < min || priority > max) &&
++        priority != THREAD_PRIORITY_IDLE &&
++        priority != THREAD_PRIORITY_TIME_CRITICAL)
++    {
++        errno = EINVAL;
++        return -1;
++    }
++
++    if (thread->priority == priority &&
++        thread->priority_applied)
++        return 0;
++
++    thread->priority = priority;
++    thread->priority_applied = 0;
++    if (thread->unix_tid == -1)
++    if (thread->fsync_idx == -1)
++            return 0;
++    
++    // Set the RT policy      
++    if (policyStr) {
++        if (strcmp(policyStr, "RR")==0)
++            wine_rt_policy = SCHED_RR;
++        else if (strcmp(policyStr, "FF")==0)
++            wine_rt_policy = SCHED_FIFO;
++    } 
++
++#ifdef __linux__
++    if (thread->process->priority == PROCESS_PRIOCLASS_REALTIME)
++    {
++#ifdef HAVE_SCHED_SETSCHEDULER
++        struct sched_param param;
++        if (sched_getparam( thread->unix_tid, &param ) != 0)
++            return 0;
++        if (sched_getparam( thread->fsync_idx, &param ) != 0)
++            return 0;
++
++        param.sched_priority = get_unix_priority( thread->process->priority, priority );
++        if (sched_setscheduler( thread->unix_tid, wine_rt_policy|SCHED_RESET_ON_FORK, &param ) == 0)
++            return 0;
++        if (sched_setscheduler( thread->fsync_idx, wine_rt_policy|SCHED_RESET_ON_FORK, &param ) == 0)
++            return 0;
++#endif
++    }
++    else
++    {
++#ifdef HAVE_SETPRIORITY
++        if (setpriority( PRIO_PROCESS, thread->unix_tid,
++                         get_unix_priority( thread->process->priority, priority ) ) == 0)
++            return 0;
++        if (setpriority( PRIO_PROCESS, thread->fsync_idx,
++                         get_unix_priority( thread->process->priority, priority ) ) == 0)
++            return 0;
++#endif
++    }
++#endif
++
++    return 0; /* ignore errors for now */
++}
++
+ /* set all information about a thread */
+ static void set_thread_info( struct thread *thread,
+                              const struct set_thread_info_request *req )
+@@ -667,9 +812,13 @@ static void set_thread_info( struct thre
+         if ((req->priority >= min && req->priority <= max) ||
+             req->priority == THREAD_PRIORITY_IDLE ||
+             req->priority == THREAD_PRIORITY_TIME_CRITICAL)
++        {    
+             thread->priority = req->priority;
+-        else
+-            set_error( STATUS_INVALID_PARAMETER );
++            // set RT threads. see: scheduler.c
++            set_scheduler_priority( thread );
++        }         
++        if (set_thread_priority( thread, req->priority ))
++            file_set_error();
+     }
+     if (req->mask & SET_THREAD_INFO_AFFINITY)
+     {
+@@ -1507,7 +1657,10 @@ DECL_HANDLER(init_first_thread)
+     if (!process->parent_id)
+         process->affinity = current->affinity = get_thread_affinity( current );
+     else
++    {
+         set_thread_affinity( current, current->affinity );
++        set_thread_priority( current, current->priority );
++    }
+ 
+     debug_level = max( debug_level, req->debug_level );
+ 
+@@ -1538,6 +1691,7 @@ DECL_HANDLER(init_thread)
+ 
+     init_thread_context( current );
+     generate_debug_event( current, DbgCreateThreadStateChange, &req->entry );
++    set_thread_priority( current, current->priority );
+     set_thread_affinity( current, current->affinity );
+ 
+     reply->suspend = (current->suspend || current->process->suspend || current->context != NULL);
+diff -Npur a/server/thread.h b/server/thread.h
+--- a/server/thread.h	2024-07-16 09:07:43.620246055 -0500
++++ b/server/thread.h	2024-07-16 09:05:13.002931713 -0500
+@@ -84,6 +84,7 @@ struct thread
+     client_ptr_t           entry_point;   /* entry point (in client address space) */
+     affinity_t             affinity;      /* affinity mask */
+     int                    priority;      /* priority level */
++    int                    priority_applied;    /* priority level successfully applied status */
+     int                    suspend;       /* suspend count */
+     int                    dbg_hidden;    /* hidden from debugger */
+     obj_handle_t           desktop;       /* desktop handle */
+@@ -124,6 +125,7 @@ extern void thread_cancel_apc( struct th
+ extern int thread_add_inflight_fd( struct thread *thread, int client, int server );
+ extern int thread_get_inflight_fd( struct thread *thread, int client );
+ extern struct token *thread_get_impersonation_token( struct thread *thread );
++extern int set_thread_priority( struct thread *thread, int priority );
+ extern int set_thread_affinity( struct thread *thread, affinity_t affinity );
+ extern int suspend_thread( struct thread *thread );
+ extern int resume_thread( struct thread *thread );
+@@ -147,4 +149,9 @@ static inline void set_win32_error( unsi
+ 
+ static inline thread_id_t get_thread_id( struct thread *thread ) { return thread->id; }
+ 
++/* scheduler functions */
++
++extern void init_scheduler( void );
++extern void set_scheduler_priority( struct thread *thread );
++
+ #endif  /* __WINE_SERVER_THREAD_H */
