@@ -4474,3 +4474,82 @@ index 5ef19ffc0d1..38ab7d8f4a0 100644
      GUID devguid;
 -- 
 GitLab
+
+From 5a6753253e28ae819c61f78c0821d826f4c7e4b7 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Tue, 30 Nov 2021 10:38:13 +0100
+Subject: [PATCH] HACK: proton: server: Close desktop immediately when last
+ user is removed.
+
+This should speed up prefix shutdown by 1s, making it only depend on
+master socket timeout.
+
+CW-Bug-Id: #19584
+---
+ server/user.h       |  1 -
+ server/winstation.c | 12 ++----------
+ 2 files changed, 2 insertions(+), 11 deletions(-)
+
+diff --git a/server/user.h b/server/user.h
+index 6f10f296200..9506665d0c0 100644
+--- a/server/user.h
++++ b/server/user.h
+@@ -71,7 +71,6 @@ struct desktop
+     struct window       *msg_window;       /* HWND_MESSAGE top window */
+     struct hook_table   *global_hooks;     /* table of global hooks on this desktop */
+     struct list          hotkeys;          /* list of registered hotkeys */
+-    struct timeout_user *close_timeout;    /* timeout before closing the desktop */
+     struct thread_input *foreground_input; /* thread input of foreground thread */
+     unsigned int         users;            /* processes and threads using this desktop */
+     struct global_cursor cursor;           /* global cursor information */
+diff --git a/server/winstation.c b/server/winstation.c
+index 76a23b197a4..9918eeef450 100644
+--- a/server/winstation.c
++++ b/server/winstation.c
+@@ -237,7 +237,6 @@ static struct desktop *create_desktop( c
+             desktop->top_window = NULL;
+             desktop->msg_window = NULL;
+             desktop->global_hooks = NULL;
+-            desktop->close_timeout = NULL;
+             desktop->foreground_input = NULL;
+             desktop->users = 0;
+             memset( &desktop->cursor, 0, sizeof(desktop->cursor) );
+@@ -299,7 +298,6 @@ static void desktop_destroy( struct obje
+     if (desktop->top_window) free_window_handle( desktop->top_window );
+     if (desktop->msg_window) free_window_handle( desktop->msg_window );
+     if (desktop->global_hooks) release_object( desktop->global_hooks );
+-    if (desktop->close_timeout) remove_timeout_user( desktop->close_timeout );
+     list_remove( &desktop->entry );
+     release_object( desktop->winstation );
+ }
+@@ -314,7 +312,6 @@ static void close_desktop_timeout( void
+ {
+     struct desktop *desktop = private;
+ 
+-    desktop->close_timeout = NULL;
+     unlink_named_object( &desktop->obj );  /* make sure no other process can open it */
+     post_desktop_message( desktop, WM_CLOSE, 0, 0 );  /* and signal the owner to quit */
+ }
+@@ -323,11 +320,6 @@ static void close_desktop_timeout( void
+ static void add_desktop_user( struct desktop *desktop )
+ {
+     desktop->users++;
+-    if (desktop->close_timeout)
+-    {
+-        remove_timeout_user( desktop->close_timeout );
+-        desktop->close_timeout = NULL;
+-    }
+ }
+ 
+ /* remove a user of the desktop and start the close timeout if necessary */
+@@ -338,8 +330,8 @@ static void remove_desktop_user( struct
+     desktop->users--;
+ 
+     /* if we have one remaining user, it has to be the manager of the desktop window */
+-    if ((process = get_top_window_owner( desktop )) && desktop->users == process->running_threads && !desktop->close_timeout)
+-        desktop->close_timeout = add_timeout_user( -TICKS_PER_SEC, close_desktop_timeout, desktop );
++    if ((process = get_top_window_owner( desktop )) && desktop->users == process->running_threads)
++        close_desktop_timeout( desktop );
+ }
+ 
+ /* set the thread default desktop handle */
