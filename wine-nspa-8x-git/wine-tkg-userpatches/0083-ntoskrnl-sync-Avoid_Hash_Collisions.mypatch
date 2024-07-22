@@ -1,0 +1,83 @@
+--- a/dlls/ntoskrnl.exe/sync.c	2024-07-21 01:08:17.352838516 -0500
++++ b/dlls/ntoskrnl.exe/sync.c	2024-07-21 01:08:28.148891913 -0500
+@@ -18,7 +18,10 @@
+  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
+  */
+ 
++#include <stdlib.h>
+ #include <limits.h>
++#include <string.h>
++#include <stdio.h>
+ 
+ #include "ntoskrnl_private.h"
+ #include "ddk/ntddk.h"
+@@ -51,6 +55,10 @@ NTSTATUS WINAPI KeWaitForMultipleObjects
+     HANDLE handles[MAXIMUM_WAIT_OBJECTS];
+     NTSTATUS ret;
+     ULONG i;
++    WCHAR uniqobj [] = { 'k','e','w','a','i','t','X','X','X','X',0 };
++    LARGE_INTEGER li;
++    unsigned int seed;
++    int hashNum;
+ 
+     TRACE("count %lu, objs %p, wait_type %u, reason %u, mode %d, alertable %u, timeout %p, wait_blocks %p.\n",
+         count, objs, wait_type, reason, mode, alertable, timeout, wait_blocks);
+@@ -59,36 +67,51 @@ NTSTATUS WINAPI KeWaitForMultipleObjects
+      * Blink stores a handle to the synchronization object,
+      * Flink stores the number of threads currently waiting on this object. */
+ 
+-    EnterCriticalSection( &sync_cs );
++    EnterCriticalSection( &sync_cs );
+     for (i = 0; i < count; i++)
+     {
+         if (objs[i]->WaitListHead.Blink == INVALID_HANDLE_VALUE)
+         {
+-            ObOpenObjectByPointer( objs[i], OBJ_KERNEL_HANDLE, NULL, SYNCHRONIZE, NULL, KernelMode, &handles[i] );
++            ObOpenObjectByPointer( objs[i], OBJ_KERNEL_HANDLE, NULL, SYNCHRONIZE, NULL, KernelMode, &handles[i] );
+             continue;
+         }
+ 
+         ++*((ULONG_PTR *)&objs[i]->WaitListHead.Flink);
+         if (!objs[i]->WaitListHead.Blink)
+         {
++            // Generate a unique name
++            QueryPerformanceCounter(&li);
++            seed = (unsigned int)(li.QuadPart & 0xFFFFFFFF);
++            srand(seed);
++            WCHAR *hashLoc = uniqobj + 6;  // Start at the 'X's
++            for (int j = 0; j < 4; j++) {
++                hashNum = rand() % 62;
++                if (hashNum < 10)
++                    hashLoc[j] = '0' + hashNum;
++                else if (hashNum < 36)
++                    hashLoc[j] = 'a' + hashNum - 10;
++                else
++                    hashLoc[j] = 'A' + hashNum - 36;
++            }
++
+             switch (objs[i]->Type)
+             {
+             case TYPE_MANUAL_TIMER:
+             case TYPE_MANUAL_EVENT:
+-                objs[i]->WaitListHead.Blink = CreateEventW( NULL, TRUE, objs[i]->SignalState, NULL );
++                objs[i]->WaitListHead.Blink = CreateEventW( NULL, TRUE, objs[i]->SignalState, uniqobj );
+                 break;
+             case TYPE_AUTO_TIMER:
+             case TYPE_AUTO_EVENT:
+-                objs[i]->WaitListHead.Blink = CreateEventW( NULL, FALSE, objs[i]->SignalState, NULL );
++                objs[i]->WaitListHead.Blink = CreateEventW( NULL, FALSE, objs[i]->SignalState, uniqobj );
+                 break;
+             case TYPE_MUTEX:
+-                objs[i]->WaitListHead.Blink = CreateMutexW( NULL, FALSE, NULL );
++                objs[i]->WaitListHead.Blink = CreateMutexW( NULL, FALSE, uniqobj );
+                 break;
+             case TYPE_SEMAPHORE:
+             {
+                 KSEMAPHORE *semaphore = CONTAINING_RECORD(objs[i], KSEMAPHORE, Header);
+-                objs[i]->WaitListHead.Blink = CreateSemaphoreW( NULL,
+-                    semaphore->Header.SignalState, semaphore->Limit, NULL );
++                objs[i]->WaitListHead.Blink = CreateSemaphoreW( NULL,
++                    semaphore->Header.SignalState, semaphore->Limit, uniqobj );
+                 break;
+             }
+             }
