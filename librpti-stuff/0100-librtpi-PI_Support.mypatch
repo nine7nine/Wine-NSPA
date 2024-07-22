@@ -7701,6 +7701,235 @@ diff -Npur a/server/thread.c b/server/thread.c
      free(surface);
  }
 
+--- a/dlls/nsiproxy.sys/icmp_echo.c	2024-07-21 18:33:21.607236587 -0500
++++ b/dlls/nsiproxy.sys/icmp_echo.c	2024-07-21 18:33:02.513153774 -0500
+@@ -29,6 +29,7 @@
+ #include <errno.h>
+ #include <limits.h>
+ #include <pthread.h>
++#include <rtpi.h>
+ #include <poll.h>
+ #include <sys/socket.h>
+ 
+@@ -117,7 +118,7 @@ struct icmp_data
+ 
+ #define MAX_HANDLES 256 /* Max number of simultaneous pings - could become dynamic if need be */
+ static struct icmp_data *handle_table[MAX_HANDLES];
+-static pthread_mutex_t handle_lock = PTHREAD_MUTEX_INITIALIZER;
++static pi_mutex_t handle_lock = PI_MUTEX_INIT(0);
+ static struct icmp_data **next_free, **next_unused = handle_table;
+ 
+ static icmp_handle handle_alloc( struct icmp_data *data )
+@@ -125,19 +126,19 @@ static icmp_handle handle_alloc( struct
+     struct icmp_data **entry;
+     icmp_handle h;
+ 
+-    pthread_mutex_lock( &handle_lock );
++    pi_mutex_lock( &handle_lock );
+     entry = next_free;
+     if (entry) next_free = *(struct icmp_data ***)entry;
+     else if (next_unused < handle_table + MAX_HANDLES) entry = next_unused++;
+     else
+     {
+-        pthread_mutex_unlock( &handle_lock );
++        pi_mutex_unlock( &handle_lock );
+         FIXME( "Exhausted icmp handle count\n" );
+         return 0;
+     }
+     *entry = data;
+     h = entry - handle_table + 1;
+-    pthread_mutex_unlock( &handle_lock );
++    pi_mutex_unlock( &handle_lock );
+     TRACE( "returning handle %x\n", h );
+     return h;
+ }
+@@ -165,14 +166,14 @@ static void handle_free( icmp_handle h )
+     struct icmp_data **entry;
+ 
+     TRACE( "%x\n", h );
+-    pthread_mutex_lock( &handle_lock );
++    pi_mutex_lock( &handle_lock );
+     entry = handle_entry( h );
+     if (entry)
+     {
+         *(struct icmp_data ***)entry = next_free;
+         next_free = entry;
+     }
+-    pthread_mutex_unlock( &handle_lock );
++    pi_mutex_unlock( &handle_lock );
+ }
+ 
+ static void ipv4_init_icmp_hdr( struct icmp_data *data, struct icmp_hdr *icmp_hdr )
+--- a/dlls/nsiproxy.sys/ndis.c	2024-07-21 18:36:12.218973925 -0500
++++ b/dlls/nsiproxy.sys/ndis.c	2024-07-21 18:35:51.201883323 -0500
+@@ -67,6 +67,7 @@
+ #endif
+ 
+ #include <pthread.h>
++#include <rtpi.h>
+ 
+ #include "ntstatus.h"
+ #define WIN32_NO_STATUS
+@@ -103,7 +104,7 @@ struct if_entry
+ };
+ 
+ static struct list if_list = LIST_INIT( if_list );
+-static pthread_mutex_t if_list_lock = PTHREAD_MUTEX_INITIALIZER;
++static pi_mutex_t if_list_lock = PI_MUTEX_INIT(0);
+ 
+ static struct if_entry *find_entry_from_index( UINT index )
+ {
+@@ -497,7 +498,7 @@ static NTSTATUS ifinfo_enumerate_all( vo
+     TRACE( "%p %d %p %d %p %d %p %d %p\n", key_data, key_size, rw_data, rw_size,
+            dynamic_data, dynamic_size, static_data, static_size, count );
+ 
+-    pthread_mutex_lock( &if_list_lock );
++    pi_mutex_lock( &if_list_lock );
+ 
+     update_if_table();
+ 
+@@ -514,7 +515,7 @@ static NTSTATUS ifinfo_enumerate_all( vo
+         num++;
+     }
+ 
+-    pthread_mutex_unlock( &if_list_lock );
++    pi_mutex_unlock( &if_list_lock );
+ 
+     if (!want_data || num <= *count) *count = num;
+     else status = STATUS_BUFFER_OVERFLOW;
+@@ -532,7 +533,7 @@ static NTSTATUS ifinfo_get_all_parameter
+     TRACE( "%p %d %p %d %p %d %p %d\n", key, key_size, rw_data, rw_size,
+            dynamic_data, dynamic_size, static_data, static_size );
+ 
+-    pthread_mutex_lock( &if_list_lock );
++    pi_mutex_lock( &if_list_lock );
+ 
+     if (!(entry = find_entry_from_luid( (const NET_LUID *)key )))
+     {
+@@ -545,7 +546,7 @@ static NTSTATUS ifinfo_get_all_parameter
+         status = STATUS_SUCCESS;
+     }
+ 
+-    pthread_mutex_unlock( &if_list_lock );
++    pi_mutex_unlock( &if_list_lock );
+ 
+     return status;
+ }
+@@ -596,7 +597,7 @@ static NTSTATUS ifinfo_get_parameter( co
+ 
+     TRACE( "%p %d %d %p %d %d\n", key, key_size, param_type, data, data_size, data_offset );
+ 
+-    pthread_mutex_lock( &if_list_lock );
++    pi_mutex_lock( &if_list_lock );
+ 
+     if (!(entry = find_entry_from_luid( (const NET_LUID *)key )))
+     {
+@@ -616,7 +617,7 @@ static NTSTATUS ifinfo_get_parameter( co
+         }
+     }
+ 
+-    pthread_mutex_unlock( &if_list_lock );
++    pi_mutex_unlock( &if_list_lock );
+ 
+     return status;
+ }
+@@ -632,7 +633,7 @@ static NTSTATUS index_luid_get_parameter
+     if (param_type != NSI_PARAM_TYPE_STATIC || data_size != sizeof(NET_LUID) || data_offset != 0)
+         return STATUS_INVALID_PARAMETER;
+ 
+-    pthread_mutex_lock( &if_list_lock );
++    pi_mutex_lock( &if_list_lock );
+ 
+     if (!(entry = find_entry_from_index( *(UINT *)key )))
+     {
+@@ -644,7 +645,7 @@ static NTSTATUS index_luid_get_parameter
+         *(NET_LUID *)data = entry->if_luid;
+         status = STATUS_SUCCESS;
+     }
+-    pthread_mutex_unlock( &if_list_lock );
++    pi_mutex_unlock( &if_list_lock );
+     return status;
+ }
+ 
+@@ -654,7 +655,7 @@ BOOL convert_unix_name_to_luid( const ch
+     BOOL ret = FALSE;
+     int updated = 0;
+ 
+-    pthread_mutex_lock( &if_list_lock );
++    pi_mutex_lock( &if_list_lock );
+ 
+     do
+     {
+@@ -670,7 +671,7 @@ BOOL convert_unix_name_to_luid( const ch
+     } while (!updated++ && update_if_table());
+ 
+ done:
+-    pthread_mutex_unlock( &if_list_lock );
++    pi_mutex_unlock( &if_list_lock );
+ 
+     return ret;
+ }
+@@ -681,7 +682,7 @@ BOOL convert_luid_to_unix_name( const NE
+     BOOL ret = FALSE;
+     int updated = 0;
+ 
+-    pthread_mutex_lock( &if_list_lock );
++    pi_mutex_lock( &if_list_lock );
+ 
+     do
+     {
+@@ -697,7 +698,7 @@ BOOL convert_luid_to_unix_name( const NE
+     } while (!updated++ && update_if_table());
+ 
+ done:
+-    pthread_mutex_unlock( &if_list_lock );
++    pi_mutex_unlock( &if_list_lock );
+ 
+     return ret;
+ }
+--- a/libs/xml2/threads.c	2024-07-21 18:30:19.629444300 -0500
++++ b/libs/xml2/threads.c	2024-07-21 18:30:08.353394958 -0500
+@@ -765,20 +765,20 @@ xmlInitThreadsInternal(void)
+             (pthread_setspecific != NULL) &&
+             (pthread_key_create != NULL) &&
+             (pthread_key_delete != NULL) &&
+-            (pthread_mutex_init != NULL) &&
+-            (pthread_mutex_destroy != NULL) &&
+-            (pthread_mutex_lock != NULL) &&
+-            (pthread_mutex_unlock != NULL) &&
+-            (pthread_cond_init != NULL) &&
+-            (pthread_cond_destroy != NULL) &&
+-            (pthread_cond_wait != NULL) &&
++            (pi_mutex_init != NULL) &&
++            (pi_mutex_destroy != NULL) &&
++            (pi_mutex_lock != NULL) &&
++            (pi_mutex_unlock != NULL) &&
++            (pi_cond_init != NULL) &&
++            (pi_cond_destroy != NULL) &&
++            (pi_cond_wait != NULL) &&
+             /*
+              * pthread_equal can be inline, resuting in -Waddress warnings.
+              * Let's assume it's available if all the other functions are.
+              */
+             /* (pthread_equal != NULL) && */
+             (pthread_self != NULL) &&
+-            (pthread_cond_signal != NULL);
++            (pi_cond_signal != NULL);
+     if (libxml_is_threaded == 0)
+         return;
+ #endif /* XML_PTHREAD_WEAK */
+--- a/dlls/nsiproxy.sys/Makefile.in	2024-07-21 18:39:17.348706101 -0500
++++ b/dlls/nsiproxy.sys/Makefile.in	2024-07-21 18:39:05.534660799 -0500
+@@ -1,7 +1,7 @@
+ MODULE    = nsiproxy.sys
+ UNIXLIB   = nsiproxy.so
+ IMPORTS   = ntoskrnl
+-UNIX_LIBS = $(PROCSTAT_LIBS)
++UNIX_LIBS = $(PROCSTAT_LIBS) -lrtpi
+ 
+ EXTRADLLFLAGS = -Wl,--subsystem,native
+ 
+
 --- a/dlls/ntdll/unix/sync.c	2024-05-05 10:59:19.982944143 -0500
 +++ b/dlls/ntdll/unix/sync.c	2024-05-05 10:59:05.863677536 -0500
 @@ -171,15 +171,15 @@ static inline int futex_wait( const LONG
