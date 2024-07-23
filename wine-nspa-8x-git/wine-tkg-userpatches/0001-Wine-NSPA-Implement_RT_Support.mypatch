@@ -1,4 +1,4 @@
-// Wine-NSPA RT Implementation v4 (Wine-8.19+)
+// Wine-NSPA RT Implementation v4.1 (Wine-8.19+)
 //
 // Based partially on Wine-RT Patch, The Muse RT code, and also
 // Remi Bernon's (OG) Niceness Priority patch. Along with a
@@ -32,8 +32,8 @@
 //   requires a couple of other commits to be applied first.
 
 diff -Npur a/configure.ac b/configure.ac
---- a/configure.ac	2024-07-16 09:07:44.274247379 -0500
-+++ b/configure.ac	2024-07-16 09:05:19.490945721 -0500
+--- a/configure.ac	2024-07-23 10:45:57.945885223 -0500
++++ b/configure.ac	2024-07-23 10:45:24.069683926 -0500
 @@ -1440,7 +1440,7 @@ dnl **** Check for libdbus ****
  if test "x$with_dbus" != "xno"
  then
@@ -70,8 +70,8 @@ diff -Npur a/configure.ac b/configure.ac
  
  AC_C_INLINE
 diff -Npur a/dlls/avrt/main.c b/dlls/avrt/main.c
---- a/dlls/avrt/main.c	2024-07-16 09:07:36.374231366 -0500
-+++ b/dlls/avrt/main.c	2024-07-16 09:05:12.999931707 -0500
+--- a/dlls/avrt/main.c	2024-07-23 10:45:49.191833552 -0500
++++ b/dlls/avrt/main.c	2024-07-23 10:45:17.642645319 -0500
 @@ -71,6 +71,12 @@ HANDLE WINAPI AvSetMmThreadCharacteristi
          return NULL;
      }
@@ -93,9 +93,38 @@ diff -Npur a/dlls/avrt/main.c b/dlls/avrt/main.c
      return TRUE;
  }
  
+diff -Npur a/dlls/kernelbase/thread.c b/dlls/kernelbase/thread.c
+--- a/dlls/kernelbase/thread.c	2024-07-23 10:45:52.728854458 -0500
++++ b/dlls/kernelbase/thread.c	2024-07-23 10:45:17.645645337 -0500
+@@ -267,13 +267,25 @@ LCID WINAPI /* DECLSPEC_HOTPATCH */ GetT
+ /**********************************************************************
+  *           GetThreadPriority   (kernelbase.@)
+  */
++#define PROCESS_PRIORITY_CLASS_REALTIME REALTIME_PRIORITY_CLASS
++
+ INT WINAPI DECLSPEC_HOTPATCH GetThreadPriority( HANDLE thread )
+ {
+     THREAD_BASIC_INFORMATION info;
++    PROCESS_PRIORITY_CLASS ppc = {0};
+ 
+     if (!set_ntstatus( NtQueryInformationThread( thread, ThreadBasicInformation,
+                                                  &info, sizeof(info), NULL )))
+         return THREAD_PRIORITY_ERROR_RETURN;
++
++    // If TIME_CRITICAL make prioclass REALTIME
++    if (info.Priority == THREAD_PRIORITY_TIME_CRITICAL)
++    {
++        ppc.PriorityClass = PROCESS_PRIORITY_CLASS_REALTIME;
++        // Set the process priority class
++        NtSetInformationProcess( GetCurrentProcess(), ProcessPriorityClass, &ppc, sizeof(ppc) );
++    }
++
+     return info.Priority;
+ }
+ 
 diff -Npur a/dlls/ntdll/unix/thread.c b/dlls/ntdll/unix/thread.c
---- a/dlls/ntdll/unix/thread.c	2024-07-16 09:07:36.759232148 -0500
-+++ b/dlls/ntdll/unix/thread.c	2024-07-16 09:05:13.010931731 -0500
+--- a/dlls/ntdll/unix/thread.c	2024-07-23 10:45:49.554835699 -0500
++++ b/dlls/ntdll/unix/thread.c	2024-07-23 10:45:17.642645319 -0500
 @@ -75,6 +75,64 @@ WINE_DEFAULT_DEBUG_CHANNEL(thread);
  WINE_DECLARE_DEBUG_CHANNEL(seh);
  WINE_DECLARE_DEBUG_CHANNEL(threadname);
@@ -223,14 +252,14 @@ diff -Npur a/dlls/ntdll/unix/thread.c b/dlls/ntdll/unix/thread.c
  }
  
 diff -Npur a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
---- a/dlls/ntdll/unix/virtual.c	2024-07-16 09:07:43.615246045 -0500
-+++ b/dlls/ntdll/unix/virtual.c	2024-07-16 09:05:13.000931709 -0500
+--- a/dlls/ntdll/unix/virtual.c	2024-07-23 10:45:57.350881719 -0500
++++ b/dlls/ntdll/unix/virtual.c	2024-07-23 10:45:17.643645325 -0500
 @@ -3662,8 +3662,10 @@ static TEB *init_teb( void *ptr, BOOL is
      teb->StaticUnicodeString.Buffer = teb->StaticUnicodeBuffer;
      teb->StaticUnicodeString.MaximumLength = sizeof(teb->StaticUnicodeBuffer);
      thread_data = (struct ntdll_thread_data *)&teb->GdiTebBatch;
 -    thread_data->esync_apc_fd = -1;
-+    // needed for thread data (ntdll-rt stuff)
++    // needed for thread data
 +    thread_data->esync_apc_fd = 0;
      thread_data->fsync_apc_idx = 0;
 +    thread_data->pthread_id  =  0;
@@ -271,21 +300,20 @@ diff -Npur a/include/config.h.in b/include/config.h.in
  #undef HAVE_SETPROCTITLE
  
 diff -Npur a/server/main.c b/server/main.c
---- a/server/main.c	2024-07-16 09:07:43.620246055 -0500
-+++ b/server/main.c	2024-07-16 09:05:13.001931711 -0500
-@@ -242,6 +242,7 @@ int main( int argc, char *argv[] )
- 
-     if (debug_level) fprintf( stderr, "wineserver: starting (pid=%ld)\n", (long) getpid() );
-     set_current_time();
-+    init_scheduler();
+--- a/server/main.c	2024-07-23 10:45:57.354881742 -0500
++++ b/server/main.c	2024-07-23 10:45:17.644645331 -0500
+@@ -245,6 +245,7 @@ int main( int argc, char *argv[] )
      init_signals();
      init_memory();
      init_directories( load_intl_file() );
++    init_scheduler();
+     init_registry();
+     main_loop();
+     return 0;
 diff -Npur a/server/Makefile.in b/server/Makefile.in
-diff -Npur a/server/Makefile.in b/server/Makefile.in
---- a/server/Makefile.in	2022-12-03 21:24:19.335823199 -0500
-+++ b/server/Makefile.in	2022-12-03 21:08:58.831502872 -0500
-@@ -32,6 +32,7 @@ C_SRCS = \
+--- a/server/Makefile.in	2024-07-23 10:45:57.354881742 -0500
++++ b/server/Makefile.in	2024-07-23 10:45:17.644645331 -0500
+@@ -32,6 +32,7 @@ SOURCES = \
  	region.c \
  	registry.c \
  	request.c \
@@ -293,17 +321,17 @@ diff -Npur a/server/Makefile.in b/server/Makefile.in
  	semaphore.c \
  	serial.c \
  	signal.c \
-@@ -51,6 +52,6 @@ MANPAGES = \
- 	wineserver.fr.UTF-8.man.in \
- 	wineserver.man.in
+@@ -49,6 +50,6 @@ SOURCES = \
+ 	wineserver.man.in \
+ 	winstation.c
  
 -UNIX_LIBS = $(LDEXECFLAGS) $(RT_LIBS) $(INOTIFY_LIBS) $(PROCSTAT_LIBS)
 +UNIX_LIBS = $(LDEXECFLAGS) $(RT_LIBS) $(INOTIFY_LIBS) $(PROCSTAT_LIBS) $(DBUS_LIBS)
  
  unicode_EXTRADEFS = -DNLSDIR="\"${nlsdir}\"" -DBIN_TO_NLSDIR=\"`${MAKEDEP} -R ${bindir} ${nlsdir}`\"
 diff -Npur a/server/process.c b/server/process.c
---- a/server/process.c	2024-07-16 09:07:43.344245496 -0500
-+++ b/server/process.c	2024-07-16 09:05:13.001931711 -0500
+--- a/server/process.c	2024-07-23 10:45:56.217875042 -0500
++++ b/server/process.c	2024-07-23 10:45:17.644645331 -0500
 @@ -1638,6 +1638,24 @@ DECL_HANDLER(get_process_vm_counters)
      release_object( process );
  }
@@ -320,7 +348,7 @@ diff -Npur a/server/process.c b/server/process.c
 +
 +    LIST_FOR_EACH_ENTRY( thread, &process->thread_list, struct thread, proc_entry )
 +    {
-+        set_thread_priority( thread, thread->priority );
++        set_thread_priority( thread, process->priority, thread->priority );
 +    }
 +
 +    process->priority = priority;
@@ -340,7 +368,7 @@ diff -Npur a/server/process.c b/server/process.c
      }
 diff -Npur a/server/scheduler.c b/server/scheduler.c
 --- a/server/scheduler.c	1969-12-31 19:00:00.000000000 -0500
-+++ b/server/scheduler.c	2024-07-16 09:05:13.008931726 -0500
++++ b/server/scheduler.c	2024-07-23 10:45:17.644645331 -0500
 @@ -0,0 +1,194 @@
 +/*
 + * Scheduler Policy && Priority Management
@@ -393,7 +421,7 @@ diff -Npur a/server/scheduler.c b/server/scheduler.c
 +
 +#if defined(__linux__) && defined(HAVE_SYS_RESOURCE_H) && defined(HAVE_SCHED_H)
 +
-+// define these for RT code
++// define for RT code
 +static int srv_rt_policy = -1;
 +static int thread_base_priority = -1;
 +static int wine_rt_policy = -1;
@@ -537,8 +565,8 @@ diff -Npur a/server/scheduler.c b/server/scheduler.c
 +
 +#endif
 diff -Npur a/server/thread.c b/server/thread.c
---- a/server/thread.c	2024-07-16 09:07:43.620246055 -0500
-+++ b/server/thread.c	2024-07-16 09:05:13.008931726 -0500
+--- a/server/thread.c	2024-07-23 10:45:57.355881748 -0500
++++ b/server/thread.c	2024-07-23 10:45:17.645645337 -0500
 @@ -27,6 +27,7 @@
  #include <stdarg.h>
  #include <stdio.h>
@@ -606,31 +634,24 @@ diff -Npur a/server/thread.c b/server/thread.c
      if (!current) current = thread;
  
      list_add_tail( &thread_list, &thread->entry );
-@@ -651,6 +674,128 @@ affinity_t get_thread_affinity( struct t
+@@ -651,6 +674,114 @@ affinity_t get_thread_affinity( struct t
  #define THREAD_PRIORITY_REALTIME_HIGHEST 6
  #define THREAD_PRIORITY_REALTIME_LOWEST -7
  
-+#if defined(HAVE_SCHED_SETSCHEDULER) || defined(HAVE_SETPRIORITY) 
++#if defined(HAVE_SCHED_SETSCHEDULER) || defined(HAVE_SETPRIORITY)
 +static int get_unix_priority(int priority_class, int priority) {
 +    int min = sched_get_priority_min(SCHED_FIFO);
 +    int max = sched_get_priority_max(SCHED_FIFO);
 +    int base_priority = get_priority("WINE_RT_PRIO", min, max);
-+    int get_priority(const char *variable, int min, int max);
 +
 +    // Priority mappings based on process priority class
 +    int priority_map[6][7] = {
-+        // PROCESS_PRIOCLASS_IDLE
-+        { 15, 10, 8, 6, 4, 2, -15 },
-+        // PROCESS_PRIOCLASS_BELOW_NORMAL
-+        { 15, 8, 6, 4, 2, 0, -15 },
-+        // PROCESS_PRIOCLASS_NORMAL
-+        { 15, 4, 2, 0, -2, -4, -15 },
-+        // PROCESS_PRIOCLASS_ABOVE_NORMAL
-+        { 15, 0, -2, -4, -6, -8, -15 },
-+        // PROCESS_PRIOCLASS_HIGH
-+        { 15, -2, -4, -6, -8, -10, -15 },
-+        // PROCESS_PRIOCLASS_REALTIME
-+        { 0, -10, -8, -6, -4, -2, thread_base_priority }
++        { 15, 10, 8, 6, 4, 2, -15 },              // PROCESS_PRIOCLASS_IDLE
++        { 15, 8, 6, 4, 2, 0, -15 },               // PROCESS_PRIOCLASS_BELOW_NORMAL
++        { 15, 4, 2, 0, -2, -4, -15 },             // PROCESS_PRIOCLASS_NORMAL
++        { 15, 0, -2, -4, -6, -8, -15 },           // PROCESS_PRIOCLASS_ABOVE_NORMAL
++        { 15, -2, -4, -6, -8, -10, -15 },         // PROCESS_PRIOCLASS_HIGH
++        { 0, -10, -8, -6, -4, -2, base_priority } // PROCESS_PRIOCLASS_REALTIME
 +    };
 +
 +    // Map priority to array index
@@ -660,23 +681,21 @@ diff -Npur a/server/thread.c b/server/thread.c
 +
 +static int wine_rt_policy = -1;
 +
-+int set_thread_priority( struct thread* thread, int priority )
-+{
++int set_thread_priority(struct thread* thread, int priority_class, int priority) {
 +    // Get RT policy
 +    const char *policyStr = getenv("WINE_RT_POLICY");
++
 +    // Set Min, Max Priority 
 +    int max = THREAD_PRIORITY_HIGHEST;
 +    int min = THREAD_PRIORITY_LOWEST;
-+    if (thread->process->priority == PROCESS_PRIOCLASS_REALTIME)
-+    {
++    if (priority_class == PROCESS_PRIOCLASS_REALTIME) {
 +        max = THREAD_PRIORITY_REALTIME_HIGHEST;
 +        min = THREAD_PRIORITY_REALTIME_LOWEST;
 +    }
 +
 +    if ((priority < min || priority > max) &&
 +        priority != THREAD_PRIORITY_IDLE &&
-+        priority != THREAD_PRIORITY_TIME_CRITICAL)
-+    {
++        priority != THREAD_PRIORITY_TIME_CRITICAL) {
 +        errno = EINVAL;
 +        return -1;
 +    }
@@ -687,46 +706,41 @@ diff -Npur a/server/thread.c b/server/thread.c
 +
 +    thread->priority = priority;
 +    thread->priority_applied = 0;
-+    if (thread->unix_tid == -1)
-+    if (thread->fsync_idx == -1)
-+            return 0;
++    if (thread->unix_tid == -1 || thread->fsync_idx == -1)
++        return 0;
 +    
 +    // Set the RT policy      
 +    if (policyStr) {
-+        if (strcmp(policyStr, "RR")==0)
++        if (strcmp(policyStr, "RR") == 0)
 +            wine_rt_policy = SCHED_RR;
-+        else if (strcmp(policyStr, "FF")==0)
++        else if (strcmp(policyStr, "FF") == 0)
 +            wine_rt_policy = SCHED_FIFO;
 +    } 
 +
 +#ifdef __linux__
-+    if (thread->process->priority == PROCESS_PRIOCLASS_REALTIME)
-+    {
 +#ifdef HAVE_SCHED_SETSCHEDULER
++    if (priority_class == PROCESS_PRIOCLASS_REALTIME) {
 +        struct sched_param param;
 +        if (sched_getparam( thread->unix_tid, &param ) != 0)
 +            return 0;
 +        if (sched_getparam( thread->fsync_idx, &param ) != 0)
 +            return 0;
 +
-+        param.sched_priority = get_unix_priority( thread->process->priority, priority );
-+        if (sched_setscheduler( thread->unix_tid, wine_rt_policy|SCHED_RESET_ON_FORK, &param ) == 0)
++        param.sched_priority = get_unix_priority(priority_class, priority);
++        if (sched_setscheduler(thread->unix_tid, wine_rt_policy | SCHED_RESET_ON_FORK, &param) == 0)
 +            return 0;
-+        if (sched_setscheduler( thread->fsync_idx, wine_rt_policy|SCHED_RESET_ON_FORK, &param ) == 0)
++        if (sched_setscheduler(thread->fsync_idx, wine_rt_policy | SCHED_RESET_ON_FORK, &param) == 0)
 +            return 0;
-+#endif
 +    }
-+    else
-+    {
++#endif
 +#ifdef HAVE_SETPRIORITY
-+        if (setpriority( PRIO_PROCESS, thread->unix_tid,
-+                         get_unix_priority( thread->process->priority, priority ) ) == 0)
-+            return 0;
-+        if (setpriority( PRIO_PROCESS, thread->fsync_idx,
-+                         get_unix_priority( thread->process->priority, priority ) ) == 0)
-+            return 0;
++    if (setpriority(PRIO_PROCESS, thread->unix_tid,
++                    get_unix_priority(priority_class, priority)) == 0)
++        return 0;
++    if (setpriority(PRIO_PROCESS, thread->fsync_idx,
++                    get_unix_priority(priority_class, priority)) == 0)
++        return 0;
 +#endif
-+    }
 +#endif
 +
 +    return 0; /* ignore errors for now */
@@ -735,7 +749,7 @@ diff -Npur a/server/thread.c b/server/thread.c
  /* set all information about a thread */
  static void set_thread_info( struct thread *thread,
                               const struct set_thread_info_request *req )
-@@ -667,9 +812,13 @@ static void set_thread_info( struct thre
+@@ -667,9 +798,13 @@ static void set_thread_info( struct thre
          if ((req->priority >= min && req->priority <= max) ||
              req->priority == THREAD_PRIORITY_IDLE ||
              req->priority == THREAD_PRIORITY_TIME_CRITICAL)
@@ -746,33 +760,33 @@ diff -Npur a/server/thread.c b/server/thread.c
 +            // set RT threads. see: scheduler.c
 +            set_scheduler_priority( thread );
 +        }         
-+        if (set_thread_priority( thread, req->priority ))
++        if (set_thread_priority( thread, thread->process->priority, req->priority ))
 +            file_set_error();
      }
      if (req->mask & SET_THREAD_INFO_AFFINITY)
      {
-@@ -1507,7 +1657,10 @@ DECL_HANDLER(init_first_thread)
+@@ -1507,7 +1642,10 @@ DECL_HANDLER(init_first_thread)
      if (!process->parent_id)
          process->affinity = current->affinity = get_thread_affinity( current );
      else
 +    {
++        set_thread_priority( current, current->process->priority, current->priority );
          set_thread_affinity( current, current->affinity );
-+        set_thread_priority( current, current->priority );
 +    }
  
      debug_level = max( debug_level, req->debug_level );
  
-@@ -1538,6 +1691,7 @@ DECL_HANDLER(init_thread)
+@@ -1538,6 +1676,7 @@ DECL_HANDLER(init_thread)
  
      init_thread_context( current );
      generate_debug_event( current, DbgCreateThreadStateChange, &req->entry );
-+    set_thread_priority( current, current->priority );
++    set_thread_priority( current, current->process->priority, current->priority );
      set_thread_affinity( current, current->affinity );
  
      reply->suspend = (current->suspend || current->process->suspend || current->context != NULL);
 diff -Npur a/server/thread.h b/server/thread.h
---- a/server/thread.h	2024-07-16 09:07:43.620246055 -0500
-+++ b/server/thread.h	2024-07-16 09:05:13.002931713 -0500
+--- a/server/thread.h	2024-07-23 10:45:57.355881748 -0500
++++ b/server/thread.h	2024-07-23 10:45:17.645645337 -0500
 @@ -84,6 +84,7 @@ struct thread
      client_ptr_t           entry_point;   /* entry point (in client address space) */
      affinity_t             affinity;      /* affinity mask */
@@ -785,7 +799,7 @@ diff -Npur a/server/thread.h b/server/thread.h
  extern int thread_add_inflight_fd( struct thread *thread, int client, int server );
  extern int thread_get_inflight_fd( struct thread *thread, int client );
  extern struct token *thread_get_impersonation_token( struct thread *thread );
-+extern int set_thread_priority( struct thread *thread, int priority );
++extern int set_thread_priority( struct thread *thread, int priority_class, int priority );
  extern int set_thread_affinity( struct thread *thread, affinity_t affinity );
  extern int suspend_thread( struct thread *thread );
  extern int resume_thread( struct thread *thread );

@@ -4830,3 +4830,933 @@ index 00b77bf6953..9046a70b359 100644
  static HRESULT alloc_user_queue(const struct queue_desc *desc, DWORD *queue_id)
 -- 
 GitLab
+
+From a5b0347f118a597005e554efa47e203237a5ae56 Mon Sep 17 00:00:00 2001
+From: Piotr Caban <piotr@codeweavers.com>
+Date: Mon, 22 Jul 2024 13:12:41 +0200
+Subject: [PATCH 1/2] ntdll: Optimize NtReadVirtualMemory for in-process reads.
+
+---
+ dlls/ntdll/unix/virtual.c | 26 ++++++++++++++++++++------
+ 1 file changed, 20 insertions(+), 6 deletions(-)
+
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index 0d88315164a..ef206d58652 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -6025,7 +6025,26 @@ NTSTATUS WINAPI NtReadVirtualMemory( HANDLE process, const void *addr, void *buf
+ {
+     unsigned int status;
+ 
+-    if (virtual_check_buffer_for_write( buffer, size ))
++    if (!virtual_check_buffer_for_write( buffer, size ))
++    {
++        status = STATUS_ACCESS_VIOLATION;
++        size = 0;
++    }
++    else if (process == GetCurrentProcess())
++    {
++        __TRY
++        {
++            memmove( buffer, (const void *)addr, size );
++            status = STATUS_SUCCESS;
++        }
++        __EXCEPT
++        {
++            status = STATUS_PARTIAL_COPY;
++            size = 0;
++        }
++        __ENDTRY
++    }
++    else
+     {
+         SERVER_START_REQ( read_process_memory )
+         {
+@@ -6036,11 +6055,6 @@ NTSTATUS WINAPI NtReadVirtualMemory( HANDLE process, const void *addr, void *buf
+         }
+         SERVER_END_REQ;
+     }
+-    else
+-    {
+-        status = STATUS_ACCESS_VIOLATION;
+-        size = 0;
+-    }
+     if (bytes_read) *bytes_read = size;
+     return status;
+ }
+-- 
+GitLab
+
+From 0ef37d1fee67d5698ebbd1e21446a1bdc3244dbb Mon Sep 17 00:00:00 2001
+From: Eric Pouech <epouech@codeweavers.com>
+Date: Sun, 30 Jun 2024 09:54:37 +0200
+Subject: [PATCH] server: Ensure in pending delete on close that path to unlink
+ are unique.
+
+This avoids the server piling up closed_fd objects when several delete are
+called on the same path.
+
+Signed-off-by: Eric Pouech <epouech@codeweavers.com>
+---
+ server/fd.c | 14 +++++++++++++-
+ 1 file changed, 13 insertions(+), 1 deletion(-)
+
+diff --git a/server/fd.c b/server/fd.c
+index f28937466fc..b5f5cd24574 100644
+--- a/server/fd.c
++++ b/server/fd.c
+@@ -1171,6 +1171,18 @@ static struct inode *get_inode( dev_t dev, ino_t ino, int unix_fd )
+     return inode;
+ }
+ 
++static int inode_has_pending_close( struct inode *inode, const char *path )
++{
++    struct fd *fd;
++
++    LIST_FOR_EACH_ENTRY( fd, &inode->closed, struct fd, inode_entry )
++    {
++        if (fd->closed && !strcmp( fd->closed->unix_name, path ))
++            return 1;
++    }
++    return 0;
++}
++
+ /* add fd to the inode list of file descriptors to close */
+ static void inode_add_closed_fd( struct inode *inode, struct closed_fd *fd )
+ {
+@@ -1187,7 +1199,7 @@ static void inode_add_closed_fd( struct inode *inode, struct closed_fd *fd )
+         free( fd->unix_name );
+         free( fd );
+     }
+-    else if (fd->disp_flags & FILE_DISPOSITION_DELETE)
++    else if ((fd->disp_flags & FILE_DISPOSITION_DELETE) && !inode_has_pending_close( inode, fd->unix_name ))
+     {
+         /* close the fd but keep the structure around for unlink */
+         if (fd->unix_fd != -1) close( fd->unix_fd );
+-- 
+GitLab
+
+From 6d6451fd6ce25ccce35cfcfc5b829940144a3f1a Mon Sep 17 00:00:00 2001
+From: Arkadiusz Hiler <ahiler@codeweavers.com>
+Date: Thu, 18 Jul 2024 16:46:15 +0300
+Subject: [PATCH] ntdll: Use the correct io callback when writing to a socket.
+
+Fixes development builds of Unreal Engine games freezing when connecting
+via Unreal Insights.
+---
+ dlls/ntdll/unix/socket.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/dlls/ntdll/unix/socket.c b/dlls/ntdll/unix/socket.c
+index 90405e005f0..53292246648 100644
+--- a/dlls/ntdll/unix/socket.c
++++ b/dlls/ntdll/unix/socket.c
+@@ -1191,7 +1191,7 @@ NTSTATUS sock_write( HANDLE handle, int fd, HANDLE event, PIO_APC_ROUTINE apc,
+     static const DWORD async_size = offsetof( struct async_send_ioctl, iov[1] );
+     struct async_send_ioctl *async;
+ 
+-    if (!(async = (struct async_send_ioctl *)alloc_fileio( async_size, async_recv_proc, handle )))
++    if (!(async = (struct async_send_ioctl *)alloc_fileio( async_size, async_send_proc, handle )))
+         return STATUS_NO_MEMORY;
+ 
+     async->count = 1;
+-- 
+GitLab
+
+From fba10c5cf56ad7ca4123d607438ef212e65ed395 Mon Sep 17 00:00:00 2001
+From: Elizabeth Figura <zfigura@codeweavers.com>
+Date: Fri, 5 Jul 2024 20:52:20 -0500
+Subject: [PATCH 1/5] server: Make pipe ends FD_TYPE_DEVICE.
+
+Named pipes are now implemented entirely on the server side, and there is no
+code that warrants a separate FD type.
+---
+ include/wine/server_protocol.h | 3 +--
+ server/named_pipe.c            | 2 +-
+ server/protocol.def            | 1 -
+ 3 files changed, 2 insertions(+), 4 deletions(-)
+
+diff --git a/include/wine/server_protocol.h b/include/wine/server_protocol.h
+index 13002594662..13e49fc9c03 100644
+--- a/include/wine/server_protocol.h
++++ b/include/wine/server_protocol.h
+@@ -1777,7 +1777,6 @@ enum server_fd_type
+     FD_TYPE_DIR,
+     FD_TYPE_SOCKET,
+     FD_TYPE_SERIAL,
+-    FD_TYPE_PIPE,
+     FD_TYPE_MAILSLOT,
+     FD_TYPE_CHAR,
+     FD_TYPE_DEVICE,
+diff --git a/server/named_pipe.c b/server/named_pipe.c
+index f3404a33c3b..dd8c14b30a9 100644
+--- a/server/named_pipe.c
++++ b/server/named_pipe.c
+@@ -1016,7 +1016,7 @@ static void pipe_end_reselect_async( struct fd *fd, struct async_queue *queue )
+ 
+ static enum server_fd_type pipe_end_get_fd_type( struct fd *fd )
+ {
+-    return FD_TYPE_PIPE;
++    return FD_TYPE_DEVICE;
+ }
+ 
+ static void pipe_end_peek( struct pipe_end *pipe_end )
+diff --git a/server/protocol.def b/server/protocol.def
+index 12eef14cc67..73c73dd1948 100644
+--- a/server/protocol.def
++++ b/server/protocol.def
+@@ -1502,7 +1502,6 @@ enum server_fd_type
+     FD_TYPE_DIR,      /* directory */
+     FD_TYPE_SOCKET,   /* socket */
+     FD_TYPE_SERIAL,   /* serial port */
+-    FD_TYPE_PIPE,     /* named pipe */
+     FD_TYPE_MAILSLOT, /* mailslot */
+     FD_TYPE_CHAR,     /* unspecified char device */
+     FD_TYPE_DEVICE,   /* Windows device file */
+-- 
+GitLab
+
+From 28a0d3105b2ca35330ef571cc2d884cae4e7fb66 Mon Sep 17 00:00:00 2001
+From: Elizabeth Figura <zfigura@codeweavers.com>
+Date: Fri, 5 Jul 2024 21:43:35 -0500
+Subject: [PATCH 3/5] server: Treat completion with error before
+ async_handoff() as error.
+
+That is, don't fill the IOSB or signal completion (unless the async was
+explicitly marked as pending, with set_async_pending().
+
+This is for convenience.
+---
+ server/async.c | 20 ++++++++++----------
+ 1 file changed, 10 insertions(+), 10 deletions(-)
+
+diff --git a/server/async.c b/server/async.c
+index 80129ac0ac3..3c9b9588c6e 100644
+--- a/server/async.c
++++ b/server/async.c
+@@ -368,16 +368,6 @@ obj_handle_t async_handoff( struct async *async, data_size_t *result, int force_
+ 
+     async->initial_status = get_error();
+ 
+-    if (!async->pending && NT_ERROR( get_error() ))
+-    {
+-        async->iosb->status = get_error();
+-        async_call_completion_callback( async );
+-
+-        close_handle( async->thread->process, async->wait_handle );
+-        async->wait_handle = 0;
+-        return 0;
+-    }
+-
+     if (get_error() != STATUS_PENDING)
+     {
+         /* status and data are already set and returned */
+@@ -393,6 +383,16 @@ obj_handle_t async_handoff( struct async *async, data_size_t *result, int force_
+         }
+     }
+ 
++    if (!async->pending && NT_ERROR( async->iosb->status ))
++    {
++        async_call_completion_callback( async );
++
++        close_handle( async->thread->process, async->wait_handle );
++        async->wait_handle = 0;
++        set_error( async->iosb->status );
++        return 0;
++    }
++
+     if (async->iosb->status != STATUS_PENDING)
+     {
+         if (result) *result = async->iosb->result;
+-- 
+GitLab
+
+
+From c984ec084b70057b73bccce48344a4e1bb1701e8 Mon Sep 17 00:00:00 2001
+From: Elizabeth Figura <zfigura@codeweavers.com>
+Date: Fri, 5 Jul 2024 21:59:40 -0500
+Subject: [PATCH 4/5] ntdll: Respect the "options" argument to
+ NtCreateMailslotFile.
+
+---
+ dlls/kernel32/sync.c           | 4 ++--
+ dlls/kernel32/tests/mailslot.c | 4 ++--
+ dlls/ntdll/unix/file.c         | 1 +
+ include/wine/server_protocol.h | 6 ++++--
+ server/mailslot.c              | 7 +++----
+ server/protocol.def            | 1 +
+ server/request.h               | 7 ++++---
+ server/trace.c                 | 1 +
+ 8 files changed, 18 insertions(+), 13 deletions(-)
+
+diff --git a/dlls/kernel32/sync.c b/dlls/kernel32/sync.c
+index 53419cd4618..44fd01002d4 100644
+--- a/dlls/kernel32/sync.c
++++ b/dlls/kernel32/sync.c
+@@ -692,8 +692,8 @@ HANDLE WINAPI CreateMailslotW( LPCWSTR lpName, DWORD nMaxMessageSize,
+     else
+         timeout.QuadPart = ((LONGLONG)0x7fffffff << 32) | 0xffffffff;
+ 
+-    if (!set_ntstatus( NtCreateMailslotFile( &handle, GENERIC_READ | SYNCHRONIZE, &attr,
+-                                             &iosb, 0, 0, nMaxMessageSize, &timeout )))
++    if (!set_ntstatus( NtCreateMailslotFile( &handle, GENERIC_READ | SYNCHRONIZE, &attr, &iosb,
++                                             FILE_SYNCHRONOUS_IO_NONALERT, 0, nMaxMessageSize, &timeout )))
+         handle = INVALID_HANDLE_VALUE;
+ 
+     RtlFreeUnicodeString( &nameW );
+diff --git a/dlls/ntdll/unix/file.c b/dlls/ntdll/unix/file.c
+index 15fdf2cb021..f0bcf72f108 100644
+--- a/dlls/ntdll/unix/file.c
++++ b/dlls/ntdll/unix/file.c
+@@ -4175,6 +4175,7 @@ NTSTATUS WINAPI NtCreateMailslotFile( HANDLE *handle, ULONG access, OBJECT_ATTRI
+     SERVER_START_REQ( create_mailslot )
+     {
+         req->access       = access;
++        req->options      = options;
+         req->max_msgsize  = msg_size;
+         req->read_timeout = timeout ? timeout->QuadPart : -1;
+         wine_server_add_data( req, objattr, len );
+diff --git a/include/wine/server_protocol.h b/include/wine/server_protocol.h
+index 13e49fc9c03..c33268ed969 100644
+--- a/include/wine/server_protocol.h
++++ b/include/wine/server_protocol.h
+@@ -4847,10 +4847,12 @@ struct create_mailslot_request
+ {
+     struct request_header __header;
+     unsigned int   access;
++    unsigned int   options;
++    char __pad_20[4];
+     timeout_t      read_timeout;
+     unsigned int   max_msgsize;
+     /* VARARG(objattr,object_attributes); */
+-    char __pad_28[4];
++    char __pad_36[4];
+ };
+ struct create_mailslot_reply
+ {
+diff --git a/server/mailslot.c b/server/mailslot.c
+index 2d8697ec9bd..b8a48c66bed 100644
+--- a/server/mailslot.c
++++ b/server/mailslot.c
+@@ -474,7 +474,7 @@ static enum server_fd_type mailslot_device_file_get_fd_type( struct fd *fd )
+ 
+ static struct mailslot *create_mailslot( struct object *root,
+                                          const struct unicode_str *name, unsigned int attr,
+-                                         int max_msgsize, timeout_t read_timeout,
++                                         unsigned int options, int max_msgsize, timeout_t read_timeout,
+                                          const struct security_descriptor *sd )
+ {
+     struct mailslot *mailslot;
+@@ -494,8 +494,7 @@ static struct mailslot *create_mailslot( struct object *root,
+         fcntl( fds[1], F_SETFL, O_NONBLOCK );
+         shutdown( fds[0], SHUT_RD );
+         mailslot->write_fd = fds[0];
+-        if ((mailslot->fd = create_anonymous_fd( &mailslot_fd_ops, fds[1], &mailslot->obj,
+-                                                 FILE_SYNCHRONOUS_IO_NONALERT )))
++        if ((mailslot->fd = create_anonymous_fd( &mailslot_fd_ops, fds[1], &mailslot->obj, options )))
+         {
+             allow_fd_caching( mailslot->fd );
+             return mailslot;
+@@ -566,7 +565,7 @@ DECL_HANDLER(create_mailslot)
+         if (!(root = get_directory_obj( current->process, objattr->rootdir ))) return;
+     }
+ 
+-    if ((mailslot = create_mailslot( root, &name, objattr->attributes, req->max_msgsize,
++    if ((mailslot = create_mailslot( root, &name, objattr->attributes, req->options, req->max_msgsize,
+                                      req->read_timeout, sd )))
+     {
+         reply->handle = alloc_handle( current->process, mailslot, req->access, objattr->attributes );
+diff --git a/server/protocol.def b/server/protocol.def
+index 73c73dd1948..829be42b334 100644
+--- a/server/protocol.def
++++ b/server/protocol.def
+@@ -3432,6 +3432,7 @@ struct handle_info
+ /* Create a mailslot */
+ @REQ(create_mailslot)
+     unsigned int   access;        /* wanted access rights */
++    unsigned int   options;
+     timeout_t      read_timeout;
+     unsigned int   max_msgsize;
+     VARARG(objattr,object_attributes); /* object attributes */
+diff --git a/server/request.h b/server/request.h
+index 572ef89987f..6158aefdb78 100644
+--- a/server/request.h
++++ b/server/request.h
+@@ -2068,9 +2068,10 @@ C_ASSERT( sizeof(struct get_system_handles_request) == 16 );
+ C_ASSERT( FIELD_OFFSET(struct get_system_handles_reply, count) == 8 );
+ C_ASSERT( sizeof(struct get_system_handles_reply) == 16 );
+ C_ASSERT( FIELD_OFFSET(struct create_mailslot_request, access) == 12 );
+-C_ASSERT( FIELD_OFFSET(struct create_mailslot_request, read_timeout) == 16 );
+-C_ASSERT( FIELD_OFFSET(struct create_mailslot_request, max_msgsize) == 24 );
+-C_ASSERT( sizeof(struct create_mailslot_request) == 32 );
++C_ASSERT( FIELD_OFFSET(struct create_mailslot_request, options) == 16 );
++C_ASSERT( FIELD_OFFSET(struct create_mailslot_request, read_timeout) == 24 );
++C_ASSERT( FIELD_OFFSET(struct create_mailslot_request, max_msgsize) == 32 );
++C_ASSERT( sizeof(struct create_mailslot_request) == 40 );
+ C_ASSERT( FIELD_OFFSET(struct create_mailslot_reply, handle) == 8 );
+ C_ASSERT( sizeof(struct create_mailslot_reply) == 16 );
+ C_ASSERT( FIELD_OFFSET(struct set_mailslot_info_request, handle) == 12 );
+diff --git a/server/trace.c b/server/trace.c
+index d10bb978f83..96dc5781d4c 100644
+--- a/server/trace.c
++++ b/server/trace.c
+@@ -4076,6 +4076,7 @@ static void dump_get_system_handles_reply( const struct get_system_handles_reply
+ static void dump_create_mailslot_request( const struct create_mailslot_request *req )
+ {
+     fprintf( stderr, " access=%08x", req->access );
++    fprintf( stderr, ", options=%08x", req->options );
+     dump_timeout( ", read_timeout=", &req->read_timeout );
+     fprintf( stderr, ", max_msgsize=%08x", req->max_msgsize );
+     dump_varargs_object_attributes( ", objattr=", cur_size );
+-- 
+GitLab
+
+
+From 3ccb87e3f8f3ee51ee5a153e8e1a9474dc00f1df Mon Sep 17 00:00:00 2001
+From: Elizabeth Figura <zfigura@codeweavers.com>
+Date: Fri, 5 Jul 2024 21:46:01 -0500
+Subject: [PATCH 5/5] server: Reimplement mailslots using server-side I/O.
+
+---
+ dlls/kernel32/tests/file.c     |   1 -
+ dlls/kernel32/tests/mailslot.c |  30 ++----
+ dlls/ntdll/unix/file.c         |  66 +-----------
+ include/wine/server_protocol.h |   3 +-
+ server/mailslot.c              | 191 ++++++++++++++++++++++++---------
+ server/protocol.def            |   1 -
+ 6 files changed, 155 insertions(+), 137 deletions(-)
+
+diff --git a/dlls/ntdll/unix/file.c b/dlls/ntdll/unix/file.c
+index f0bcf72f108..ca95dd347eb 100644
+--- a/dlls/ntdll/unix/file.c
++++ b/dlls/ntdll/unix/file.c
+@@ -4522,44 +4522,6 @@ NTSTATUS WINAPI NtQueryInformationFile( HANDLE handle, IO_STATUS_BLOCK *io,
+             }
+         }
+         break;
+-    case FileMailslotQueryInformation:
+-        {
+-            FILE_MAILSLOT_QUERY_INFORMATION *info = ptr;
+-
+-            SERVER_START_REQ( set_mailslot_info )
+-            {
+-                req->handle = wine_server_obj_handle( handle );
+-                req->flags = 0;
+-                status = wine_server_call( req );
+-                if (status == STATUS_SUCCESS)
+-                {
+-                    info->MaximumMessageSize = reply->max_msgsize;
+-                    info->MailslotQuota = 0;
+-                    info->NextMessageSize = 0;
+-                    info->MessagesAvailable = 0;
+-                    info->ReadTimeout.QuadPart = reply->read_timeout;
+-                }
+-            }
+-            SERVER_END_REQ;
+-            if (!status)
+-            {
+-                char *tmpbuf;
+-                ULONG size = info->MaximumMessageSize ? info->MaximumMessageSize : 0x10000;
+-                if (size > 0x10000) size = 0x10000;
+-                if ((tmpbuf = malloc( size )))
+-                {
+-                    if (needs_close) close( fd );
+-                    if (!server_get_unix_fd( handle, FILE_READ_DATA, &fd, &needs_close, NULL, NULL ))
+-                    {
+-                        int res = recv( fd, tmpbuf, size, MSG_PEEK );
+-                        info->MessagesAvailable = (res > 0);
+-                        info->NextMessageSize = (res >= 0) ? res : MAILSLOT_NO_MESSAGE;
+-                    }
+-                    free( tmpbuf );
+-                }
+-            }
+-        }
+-        break;
+     case FileNameInformation:
+         {
+             FILE_NAME_INFORMATION *info = ptr;
+@@ -5156,10 +5118,7 @@ static BOOL async_write_proc( void *user, ULONG_PTR *info, unsigned int *status
+                                           &needs_close, &type, NULL )))
+             break;
+ 
+-        if (!fileio->count && type == FD_TYPE_MAILSLOT)
+-            result = send( fd, fileio->buffer, 0, 0 );
+-        else
+-            result = write( fd, &fileio->buffer[fileio->already], fileio->count - fileio->already );
++        result = write( fd, &fileio->buffer[fileio->already], fileio->count - fileio->already );
+ 
+         if (needs_close) close( fd );
+ 
+@@ -6387,21 +6397,6 @@ static unsigned int get_io_timeouts( HAN
+         }
+         break;
+     }
+-    case FD_TYPE_MAILSLOT:
+-        if (is_read)
+-        {
+-            timeouts->interval = 0;  /* return as soon as we got something */
+-            SERVER_START_REQ( set_mailslot_info )
+-            {
+-                req->handle = wine_server_obj_handle( handle );
+-                req->flags = 0;
+-                if (!(status = wine_server_call( req )) &&
+-                    reply->read_timeout != TIMEOUT_INFINITE)
+-                    timeouts->total = reply->read_timeout / -10000;
+-            }
+-            SERVER_END_REQ;
+-        }
+-        break;
+     case FD_TYPE_SOCKET:
+     case FD_TYPE_CHAR:
+         if (is_read) timeouts->interval = 0;  /* return as soon as we got something */
+@@ -5428,7 +5373,6 @@ static NTSTATUS get_io_avail_mode( HANDLE handle, enum server_fd_type type, BOOL
+         }
+         break;
+     }
+-    case FD_TYPE_MAILSLOT:
+     case FD_TYPE_SOCKET:
+     case FD_TYPE_CHAR:
+         *avail_mode = TRUE;
+@@ -5703,7 +5647,7 @@ NTSTATUS WINAPI NtReadFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, vo
+                 if (total)  /* return with what we got so far */
+                     status = STATUS_SUCCESS;
+                 else
+-                    status = (type == FD_TYPE_MAILSLOT) ? STATUS_IO_TIMEOUT : STATUS_TIMEOUT;
++                    status = STATUS_TIMEOUT;
+                 goto done;
+             }
+             if (ret == -1 && errno != EINTR)
+@@ -5934,11 +5878,7 @@ NTSTATUS WINAPI NtWriteFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, v
+ 
+     for (;;)
+     {
+-        /* zero-length writes on sockets may not work with plain write(2) */
+-        if (!length && type == FD_TYPE_MAILSLOT)
+-            result = send( unix_handle, buffer, 0, 0 );
+-        else
+-            result = write( unix_handle, (const char *)buffer + total, length - total );
++        result = write( unix_handle, (const char *)buffer + total, length - total );
+ 
+         if (result >= 0)
+         {
+diff --git a/include/wine/server_protocol.h b/include/wine/server_protocol.h
+index c33268ed969..fe800aa8240 100644
+--- a/include/wine/server_protocol.h
++++ b/include/wine/server_protocol.h
+@@ -1777,7 +1777,6 @@ enum server_fd_type
+     FD_TYPE_DIR,
+     FD_TYPE_SOCKET,
+     FD_TYPE_SERIAL,
+-    FD_TYPE_MAILSLOT,
+     FD_TYPE_CHAR,
+     FD_TYPE_DEVICE,
+     FD_TYPE_NB_TYPES
+diff --git a/server/mailslot.c b/server/mailslot.c
+index b8a48c66bed..7defbccdb44 100644
+--- a/server/mailslot.c
++++ b/server/mailslot.c
+@@ -47,14 +47,21 @@
+ #include "thread.h"
+ #include "request.h"
+ 
++struct mailslot_message
++{
++    struct list entry;
++    struct iosb *iosb;
++};
++
+ struct mailslot
+ {
+     struct object       obj;
+     struct fd          *fd;
+-    int                 write_fd;
+     unsigned int        max_msgsize;
+     timeout_t           read_timeout;
+     struct list         writers;
++    struct list         messages;
++    struct async_queue  read_q;
+ };
+ 
+ /* mailslot functions */
+@@ -91,21 +98,23 @@ static const struct object_ops mailslot_ops =
+ };
+ 
+ static enum server_fd_type mailslot_get_fd_type( struct fd *fd );
+-static void mailslot_queue_async( struct fd *fd, struct async *async, int type, int count );
++static void mailslot_read( struct fd *fd, struct async *async, file_pos_t pos );
++static void mailslot_write( struct fd *fd, struct async *async, file_pos_t pos );
++static void mailslot_get_file_info( struct fd *fd, obj_handle_t handle, unsigned int info_class );
+ 
+ static const struct fd_ops mailslot_fd_ops =
+ {
+     default_fd_get_poll_events, /* get_poll_events */
+     default_poll_event,         /* poll_event */
+     mailslot_get_fd_type,       /* get_fd_type */
+-    no_fd_read,                 /* read */
+-    no_fd_write,                /* write */
++    mailslot_read,              /* read */
++    mailslot_write,             /* write */
+     no_fd_flush,                /* flush */
+-    default_fd_get_file_info,   /* get_file_info */
++    mailslot_get_file_info,     /* get_file_info */
+     no_fd_get_volume_info,      /* get_volume_info */
+     default_fd_ioctl,           /* ioctl */
+     default_fd_cancel_async,    /* cancel_async */
+-    mailslot_queue_async,       /* queue_async */
++    no_fd_queue_async,          /* queue_async */
+     default_fd_reselect_async   /* reselect_async */
+ };
+ 
+@@ -150,14 +159,16 @@ static const struct object_ops mail_writer_ops =
+ };
+ 
+ static enum server_fd_type mail_writer_get_fd_type( struct fd *fd );
++static void mail_writer_read( struct fd *fd, struct async *async, file_pos_t pos );
++static void mail_writer_write( struct fd *fd, struct async *async, file_pos_t pos );
+ 
+ static const struct fd_ops mail_writer_fd_ops =
+ {
+     default_fd_get_poll_events,  /* get_poll_events */
+     default_poll_event,          /* poll_event */
+     mail_writer_get_fd_type,     /* get_fd_type */
+-    no_fd_read,                  /* read */
+-    no_fd_write,                 /* write */
++    mail_writer_read,            /* read */
++    mail_writer_write,           /* write */
+     no_fd_flush,                 /* flush */
+     default_fd_get_file_info,    /* get_file_info */
+     no_fd_get_volume_info,       /* get_volume_info */
+@@ -258,17 +269,29 @@ static const struct fd_ops mailslot_device_fd_ops =
+     default_fd_reselect_async           /* reselect_async */
+ };
+ 
++static struct mailslot_message *get_first_message( struct mailslot *mailslot )
++{
++    if (list_empty( &mailslot->messages ))
++        return NULL;
++
++    return LIST_ENTRY( list_head( &mailslot->messages ), struct mailslot_message, entry );
++}
++
+ static void mailslot_destroy( struct object *obj)
+ {
+     struct mailslot *mailslot = (struct mailslot *) obj;
++    struct mailslot_message *message;
+ 
+-    assert( mailslot->fd );
+-
+-    if (mailslot->write_fd != -1)
++    while ((message = get_first_message( mailslot )))
+     {
+-        shutdown( mailslot->write_fd, SHUT_RDWR );
+-        close( mailslot->write_fd );
++        list_remove( &message->entry );
++        release_object( message->iosb );
++        free( message );
+     }
++
++    free_async_queue( &mailslot->read_q );
++
++    assert( mailslot->fd );
+     release_object( mailslot->fd );
+ }
+ 
+@@ -283,7 +306,85 @@ static void mailslot_dump( struct object *obj, int verbose )
+ 
+ static enum server_fd_type mailslot_get_fd_type( struct fd *fd )
+ {
+-    return FD_TYPE_MAILSLOT;
++    return FD_TYPE_DEVICE;
++}
++
++static void reselect_mailslot( struct mailslot *mailslot )
++{
++    struct mailslot_message *message;
++    struct async *async;
++
++    while ((message = get_first_message( mailslot )) && (async = find_pending_async( &mailslot->read_q )))
++    {
++        struct iosb *read_iosb = async_get_iosb( async );
++
++        if (read_iosb->out_size < message->iosb->in_size)
++        {
++            async_request_complete( async, STATUS_BUFFER_TOO_SMALL, 0, 0, NULL );
++        }
++        else
++        {
++            async_request_complete( async, STATUS_SUCCESS, message->iosb->in_size,
++                                    message->iosb->in_size, message->iosb->in_data );
++            message->iosb->in_data = NULL;
++            list_remove( &message->entry );
++            release_object( message->iosb );
++            free( message );
++        }
++
++        release_object( async );
++        release_object( read_iosb );
++    }
++}
++
++static void mailslot_read( struct fd *fd, struct async *async, file_pos_t pos )
++{
++    struct mailslot *mailslot = get_fd_user( fd );
++
++    if (mailslot->read_timeout != (timeout_t)-1)
++        async_set_timeout( async, mailslot->read_timeout ? mailslot->read_timeout : -1, STATUS_IO_TIMEOUT );
++    queue_async( &mailslot->read_q, async );
++    reselect_mailslot( mailslot );
++    set_error( STATUS_PENDING );
++}
++
++static void mailslot_write( struct fd *fd, struct async *async, file_pos_t pos )
++{
++    set_error( STATUS_INVALID_PARAMETER );
++}
++
++static void mailslot_get_file_info( struct fd *fd, obj_handle_t handle, unsigned int info_class )
++{
++    struct mailslot *mailslot = get_fd_user( fd );
++
++    switch (info_class)
++    {
++    case FileMailslotQueryInformation:
++        {
++            FILE_MAILSLOT_QUERY_INFORMATION *info;
++            struct mailslot_message *message;
++
++            if (get_reply_max_size() < sizeof(*info))
++            {
++                set_error( STATUS_INFO_LENGTH_MISMATCH );
++                return;
++            }
++
++            if (!(info = set_reply_data_size( sizeof(*info) ))) return;
++            info->MaximumMessageSize = mailslot->max_msgsize;
++            info->MailslotQuota = 0;
++            info->MessagesAvailable = list_count( &mailslot->messages );
++            if ((message = get_first_message( mailslot )))
++                info->NextMessageSize = message->iosb->in_size;
++            else
++                info->NextMessageSize = MAILSLOT_NO_MESSAGE;
++            info->ReadTimeout.QuadPart = mailslot->read_timeout;
++            break;
++        }
++
++    default:
++        default_fd_get_file_info( fd, handle, info_class );
++    }
+ }
+ 
+ static struct fd *mailslot_get_fd( struct object *obj )
+@@ -318,7 +419,6 @@ static struct object *mailslot_open_file( struct object *obj, unsigned int acces
+ {
+     struct mailslot *mailslot = (struct mailslot *)obj;
+     struct mail_writer *writer;
+-    int unix_fd;
+ 
+     if (!(sharing & FILE_SHARE_READ))
+     {
+@@ -341,23 +441,15 @@ static struct object *mailslot_open_file( struct object *obj, unsigned int acces
+         }
+     }
+ 
+-    if ((unix_fd = dup( mailslot->write_fd )) == -1)
+-    {
+-        file_set_error();
+-        return NULL;
+-    }
+     if (!(writer = alloc_object( &mail_writer_ops )))
+-    {
+-        close( unix_fd );
+         return NULL;
+-    }
+     grab_object( mailslot );
+     writer->mailslot = mailslot;
+     writer->access   = mail_writer_map_access( &writer->obj, access );
+     writer->sharing  = sharing;
+     list_add_head( &mailslot->writers, &writer->entry );
+ 
+-    if (!(writer->fd = create_anonymous_fd( &mail_writer_fd_ops, unix_fd, &writer->obj, options )))
++    if (!(writer->fd = alloc_pseudo_fd( &mail_writer_fd_ops, &writer->obj, options )))
+     {
+         release_object( writer );
+         return NULL;
+@@ -366,18 +458,6 @@ static struct object *mailslot_open_file( struct object *obj, unsigned int acces
+     return &writer->obj;
+ }
+ 
+-static void mailslot_queue_async( struct fd *fd, struct async *async, int type, int count )
+-{
+-    struct mailslot *mailslot = get_fd_user( fd );
+-
+-    assert(mailslot->obj.ops == &mailslot_ops);
+-
+-    fd_queue_async( fd, async, type );
+-    async_set_timeout( async, mailslot->read_timeout ? mailslot->read_timeout : -1,
+-                       STATUS_IO_TIMEOUT );
+-    set_error( STATUS_PENDING );
+-}
+-
+ static void mailslot_device_dump( struct object *obj, int verbose )
+ {
+     fputs( "Mailslot device\n", stderr );
+@@ -478,29 +558,21 @@ static struct mailslot *create_mailslot( struct object *root,
+                                          const struct security_descriptor *sd )
+ {
+     struct mailslot *mailslot;
+-    int fds[2];
+ 
+     if (!(mailslot = create_named_object( root, &mailslot_ops, name, attr, sd ))) return NULL;
+ 
+     mailslot->fd = NULL;
+-    mailslot->write_fd = -1;
+     mailslot->max_msgsize = max_msgsize;
+     mailslot->read_timeout = read_timeout;
+     list_init( &mailslot->writers );
++    list_init( &mailslot->messages );
++    init_async_queue( &mailslot->read_q );
+ 
+-    if (!socketpair( PF_UNIX, SOCK_DGRAM, 0, fds ))
++    if ((mailslot->fd = alloc_pseudo_fd( &mailslot_fd_ops, &mailslot->obj, options )))
+     {
+-        fcntl( fds[0], F_SETFL, O_NONBLOCK );
+-        fcntl( fds[1], F_SETFL, O_NONBLOCK );
+-        shutdown( fds[0], SHUT_RD );
+-        mailslot->write_fd = fds[0];
+-        if ((mailslot->fd = create_anonymous_fd( &mailslot_fd_ops, fds[1], &mailslot->obj, options )))
+-        {
+-            allow_fd_caching( mailslot->fd );
+-            return mailslot;
+-        }
++        allow_fd_caching( mailslot->fd );
++        return mailslot;
+     }
+-    else file_set_error();
+ 
+     release_object( mailslot );
+     return NULL;
+@@ -522,7 +594,26 @@ static void mail_writer_destroy( struct object *obj)
+ 
+ static enum server_fd_type mail_writer_get_fd_type( struct fd *fd )
+ {
+-    return FD_TYPE_MAILSLOT;
++    return FD_TYPE_DEVICE;
++}
++
++static void mail_writer_read( struct fd *fd, struct async *async, file_pos_t pos )
++{
++    set_error( STATUS_INVALID_PARAMETER );
++}
++
++static void mail_writer_write( struct fd *fd, struct async *async, file_pos_t pos )
++{
++    struct mail_writer *writer = get_fd_user( fd );
++    struct mailslot_message *message;
++    data_size_t size;
++
++    if (!(message = mem_alloc( sizeof(*message) ))) return;
++    message->iosb = async_get_iosb( async );
++    size = message->iosb->in_size;
++    list_add_tail( &writer->mailslot->messages, &message->entry );
++    reselect_mailslot( writer->mailslot );
++    async_request_complete( async, STATUS_SUCCESS, size, 0, NULL );
+ }
+ 
+ static struct fd *mail_writer_get_fd( struct object *obj )
+diff --git a/server/protocol.def b/server/protocol.def
+index 829be42b334..91752612eea 100644
+--- a/server/protocol.def
++++ b/server/protocol.def
+@@ -1502,7 +1502,6 @@ enum server_fd_type
+     FD_TYPE_DIR,      /* directory */
+     FD_TYPE_SOCKET,   /* socket */
+     FD_TYPE_SERIAL,   /* serial port */
+-    FD_TYPE_MAILSLOT, /* mailslot */
+     FD_TYPE_CHAR,     /* unspecified char device */
+     FD_TYPE_DEVICE,   /* Windows device file */
+     FD_TYPE_NB_TYPES
+-- 
+GitLab
+
+From e285015e53896814701e1bb1ce9e675e29625097 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Thu, 30 Nov 2023 17:29:05 +0100
+Subject: [PATCH] winex11: Always synchronize gdi_display after window
+ creation.
+
+---
+ dlls/winex11.drv/window.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/dlls/winex11.drv/window.c b/dlls/winex11.drv/window.c
+index e68c4abdf93..696edd6675c 100644
+--- a/dlls/winex11.drv/window.c
++++ b/dlls/winex11.drv/window.c
+@@ -1750,7 +1750,6 @@ Window create_client_window( HWND hwnd, const XVisualInfo *visual )
+     cx = min( max( 1, data->client_rect.right - data->client_rect.left ), 65535 );
+     cy = min( max( 1, data->client_rect.bottom - data->client_rect.top ), 65535 );
+ 
+-    XSync( gdi_display, False ); /* make sure whole_window is known from gdi_display */
+     ret = data->client_window = XCreateWindow( gdi_display,
+                                                data->whole_window ? data->whole_window : dummy_parent,
+                                                x, y, cx, cy, 0, default_visual.depth, InputOutput,
+@@ -1837,6 +1836,7 @@ static void create_whole_window( struct x11drv_win_data *data )
+     sync_window_opacity( data->display, data->whole_window, key, alpha, layered_flags );
+ 
+     XFlush( data->display );  /* make sure the window exists before we start painting to it */
++    XSync( gdi_display, False ); /* make sure whole_window is known from gdi_display */
+ 
+ done:
+     if (win_rgn) NtGdiDeleteObjectApp( win_rgn );
+
+From 3ad11961b6af4dc3b7238152719658d89e7fc4ea Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Mon, 13 Sep 2021 00:39:05 +0300
+Subject: [PATCH] winex11.drv: Always sync windowless GL drawables on size
+ change.
+
+CW-Bug-ID: #19216
+---
+ dlls/winex11.drv/window.c | 12 +++++++-----
+ 1 file changed, 7 insertions(+), 5 deletions(-)
+
+diff --git a/dlls/winex11.drv/window.c b/dlls/winex11.drv/window.c
+index a088b45a2a0..0df0c91aca9 100644
+--- a/dlls/winex11.drv/window.c
++++ b/dlls/winex11.drv/window.c
+@@ -2810,6 +2810,7 @@ void X11DRV_WindowPosChanged( HWND hwnd, HWND insert_after, UINT swp_flags,
+     struct x11drv_win_data *data;
+     UINT new_style = NtUserGetWindowLongW( hwnd, GWL_STYLE );
+     RECT old_window_rect, old_whole_rect, old_client_rect;
++    BOOL needs_resize;
+     int event_type;
+ 
+     if (!(data = get_win_data( hwnd ))) return;
+@@ -2870,13 +2871,13 @@ void X11DRV_WindowPosChanged( HWND hwnd, HWND insert_after, UINT swp_flags,
+ 
+     sync_client_position( data, &old_client_rect, &old_whole_rect );
+ 
++    needs_resize = !data->client_window && (data->client_rect.right - data->client_rect.left !=
++                   old_client_rect.right - old_client_rect.left ||
++                   data->client_rect.bottom - data->client_rect.top !=
++                   old_client_rect.bottom - old_client_rect.top);
++
+     if (!data->whole_window)
+     {
+-        BOOL needs_resize = (!data->client_window &&
+-                             (data->client_rect.right - data->client_rect.left !=
+-                              old_client_rect.right - old_client_rect.left ||
+-                              data->client_rect.bottom - data->client_rect.top !=
+-                              old_client_rect.bottom - old_client_rect.top));
+         release_win_data( data );
+         if (needs_resize) sync_gl_drawable( hwnd, FALSE );
+         return;
+@@ -2951,6 +2952,7 @@ void X11DRV_WindowPosChanged( HWND hwnd, HWND insert_after, UINT swp_flags,
+         data->surface->funcs->flush( data->surface );
+ 
+     release_win_data( data );
++    if (needs_resize) sync_gl_drawable( hwnd, FALSE );
+ }
+ 
+ /* check if the window icon should be hidden (i.e. moved off-screen) */
+
