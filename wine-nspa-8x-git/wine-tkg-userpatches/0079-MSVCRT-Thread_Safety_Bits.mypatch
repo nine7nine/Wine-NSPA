@@ -5,31 +5,6 @@
 
 --- a/dlls/msvcrt/file.c	2024-07-17 10:47:59.072402102 -0500
 +++ b/dlls/msvcrt/file.c	2024-07-17 10:47:11.042591224 -0500
-@@ -785,11 +785,13 @@ void msvcrt_init_io(void)
-   memset(MSVCRT__iob, 0, 3 * sizeof(file_crit));
-   for (i = 0; i < 3; i++)
-   {
--    /* FILE structs for stdin/out/err are static and never deleted */
--    MSVCRT__iob[i]._file = get_ioinfo_nolock(i)->handle == MSVCRT_NO_CONSOLE ?
--        MSVCRT_NO_CONSOLE_FD : i;
--    MSVCRT__iob[i]._tmpfname = NULL;
--    MSVCRT__iob[i]._flag = (i == 0) ? _IOREAD : _IOWRT;
-+      /* FILE structs for stdin/out/err are static and never deleted */
-+      file_crit* f = (file_crit*)&MSVCRT__iob[i];
-+      f->file._file = get_ioinfo_nolock(i)->handle == MSVCRT_NO_CONSOLE ?
-+          MSVCRT_NO_CONSOLE_FD : i;
-+      f->file._tmpfname = NULL;
-+      f->file._flag = (i == 0) ? _IOREAD : _IOWRT;
-+      InitializeCriticalSection(&f->crit);
-   }
-   MSVCRT_stream_idx = 3;
- }
- 
-
-// Part 2: refactor the whole function for thread safety.
-
---- a/dlls/msvcrt/file.c	2024-07-23 20:08:14.634116649 -0500
-+++ b/dlls/msvcrt/file.c	2024-07-23 19:46:12.381286886 -0500
 @@ -273,6 +273,7 @@ static const ULONGLONG WCCOM = TOUL('c')
   * protects fd critical sections creation code.
   */
@@ -38,7 +13,7 @@
  static CRITICAL_SECTION_DEBUG MSVCRT_file_cs_debug =
  {
      0, 0, &MSVCRT_file_cs,
-@@ -690,110 +691,92 @@ BOOL msvcrt_create_io_inherit_block(WORD
+@@ -690,108 +691,90 @@ BOOL msvcrt_create_io_inherit_block(WORD
   */
  void msvcrt_init_io(void)
  {
@@ -81,29 +56,10 @@
 -    HANDLE h = GetStdHandle(STD_INPUT_HANDLE);
 -    DWORD flags = WX_OPEN | WX_TEXT;
 -    DWORD type = GetFileType(h);
--
--    if (type == FILE_TYPE_UNKNOWN) {
--        h = MSVCRT_NO_CONSOLE;
--        flags |= WX_TTY;
--    } else if ((type & 0xf) == FILE_TYPE_CHAR) {
--        flags |= WX_TTY;
--    } else if ((type & 0xf) == FILE_TYPE_PIPE) {
--        flags |= WX_PIPE;
--    }
--
--    msvcrt_set_fd(fdinfo, h, flags);
--  }
--  release_ioinfo(fdinfo);
 +    STARTUPINFOA si;
 +    int i;
 +    ioinfo *fdinfo;
  
--  fdinfo = get_ioinfo_alloc_fd(STDOUT_FILENO);
--  if (!(fdinfo->wxflag & WX_OPEN) || fdinfo->handle == INVALID_HANDLE_VALUE) {
--    HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
--    DWORD flags = WX_OPEN | WX_TEXT;
--    DWORD type = GetFileType(h);
--
 -    if (type == FILE_TYPE_UNKNOWN) {
 -        h = MSVCRT_NO_CONSOLE;
 -        flags |= WX_TTY;
@@ -147,9 +103,9 @@
 +    {
 +        EnterCriticalSection(&fd_cs[i]);
  
--  fdinfo = get_ioinfo_alloc_fd(STDERR_FILENO);
+-  fdinfo = get_ioinfo_alloc_fd(STDOUT_FILENO);
 -  if (!(fdinfo->wxflag & WX_OPEN) || fdinfo->handle == INVALID_HANDLE_VALUE) {
--    HANDLE h = GetStdHandle(STD_ERROR_HANDLE);
+-    HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
 -    DWORD flags = WX_OPEN | WX_TEXT;
 -    DWORD type = GetFileType(h);
 -
@@ -184,42 +140,56 @@
 -    msvcrt_set_fd(fdinfo, h, flags);
 -  }
 -  release_ioinfo(fdinfo);
-+    // Print handles
 +    TRACE(":handles (%p)(%p)(%p)\n", get_ioinfo_nolock(STDIN_FILENO)->handle,
 +          get_ioinfo_nolock(STDOUT_FILENO)->handle,
 +          get_ioinfo_nolock(STDERR_FILENO)->handle);
-+
+ 
+-  fdinfo = get_ioinfo_alloc_fd(STDERR_FILENO);
+-  if (!(fdinfo->wxflag & WX_OPEN) || fdinfo->handle == INVALID_HANDLE_VALUE) {
+-    HANDLE h = GetStdHandle(STD_ERROR_HANDLE);
+-    DWORD flags = WX_OPEN | WX_TEXT;
+-    DWORD type = GetFileType(h);
+-
+-    if (type == FILE_TYPE_UNKNOWN) {
+-        h = MSVCRT_NO_CONSOLE;
+-        flags |= WX_TTY;
+-    } else if ((type & 0xf) == FILE_TYPE_CHAR) {
+-        flags |= WX_TTY;
+-    } else if ((type & 0xf) == FILE_TYPE_PIPE) {
+-        flags |= WX_PIPE;
+-    }
 +    // Initialize FILE structs for stdin, stdout, and stderr
 +    memset(MSVCRT__iob, 0, 3 * sizeof(FILE));
 +    for (i = 0; i < 3; i++)
 +    {
-+        EnterCriticalSection(&fd_cs[i]); // Ensure thread safety for each file descriptor
++          EnterCriticalSection(&fd_cs[i]);
+ 
+-    msvcrt_set_fd(fdinfo, h, flags);
+-  }
+-  release_ioinfo(fdinfo);
++          /* FILE structs for stdin/out/err are static and never deleted */
++          MSVCRT__iob[i]._file = get_ioinfo_nolock(i)->handle == MSVCRT_NO_CONSOLE ?
++              MSVCRT_NO_CONSOLE_FD : i;
++          MSVCRT__iob[i]._tmpfname = NULL;
++          MSVCRT__iob[i]._flag = (i == 0) ? _IOREAD : _IOWRT;
  
 -  TRACE(":handles (%p)(%p)(%p)\n", get_ioinfo_nolock(STDIN_FILENO)->handle,
 -        get_ioinfo_nolock(STDOUT_FILENO)->handle,
 -        get_ioinfo_nolock(STDERR_FILENO)->handle);
-+        file_crit* f = (file_crit*)&MSVCRT__iob[i];
-+        f->file._file = get_ioinfo_nolock(i)->handle == MSVCRT_NO_CONSOLE ?
-+            MSVCRT_NO_CONSOLE_FD : i;
-+        f->file._tmpfname = NULL;
-+        f->file._flag = (i == 0) ? _IOREAD : _IOWRT;
-+        InitializeCriticalSection(&f->crit);
-+        
-+        LeaveCriticalSection(&fd_cs[i]);
-+    }
- 
+-
 -  memset(MSVCRT__iob,0,3*sizeof(FILE));
 -  for (i = 0; i < 3; i++)
 -  {
--      /* FILE structs for stdin/out/err are static and never deleted */
--      file_crit* f = (file_crit*)&MSVCRT__iob[i];
--      f->file._file = get_ioinfo_nolock(i)->handle == MSVCRT_NO_CONSOLE ?
--          MSVCRT_NO_CONSOLE_FD : i;
--      f->file._tmpfname = NULL;
--      f->file._flag = (i == 0) ? _IOREAD : _IOWRT;
--      InitializeCriticalSection(&f->crit);
+-    /* FILE structs for stdin/out/err are static and never deleted */
+-    MSVCRT__iob[i]._file = get_ioinfo_nolock(i)->handle == MSVCRT_NO_CONSOLE ?
+-        MSVCRT_NO_CONSOLE_FD : i;
+-    MSVCRT__iob[i]._tmpfname = NULL;
+-    MSVCRT__iob[i]._flag = (i == 0) ? _IOREAD : _IOWRT;
 -  }
 -  MSVCRT_stream_idx = 3;
++          LeaveCriticalSection(&fd_cs[i]);
++    }
++
 +    MSVCRT_stream_idx = 3;
  }
  
