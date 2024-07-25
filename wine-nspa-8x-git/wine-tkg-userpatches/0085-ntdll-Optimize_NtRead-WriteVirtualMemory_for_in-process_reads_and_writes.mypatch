@@ -1,0 +1,92 @@
+// ntdll: Optimize NtReadVirtualMemory for in-process reads
+// ntdll: Optimize NtWriteVirtualMemory for in-process writes
+//
+// based on Piotr Caban's NtReadVirtualMemory for in-process reads
+// patch, but also extended for NtWriteVirtualMemory, as a similar
+// aproach should work there, as well.
+
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index 0d88315164a..ef206d58652 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -6626,7 +6623,26 @@ NTSTATUS WINAPI NtWriteVirtualMemory( HA
+ {
+     unsigned int status;
+ 
+-    if (virtual_check_buffer_for_read( buffer, size ))
++    if (!virtual_check_buffer_for_read( buffer, size ))
++    {
++        status = STATUS_PARTIAL_COPY;
++        size = 0;
++    }
++    else if (process == GetCurrentProcess())
++    {
++        __TRY
++        {
++            memmove( (void *)addr, buffer, size );
++            status = STATUS_SUCCESS;
++        }
++        __EXCEPT
++        {
++            status = STATUS_PARTIAL_COPY;
++            size = 0;
++        }
++        __ENDTRY
++    }
++    else
+     {
+         SERVER_START_REQ( write_process_memory )
+         {
+@@ -6637,11 +6653,6 @@ NTSTATUS WINAPI NtWriteVirtualMemory( HA
+         }
+         SERVER_END_REQ;
+     }
+-    else
+-    {
+-        status = STATUS_PARTIAL_COPY;
+-        size = 0;
+-    }
+     if (bytes_written) *bytes_written = size;
+     return status;
+ }
+@@ -7001,7 +7012,26 @@ NTSTATUS WINAPI NtWow64ReadVirtualMemory
+ 
+     if (size > MAXLONG) size = MAXLONG;
+ 
+-    if (virtual_check_buffer_for_write( buffer, size ))
++    if (!virtual_check_buffer_for_write( buffer, size ))
++    {
++        status = STATUS_ACCESS_VIOLATION;
++        size = 0;
++    }
++    else if (process == GetCurrentProcess())
++    {
++        __TRY
++        {
++            memmove( buffer, (void *)addr, size );
++            status = STATUS_SUCCESS;
++        }
++        __EXCEPT
++        {
++            status = STATUS_PARTIAL_COPY;
++            size = 0;
++        }
++        __ENDTRY
++    }
++    else
+     {
+         SERVER_START_REQ( read_process_memory )
+         {
+@@ -7012,11 +7042,6 @@ NTSTATUS WINAPI NtWow64ReadVirtualMemory
+         }
+         SERVER_END_REQ;
+     }
+-    else
+-    {
+-        status = STATUS_ACCESS_VIOLATION;
+-        size = 0;
+-    }
+     if (bytes_read) *bytes_read = size;
+     return status;
+ }
+

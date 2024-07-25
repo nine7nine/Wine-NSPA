@@ -17306,3 +17306,173 @@ index 3de12d1087f..4fa56384cd5 100644
  
      file->_base = calloc(1, MSVCRT_INTERNAL_BUFSIZ);
      if(file->_base) {
+
+From 2c0886257a79cf887d7cf5dce79293ad96668157 Mon Sep 17 00:00:00 2001
+From: Piotr Caban <piotr@codeweavers.com>
+Date: Mon, 22 Jul 2024 19:37:51 +0200
+Subject: [PATCH] ucrtbase: Fix mbstowcs on UTF8 strings.
+
+Wine-Bug: https://bugs.winehq.org/show_bug.cgi?id=56994
+---
+ dlls/msvcrt/mbcs.c           | 16 +++++++++++++++-
+ dlls/ucrtbase/tests/string.c | 23 +++++++++++++++++++++++
+ 2 files changed, 38 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/msvcrt/mbcs.c b/dlls/msvcrt/mbcs.c
+index 0bac4c9f8d9..5f5cd3e8cda 100644
+--- a/dlls/msvcrt/mbcs.c
++++ b/dlls/msvcrt/mbcs.c
+@@ -3266,6 +3266,17 @@ size_t CDECL mbrtowc(wchar_t *dst, const char *str,
+     return len;
+ }
+ 
++static inline int get_utf8_char_len(char ch)
++{
++    if((ch&0xf8) == 0xf0)
++        return 4;
++    else if((ch&0xf0) == 0xe0)
++        return 3;
++    else if((ch&0xe0) == 0xc0)
++        return 2;
++    return 1;
++}
++
+ /*********************************************************************
+  *		_mbstowcs_l(MSVCRT.@)
+  */
+@@ -3311,7 +3322,10 @@ size_t CDECL _mbstowcs_l(wchar_t *wcstr, const char *mbstr,
+         if(mbstr[size] == '\0')
+             break;
+ 
+-        size += (_isleadbyte_l((unsigned char)mbstr[size], locale) ? 2 : 1);
++        if (locinfo->lc_codepage == CP_UTF8)
++            size += get_utf8_char_len(mbstr[size]);
++        else
++            size += (_isleadbyte_l((unsigned char)mbstr[size], locale) ? 2 : 1);
+     }
+ 
+     if(size) {
+-- 
+GitLab
+
+From 9dd01c1350f19d1e21ee3b8f6d8baccb8474323a Mon Sep 17 00:00:00 2001
+From: Piotr Caban <piotr@codeweavers.com>
+Date: Thu, 25 Jul 2024 11:17:05 +0200
+Subject: [PATCH 1/3] msvcrt: Use thread-safe functions in _ctime64_s.
+
+---
+ dlls/msvcrt/time.c | 10 ++++++----
+ 1 file changed, 6 insertions(+), 4 deletions(-)
+
+diff --git a/dlls/msvcrt/time.c b/dlls/msvcrt/time.c
+index 7a110e53455..5b3698357c2 100644
+--- a/dlls/msvcrt/time.c
++++ b/dlls/msvcrt/time.c
+@@ -1730,7 +1730,8 @@ char * CDECL _ctime64(const __time64_t *time)
+  */
+ errno_t CDECL _ctime64_s(char *res, size_t len, const __time64_t *time)
+ {
+-    struct tm *t;
++    struct tm t;
++    int ret;
+ 
+     if (!MSVCRT_CHECK_PMT( res != NULL )) return EINVAL;
+     if (!MSVCRT_CHECK_PMT( len >= 26 )) return EINVAL;
+@@ -1738,9 +1739,10 @@ errno_t CDECL _ctime64_s(char *res, size_t len, const __time64_t *time)
+     if (!MSVCRT_CHECK_PMT( time != NULL )) return EINVAL;
+     if (!MSVCRT_CHECK_PMT( *time > 0 )) return EINVAL;
+ 
+-    t = _localtime64( time );
+-    strcpy( res, asctime( t ) );
+-    return 0;
++    ret = _localtime64_s( &t, time );
++    if (ret)
++        return ret;
++    return asctime_s( res, len, &t );
+ }
+ 
+ /*********************************************************************
+-- 
+GitLab
+
+
+From 70580c05f967c1c8ffb80734a29598893814cf7c Mon Sep 17 00:00:00 2001
+From: Piotr Caban <piotr@codeweavers.com>
+Date: Thu, 25 Jul 2024 11:18:29 +0200
+Subject: [PATCH 2/3] msvcrt: Use thread-safe functions in _ctime32_s.
+
+---
+ dlls/msvcrt/time.c | 10 ++++++----
+ 1 file changed, 6 insertions(+), 4 deletions(-)
+
+diff --git a/dlls/msvcrt/time.c b/dlls/msvcrt/time.c
+index 5b3698357c2..155454c5659 100644
+--- a/dlls/msvcrt/time.c
++++ b/dlls/msvcrt/time.c
+@@ -1761,7 +1761,8 @@ char * CDECL _ctime32(const __time32_t *time)
+  */
+ errno_t CDECL _ctime32_s(char *res, size_t len, const __time32_t *time)
+ {
+-    struct tm *t;
++    struct tm t;
++    int ret;
+ 
+     if (!MSVCRT_CHECK_PMT( res != NULL )) return EINVAL;
+     if (!MSVCRT_CHECK_PMT( len >= 26 )) return EINVAL;
+@@ -1769,9 +1770,10 @@ errno_t CDECL _ctime32_s(char *res, size_t len, const __time32_t *time)
+     if (!MSVCRT_CHECK_PMT( time != NULL )) return EINVAL;
+     if (!MSVCRT_CHECK_PMT( *time > 0 )) return EINVAL;
+ 
+-    t = _localtime32( time );
+-    strcpy( res, asctime( t ) );
+-    return 0;
++    ret = _localtime32_s( &t, time );
++    if (ret)
++        return ret;
++    return asctime_s( res, len, &t );
+ }
+ 
+ /*********************************************************************
+-- 
+GitLab
+
+
+From 0693a684682cea275da8888051d4986071ed8e93 Mon Sep 17 00:00:00 2001
+From: Piotr Caban <piotr@codeweavers.com>
+Date: Thu, 25 Jul 2024 11:39:32 +0200
+Subject: [PATCH 3/3] msvcrt: Don't access input string after NULL-byte in
+ mbstowcs.
+
+---
+ dlls/msvcrt/mbcs.c | 16 ++++++++++++++--
+ 1 file changed, 14 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/msvcrt/mbcs.c b/dlls/msvcrt/mbcs.c
+index 5f5cd3e8cda..bd4245c2c53 100644
+--- a/dlls/msvcrt/mbcs.c
++++ b/dlls/msvcrt/mbcs.c
+@@ -3322,8 +3322,20 @@ size_t CDECL _mbstowcs_l(wchar_t *wcstr, const char *mbstr,
+         if(mbstr[size] == '\0')
+             break;
+ 
+-        if (locinfo->lc_codepage == CP_UTF8)
+-            size += get_utf8_char_len(mbstr[size]);
++        if(locinfo->lc_codepage == CP_UTF8) {
++            int j, chlen = get_utf8_char_len(mbstr[size]);
++
++            for(j = 1; j < chlen; j++)
++            {
++                if(!mbstr[size + j])
++                {
++                    if(count) wcstr[0] = '\0';
++                    *_errno() = EILSEQ;
++                    return -1;
++                }
++            }
++            size += chlen;
++        }
+         else
+             size += (_isleadbyte_l((unsigned char)mbstr[size], locale) ? 2 : 1);
+     }
+-- 
+GitLab
