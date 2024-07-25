@@ -6077,3 +6077,194 @@ index ed850f4772b..d6dbd917ce5 100644
  
      /* note: limit is lower than base since the stack grows down */
 
+From f64ed806439b7a930ab7a9157872078acc24fc39 Mon Sep 17 00:00:00 2001
+From: Herman Semenov <GermanAizek@yandex.ru>
+Date: Wed, 24 Jul 2024 20:33:47 -0500
+Subject: [PATCH] msvcrt, winex11, mountmgr: fixed memleaks
+
+---
+ dlls/mountmgr.sys/device.c | 5 +++++
+ dlls/msvcrt/dir.c          | 4 ++++
+ dlls/msvcrt/time.c         | 2 ++
+ dlls/winex11.drv/xim.c     | 1 +
+ 4 files changed, 12 insertions(+)
+
+diff --git a/dlls/mountmgr.sys/device.c b/dlls/mountmgr.sys/device.c
+index 48ee8d9189a..1f89f38f7d1 100644
+--- a/dlls/mountmgr.sys/device.c
++++ b/dlls/mountmgr.sys/device.c
+@@ -1463,7 +1463,12 @@ NTSTATUS query_unix_drive( void *buff, SIZE_T insize, SIZE_T outsize, IO_STATUS_
+     LeaveCriticalSection( &device_section );
+ 
+     if (!volume)
++    {
++        free(device);
++        free(mount_point);
++        free(label);
+         return STATUS_NO_SUCH_DEVICE;
++    }
+ 
+     switch (device_type)
+     {
+diff --git a/dlls/msvcrt/dir.c b/dlls/msvcrt/dir.c
+index 546e8d49a7b..f3bf58c2f59 100644
+--- a/dlls/msvcrt/dir.c
++++ b/dlls/msvcrt/dir.c
+@@ -1277,6 +1277,8 @@ wchar_t * CDECL _wfullpath(wchar_t * absPath, const wchar_t* relPath, size_t siz
+ 
+   if (size < 4)
+   {
++    if (alloced)
++      free(buffer);
+     *_errno() = ERANGE;
+     return NULL;
+   }
+@@ -1331,6 +1333,8 @@ char * CDECL _fullpath(char * absPath, const char* relPath, size_t size)
+ 
+   if (size < 4)
+   {
++    if (alloced)
++        free(buffer);
+     *_errno() = ERANGE;
+     return NULL;
+   }
+diff --git a/dlls/msvcrt/time.c b/dlls/msvcrt/time.c
+index 7a110e53455..044eefbae05 100644
+--- a/dlls/msvcrt/time.c
++++ b/dlls/msvcrt/time.c
+@@ -1740,6 +1740,7 @@ errno_t CDECL _ctime64_s(char *res, size_t len, const __time64_t *time)
+ 
+     t = _localtime64( time );
+     strcpy( res, asctime( t ) );
++    free(t);
+     return 0;
+ }
+ 
+@@ -1769,6 +1770,7 @@ errno_t CDECL _ctime32_s(char *res, size_t len, const __time32_t *time)
+ 
+     t = _localtime32( time );
+     strcpy( res, asctime( t ) );
++    free(t);
+     return 0;
+ }
+ 
+diff --git a/dlls/winex11.drv/xim.c b/dlls/winex11.drv/xim.c
+index c6a93eb5e16..2bd8c63969a 100644
+--- a/dlls/winex11.drv/xim.c
++++ b/dlls/winex11.drv/xim.c
+@@ -99,6 +99,7 @@ static void xim_update_comp_string( UINT offset, UINT old_len, const WCHAR *text
+     memmove( ptr + new_len, ptr + old_len, (len - offset - old_len) * sizeof(WCHAR) );
+     if (text) memcpy( ptr, text, new_len * sizeof(WCHAR) );
+     ime_comp_buf[len + diff] = 0;
++    free(ptr);
+ }
+ 
+ void xim_set_result_string( HWND hwnd, const char *str, UINT count )
+-- 
+GitLab
+
+From a5b0347f118a597005e554efa47e203237a5ae56 Mon Sep 17 00:00:00 2001
+From: Piotr Caban <piotr@codeweavers.com>
+Date: Mon, 22 Jul 2024 13:12:41 +0200
+Subject: [PATCH 1/2] ntdll: Optimize NtReadVirtualMemory for in-process reads.
+
+---
+ dlls/ntdll/unix/virtual.c | 26 ++++++++++++++++++++------
+ 1 file changed, 20 insertions(+), 6 deletions(-)
+
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index 0d88315164a..ef206d58652 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -6025,7 +6025,26 @@ NTSTATUS WINAPI NtReadVirtualMemory( HANDLE process, const void *addr, void *buf
+ {
+     unsigned int status;
+ 
+-    if (virtual_check_buffer_for_write( buffer, size ))
++    if (!virtual_check_buffer_for_write( buffer, size ))
++    {
++        status = STATUS_ACCESS_VIOLATION;
++        size = 0;
++    }
++    else if (process == GetCurrentProcess())
++    {
++        __TRY
++        {
++            memmove( buffer, (const void *)addr, size );
++            status = STATUS_SUCCESS;
++        }
++        __EXCEPT
++        {
++            status = STATUS_PARTIAL_COPY;
++            size = 0;
++        }
++        __ENDTRY
++    }
++    else
+     {
+         SERVER_START_REQ( read_process_memory )
+         {
+@@ -6036,11 +6055,6 @@ NTSTATUS WINAPI NtReadVirtualMemory( HANDLE process, const void *addr, void *buf
+         }
+         SERVER_END_REQ;
+     }
+-    else
+-    {
+-        status = STATUS_ACCESS_VIOLATION;
+-        size = 0;
+-    }
+     if (bytes_read) *bytes_read = size;
+     return status;
+ }
+-- 
+GitLab
+
+From 2c0886257a79cf887d7cf5dce79293ad96668157 Mon Sep 17 00:00:00 2001
+From: Piotr Caban <piotr@codeweavers.com>
+Date: Mon, 22 Jul 2024 19:37:51 +0200
+Subject: [PATCH] ucrtbase: Fix mbstowcs on UTF8 strings.
+
+Wine-Bug: https://bugs.winehq.org/show_bug.cgi?id=56994
+---
+ dlls/msvcrt/mbcs.c           | 16 +++++++++++++++-
+ dlls/ucrtbase/tests/string.c | 23 +++++++++++++++++++++++
+ 2 files changed, 38 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/msvcrt/mbcs.c b/dlls/msvcrt/mbcs.c
+index 0bac4c9f8d9..5f5cd3e8cda 100644
+--- a/dlls/msvcrt/mbcs.c
++++ b/dlls/msvcrt/mbcs.c
+@@ -3266,6 +3266,17 @@ size_t CDECL mbrtowc(wchar_t *dst, const char *str,
+     return len;
+ }
+ 
++static inline int get_utf8_char_len(char ch)
++{
++    if((ch&0xf8) == 0xf0)
++        return 4;
++    else if((ch&0xf0) == 0xe0)
++        return 3;
++    else if((ch&0xe0) == 0xc0)
++        return 2;
++    return 1;
++}
++
+ /*********************************************************************
+  *		_mbstowcs_l(MSVCRT.@)
+  */
+@@ -3311,7 +3322,10 @@ size_t CDECL _mbstowcs_l(wchar_t *wcstr, const char *mbstr,
+         if(mbstr[size] == '\0')
+             break;
+ 
+-        size += (_isleadbyte_l((unsigned char)mbstr[size], locale) ? 2 : 1);
++        if (locinfo->lc_codepage == CP_UTF8)
++            size += get_utf8_char_len(mbstr[size]);
++        else
++            size += (_isleadbyte_l((unsigned char)mbstr[size], locale) ? 2 : 1);
+     }
+ 
+     if(size) {
+-- 
+GitLab
+
+
