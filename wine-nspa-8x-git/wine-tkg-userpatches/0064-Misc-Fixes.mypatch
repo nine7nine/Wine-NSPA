@@ -4831,62 +4831,6 @@ index 00b77bf6953..9046a70b359 100644
 -- 
 GitLab
 
-From a5b0347f118a597005e554efa47e203237a5ae56 Mon Sep 17 00:00:00 2001
-From: Piotr Caban <piotr@codeweavers.com>
-Date: Mon, 22 Jul 2024 13:12:41 +0200
-Subject: [PATCH 1/2] ntdll: Optimize NtReadVirtualMemory for in-process reads.
-
----
- dlls/ntdll/unix/virtual.c | 26 ++++++++++++++++++++------
- 1 file changed, 20 insertions(+), 6 deletions(-)
-
-diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
-index 0d88315164a..ef206d58652 100644
---- a/dlls/ntdll/unix/virtual.c
-+++ b/dlls/ntdll/unix/virtual.c
-@@ -6025,7 +6025,26 @@ NTSTATUS WINAPI NtReadVirtualMemory( HANDLE process, const void *addr, void *buf
- {
-     unsigned int status;
- 
--    if (virtual_check_buffer_for_write( buffer, size ))
-+    if (!virtual_check_buffer_for_write( buffer, size ))
-+    {
-+        status = STATUS_ACCESS_VIOLATION;
-+        size = 0;
-+    }
-+    else if (process == GetCurrentProcess())
-+    {
-+        __TRY
-+        {
-+            memmove( buffer, (const void *)addr, size );
-+            status = STATUS_SUCCESS;
-+        }
-+        __EXCEPT
-+        {
-+            status = STATUS_PARTIAL_COPY;
-+            size = 0;
-+        }
-+        __ENDTRY
-+    }
-+    else
-     {
-         SERVER_START_REQ( read_process_memory )
-         {
-@@ -6036,11 +6055,6 @@ NTSTATUS WINAPI NtReadVirtualMemory( HANDLE process, const void *addr, void *buf
-         }
-         SERVER_END_REQ;
-     }
--    else
--    {
--        status = STATUS_ACCESS_VIOLATION;
--        size = 0;
--    }
-     if (bytes_read) *bytes_read = size;
-     return status;
- }
--- 
-GitLab
-
 From 0ef37d1fee67d5698ebbd1e21446a1bdc3244dbb Mon Sep 17 00:00:00 2001
 From: Eric Pouech <epouech@codeweavers.com>
 Date: Sun, 30 Jun 2024 09:54:37 +0200
@@ -5678,85 +5622,458 @@ index 829be42b334..91752612eea 100644
 -- 
 GitLab
 
-From e285015e53896814701e1bb1ce9e675e29625097 Mon Sep 17 00:00:00 2001
-From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
-Date: Thu, 30 Nov 2023 17:29:05 +0100
-Subject: [PATCH] winex11: Always synchronize gdi_display after window
- creation.
+From db545957437bf9c5fbc4e69d07de2e8caed9ecfd Mon Sep 17 00:00:00 2001
+From: Brendan McGrath <bmcgrath@codeweavers.com>
+Date: Wed, 29 May 2024 11:52:18 +1000
+Subject: [PATCH] server: Don't always return STATUS_OBJECT_NAME_INVALID on
+ ENOTDIR.
+
+Only return STATUS_OBJECT_NAME_INVALID if we're not looking for a
+FILE_DIRECTORY_FILE.
+
+(cherry picked from commit d88863805dc4b79d965577a31b2845c0c81a09d9)
+CW-Bug-Id: #23860
+---
+ dlls/kernel32/tests/file.c | 1 -
+ dlls/ntdll/tests/file.c    | 1 -
+ server/fd.c                | 2 +-
+ 3 files changed, 1 insertion(+), 3 deletions(-)
+
+diff --git a/server/fd.c b/server/fd.c
+index 36e4697e33b..04d5f9bbe10 100644
+--- a/server/fd.c
++++ b/server/fd.c
+@@ -2000,7 +2000,7 @@ struct fd *open_fd( struct fd *root, const char *name, struct unicode_str nt_nam
+         if (fd->unix_fd == -1)
+         {
+             /* check for trailing slash on file path */
+-            if ((errno == ENOENT || errno == ENOTDIR) && name[strlen(name) - 1] == '/')
++            if ((errno == ENOENT || (errno == ENOTDIR && !(options & FILE_DIRECTORY_FILE))) && name[strlen(name) - 1] == '/')
+                 set_error( STATUS_OBJECT_NAME_INVALID );
+             else
+                 file_set_error();
+
+From c30a660dbf448c19cb9ef6c733661233308c5215 Mon Sep 17 00:00:00 2001
+From: Fabian Maurer <dark.shadow4@web.de>
+Date: Sun, 30 Jun 2024 16:18:08 +0200
+Subject: [PATCH] ntdll: Prevent double close in error case (coverity).
 
 ---
- dlls/winex11.drv/window.c | 2 +-
- 1 file changed, 1 insertion(+), 1 deletion(-)
+ dlls/ntdll/unix/socket.c | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
 
-diff --git a/dlls/winex11.drv/window.c b/dlls/winex11.drv/window.c
-index e68c4abdf93..696edd6675c 100644
---- a/dlls/winex11.drv/window.c
-+++ b/dlls/winex11.drv/window.c
-@@ -1750,7 +1750,6 @@ Window create_client_window( HWND hwnd, const XVisualInfo *visual )
-     cx = min( max( 1, data->client_rect.right - data->client_rect.left ), 65535 );
-     cy = min( max( 1, data->client_rect.bottom - data->client_rect.top ), 65535 );
+diff --git a/dlls/ntdll/unix/socket.c b/dlls/ntdll/unix/socket.c
+index a2b7b9fd051..90405e005f0 100644
+--- a/dlls/ntdll/unix/socket.c
++++ b/dlls/ntdll/unix/socket.c
+@@ -1787,8 +1787,7 @@ NTSTATUS sock_ioctl( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, void *apc
  
--    XSync( gdi_display, False ); /* make sure whole_window is known from gdi_display */
-     ret = data->client_window = XCreateWindow( gdi_display,
-                                                data->whole_window ? data->whole_window : dummy_parent,
-                                                x, y, cx, cy, 0, default_visual.depth, InputOutput,
-@@ -1837,6 +1836,7 @@ static void create_whole_window( struct x11drv_win_data *data )
-     sync_window_opacity( data->display, data->whole_window, key, alpha, layered_flags );
+             if (getifaddrs( &ifaddrs ) < 0)
+             {
+-                status = sock_errno_to_status( errno );
+-                break;
++                return sock_errno_to_status( errno );
+             }
  
-     XFlush( data->display );  /* make sure the window exists before we start painting to it */
-+    XSync( gdi_display, False ); /* make sure whole_window is known from gdi_display */
- 
- done:
-     if (win_rgn) NtGdiDeleteObjectApp( win_rgn );
+             for (ifaddr = ifaddrs; ifaddr != NULL; ifaddr = ifaddr->ifa_next)
+-- 
+GitLab
 
-From 3ad11961b6af4dc3b7238152719658d89e7fc4ea Mon Sep 17 00:00:00 2001
-From: Paul Gofman <pgofman@codeweavers.com>
-Date: Mon, 13 Sep 2021 00:39:05 +0300
-Subject: [PATCH] winex11.drv: Always sync windowless GL drawables on size
- change.
+From efd1f5db6589c7843a30fdde55b13b8c53ffb073 Mon Sep 17 00:00:00 2001
+From: Andrew Eikum <aeikum@codeweavers.com>
+Date: Thu, 10 Sep 2020 11:07:01 -0500
+Subject: [PATCH] HACK: ntdll: Don't let applications change permissions on
+ wine's files
 
-CW-Bug-ID: #19216
+The 2019 VCRuntime installer will chmod a+w on files that it can't open
+for writing, which would leak through the library symlinks and modify
+the global installation.
 ---
- dlls/winex11.drv/window.c | 12 +++++++-----
- 1 file changed, 7 insertions(+), 5 deletions(-)
+ dlls/ntdll/unix/file.c | 33 ++++++++++++++++++++++++++++-----
+ 1 file changed, 28 insertions(+), 5 deletions(-)
 
-diff --git a/dlls/winex11.drv/window.c b/dlls/winex11.drv/window.c
-index a088b45a2a0..0df0c91aca9 100644
---- a/dlls/winex11.drv/window.c
-+++ b/dlls/winex11.drv/window.c
-@@ -2810,6 +2810,7 @@ void X11DRV_WindowPosChanged( HWND hwnd, HWND insert_after, UINT swp_flags,
-     struct x11drv_win_data *data;
-     UINT new_style = NtUserGetWindowLongW( hwnd, GWL_STYLE );
-     RECT old_window_rect, old_whole_rect, old_client_rect;
-+    BOOL needs_resize;
-     int event_type;
- 
-     if (!(data = get_win_data( hwnd ))) return;
-@@ -2870,13 +2871,13 @@ void X11DRV_WindowPosChanged( HWND hwnd, HWND insert_after, UINT swp_flags,
- 
-     sync_client_position( data, &old_client_rect, &old_whole_rect );
- 
-+    needs_resize = !data->client_window && (data->client_rect.right - data->client_rect.left !=
-+                   old_client_rect.right - old_client_rect.left ||
-+                   data->client_rect.bottom - data->client_rect.top !=
-+                   old_client_rect.bottom - old_client_rect.top);
-+
-     if (!data->whole_window)
-     {
--        BOOL needs_resize = (!data->client_window &&
--                             (data->client_rect.right - data->client_rect.left !=
--                              old_client_rect.right - old_client_rect.left ||
--                              data->client_rect.bottom - data->client_rect.top !=
--                              old_client_rect.bottom - old_client_rect.top));
-         release_win_data( data );
-         if (needs_resize) sync_gl_drawable( hwnd, FALSE );
-         return;
-@@ -2951,6 +2952,7 @@ void X11DRV_WindowPosChanged( HWND hwnd, HWND insert_after, UINT swp_flags,
-         data->surface->funcs->flush( data->surface );
- 
-     release_win_data( data );
-+    if (needs_resize) sync_gl_drawable( hwnd, FALSE );
+diff --git a/dlls/ntdll/unix/file.c b/dlls/ntdll/unix/file.c
+index ee68e4dee9b..4664380d2c0 100644
+--- a/dlls/ntdll/unix/file.c
++++ b/dlls/ntdll/unix/file.c
+@@ -1619,9 +1619,24 @@ static int fd_set_dos_attrib( int fd, UINT attr, BOOL force_set )
+     else return xattr_fremove( fd, SAMBA_XATTR_DOS_ATTRIB );
  }
  
- /* check if the window icon should be hidden (i.e. moved off-screen) */
++static unsigned int server_get_unix_name( HANDLE handle, char **unix_name );
++
++/* return TRUE if this is a file owned by Wine which applications should not try to mess with. */
++static BOOL is_wine_file( HANDLE handle )
++{
++    char *unix_name;
++    BOOL ret;
++
++    if (server_get_unix_name( handle, &unix_name ))
++        return FALSE;
++    ret = strstr(unix_name, "/lib/wine/" ) || strstr( unix_name, "/lib64/wine/" ) ||strstr( unix_name, "/share/wine/" );
++    free(unix_name);
++    return ret;
++}
++
+ 
+ /* set the stat info and file attributes for a file (by file descriptor) */
+-static NTSTATUS fd_set_file_info( int fd, UINT attr, BOOL force_set_xattr )
++static NTSTATUS fd_set_file_info( int fd, HANDLE handle, UINT attr, BOOL force_set_xattr )
+ {
+     struct stat st;
+ 
+@@ -1635,8 +1650,16 @@ static NTSTATUS fd_set_file_info( int fd, UINT attr, BOOL force_set_xattr )
+     }
+     else
+     {
+-        /* add write permission only where we already have read permission */
+-        st.st_mode |= (0600 | ((st.st_mode & 044) >> 1)) & (~start_umask);
++        if (is_wine_file( handle ))
++        {
++            TRACE("HACK: Not giving write permission to wine file!\n");
++            return STATUS_ACCESS_DENIED;
++        }
++        else
++        {
++            /* add write permission only where we already have read permission */
++            st.st_mode |= (0600 | ((st.st_mode & 044) >> 1)) & (~start_umask);
++        }
+     }
+     if (fchmod( fd, st.st_mode ) == -1) return errno_to_status( errno );
+ 
+@@ -4592,8 +4615,8 @@ NTSTATUS WINAPI NtSetInformationFile( HANDLE handle, IO_STATUS_BLOCK *io,
+                 status = set_file_times( fd, &mtime, &atime );
+ 
+             if (status == STATUS_SUCCESS)
+-                status = fd_set_file_info( fd, info->FileAttributes,
+-                                           unix_name && is_hidden_file( unix_name ));
++                status = fd_set_file_info( fd, handle, info->FileAttributes,
++                                           unix_name && is_hidden_file( unix_name ) );
+ 
+             if (needs_close) close( fd );
+             free( unix_name );
+
+From 1ab1c9708745b9cbf5f9540cd799ebff654362d0 Mon Sep 17 00:00:00 2001
+From: Zhiyi Zhang <zzhang@codeweavers.com>
+Date: Sat, 25 Nov 2023 23:26:58 +0800
+Subject: [PATCH] ntdll: Fix an out-of-bounds read (Coverity).
+
+class FileRenameInformationEx to FileKnownFolderInformation could cause an out-of-bounds read of info_sizes.
+---
+ dlls/ntdll/unix/file.c | 14 +++++++++++++-
+ 1 file changed, 13 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/ntdll/unix/file.c b/dlls/ntdll/unix/file.c
+index 98e50082904..ee68e4dee9b 100644
+--- a/dlls/ntdll/unix/file.c
++++ b/dlls/ntdll/unix/file.c
+@@ -4264,7 +4264,7 @@ NTSTATUS WINAPI NtQueryAttributesFile( const OBJECT_ATTRIBUTES *attr, FILE_BASIC
+ NTSTATUS WINAPI NtQueryInformationFile( HANDLE handle, IO_STATUS_BLOCK *io,
+                                         void *ptr, ULONG len, FILE_INFORMATION_CLASS class )
+ {
+-    static const size_t info_sizes[] =
++    static const size_t info_sizes[FileMaximumInformation] =
+     {
+         0,
+         sizeof(FILE_DIRECTORY_INFORMATION),            /* FileDirectoryInformation */
+@@ -4331,6 +4331,18 @@ NTSTATUS WINAPI NtQueryInformationFile( HANDLE handle, IO_STATUS_BLOCK *io,
+         0,                                             /* FileHardLinkFullIdInformation */
+         0,                                             /* FileIdExtdBothDirectoryInformation */
+         0,                                             /* FileDispositionInformationEx */
++        0,                                             /* FileRenameInformationEx */
++        0,                                             /* FileRenameInformationExBypassAccessCheck */
++        0,                                             /* FileDesiredStorageClassInformation */
++        0,                                             /* FileStatInformation */
++        0,                                             /* FileMemoryPartitionInformation */
++        0,                                             /* FileStatLxInformation */
++        0,                                             /* FileCaseSensitiveInformation */
++        0,                                             /* FileLinkInformationEx */
++        0,                                             /* FileLinkInformationExBypassAccessCheck */
++        0,                                             /* FileStorageReserveIdInformation */
++        0,                                             /* FileCaseSensitiveInformationForceAccessCheck */
++        0,                                             /* FileKnownFolderInformation */
+     };
+ 
+     struct stat st;
+
+From eff7707e714efc63cc568b963a5cbedc104acacf Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Wed, 14 Jul 2021 20:45:38 +0300
+Subject: [PATCH] ntdll: Add stub implementation for
+ NtSetInformationFile(FileAllocationInformation).
+
+CW-Bug-Id: #19085
+---
+ dlls/ntdll/unix/file.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/dlls/ntdll/unix/file.c b/dlls/ntdll/unix/file.c
+index 367cc6763cd..c8bbcce413f 100644
+--- a/dlls/ntdll/unix/file.c
++++ b/dlls/ntdll/unix/file.c
+@@ -4659,6 +4659,15 @@ NTSTATUS WINAPI NtSetInformationFile( HANDLE handle, IO_STATUS_BLOCK *io,
+         else status = STATUS_INVALID_PARAMETER_3;
+         break;
+ 
++    case FileAllocationInformation:
++    {
++        const FILE_ALLOCATION_INFORMATION *info = ptr;
++
++        FIXME("FileAllocationInformation AllocationSize %p stub.\n", (void *)(ULONG_PTR)info->AllocationSize.QuadPart);
++        io->Status = STATUS_SUCCESS;
++        break;
++    }
++
+     case FilePipeInformation:
+         if (len >= sizeof(FILE_PIPE_INFORMATION))
+         {
+
+From 4703b100e324673214247b60a1172fae5f10c22e Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Thu, 17 Nov 2022 20:00:24 -0600
+Subject: [PATCH] ntdll: Return FILE_DEVICE_UNKNOWN for Unix FIFOs and sockets
+ from get_device_info().
+
+CW-Bug-Id: #21570
+---
+ dlls/ntdll/unix/file.c | 15 ++++++++++++---
+ 1 file changed, 12 insertions(+), 3 deletions(-)
+
+diff --git a/dlls/ntdll/unix/file.c b/dlls/ntdll/unix/file.c
+index 54847281181..c251d9c1955 100644
+--- a/dlls/ntdll/unix/file.c
++++ b/dlls/ntdll/unix/file.c
+@@ -7026,7 +7026,7 @@ NTSTATUS get_device_info( int fd, FILE_FS_DEVICE_INFORMATION *info )
+     }
+     else if (S_ISFIFO( st.st_mode ) || S_ISSOCK( st.st_mode ))
+     {
+-        info->DeviceType = FILE_DEVICE_NAMED_PIPE;
++        info->DeviceType = FILE_DEVICE_UNKNOWN;
+     }
+     else if (is_device_placeholder( fd ))
+     {
+@@ -7135,10 +7135,11 @@ NTSTATUS WINAPI NtQueryVolumeInformationFile( HANDLE handle, IO_STATUS_BLOCK *io
+                                               void *buffer, ULONG length,
+                                               FS_INFORMATION_CLASS info_class )
+ {
++    enum server_fd_type fd_type;
+     int fd, needs_close;
+     unsigned int status;
+ 
+-    status = server_get_unix_fd( handle, 0, &fd, &needs_close, NULL, NULL );
++    status = server_get_unix_fd( handle, 0, &fd, &needs_close, &fd_type, NULL );
+     if (status == STATUS_BAD_DEVICE_TYPE)
+     {
+         struct async_irp *async;
+@@ -7205,7 +7206,15 @@ NTSTATUS WINAPI NtQueryVolumeInformationFile( HANDLE handle, IO_STATUS_BLOCK *io
+         {
+             FILE_FS_DEVICE_INFORMATION *info = buffer;
+ 
+-            if ((status = get_device_info( fd, info )) == STATUS_SUCCESS)
++            if (fd_type == FD_TYPE_SOCKET || fd_type == FD_TYPE_DEVICE)
++            {
++                info->Characteristics = 0;
++                info->DeviceType = FILE_DEVICE_NAMED_PIPE;
++                status = STATUS_SUCCESS;
++            }
++            else status = get_device_info( fd, info );
++
++            if (!status)
+                 io->Information = sizeof(*info);
+         }
+         break;
+
+From 7a7b82880a73e654933b7866e79f3e9a62a565ef Mon Sep 17 00:00:00 2001
+From: Alexandre Julliard <julliard@winehq.org>
+Date: Thu, 14 Dec 2023 15:43:39 +0100
+Subject: [PATCH] ntdll: Only free reserved memory for DYNAMIC_BASE binaries.
+
+To avoid triggering more pointer-truncation bugs in applications.
+---
+ dlls/ntdll/unix/virtual.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index 5bdeef4c1bc..e805c349eac 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -4397,7 +4397,8 @@ void virtual_set_large_address_space(void)
+         if (is_wow64())
+             user_space_wow_limit = ((main_image_info.ImageCharacteristics & IMAGE_FILE_LARGE_ADDRESS_AWARE) ? limit_4g : limit_2g) - 1;
+ #ifndef __APPLE__  /* don't free the zerofill section on macOS */
+-        else if (main_image_info.DllCharacteristics & IMAGE_DLLCHARACTERISTICS_HIGH_ENTROPY_VA)
++        else if ((main_image_info.DllCharacteristics & IMAGE_DLLCHARACTERISTICS_HIGH_ENTROPY_VA) &&
++                 (main_image_info.DllCharacteristics & IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE))
+             free_reserved_memory( 0, (char *)0x7ffe0000 );
+ #endif
+     }
+
+From 9b9a30194780f93b4956d285e1cf01b147601939 Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Tue, 14 Jan 2020 21:39:23 +0300
+Subject: [PATCH] ntdll: Increase step after failed map attempt in
+ try_map_free_area().
+
+---
+ dlls/ntdll/unix/virtual.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index abe1b4dc4ec..b307337b93e 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -1301,6 +1301,7 @@ static void* try_map_free_area( void *base, void *end, ptrdiff_t step,
+             step == 0)
+             break;
+         start = (char *)start + step;
++        step *= 2;
+     }
+ 
+     return NULL;
+
+From f1292811e14a4218e36309b308b888fb3173d5b5 Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Thu, 23 Jul 2020 18:40:39 +0300
+Subject: [PATCH] ntdll: Increase free ranges view block size on 64 bit.
+
+---
+ dlls/ntdll/unix/virtual.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index b307337b93e..3be59de16ec 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -205,7 +205,11 @@ static BYTE *pages_vprot;
+ #endif
+ 
+ static struct file_view *view_block_start, *view_block_end, *next_free_view;
++#ifdef _WIN64
++static const size_t view_block_size = 0x200000;
++#else
+ static const size_t view_block_size = 0x100000;
++#endif
+ static void *preload_reserve_start;
+ static void *preload_reserve_end;
+ static BOOL force_exec_prot;  /* whether to force PROT_EXEC on all PROT_READ mmaps */
+
+From 72c83690354adb0d3f81e171f5fba938a4ac2755 Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Thu, 10 Feb 2022 16:17:41 +0300
+Subject: [PATCH] ntdll: Guard against syscall stack overrun.
+
+---
+ dlls/ntdll/unix/signal_arm.c    |  4 ++++
+ dlls/ntdll/unix/signal_arm64.c  |  4 ++++
+ dlls/ntdll/unix/signal_i386.c   |  4 ++++
+ dlls/ntdll/unix/signal_x86_64.c |  4 ++++
+ dlls/ntdll/unix/unix_private.h  | 10 +++++++++-
+ dlls/ntdll/unix/virtual.c       |  6 ++++++
+ 6 files changed, 31 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/ntdll/unix/signal_arm.c b/dlls/ntdll/unix/signal_arm.c
+index 5115fa7ec3a..afa3e71c5e2 100644
+--- a/dlls/ntdll/unix/signal_arm.c
++++ b/dlls/ntdll/unix/signal_arm.c
+@@ -1304,6 +1304,10 @@ static BOOL handle_syscall_fault( ucontext_t *context, EXCEPTION_RECORD *rec )
+            (DWORD)IP_sig(context), (DWORD)SP_sig(context), (DWORD)LR_sig(context),
+            (DWORD)PC_sig(context), (DWORD)CPSR_sig(context) );
+ 
++    if (rec->ExceptionCode == STATUS_ACCESS_VIOLATION
++            && is_inside_syscall_stack_guard( (char *)rec->ExceptionInformation[1] ))
++        ERR_(seh)( "Syscall stack overrun.\n ");
++
+     if (ntdll_get_thread_data()->jmp_buf)
+     {
+         TRACE( "returning to handler\n" );
+diff --git a/dlls/ntdll/unix/signal_arm64.c b/dlls/ntdll/unix/signal_arm64.c
+index f96ec330796..389f16f89d9 100644
+--- a/dlls/ntdll/unix/signal_arm64.c
++++ b/dlls/ntdll/unix/signal_arm64.c
+@@ -1271,6 +1271,10 @@ static BOOL handle_syscall_fault( ucontext_t *context, EXCEPTION_RECORD *rec )
+           (DWORD64)REGn_sig(28, context), (DWORD64)FP_sig(context),
+           (DWORD64)LR_sig(context), (DWORD64)SP_sig(context) );
+ 
++    if (rec->ExceptionCode == STATUS_ACCESS_VIOLATION
++            && is_inside_syscall_stack_guard( (char *)rec->ExceptionInformation[1] ))
++        ERR_(seh)( "Syscall stack overrun.\n ");
++
+     if (ntdll_get_thread_data()->jmp_buf)
+     {
+         TRACE( "returning to handler\n" );
+diff --git a/dlls/ntdll/unix/signal_i386.c b/dlls/ntdll/unix/signal_i386.c
+index c372b5bf3a0..d39117b64fc 100644
+--- a/dlls/ntdll/unix/signal_i386.c
++++ b/dlls/ntdll/unix/signal_i386.c
+@@ -1846,6 +1846,10 @@ static BOOL handle_syscall_fault( ucontext_t *sigcontext, void *stack_ptr,
+           context->Ebp, context->Esp, context->SegCs, context->SegDs,
+           context->SegEs, context->SegFs, context->SegGs, context->EFlags );
+ 
++    if (rec->ExceptionCode == STATUS_ACCESS_VIOLATION
++            && is_inside_syscall_stack_guard( (char *)rec->ExceptionInformation[1] ))
++        ERR_(seh)( "Syscall stack overrun.\n ");
++
+     if (ntdll_get_thread_data()->jmp_buf)
+     {
+         TRACE( "returning to handler\n" );
+diff --git a/dlls/ntdll/unix/signal_x86_64.c b/dlls/ntdll/unix/signal_x86_64.c
+index d8d5678ec80..de8aaecf94c 100644
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -2128,6 +2128,10 @@ static BOOL handle_syscall_fault( ucontext_t *sigcontext, EXCEPTION_RECORD *rec,
+     TRACE_(seh)( " r12=%016lx r13=%016lx r14=%016lx r15=%016lx\n",
+                  context->R12, context->R13, context->R14, context->R15 );
+ 
++    if (rec->ExceptionCode == STATUS_ACCESS_VIOLATION
++            && is_inside_syscall_stack_guard( (char *)rec->ExceptionInformation[1] ))
++        ERR_(seh)( "Syscall stack overrun.\n ");
++
+     if (ntdll_get_thread_data()->jmp_buf)
+     {
+         TRACE_(seh)( "returning to handler\n" );
+diff --git a/dlls/ntdll/unix/unix_private.h b/dlls/ntdll/unix/unix_private.h
+index 904a35f471b..55d3a0fb53c 100644
+--- a/dlls/ntdll/unix/unix_private.h
++++ b/dlls/ntdll/unix/unix_private.h
+@@ -127,7 +127,8 @@ static const SIZE_T teb_size = 0x3800;  /* TEB64 + TEB32 + debug info */
+ static const SIZE_T signal_stack_mask = 0xffff;
+ static const SIZE_T signal_stack_size = 0x10000 - 0x3800;
+ static const SIZE_T kernel_stack_size = 0x100000;
+-static const SIZE_T min_kernel_stack  = 0x2000;
++static const SIZE_T kernel_stack_guard_size = 0x1000;
++static const SIZE_T min_kernel_stack  = 0x3000;
+ static const LONG teb_offset = 0x2000;
+ 
+ #define FILE_WRITE_TO_END_OF_FILE      ((LONGLONG)-1)
+@@ -388,6 +389,13 @@ static inline BOOL is_inside_signal_stack( void *ptr )
+             (char *)ptr < (char *)get_signal_stack() + signal_stack_size);
+ }
+ 
++static inline BOOL is_inside_syscall_stack_guard( const char *stack_ptr )
++{
++    const char *kernel_stack = ntdll_get_thread_data()->kernel_stack;
++
++    return (stack_ptr >= kernel_stack && stack_ptr < kernel_stack + kernel_stack_guard_size);
++}
++
+ static inline void mutex_lock( pthread_mutex_t *mutex )
+ {
+     if (!process_exiting) pthread_mutex_lock( mutex );
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index ed850f4772b..d6dbd917ce5 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -3929,6 +3929,12 @@ NTSTATUS virtual_alloc_thread_stack( INITIAL_TEB *stack, ULONG_PTR limit_low, UL
+                         VPROT_READ | VPROT_WRITE | VPROT_COMMITTED | VPROT_GUARD );
+         mprotect_range( view->base, 2 * page_size , 0, 0 );
+     }
++    else
++    {
++        /* setup kernel stack no access guard page */
++        set_page_vprot( view->base, kernel_stack_guard_size, VPROT_COMMITTED | VPROT_READ );
++        mprotect_range( view->base, kernel_stack_guard_size, 0, 0 );
++    }
+     VIRTUAL_DEBUG_DUMP_VIEW( view );
+ 
+     /* note: limit is lower than base since the stack grows down */
 

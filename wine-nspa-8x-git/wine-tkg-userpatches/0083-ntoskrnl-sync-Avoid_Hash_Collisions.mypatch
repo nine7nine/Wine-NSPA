@@ -81,3 +81,75 @@
                  break;
              }
              }
+
+--- a/dlls/ntoskrnl.exe/sync.c	2024-07-23 17:07:38.647542777 -0500
++++ b/dlls/ntoskrnl.exe/sync.c	2024-07-23 17:07:29.813501331 -0500
+@@ -54,7 +54,9 @@ NTSTATUS WINAPI KeWaitForMultipleObjects
+     HANDLE handles[MAXIMUM_WAIT_OBJECTS];
+     NTSTATUS ret;
+     ULONG i;
+-    WCHAR uniqobj [] = { 'k','e','w','a','i','t','X','X','X','X',0 };
++    WCHAR uniqmtx[] = { 'm','u','t','e','x','X','X','X','X',0 };
++    WCHAR uniqev[] = { 'e','v','e','n','t','X','X','X','X',0 };
++    WCHAR uniqsem[] = { 's','e','m','a','p','X','X','X','X',0 };
+     LARGE_INTEGER li;
+     unsigned int seed;
+     int hashNum;
+@@ -78,11 +80,28 @@ NTSTATUS WINAPI KeWaitForMultipleObjects
+         ++*((ULONG_PTR *)&objs[i]->WaitListHead.Flink);
+         if (!objs[i]->WaitListHead.Blink)
+         {
+-            // Generate a unique name
++            // Generate a unique name based on the object type
+             QueryPerformanceCounter(&li);
+             seed = (unsigned int)(li.QuadPart & 0xFFFFFFFF);
+             srand(seed);
+-            WCHAR *hashLoc = uniqobj + 6;  // Start at the 'X's
++            WCHAR *hashLoc;
++            switch (objs[i]->Type)
++            {
++            case TYPE_MANUAL_TIMER:
++            case TYPE_MANUAL_EVENT:
++            case TYPE_AUTO_TIMER:
++            case TYPE_AUTO_EVENT:
++                hashLoc = uniqev + 5;
++                break;
++            case TYPE_MUTEX:
++                hashLoc = uniqmtx + 5;
++                break;
++            case TYPE_SEMAPHORE:
++                hashLoc = uniqsem + 5;
++                break;
++            default:
++                continue;
++            }
+             for (int j = 0; j < 4; j++) {
+                 hashNum = rand() % 62;
+                 if (hashNum < 10)
+@@ -97,20 +116,20 @@ NTSTATUS WINAPI KeWaitForMultipleObjects
+             {
+             case TYPE_MANUAL_TIMER:
+             case TYPE_MANUAL_EVENT:
+-                objs[i]->WaitListHead.Blink = CreateEventW( NULL, TRUE, objs[i]->SignalState, uniqobj );
++                objs[i]->WaitListHead.Blink = CreateEventW( NULL, TRUE, objs[i]->SignalState, uniqev );
+                 break;
+             case TYPE_AUTO_TIMER:
+             case TYPE_AUTO_EVENT:
+-                objs[i]->WaitListHead.Blink = CreateEventW( NULL, FALSE, objs[i]->SignalState, uniqobj );
++                objs[i]->WaitListHead.Blink = CreateEventW( NULL, FALSE, objs[i]->SignalState, uniqev );
+                 break;
+             case TYPE_MUTEX:
+-                objs[i]->WaitListHead.Blink = CreateMutexW( NULL, FALSE, uniqobj );
++                objs[i]->WaitListHead.Blink = CreateMutexW( NULL, FALSE, uniqmtx );
+                 break;
+             case TYPE_SEMAPHORE:
+             {
+                 KSEMAPHORE *semaphore = CONTAINING_RECORD(objs[i], KSEMAPHORE, Header);
+-                objs[i]->WaitListHead.Blink = CreateSemaphoreW( NULL,
+-                    semaphore->Header.SignalState, semaphore->Limit, uniqobj );
++                objs[i]->WaitListHead.Blink = CreateSemaphoreW( NULL,
++                    semaphore->Header.SignalState, semaphore->Limit, uniqsem );
+                 break;
+             }
+             }
+

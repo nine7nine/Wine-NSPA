@@ -179,3 +179,68 @@
  extern void init_environment( int argc, char *argv[], char *envp[] ) DECLSPEC_HIDDEN;
  extern void init_startup_info(void) DECLSPEC_HIDDEN;
 
+From e3eec6112d672fe015c0b7b0264a749151d24cbd Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Tue, 5 Mar 2024 10:49:09 -0600
+Subject: [PATCH] fixup! ntdll: Simulate async file read and IO cancellation to
+ workaround AC:Odyssey out of order dialogues bug.
+
+CW-Bug-Id: #21711
+---
+ dlls/ntdll/unix/file.c | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/dlls/ntdll/unix/file.c b/dlls/ntdll/unix/file.c
+index c251d9c1955..a117b08010c 100644
+--- a/dlls/ntdll/unix/file.c
++++ b/dlls/ntdll/unix/file.c
+@@ -5582,6 +5582,7 @@ struct async_file_read_job
+     LONG  cancelled;
+     struct list queue_entry;
+     struct async_file_read_job *next;
++    ULONG64 queue_time_mcs;
+ };
+ 
+ 
+@@ -5602,7 +5603,9 @@ static void *async_file_read_thread(void *dummy)
+     ULONG buffer_length = 0;
+     void *buffer = NULL;
+     struct list *entry;
++    struct timespec ts;
+     NTSTATUS status;
++    ULONG64 delay;
+     ULONG total;
+     int result;
+ 
+@@ -5653,6 +5656,13 @@ static void *async_file_read_thread(void *dummy)
+                 break;
+         }
+ 
++        clock_gettime( CLOCK_MONOTONIC, &ts );
++        delay = ts.tv_sec * (ULONG64)1000000 + ts.tv_nsec / 1000 - job->queue_time_mcs;
++        if (delay < 1000)
++            usleep( 1000 - delay );
++        else
++            usleep( 50 );
++
+         total = result;
+         status = (total || !job->length) ? STATUS_SUCCESS : STATUS_END_OF_FILE;
+ done:
+@@ -5713,6 +5723,7 @@ static NTSTATUS queue_async_file_read( HANDLE handle, int unix_handle, int needs
+                             IO_STATUS_BLOCK *io, void *buffer, ULONG length, LARGE_INTEGER *offset )
+ {
+     struct async_file_read_job *job;
++    struct timespec ts;
+ 
+     pthread_once( &async_file_read_once, async_file_read_init );
+ 
+@@ -5744,6 +5755,8 @@ static NTSTATUS queue_async_file_read( HANDLE handle, int unix_handle, int needs
+     job->offset = *offset;
+     job->thread_id = GetCurrentThreadId();
+     job->cancelled = 0;
++    clock_gettime( CLOCK_MONOTONIC, &ts );
++    job->queue_time_mcs = ts.tv_sec * (ULONG64)1000000 + ts.tv_nsec / 1000;
+ 
+     list_add_tail( &async_file_read_queue, &job->queue_entry );
+ 
+
