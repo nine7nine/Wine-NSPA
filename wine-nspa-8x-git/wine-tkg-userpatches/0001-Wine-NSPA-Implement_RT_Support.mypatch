@@ -149,7 +149,7 @@ diff -Npur a/dlls/ntdll/unix/thread.c b/dlls/ntdll/unix/thread.c
 +
 +    // Get the fsync priority
 +    if ((thread_kapc_priority = get_priority("WINE_RT_PRIO", min, max - 1)) != -1) {
-+        thread_kapc_priority -= 2;
++        // thread_kapc_priority -= 2;
 +        struct sched_param param;
 +        param.sched_priority = thread_kapc_priority;
 +        return pthread_setschedparam(pthread_id, fifo | SCHED_RESET_ON_FORK, &param);
@@ -198,7 +198,7 @@ diff -Npur a/dlls/ntdll/unix/thread.c b/dlls/ntdll/unix/thread.c
 +        }
 +    }
 +    
-+    if (validPIDThread != 0) {
++    if (validPIDThread != 0 && validIDXThread == 0) {
 +        // Fail on / filter out unsupported threads;
 +        if (handle == GetCurrentThread() && (validPIDThread != thread_data->pthread_id)) { 
 +            return status;
@@ -207,7 +207,7 @@ diff -Npur a/dlls/ntdll/unix/thread.c b/dlls/ntdll/unix/thread.c
 +        // Set RT for most unix-side threads
 +        pthread_attr_setinheritsched(&pthread_attr, PTHREAD_EXPLICIT_SCHED);
 +        ntdll_set_sync_realtime(validPIDThread, ntdll_rt_policy | SCHED_RESET_ON_FORK, priority);
-+    } else if (validIDXThread != 0) {
++    } else if (validIDXThread != 0 && validPIDThread == 0) {
 +        // Fail on / filter out unsupported threads;
 +        if (handle == GetCurrentThread() && (validIDXThread != thread_data->fsync_apc_idx)) { 
 +            return status;
@@ -784,3 +784,62 @@ diff -Npur a/server/thread.h b/server/thread.h
 +extern void set_scheduler_priority( struct thread *thread );
 +
  #endif  /* __WINE_SERVER_THREAD_H */
+
+// Set multiple Wine threads as TIME_CRITICAL:
+//
+// - mmdevapi: wine_mmdevapi_notification thread
+//
+// - winealsa: winealsa_midi_notify: This one used pi_cond/pthread condvars.
+//   While upstream marks the mainloop as TC, this isn't touched (it 
+//   should be, at least in my builds, using RT scheduling).
+//
+// - ntdll/threadpool: wine_threadpool_worker: these are persistent threads
+//   that manage the other workpool threads. Make them TC/RT, as some 
+//   VSTs and apps make use of threadpools. (eg: Massive X, Guitar Rig 6,
+//   etc).
+
+--- a/dlls/mmdevapi/devenum.c	2024-07-25 18:21:21.824250678 -0500
++++ b/dlls/mmdevapi/devenum.c	2024-07-25 18:21:12.004214260 -0500
+@@ -1193,6 +1193,7 @@ static DWORD WINAPI notif_thread_proc(vo
+     DWORD size;
+ 
+     SetThreadDescription(GetCurrentThread(), L"wine_mmdevapi_notification");
++    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+ 
+     lstrcpyW(reg_key, drv_keyW);
+     lstrcatW(reg_key, L"\\");
+--- a/dlls/winealsa.drv/midi.c	2024-07-25 18:19:34.547859993 -0500
++++ b/dlls/winealsa.drv/midi.c	2024-07-25 18:01:27.887046271 -0500
+@@ -115,6 +115,7 @@ static DWORD WINAPI notify_thread(void *
+     BOOL quit;
+ 
+     SetThreadDescription(GetCurrentThread(), L"winealsa_midi_notify");
++    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+ 
+     params.notify = &notify;
+     params.quit = &quit;
+--- a/dlls/ntdll/threadpool.c	2024-07-25 22:44:03.775067304 -0500
++++ b/dlls/ntdll/threadpool.c	2024-07-25 22:43:42.568970516 -0500
+@@ -404,6 +404,13 @@ static void set_thread_name(const WCHAR
+     NtSetInformationThread(GetCurrentThread(), ThreadNameInformation, &info, sizeof(info));
+ }
+ 
++static void set_thread_priority(HANDLE thread, INT priority)
++{
++    DWORD prio = priority;
++
++    NtSetInformationThread(thread, ThreadBasePriority, &prio, sizeof(prio));
++}
++
+ static void CALLBACK process_rtl_work_item( TP_CALLBACK_INSTANCE *instance, void *userdata )
+ {
+     struct rtl_work_item *item = userdata;
+@@ -2349,6 +2356,7 @@ static void CALLBACK threadpool_worker_p
+ 
+     TRACE( "starting worker thread for pool %p\n", pool );
+     set_thread_name(L"wine_threadpool_worker");
++    set_thread_priority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+ 
+     enter_critical_section( &pool->cs );
+     for (;;)
+

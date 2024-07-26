@@ -1,0 +1,1094 @@
+
+From d09fc70d37aaacfbf29c8876248c626dcb501b71 Mon Sep 17 00:00:00 2001
+From: Jinoh Kang <jinoh.kang.kr@gmail.com>
+Date: Thu, 16 Nov 2023 22:45:00 +0900
+Subject: [PATCH 2/5] server: Inline open_named_object() call in
+ open_file_object handler.
+
+Prepare for passing the remaining subpath after object namespace
+traversal to the open_file() method.
+---
+ server/fd.c | 9 +++++++--
+ 1 file changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/server/fd.c b/server/fd.c
+index f28937466fc..dabba024fb9 100644
+--- a/server/fd.c
++++ b/server/fd.c
+@@ -2769,14 +2769,19 @@ DECL_HANDLER(open_file_object)
+ {
+     struct unicode_str name = get_req_unicode_str();
+     struct object *obj, *result, *root = NULL;
++    struct unicode_str name_left;
+ 
+     if (req->rootdir && !(root = get_handle_obj( current->process, req->rootdir, 0, NULL ))) return;
+ 
+-    obj = open_named_object( root, NULL, &name, req->attributes );
++    obj = lookup_named_object( root, &name, req->attributes, &name_left );
+     if (root) release_object( root );
+     if (!obj) return;
+ 
+-    if ((result = obj->ops->open_file( obj, req->access, req->sharing, req->options )))
++    if (name_left.len) /* not fully parsed */
++    {
++        set_error( STATUS_OBJECT_NAME_NOT_FOUND );
++    }
++    else if ((result = obj->ops->open_file( obj, req->access, req->sharing, req->options )))
+     {
+         reply->handle = alloc_handle( current->process, result, req->access, req->attributes );
+         release_object( result );
+-- 
+GitLab
+
+
+From 8a9ee441b6da43662978bc7156b3135a16d26263 Mon Sep 17 00:00:00 2001
+From: Jinoh Kang <jinoh.kang.kr@gmail.com>
+Date: Thu, 23 Nov 2023 23:43:01 +0900
+Subject: [PATCH 3/5] server: Pass the object subpath to open_file instead of
+ rejecting it.
+
+This is required to emulate Windows NT virtual file systems (e.g.,
+\Device\NamedPipe).
+
+In general, Windows file system drivers process pathnames on its own
+(for IRP_MJ_CREATE), since putting every existing file into the
+in-memory namespace is slow and highly inefficient.
+
+To avoid regression, make the refactoring as close to no-op as possible.
+Some (subpath->len) checks could turn into an assert, but that seems
+highly superfluous and we don't know which are actually safe to do so.
+---
+ server/console.c    | 99 ++++++++++++++++++++++++++++++++-------------
+ server/device.c     | 14 +++++--
+ server/fd.c         |  6 +--
+ server/file.c       | 14 +++++--
+ server/mailslot.c   | 28 +++++++++----
+ server/named_pipe.c | 44 ++++++++++++++------
+ server/object.c     |  9 +++--
+ server/object.h     |  8 ++--
+ server/sock.c       | 14 +++++--
+ 9 files changed, 163 insertions(+), 73 deletions(-)
+
+diff --git a/server/console.c b/server/console.c
+index b64283baf4a..002a9b30a55 100644
+--- a/server/console.c
++++ b/server/console.c
+@@ -69,8 +69,8 @@ static int console_signaled( struct object *obj, struct wait_queue_entry *entry
+ static struct fd *console_get_fd( struct object *obj );
+ static struct object *console_lookup_name( struct object *obj, struct unicode_str *name,
+                                            unsigned int attr, struct object *root );
+-static struct object *console_open_file( struct object *obj, unsigned int access,
+-                                         unsigned int sharing, unsigned int options );
++static struct object *console_open_file( struct object *obj, const struct unicode_str *subpath,
++                                         unsigned int access, unsigned int sharing, unsigned int options );
+ static int console_add_queue( struct object *obj, struct wait_queue_entry *entry );
+ 
+ static const struct object_ops console_ops =
+@@ -147,8 +147,8 @@ static int console_server_signaled( struct object *obj, struct wait_queue_entry
+ static struct fd *console_server_get_fd( struct object *obj );
+ static struct object *console_server_lookup_name( struct object *obj, struct unicode_str *name,
+                                                 unsigned int attr, struct object *root );
+-static struct object *console_server_open_file( struct object *obj, unsigned int access,
+-                                                unsigned int sharing, unsigned int options );
++static struct object *console_server_open_file( struct object *obj, const struct unicode_str *subpath,
++                                                unsigned int access, unsigned int sharing, unsigned int options );
+ 
+ static const struct object_ops console_server_ops =
+ {
+@@ -216,8 +216,8 @@ static void screen_buffer_dump( struct object *obj, int verbose );
+ static void screen_buffer_destroy( struct object *obj );
+ static int screen_buffer_add_queue( struct object *obj, struct wait_queue_entry *entry );
+ static struct fd *screen_buffer_get_fd( struct object *obj );
+-static struct object *screen_buffer_open_file( struct object *obj, unsigned int access,
+-                                               unsigned int sharing, unsigned int options );
++static struct object *screen_buffer_open_file( struct object *obj, const struct unicode_str *subpath,
++                                               unsigned int access, unsigned int sharing, unsigned int options );
+ 
+ static const struct object_ops screen_buffer_ops =
+ {
+@@ -265,8 +265,8 @@ static const struct fd_ops screen_buffer_fd_ops =
+ static void console_device_dump( struct object *obj, int verbose );
+ static struct object *console_device_lookup_name( struct object *obj, struct unicode_str *name,
+                                                 unsigned int attr, struct object *root );
+-static struct object *console_device_open_file( struct object *obj, unsigned int access,
+-                                                unsigned int sharing, unsigned int options );
++static struct object *console_device_open_file( struct object *obj, const struct unicode_str *subpath,
++                                                unsigned int access, unsigned int sharing, unsigned int options );
+ 
+ static const struct object_ops console_device_ops =
+ {
+@@ -299,8 +299,8 @@ struct console_input
+ };
+ 
+ static void console_input_dump( struct object *obj, int verbose );
+-static struct object *console_input_open_file( struct object *obj, unsigned int access,
+-                                               unsigned int sharing, unsigned int options );
++static struct object *console_input_open_file( struct object *obj, const struct unicode_str *subpath,
++                                               unsigned int access, unsigned int sharing, unsigned int options );
+ static int console_input_add_queue( struct object *obj, struct wait_queue_entry *entry );
+ static struct fd *console_input_get_fd( struct object *obj );
+ static void console_input_destroy( struct object *obj );
+@@ -358,8 +358,8 @@ struct console_output
+ static void console_output_dump( struct object *obj, int verbose );
+ static int console_output_add_queue( struct object *obj, struct wait_queue_entry *entry );
+ static struct fd *console_output_get_fd( struct object *obj );
+-static struct object *console_output_open_file( struct object *obj, unsigned int access,
+-                                                unsigned int sharing, unsigned int options );
++static struct object *console_output_open_file( struct object *obj, const struct unicode_str *subpath,
++                                                unsigned int access, unsigned int sharing, unsigned int options );
+ static void console_output_destroy( struct object *obj );
+ 
+ static const struct object_ops console_output_ops =
+@@ -415,8 +415,8 @@ static void console_connection_dump( struct object *obj, int verbose );
+ static struct fd *console_connection_get_fd( struct object *obj );
+ static struct object *console_connection_lookup_name( struct object *obj, struct unicode_str *name,
+                                                     unsigned int attr, struct object *root );
+-static struct object *console_connection_open_file( struct object *obj, unsigned int access,
+-                                                    unsigned int sharing, unsigned int options );
++static struct object *console_connection_open_file( struct object *obj, const struct unicode_str *subpath,
++                                                    unsigned int access, unsigned int sharing, unsigned int options );
+ static int console_connection_close_handle( struct object *obj, struct process *process, obj_handle_t handle );
+ static void console_connection_destroy( struct object *obj );
+ 
+@@ -805,9 +805,15 @@ static struct object *console_lookup_name( struct object *obj, struct unicode_st
+     return NULL;
+ }
+ 
+-static struct object *console_open_file( struct object *obj, unsigned int access,
+-                                               unsigned int sharing, unsigned int options )
++static struct object *console_open_file( struct object *obj, const struct unicode_str *subpath,
++                                         unsigned int access, unsigned int sharing, unsigned int options )
+ {
++    if (subpath->len)
++    {
++        set_error( STATUS_OBJECT_NAME_NOT_FOUND );
++        return NULL;
++    }
++
+     return grab_object( obj );
+ }
+ 
+@@ -833,9 +839,15 @@ static void screen_buffer_destroy( struct object *obj )
+     free_async_queue( &screen_buffer->ioctl_q );
+ }
+ 
+-static struct object *screen_buffer_open_file( struct object *obj, unsigned int access,
+-                                               unsigned int sharing, unsigned int options )
++static struct object *screen_buffer_open_file( struct object *obj, const struct unicode_str *subpath,
++                                               unsigned int access, unsigned int sharing, unsigned int options )
+ {
++    if (subpath->len)
++    {
++        set_error( STATUS_OBJECT_NAME_NOT_FOUND );
++        return NULL;
++    }
++
+     return grab_object( obj );
+ }
+ 
+@@ -920,9 +932,15 @@ static struct fd *console_server_get_fd( struct object* obj )
+     return (struct fd *)grab_object( server->fd );
+ }
+ 
+-static struct object *console_server_open_file( struct object *obj, unsigned int access,
+-                                                unsigned int sharing, unsigned int options )
++static struct object *console_server_open_file( struct object *obj, const struct unicode_str *subpath,
++                                                unsigned int access, unsigned int sharing, unsigned int options )
+ {
++    if (subpath->len)
++    {
++        set_error( STATUS_OBJECT_NAME_NOT_FOUND );
++        return NULL;
++    }
++
+     return grab_object( obj );
+ }
+ 
+@@ -1230,9 +1248,15 @@ static struct object *console_connection_lookup_name( struct object *obj, struct
+     return NULL;
+ }
+ 
+-static struct object *console_connection_open_file( struct object *obj, unsigned int access,
+-                                                    unsigned int sharing, unsigned int options )
++static struct object *console_connection_open_file( struct object *obj, const struct unicode_str *subpath,
++                                                    unsigned int access, unsigned int sharing, unsigned int options )
+ {
++    if (subpath->len)
++    {
++        set_error( STATUS_OBJECT_NAME_NOT_FOUND );
++        return NULL;
++    }
++
+     return grab_object( obj );
+ }
+ 
+@@ -1355,10 +1379,17 @@ static struct object *console_device_lookup_name( struct object *obj, struct uni
+     return NULL;
+ }
+ 
+-static struct object *console_device_open_file( struct object *obj, unsigned int access,
+-                                                unsigned int sharing, unsigned int options )
++static struct object *console_device_open_file( struct object *obj, const struct unicode_str *subpath,
++                                                unsigned int access, unsigned int sharing, unsigned int options )
+ {
+     int is_output;
++
++    if (subpath->len)
++    {
++        set_error( STATUS_OBJECT_NAME_NOT_FOUND );
++        return NULL;
++    }
++
+     access = default_map_access( obj, access );
+     is_output = access & FILE_WRITE_DATA;
+     if (!current->process->console || (is_output && !current->process->console))
+@@ -1396,9 +1427,15 @@ static struct fd *console_input_get_fd( struct object *obj )
+     return (struct fd *)grab_object( console_input->fd );
+ }
+ 
+-static struct object *console_input_open_file( struct object *obj, unsigned int access,
+-                                               unsigned int sharing, unsigned int options )
++static struct object *console_input_open_file( struct object *obj, const struct unicode_str *subpath,
++                                               unsigned int access, unsigned int sharing, unsigned int options )
+ {
++    if (subpath->len)
++    {
++        set_error( STATUS_OBJECT_NAME_NOT_FOUND );
++        return NULL;
++    }
++
+     return grab_object( obj );
+ }
+ 
+@@ -1468,9 +1505,15 @@ static struct fd *console_output_get_fd( struct object *obj )
+     return (struct fd *)grab_object( console_output->fd );
+ }
+ 
+-static struct object *console_output_open_file( struct object *obj, unsigned int access,
+-                                                unsigned int sharing, unsigned int options )
++static struct object *console_output_open_file( struct object *obj, const struct unicode_str *subpath,
++                                                unsigned int access, unsigned int sharing, unsigned int options )
+ {
++    if (subpath->len)
++    {
++        set_error( STATUS_OBJECT_NAME_NOT_FOUND );
++        return NULL;
++    }
++
+     return grab_object( obj );
+ }
+ 
+diff --git a/server/device.c b/server/device.c
+index 436dac6bfe9..32f8e217b86 100644
+--- a/server/device.c
++++ b/server/device.c
+@@ -151,8 +151,8 @@ struct device
+ 
+ static void device_dump( struct object *obj, int verbose );
+ static void device_destroy( struct object *obj );
+-static struct object *device_open_file( struct object *obj, unsigned int access,
+-                                        unsigned int sharing, unsigned int options );
++static struct object *device_open_file( struct object *obj, const struct unicode_str *subpath,
++                                        unsigned int access, unsigned int sharing, unsigned int options );
+ static struct list *device_get_kernel_obj_list( struct object *obj );
+ 
+ static const struct object_ops device_ops =
+@@ -420,13 +420,19 @@ static void add_irp_to_queue( struct device_manager *manager, struct irp_call *i
+     if (list_head( &manager->requests ) == &irp->mgr_entry) wake_up( &manager->obj, 0 );  /* first one */
+ }
+ 
+-static struct object *device_open_file( struct object *obj, unsigned int access,
+-                                        unsigned int sharing, unsigned int options )
++static struct object *device_open_file( struct object *obj, const struct unicode_str *subpath,
++                                        unsigned int access, unsigned int sharing, unsigned int options )
+ {
+     struct device *device = (struct device *)obj;
+     struct device_file *file;
+     struct unicode_str nt_name;
+ 
++    if (subpath->len) /* TODO: handle non-empty filenames (filesystem device) */
++    {
++        set_error( STATUS_OBJECT_NAME_NOT_FOUND );
++        return NULL;
++    }
++
+     if (!(file = alloc_object( &device_file_ops ))) return NULL;
+ 
+     file->device = (struct device *)grab_object( device );
+diff --git a/server/fd.c b/server/fd.c
+index dabba024fb9..a39215a8d1e 100644
+--- a/server/fd.c
++++ b/server/fd.c
+@@ -2777,11 +2777,7 @@ DECL_HANDLER(open_file_object)
+     if (root) release_object( root );
+     if (!obj) return;
+ 
+-    if (name_left.len) /* not fully parsed */
+-    {
+-        set_error( STATUS_OBJECT_NAME_NOT_FOUND );
+-    }
+-    else if ((result = obj->ops->open_file( obj, req->access, req->sharing, req->options )))
++    if ((result = obj->ops->open_file( obj, &name_left, req->access, req->sharing, req->options )))
+     {
+         reply->handle = alloc_handle( current->process, result, req->access, req->attributes );
+         release_object( result );
+diff --git a/server/file.c b/server/file.c
+index 76c687833c9..6d2fc1e747a 100644
+--- a/server/file.c
++++ b/server/file.c
+@@ -79,8 +79,8 @@ static struct security_descriptor *file_get_sd( struct object *obj );
+ static int file_set_sd( struct object *obj, const struct security_descriptor *sd, unsigned int set_info );
+ static struct object *file_lookup_name( struct object *obj, struct unicode_str *name,
+                                       unsigned int attr, struct object *root );
+-static struct object *file_open_file( struct object *obj, unsigned int access,
+-                                      unsigned int sharing, unsigned int options );
++static struct object *file_open_file( struct object *obj, const struct unicode_str *subpath,
++                                      unsigned int access, unsigned int sharing, unsigned int options );
+ static struct list *file_get_kernel_obj_list( struct object *obj );
+ static void file_destroy( struct object *obj );
+ 
+@@ -556,8 +556,8 @@ static struct object *file_lookup_name( struct object *obj, struct unicode_str *
+     return NULL;
+ }
+ 
+-static struct object *file_open_file( struct object *obj, unsigned int access,
+-                                      unsigned int sharing, unsigned int options )
++static struct object *file_open_file( struct object *obj, const struct unicode_str *subpath,
++                                      unsigned int access, unsigned int sharing, unsigned int options )
+ {
+     struct file *file = (struct file *)obj;
+     struct object *new_file = NULL;
+@@ -566,6 +566,12 @@ static struct object *file_open_file( struct object *obj, unsigned int access,
+ 
+     assert( obj->ops == &file_ops );
+ 
++    if (subpath->len)
++    {
++        set_error( STATUS_OBJECT_NAME_NOT_FOUND );
++        return NULL;
++    }
++
+     if ((unix_name = dup_fd_name( file->fd, "" )))
+     {
+         get_nt_name( file->fd, &nt_name );
+diff --git a/server/mailslot.c b/server/mailslot.c
+index 2d8697ec9bd..58e2b1a2ceb 100644
+--- a/server/mailslot.c
++++ b/server/mailslot.c
+@@ -62,8 +62,8 @@ static void mailslot_dump( struct object*, int );
+ static struct fd *mailslot_get_fd( struct object * );
+ static unsigned int mailslot_map_access( struct object *obj, unsigned int access );
+ static int mailslot_link_name( struct object *obj, struct object_name *name, struct object *parent );
+-static struct object *mailslot_open_file( struct object *obj, unsigned int access,
+-                                          unsigned int sharing, unsigned int options );
++static struct object *mailslot_open_file( struct object *obj, const struct unicode_str *subpath,
++                                          unsigned int access, unsigned int sharing, unsigned int options );
+ static void mailslot_destroy( struct object * );
+ 
+ static const struct object_ops mailslot_ops =
+@@ -184,8 +184,8 @@ struct mailslot_device_file
+ static void mailslot_device_dump( struct object *obj, int verbose );
+ static struct object *mailslot_device_lookup_name( struct object *obj, struct unicode_str *name,
+                                                    unsigned int attr, struct object *root );
+-static struct object *mailslot_device_open_file( struct object *obj, unsigned int access,
+-                                                 unsigned int sharing, unsigned int options );
++static struct object *mailslot_device_open_file( struct object *obj, const struct unicode_str *subpath,
++                                                 unsigned int access, unsigned int sharing, unsigned int options );
+ static void mailslot_device_destroy( struct object *obj );
+ 
+ static const struct object_ops mailslot_device_ops =
+@@ -422,12 +422,18 @@ static int mailslot_link_name( struct ob
+     return 1;
+ }
+ 
+-static struct object *mailslot_open_file( struct object *obj, unsigned int access,
+-                                          unsigned int sharing, unsigned int options )
++static struct object *mailslot_open_file( struct object *obj, const struct unicode_str *subpath,
++                                          unsigned int access, unsigned int sharing, unsigned int options )
+ {
+     struct mailslot *mailslot = (struct mailslot *)obj;
+     struct mail_writer *writer;
+ 
++    if (subpath->len)
++    {
++        set_error( STATUS_OBJECT_NAME_NOT_FOUND );
++       return NULL;
++    }
++
+     if (!(sharing & FILE_SHARE_READ))
+     {
+         set_error( STATUS_SHARING_VIOLATION );
+@@ -399,11 +405,17 @@ static struct object *mailslot_device_lookup_name( struct object *obj, struct un
+     return found;
+ }
+ 
+-static struct object *mailslot_device_open_file( struct object *obj, unsigned int access,
+-                                                 unsigned int sharing, unsigned int options )
++static struct object *mailslot_device_open_file( struct object *obj, const struct unicode_str *subpath,
++                                                 unsigned int access, unsigned int sharing, unsigned int options )
+ {
+     struct mailslot_device_file *file;
+ 
++    if (subpath->len)
++    {
++        set_error( STATUS_OBJECT_NAME_NOT_FOUND );
++        return NULL;
++    }
++
+     if (!(file = alloc_object( &mailslot_device_file_ops ))) return NULL;
+     file->device = (struct mailslot_device *)grab_object( obj );
+     if (!(file->fd = alloc_pseudo_fd( &mailslot_device_fd_ops, obj, options )))
+diff --git a/server/named_pipe.c b/server/named_pipe.c
+index f3404a33c3b..e30bb4297fa 100644
+--- a/server/named_pipe.c
++++ b/server/named_pipe.c
+@@ -107,8 +107,8 @@ static void named_pipe_dump( struct object *obj, int verbose );
+ static unsigned int named_pipe_map_access( struct object *obj, unsigned int access );
+ static WCHAR *named_pipe_get_full_name( struct object *obj, data_size_t *ret_len );
+ static int named_pipe_link_name( struct object *obj, struct object_name *name, struct object *parent );
+-static struct object *named_pipe_open_file( struct object *obj, unsigned int access,
+-                                            unsigned int sharing, unsigned int options );
++static struct object *named_pipe_open_file( struct object *obj, const struct unicode_str *subpath,
++                                            unsigned int access, unsigned int sharing, unsigned int options );
+ static void named_pipe_destroy( struct object *obj );
+ 
+ static const struct object_ops named_pipe_ops =
+@@ -154,8 +154,8 @@ static void pipe_end_get_file_info( struct fd *fd, obj_handle_t handle, unsigned
+ static void pipe_server_dump( struct object *obj, int verbose );
+ static struct object *pipe_server_lookup_name( struct object *obj, struct unicode_str *name,
+                                                unsigned int attr, struct object *root );
+-static struct object *pipe_server_open_file( struct object *obj, unsigned int access,
+-                                             unsigned int sharing, unsigned int options );
++static struct object *pipe_server_open_file( struct object *obj, const struct unicode_str *subpath,
++                                             unsigned int access, unsigned int sharing, unsigned int options );
+ static void pipe_server_destroy( struct object *obj);
+ static void pipe_server_ioctl( struct fd *fd, ioctl_code_t code, struct async *async );
+ 
+@@ -246,8 +246,8 @@ static const struct fd_ops pipe_client_fd_ops =
+ static void named_pipe_device_dump( struct object *obj, int verbose );
+ static struct object *named_pipe_device_lookup_name( struct object *obj,
+     struct unicode_str *name, unsigned int attr, struct object *root );
+-static struct object *named_pipe_device_open_file( struct object *obj, unsigned int access,
+-                                                   unsigned int sharing, unsigned int options );
++static struct object *named_pipe_device_open_file( struct object *obj, const struct unicode_str *subpath,
++                                                   unsigned int access, unsigned int sharing, unsigned int options );
+ static void named_pipe_device_destroy( struct object *obj );
+ 
+ static const struct object_ops named_pipe_device_ops =
+@@ -462,12 +462,18 @@ static struct object *pipe_server_lookup_name( struct object *obj, struct unicod
+     return NULL;
+ }
+ 
+-static struct object *pipe_server_open_file( struct object *obj, unsigned int access,
+-                                             unsigned int sharing, unsigned int options )
++static struct object *pipe_server_open_file( struct object *obj, const struct unicode_str *subpath,
++                                             unsigned int access, unsigned int sharing, unsigned int options )
+ {
+     struct pipe_server *server = (struct pipe_server *)obj;
+ 
+-    return server->pipe_end.pipe->obj.ops->open_file( &server->pipe_end.pipe->obj, access, sharing, options );
++    if (subpath->len)
++    {
++        set_error( STATUS_OBJECT_NAME_NOT_FOUND );
++        return NULL;
++    }
++
++    return server->pipe_end.pipe->obj.ops->open_file( &server->pipe_end.pipe->obj, subpath, access, sharing, options );
+ }
+ 
+ static void pipe_server_destroy( struct object *obj )
+@@ -508,11 +514,17 @@ static struct object *named_pipe_device_lookup_name( struct object *obj, struct
+     return found;
+ }
+ 
+-static struct object *named_pipe_device_open_file( struct object *obj, unsigned int access,
+-                                                   unsigned int sharing, unsigned int options )
++static struct object *named_pipe_device_open_file( struct object *obj, const struct unicode_str *subpath,
++                                                   unsigned int access, unsigned int sharing, unsigned int options )
+ {
+     struct named_pipe_device_file *file;
+ 
++    if (subpath->len)
++    {
++        set_error( STATUS_OBJECT_NAME_NOT_FOUND );
++        return NULL;
++    }
++
+     if (!(file = alloc_object( &named_pipe_device_file_ops ))) return NULL;
+     file->device = (struct named_pipe_device *)grab_object( obj );
+     if (!(file->fd = alloc_pseudo_fd( &named_pipe_device_fd_ops, obj, options )))
+@@ -1333,14 +1345,20 @@ static int named_pipe_link_name( struct object *obj, struct object_name *name, s
+     return 1;
+ }
+ 
+-static struct object *named_pipe_open_file( struct object *obj, unsigned int access,
+-                                            unsigned int sharing, unsigned int options )
++static struct object *named_pipe_open_file( struct object *obj, const struct unicode_str *subpath,
++                                            unsigned int access, unsigned int sharing, unsigned int options )
+ {
+     struct named_pipe *pipe = (struct named_pipe *)obj;
+     struct pipe_server *server;
+     struct pipe_end *client;
+     unsigned int pipe_sharing;
+ 
++    if (subpath->len)
++    {
++        set_error( STATUS_OBJECT_NAME_NOT_FOUND );
++        return NULL;
++    }
++
+     if (list_empty( &pipe->listeners ))
+     {
+         set_error( STATUS_PIPE_NOT_AVAILABLE );
+diff --git a/server/object.c b/server/object.c
+index 459ead5f3a5..20877cb129c 100644
+--- a/server/object.c
++++ b/server/object.c
+@@ -702,10 +702,13 @@ void default_unlink_name( struct object *obj, struct object_name *name )
+     list_remove( &name->entry );
+ }
+ 
+-struct object *no_open_file( struct object *obj, unsigned int access, unsigned int sharing,
+-                             unsigned int options )
++struct object *no_open_file( struct object *obj, const struct unicode_str *subpath,
++                             unsigned int access, unsigned int sharing, unsigned int options )
+ {
+-    set_error( STATUS_OBJECT_TYPE_MISMATCH );
++    if (subpath->len) /* not fully parsed */
++        set_error( STATUS_OBJECT_NAME_NOT_FOUND );
++    else
++        set_error( STATUS_OBJECT_TYPE_MISMATCH );
+     return NULL;
+ }
+ 
+diff --git a/server/object.h b/server/object.h
+index d4d66536b81..61221728f46 100644
+--- a/server/object.h
++++ b/server/object.h
+@@ -99,8 +99,8 @@ struct object_ops
+     /* unlink an object's name from its parent */
+     void (*unlink_name)(struct object *, struct object_name *);
+     /* open a file object to access this object */
+-    struct object *(*open_file)(struct object *, unsigned int access, unsigned int sharing,
+-                                unsigned int options);
++    struct object *(*open_file)(struct object *, const struct unicode_str *filename,
++                                unsigned int access, unsigned int sharing, unsigned int options);
+     /* return list of kernel objects */
+     struct list *(*get_kernel_obj_list)(struct object *);
+     /* close a handle to this object */
+@@ -178,8 +178,8 @@ extern struct object *no_lookup_name( struct object *obj, struct unicode_str *na
+                                       unsigned int attributes, struct object *root );
+ extern int no_link_name( struct object *obj, struct object_name *name, struct object *parent );
+ extern void default_unlink_name( struct object *obj, struct object_name *name );
+-extern struct object *no_open_file( struct object *obj, unsigned int access, unsigned int sharing,
+-                                    unsigned int options );
++extern struct object *no_open_file( struct object *obj, const struct unicode_str *filename, unsigned int access,
++                                    unsigned int sharing, unsigned int options );
+ extern struct list *no_kernel_obj_list( struct object *obj );
+ extern int no_close_handle( struct object *obj, struct process *process, obj_handle_t handle );
+ extern void no_destroy( struct object *obj );
+diff --git a/server/sock.c b/server/sock.c
+index 8a95caded8b..e93ac95a7ea 100644
+--- a/server/sock.c
++++ b/server/sock.c
+@@ -3770,8 +3770,8 @@ static void sock_release_ifchange( struct sock *sock )
+ static void socket_device_dump( struct object *obj, int verbose );
+ static struct object *socket_device_lookup_name( struct object *obj, struct unicode_str *name,
+                                                  unsigned int attr, struct object *root );
+-static struct object *socket_device_open_file( struct object *obj, unsigned int access,
+-                                               unsigned int sharing, unsigned int options );
++static struct object *socket_device_open_file( struct object *obj, const struct unicode_str *subpath,
++                                               unsigned int access, unsigned int sharing, unsigned int options );
+ 
+ static const struct object_ops socket_device_ops =
+ {
+@@ -3809,11 +3809,17 @@ static struct object *socket_device_lookup_name( struct object *obj, struct unic
+     return NULL;
+ }
+ 
+-static struct object *socket_device_open_file( struct object *obj, unsigned int access,
+-                                               unsigned int sharing, unsigned int options )
++static struct object *socket_device_open_file( struct object *obj, const struct unicode_str *subpath,
++                                               unsigned int access, unsigned int sharing, unsigned int options )
+ {
+     struct sock *sock;
+ 
++    if (subpath->len)
++    {
++        set_error( STATUS_OBJECT_NAME_NOT_FOUND );
++        return NULL;
++    }
++
+     if (!(sock = create_socket())) return NULL;
+     if (!(sock->fd = alloc_pseudo_fd( &sock_fd_ops, &sock->obj, options )))
+     {
+-- 
+GitLab
+
+
+From ca6438316e6a64129eddccdb32e5855ac9281200 Mon Sep 17 00:00:00 2001
+From: Jinoh Kang <jinoh.kang.kr@gmail.com>
+Date: Sat, 25 Nov 2023 08:30:02 +0900
+Subject: [PATCH 4/5] server: Add stub lookup_name implementation for
+ named_pipe_device_file_ops.
+
+Prepare allowing creating named pipes using \Device\NamedPipe\ as
+RootDirectory.
+---
+ server/named_pipe.c | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/server/named_pipe.c b/server/named_pipe.c
+index e30bb4297fa..2909dbb57c3 100644
+--- a/server/named_pipe.c
++++ b/server/named_pipe.c
+@@ -277,6 +277,8 @@ static const struct object_ops named_pipe_device_ops =
+ static void named_pipe_device_file_dump( struct object *obj, int verbose );
+ static struct fd *named_pipe_device_file_get_fd( struct object *obj );
+ static WCHAR *named_pipe_device_file_get_full_name( struct object *obj, data_size_t *len );
++static struct object *named_pipe_device_file_lookup_name( struct object *obj, struct unicode_str *name,
++                                                          unsigned int attr, struct object *root );
+ static void named_pipe_device_ioctl( struct fd *fd, ioctl_code_t code, struct async *async );
+ static enum server_fd_type named_pipe_device_file_get_fd_type( struct fd *fd );
+ static void named_pipe_device_file_destroy( struct object *obj );
+@@ -296,7 +298,7 @@ static const struct object_ops named_pipe_device_file_ops =
+     default_get_sd,                          /* get_sd */
+     default_set_sd,                          /* set_sd */
+     named_pipe_device_file_get_full_name,    /* get_full_name */
+-    no_lookup_name,                          /* lookup_name */
++    named_pipe_device_file_lookup_name,      /* lookup_name */
+     no_link_name,                            /* link_name */
+     NULL,                                    /* unlink_name */
+     no_open_file,                            /* open_file */
+@@ -585,6 +587,12 @@ static enum server_fd_type named_pipe_device_file_get_fd_type( struct fd *fd )
+     return FD_TYPE_DEVICE;
+ }
+ 
++static struct object *named_pipe_device_file_lookup_name( struct object *obj, struct unicode_str *name,
++                                                          unsigned int attr, struct object *root )
++{
++    return no_lookup_name( obj, name, attr, root );
++}
++
+ static void named_pipe_device_file_destroy( struct object *obj )
+ {
+     struct named_pipe_device_file *file = (struct named_pipe_device_file*)obj;
+-- 
+GitLab
+
+
+From c0538a20052e507c46b0dca49b5fec1f26d9fb26 Mon Sep 17 00:00:00 2001
+From: Jinoh Kang <jinoh.kang.kr@gmail.com>
+Date: Thu, 25 Nov 2021 22:08:07 +0900
+Subject: [PATCH 5/5] server: Allow creating named pipes using
+ \Device\NamedPipe\ as RootDirectory.
+
+Wine-Bug: https://bugs.winehq.org/show_bug.cgi?id=52105
+Fixes: 2600ecd4edfdb71097105c74312f83845305a4f2
+---
+ dlls/ntdll/tests/om.c   |  2 +-
+ dlls/ntdll/tests/pipe.c |  5 ++---
+ server/named_pipe.c     | 46 ++++++++++++++++++++++++++++++++++++-----
+ 3 files changed, 44 insertions(+), 9 deletions(-)
+
+diff --git a/server/named_pipe.c b/server/named_pipe.c
+index 2909dbb57c3..35a198441a6 100644
+--- a/server/named_pipe.c
++++ b/server/named_pipe.c
+@@ -99,6 +99,7 @@ struct named_pipe_device
+ struct named_pipe_device_file
+ {
+     struct object             obj;         /* object header */
++    int                       is_rootdir;  /* is root directory file? */
+     struct fd                *fd;          /* pseudo-fd for ioctls */
+     struct named_pipe_device *device;      /* named pipe device */
+ };
+@@ -528,6 +529,7 @@ static struct object *named_pipe_device_open_file( struct object *obj, const str
+     }
+ 
+     if (!(file = alloc_object( &named_pipe_device_file_ops ))) return NULL;
++    file->is_rootdir = !!subpath->str;  /* TRUE: "\\Device\\NamedPipe\\" (trailing \\) */
+     file->device = (struct named_pipe_device *)grab_object( obj );
+     if (!(file->fd = alloc_pseudo_fd( &named_pipe_device_fd_ops, obj, options )))
+     {
+@@ -567,7 +569,8 @@ static void named_pipe_device_file_dump( struct object *obj, int verbose )
+ {
+     struct named_pipe_device_file *file = (struct named_pipe_device_file *)obj;
+ 
+-    fprintf( stderr, "File on named pipe device %p\n", file->device );
++    fprintf( stderr, "%s on named pipe device %p\n",
++             file->is_rootdir ? "Root directory" : "File", file->device );
+ }
+ 
+ static struct fd *named_pipe_device_file_get_fd( struct object *obj )
+@@ -576,10 +579,32 @@ static struct fd *named_pipe_device_file_get_fd( struct object *obj )
+     return (struct fd *)grab_object( file->fd );
+ }
+ 
+-static WCHAR *named_pipe_device_file_get_full_name( struct object *obj, data_size_t *len )
++static WCHAR *named_pipe_device_file_get_full_name( struct object *obj, data_size_t *ret_len )
+ {
+     struct named_pipe_device_file *file = (struct named_pipe_device_file *)obj;
+-    return file->device->obj.ops->get_full_name( &file->device->obj, len );
++    WCHAR *device_name;
++    data_size_t len;
++
++    device_name = file->device->obj.ops->get_full_name( &file->device->obj, &len );
++    if (!device_name) return NULL;
++
++    if (file->is_rootdir)
++    {
++        WCHAR *newbuf;
++
++        len += sizeof(WCHAR);
++        if (!(newbuf = realloc(device_name, len)))
++        {
++            free(device_name);
++            return NULL;
++        }
++
++        device_name = newbuf;
++        *(WCHAR *)((char *)device_name + len - sizeof(WCHAR)) = '\\';
++    }
++
++    *ret_len = len;
++    return device_name;
+ }
+ 
+ static enum server_fd_type named_pipe_device_file_get_fd_type( struct fd *fd )
+@@ -590,6 +615,11 @@ static enum server_fd_type named_pipe_device_file_get_fd_type( struct fd *fd )
+ static struct object *named_pipe_device_file_lookup_name( struct object *obj, struct unicode_str *name,
+                                                           unsigned int attr, struct object *root )
+ {
++    struct named_pipe_device_file *file = (struct named_pipe_device_file *)obj;
++
++    if (file->is_rootdir)
++        return grab_object( file->device );
++
+     return no_lookup_name( obj, name, attr, root );
+ }
+ 
+@@ -1516,7 +1566,13 @@ static struct pipe_end *create_pipe_clie
+ 
+ static int named_pipe_link_name( struct object *obj, struct object_name *name, struct object *parent )
+ {
+-    if (parent->ops == &named_pipe_dir_ops) parent = &((struct named_pipe_dir *)parent)->device->obj;
++    if (parent->ops == &named_pipe_device_file_ops)
++    {
++        struct named_pipe_device_file *file = (struct named_pipe_device_file *)parent;
++
++        if (file->is_rootdir)
++            parent = &((struct named_pipe_device_file *)parent)->device->obj;
++    }
+     if (parent->ops != &named_pipe_device_ops)
+     {
+         set_error( STATUS_OBJECT_NAME_INVALID );
+-- 
+GitLab
+
+From 594ebba789054940c6fd9bd14bef3e50a2e098d5 Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Wed, 24 Jul 2024 14:38:58 -0600
+Subject: [PATCH] ntdll: Partially support querying directory entries for
+ '\\Device\\NamedPipe\\'.
+
+CW-Bug-Id: #24062
+---
+ dlls/ntdll/tests/pipe.c | 109 ++++++++++++++++++++++++++++++++++++++++
+ dlls/ntdll/unix/file.c  |  55 ++++++++++++++++++++
+ server/named_pipe.c     |  82 +++++++++++++++++++++++++++++-
+ server/protocol.def     |  13 +++++
+ server/trace.c          |  23 +++++++++
+ 5 files changed, 281 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/ntdll/unix/file.c b/dlls/ntdll/unix/file.c
+index e5ea71fae80..61f7522cab6 100644
+--- a/dlls/ntdll/unix/file.c
++++ b/dlls/ntdll/unix/file.c
+@@ -2624,6 +2624,57 @@ static unsigned int get_cached_dir_data( HANDLE handle, struct dir_data **data_r
+     return status;
+ }
+ 
++static NTSTATUS server_query_directory_file( HANDLE handle, IO_STATUS_BLOCK *io, void *buffer, ULONG length,
++                                             FILE_INFORMATION_CLASS info_class, BOOLEAN single_entry,
++                                             BOOLEAN restart_scan )
++{
++    FILE_DIRECTORY_INFORMATION *info = (FILE_DIRECTORY_INFORMATION *)buffer;
++    struct directory_file_entry *entries;
++    unsigned int total_len;
++    NTSTATUS status;
++
++    if (!(entries = malloc( length ))) return STATUS_NO_MEMORY;
++
++    SERVER_START_REQ( query_directory_file )
++    {
++        req->handle = wine_server_obj_handle( handle );;
++        req->restart_scan = restart_scan;
++        wine_server_set_reply( req, entries, length );
++        status = wine_server_call( req );
++        total_len = reply->total_len;
++        if (status == STATUS_OBJECT_TYPE_MISMATCH) status = STATUS_BAD_DEVICE_TYPE;
++    }
++    SERVER_END_REQ;
++
++    if (!status && offsetof(FILE_DIRECTORY_INFORMATION, FileName) + total_len > length)
++        status = STATUS_INFO_LENGTH_MISMATCH;
++
++    io->Status = status;
++    io->Information = 0;
++    if (!status)
++    {
++        static int once;
++
++        if (info_class != FileDirectoryInformation)
++        {
++            FIXME( "Unsupprted info_class %d.\n", info_class );
++            free( entries );
++            return STATUS_NOT_SUPPORTED;
++        }
++        if (!single_entry) FIXME( "Multiple entries not supported.\n" );
++
++        memset( info, 0, sizeof(*info) );
++        if (!once++) FIXME( "Not filling attributes." );
++        info->FileNameLength = entries->name_len;
++        memcpy( info->FileName, entries + 1, entries->name_len );
++        io->Information = offsetof(FILE_DIRECTORY_INFORMATION, FileName) + total_len;
++        TRACE( "-> %s.\n", debugstr_wn(info->FileName, info->FileNameLength / 2) );
++    }
++    else TRACE( "-> status %#x.\n", (int)status );
++
++    free( entries );
++    return status;
++}
+ 
+ /******************************************************************************
+  *              NtQueryDirectoryFile   (NTDLL.@)
+@@ -2674,7 +2725,11 @@ NTSTATUS WINAPI NtQueryDirectoryFile( HANDLE handle, HANDLE event, PIO_APC_ROUTI
+     if (!buffer) return STATUS_ACCESS_VIOLATION;
+ 
+     if ((status = server_get_unix_fd( handle, FILE_LIST_DIRECTORY, &fd, &needs_close, &type, NULL )))
++    {
++        if (status == STATUS_BAD_DEVICE_TYPE)
++            return server_query_directory_file( handle, io, buffer, length, info_class, single_entry, restart_scan);
+         return status;
++    }
+ 
+     if (type != FD_TYPE_DIR)
+     {
+diff --git a/server/named_pipe.c b/server/named_pipe.c
+index 4efa51e2fec..25299747dae 100644
+--- a/server/named_pipe.c
++++ b/server/named_pipe.c
+@@ -34,6 +34,7 @@
+ #include "windef.h"
+ #include "winternl.h"
+ #include "winioctl.h"
++#include "ddk/wdm.h"
+ 
+ #include "file.h"
+ #include "handle.h"
+@@ -101,6 +102,8 @@ struct named_pipe_device_file
+     struct object             obj;         /* object header */
+     struct fd                *fd;          /* pseudo-fd for ioctls */
+     struct named_pipe_device *device;      /* named pipe device */
++    struct process           *enum_client_process;
++    unsigned int              enum_index;
+ };
+ 
+ static void named_pipe_dump( struct object *obj, int verbose );
+@@ -288,6 +291,7 @@ static WCHAR *named_pipe_device_file_get_full_name( struct object *obj, data_siz
+ static void named_pipe_device_ioctl( struct fd *fd, ioctl_code_t code, struct async *async );
+ static enum server_fd_type named_pipe_device_file_get_fd_type( struct fd *fd );
+ static void named_pipe_device_file_destroy( struct object *obj );
++static int named_pipe_device_file_close_handle( struct object *obj, struct process *process, obj_handle_t handle );
+ 
+ static const struct object_ops named_pipe_device_file_ops =
+ {
+@@ -311,7 +315,7 @@ static const struct object_ops named_pipe_device_file_ops =
+     NULL,                                    /* unlink_name */
+     no_open_file,                            /* open_file */
+     no_kernel_obj_list,                      /* get_kernel_obj_list */
+-    no_close_handle,                         /* close_handle */
++    named_pipe_device_file_close_handle,     /* close_handle */
+     named_pipe_device_file_destroy           /* destroy */
+ };
+ 
+@@ -525,6 +529,8 @@ static struct object *named_pipe_device_open_file( struct object *obj, unsigned
+ 
+     if (!(file = alloc_object( &named_pipe_device_file_ops ))) return NULL;
+     file->device = (struct named_pipe_device *)grab_object( obj );
++    file->enum_client_process = NULL;
++    file->enum_index = 0;
+     if (!(file->fd = alloc_pseudo_fd( &named_pipe_device_fd_ops, obj, options )))
+     {
+         release_object( file );
+@@ -713,14 +713,31 @@ static struct object *named_pipe_device_
+     return no_lookup_name( obj, name, attr, root );
+ }
+ 
++static void release_enum( struct named_pipe_device_file *file )
++{
++    if (!file->enum_client_process) return;
++    release_object( file->enum_client_process );
++    file->enum_client_process = NULL;
++}
++
+ static void named_pipe_device_file_destroy( struct object *obj )
+ {
+     struct named_pipe_device_file *file = (struct named_pipe_device_file*)obj;
+     assert( obj->ops == &named_pipe_device_file_ops );
++    release_enum( file );
+     if (file->fd) release_object( file->fd );
+     release_object( file->device );
+ }
+ 
++static int named_pipe_device_file_close_handle( struct object *obj, struct process *process, obj_handle_t handle )
++{
++    struct named_pipe_device_file *file = (struct named_pipe_device_file *)obj;
++    assert( obj->ops == &named_pipe_device_file_ops );
++
++    release_enum( file );
++    return 1;
++}
++
+ static void named_pipe_dir_dump( struct object *obj, int verbose )
+ {
+     struct named_pipe_dir *dir = (struct named_pipe_dir *)obj;
+@@ -1547,3 +1570,60 @@ DECL_HANDLER(set_named_pipe_info)
+ 
+     release_object( pipe_end );
+ }
++
++DECL_HANDLER(query_directory_file)
++{
++    struct named_pipe_device_file *file;
++    struct directory_file_entry entry;
++    struct unicode_str name;
++    struct named_pipe *pipe;
++    size_t entry_size;
++    char *buffer;
++
++    file = (struct named_pipe_device_file *)get_handle_obj( current->process, req->handle,
++                                                            DIRECTORY_QUERY, &named_pipe_device_file_ops );
++    if (!file) return;
++
++    reply->total_len = 0;
++    if (!file->enum_client_process)
++    {
++        file->enum_client_process = (struct process *)grab_object( current->process );
++        file->enum_index = 0;
++    }
++
++    if (file->enum_client_process != current->process)
++    {
++        release_object( file );
++        set_error( STATUS_SHARING_VIOLATION );
++        return;
++    }
++
++    if (req->restart_scan) file->enum_index = 0;
++    if (!(pipe = (struct named_pipe *)find_object_index( file->device->pipes, file->enum_index )))
++    {
++        release_object( file );
++        set_error( STATUS_NO_MORE_FILES );
++        return;
++    }
++
++    assert( pipe->obj.ops == &named_pipe_ops );
++
++    name.str = get_object_name( &pipe->obj, &name.len );
++    entry_size = (sizeof(entry) + name.len + 3) & ~3;
++    if (entry_size > get_reply_max_size())
++    {
++        set_error( STATUS_INFO_LENGTH_MISMATCH );
++        goto done;
++    }
++    entry.name_len = name.len;
++    reply->total_len = entry.name_len;
++
++    if (!(buffer = set_reply_data_size( entry_size ))) goto done;
++    memcpy( buffer, &entry, sizeof(entry) );
++    memcpy( buffer + sizeof(entry), name.str, name.len );
++
++    ++file->enum_index;
++done:
++    release_object( &pipe->obj );
++    release_object( file );
++}
+diff --git a/server/protocol.def b/server/protocol.def
+index 302563cbe66..fd7bdab844a 100644
+--- a/server/protocol.def
++++ b/server/protocol.def
+@@ -891,6 +892,12 @@ struct cpu_topology_override
+     unsigned char host_cpu_id[64];
+ };
+ 
++struct directory_file_entry
++{
++    data_size_t name_len;
++    /* VARARG(name,unicode_str,name_len); */
++};
++
+ typedef struct
+ {
+     int x;
+@@ -3530,6 +3536,13 @@ struct handle_info
+     VARARG(type,unicode_str);          /* entry type */
+ @END
+ 
++@REQ(query_directory_file)
++    obj_handle_t   handle;
++    unsigned int   restart_scan;
++@REPLY
++    data_size_t    total_len;          /* total length needed for strings */
++    VARARG(entries,directory_file_entries);
++@END
+ 
+ /* Create a symbolic link object */
+ @REQ(create_symlink)
+diff --git a/server/trace.c b/server/trace.c
+index a44836e6543..adcf57079a7 100644
+--- a/server/trace.c
++++ b/server/trace.c
+@@ -1414,6 +1414,29 @@ static void dump_varargs_cpu_topology_override( const char *prefix, data_size_t
+     remove_data( size );
+ }
+ 
++static void dump_varargs_directory_file_entries( const char *prefix, data_size_t size )
++{
++    const struct directory_file_entry *entry = cur_data;
++    const WCHAR *str;
++
++    fprintf( stderr, "%s{", prefix );
++    if (size)
++    {
++        if (size < sizeof(*entry) || size - sizeof(*entry) < entry->name_len)
++        {
++            fprintf( stderr, "***invalid***}" );
++            remove_data( size );
++            return;
++        }
++        str = (const WCHAR *)(entry + 1);
++        fprintf( stderr, "{name=L\"" );
++        dump_strW( str, entry->name_len, stderr, "\"\"" );
++        fprintf( stderr, "\"}" );
++        remove_data( size );
++    }
++    fputc( '}', stderr );
++}
++
+ typedef void (*dump_func)( const void *req );
+ 
+ /* Everything below this line is generated automatically by tools/make_requests */
+
+--- a/server/named_pipe.c	2024-07-25 13:57:06.873170024 -0500
++++ b/server/named_pipe.c	2024-07-25 13:56:55.914123631 -0500
+@@ -103,6 +103,8 @@ struct named_pipe_device_file
+     int                       is_rootdir;  /* is root directory file? */
+     struct fd                *fd;          /* pseudo-fd for ioctls */
+     struct named_pipe_device *device;      /* named pipe device */
++    struct process           *enum_client_process;
++    unsigned int              enum_index;
+ };
+ 
+ /* mostly identical to named_pipe_device_file (declared separately for type checking) */
