@@ -1,0 +1,144 @@
+--- a/dlls/ntdll/unix/esync.c	2024-07-28 17:22:51.250057029 -0500
++++ b/dlls/ntdll/unix/esync.c	2024-07-28 17:23:03.756047349 -0500
+@@ -181,7 +181,7 @@ static struct esync *add_to_list( HANDLE
+         }
+     }
+ 
+-    if (!InterlockedCompareExchange( (int *)&esync_list[entry][idx].type, type, 0 ))
++    if (!InterlockedCompareExchange( (LONG *)&esync_list[entry][idx].type, type, 0 ))
+     {
+         esync_list[entry][idx].fd = fd;
+         esync_list[entry][idx].shm = shm;
+@@ -254,7 +254,7 @@ static NTSTATUS get_object( HANDLE handl
+ 
+     if (ret)
+     {
+-        WARN("Failed to retrieve fd for handle %p, status %#x.\n", handle, ret);
++        WARN("Failed to retrieve fd for handle %p, status %#x.\n", handle, (unsigned int)ret);
+         *obj = NULL;
+         return ret;
+     }
+@@ -273,7 +273,7 @@ NTSTATUS esync_close( HANDLE handle )
+ 
+     if (entry < ESYNC_LIST_ENTRIES && esync_list[entry])
+     {
+-        if (InterlockedExchange((int *)&esync_list[entry][idx].type, 0))
++        if (InterlockedExchange((LONG *)&esync_list[entry][idx].type, 0))
+         {
+             close( esync_list[entry][idx].fd );
+             return STATUS_SUCCESS;
+@@ -372,7 +372,7 @@ extern NTSTATUS esync_create_semaphore(H
+     const OBJECT_ATTRIBUTES *attr, LONG initial, LONG max)
+ {
+     TRACE("name %s, initial %d, max %d.\n",
+-        attr ? debugstr_us(attr->ObjectName) : "<no name>", initial, max);
++        attr ? debugstr_us(attr->ObjectName) : "<no name>", (int)initial, (int)max);
+ 
+     return create_esync( ESYNC_SEMAPHORE, handle, access, attr, initial, max );
+ }
+@@ -393,7 +393,7 @@ NTSTATUS esync_release_semaphore( HANDLE
+     ULONG current;
+     NTSTATUS ret;
+ 
+-    TRACE("%p, %d, %p.\n", handle, count, prev);
++    TRACE("%p, %d, %p.\n", handle, (int)count, prev);
+ 
+     if ((ret = get_object( handle, &obj))) return ret;
+     semaphore = obj->shm;
+@@ -404,7 +404,7 @@ NTSTATUS esync_release_semaphore( HANDLE
+ 
+         if (count + current > semaphore->max)
+             return STATUS_SEMAPHORE_LIMIT_EXCEEDED;
+-    } while (InterlockedCompareExchange( &semaphore->count, count + current, current ) != current);
++    } while (InterlockedCompareExchange( (LONG *)&semaphore->count, count + current, current ) != current);
+ 
+     if (prev) *prev = current;
+ 
+@@ -533,7 +533,7 @@ NTSTATUS esync_set_event( HANDLE handle
+     if (obj->type == ESYNC_MANUAL_EVENT)
+     {
+         /* Acquire the spinlock. */
+-        while (InterlockedCompareExchange( &event->locked, 1, 0 ))
++        while (InterlockedCompareExchange( (LONG *)&event->locked, 1, 0 ))
+             small_pause();
+     }
+ 
+@@ -546,7 +546,7 @@ NTSTATUS esync_set_event( HANDLE handle
+      * eventfd is unsignaled (i.e. reset shm, set shm, set fd, reset fd), we
+      * *must* signal the fd now, or any waiting threads will never wake up. */
+ 
+-    if (!InterlockedExchange( &event->signaled, 1 ) || obj->type == ESYNC_AUTO_EVENT)
++    if (!InterlockedExchange( (LONG *)&event->signaled, 1 ) || obj->type == ESYNC_AUTO_EVENT)
+     {
+         if (write( obj->fd, &value, sizeof(value) ) == -1)
+             ERR("write: %s\n", strerror(errno));
+@@ -579,7 +579,7 @@ NTSTATUS esync_reset_event( HANDLE handl
+     if (obj->type == ESYNC_MANUAL_EVENT)
+     {
+         /* Acquire the spinlock. */
+-        while (InterlockedCompareExchange( &event->locked, 1, 0 ))
++        while (InterlockedCompareExchange( (LONG *)&event->locked, 1, 0 ))
+             small_pause();
+     }
+ 
+@@ -589,7 +589,7 @@ NTSTATUS esync_reset_event( HANDLE handl
+      * For auto-reset events, we have no guarantee that the previous "signaled"
+      * state is actually correct. We need to leave both states unsignaled after
+      * leaving this function, so we always have to read(). */
+-    if (InterlockedExchange( &event->signaled, 0 ) || obj->type == ESYNC_AUTO_EVENT)
++    if (InterlockedExchange( (LONG *)&event->signaled, 0 ) || obj->type == ESYNC_AUTO_EVENT)
+     {
+         if (read( obj->fd, &value, sizeof(value) ) == -1 && errno != EWOULDBLOCK && errno != EAGAIN)
+         {
+@@ -792,7 +792,7 @@ static BOOL update_grabbed_object( struc
+          * fact that we were able to grab it at all means the count is nonzero,
+          * and if someone else grabbed it then the count must have been >= 2,
+          * etc. */
+-        InterlockedExchangeAdd( &semaphore->count, -1 );
++        InterlockedExchangeAdd( (LONG *)&semaphore->count, -1 );
+     }
+     else if (obj->type == ESYNC_AUTO_EVENT)
+     {
+@@ -879,7 +879,7 @@ static NTSTATUS __esync_wait_objects( DW
+ 
+     if (TRACE_ON(esync))
+     {
+-        TRACE("Waiting for %s of %d handles:", wait_any ? "any" : "all", count);
++        TRACE("Waiting for %s of %d handles:", wait_any ? "any" : "all", (int)count);
+         for (i = 0; i < count; i++)
+             TRACE(" %p", handles[i]);
+ 
+@@ -946,7 +946,7 @@ static NTSTATUS __esync_wait_objects( DW
+                         if ((size = read( obj->fd, &value, sizeof(value) )) == sizeof(value))
+                         {
+                             TRACE("Woken up by handle %p [%d].\n", handles[i], i);
+-                            InterlockedDecrement( &semaphore->count );
++                            InterlockedDecrement( (LONG *)&semaphore->count );
+                             return i;
+                         }
+                     }
+@@ -1169,10 +1169,22 @@ tryagain:
+                         {
+                             /* We were too slow. Put everything back. */
+                             value = 1;
+-                            for (j = i; j >= 0; j--)
++                            for (j = i - 1; j >= 0; j--)
+                             {
+-                                if (write( obj->fd, &value, sizeof(value) ) == -1)
++                                struct esync *obj = objs[j];
++
++                                if (obj->type == ESYNC_MUTEX)
++                                {
++                                    struct mutex *mutex = obj->shm;
++
++                                    if (mutex->tid == GetCurrentThreadId())
++                                        continue;
++                                }
++                                if (write( fds[j].fd, &value, sizeof(value) ) == -1)
++                                {
++                                    ERR("write failed.\n");
+                                     return errno_to_status( errno );
++                                }
+                             }
+ 
+                             goto tryagain;  /* break out of two loops and a switch */
