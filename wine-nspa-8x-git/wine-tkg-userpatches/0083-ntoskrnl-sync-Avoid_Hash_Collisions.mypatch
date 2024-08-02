@@ -153,3 +153,101 @@
              }
              }
 
+--- a/dlls/rpcrt4/rpc_transport.c	2024-07-21 00:03:17.826348067 -0500
++++ b/dlls/rpcrt4/rpc_transport.c	2024-07-21 00:03:04.650315317 -0500
+@@ -29,6 +29,7 @@
+ 
+ #include <stdarg.h>
+ #include <stdio.h>
++#include <stdlib.h>
+ #include <string.h>
+ #include <assert.h>
+ 
+@@ -629,11 +630,33 @@ typedef struct _RpcServerProtseq_np
+     HANDLE mgr_event;
+ } RpcServerProtseq_np;
+ 
+-static RpcServerProtseq *rpcrt4_protseq_np_alloc(void)
+-{
++static RpcServerProtseq *rpcrt4_protseq_np_alloc(void) {
++    WCHAR uniqrpc [] = { 'r','p','c','m','e','X','X','X','X',0 };
+     RpcServerProtseq_np *ps = calloc(1, sizeof(*ps));
+-    if (ps)
+-        ps->mgr_event = CreateEventW(NULL, FALSE, FALSE, NULL);
++    
++    if (ps) {
++        // Use QueryPerformanceCounter for time-based seeding
++        LARGE_INTEGER li;
++        QueryPerformanceCounter(&li);
++        unsigned int seed = (unsigned int)(li.QuadPart & 0xFFFFFFFF);
++
++        // Generate a random string
++        srand(seed);
++        int hashNum;
++        WCHAR *hashLoc = uniqrpc + 5;
++        for (int i = 0; i < 4; i++) {
++            hashNum = rand() % 62;
++            if (hashNum < 10)
++                hashLoc[i] = '0' + hashNum;
++            else if (hashNum < 36)
++                hashLoc[i] = 'a' + hashNum - 10;
++            else
++                hashLoc[i] = 'A' + hashNum - 36;
++        }
++
++        ps->mgr_event = CreateEventW(NULL, FALSE, FALSE, uniqrpc );
++    }
++    
+     return &ps->common;
+ }
+ 
+--- a/dlls/sechost/service.c	2024-07-21 00:04:34.776544753 -0500
++++ b/dlls/sechost/service.c	2024-07-21 00:04:02.112460174 -0500
+@@ -21,6 +21,8 @@
+  */
+ 
+ #include <stdarg.h>
++#include <stdlib.h>
++#include <time.h>
+ #define WINADVAPI
+ #include "windef.h"
+ #include "winbase.h"
+@@ -1796,6 +1796,11 @@ static BOOL service_run_main_thread(void
+     HANDLE wait_handles[MAXIMUM_WAIT_OBJECTS], system_shutdown;
+     UINT wait_services[MAXIMUM_WAIT_OBJECTS];
+     struct dispatcher_data *disp = heap_alloc( sizeof(*disp) );
++    WCHAR uniqsec[] = { 's','r','v','t','h','r','X','X','X','X',0 };
++    int hashNum;
++    WCHAR *hashLoc = uniqsec + 6;
++    unsigned int seed;
++    LARGE_INTEGER li;
+ 
+     disp->manager = OpenSCManagerW( NULL, NULL, SC_MANAGER_CONNECT );
+     if (!disp->manager)
+@@ -1815,7 +1820,24 @@ static BOOL service_run_main_thread(void
+         return FALSE;
+     }
+ 
+-    service_event = CreateEventW( NULL, FALSE, FALSE, NULL );
++    // Use QueryPerformanceCounter for time-based seeding
++    QueryPerformanceCounter(&li);
++    seed = (unsigned int)(li.QuadPart & 0xFFFFFFFF);
++
++    // Generate a random string
++    srand(seed);
++    while (*hashLoc != 0) {
++        hashNum = rand() % 62;
++        if (hashNum < 10)
++            *hashLoc = '0' + hashNum;
++        else if (hashNum < 36)
++            *hashLoc = 'a' + hashNum - 10;
++        else
++            *hashLoc = 'A' + hashNum - 36;
++        hashLoc++;
++    }
++ 
++    service_event = CreateEventW(NULL, FALSE, FALSE, uniqsec );
+     stop_service  = FALSE;
+ 
+     /* FIXME: service_control_dispatcher should be merged into the main thread */
+

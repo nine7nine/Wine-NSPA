@@ -6386,3 +6386,260 @@ index c6a93eb5e16..2bd8c63969a 100644
  void xim_set_result_string( HWND hwnd, const char *str, UINT count )
 -- 
 GitLab
+
+From 7175d8855af8bdf30440c15e60681ea9df9e0382 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Mon, 27 Nov 2023 19:05:38 +0100
+Subject: [PATCH 1/2] win32u: Initialize sysparams before winstation.
+
+Wine-Bug: https://bugs.winehq.org/show_bug.cgi?id=55843
+---
+ dlls/win32u/class.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/dlls/win32u/class.c b/dlls/win32u/class.c
+index 396e2285797..1fb5044b2e5 100644
+--- a/dlls/win32u/class.c
++++ b/dlls/win32u/class.c
+@@ -249,8 +249,8 @@ DLGPROC get_dialog_proc( DLGPROC ret, BOOL ansi )
+ static void init_user(void)
+ {
+     gdi_init();
+-    winstation_init();
+     sysparams_init();
++    winstation_init();
+     register_desktop_class();
+ }
+ 
+-- 
+GitLab
+
+From 8e4c196c14779194b42f2c235c8f421c0d2f94c4 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Mon, 27 Nov 2023 19:12:36 +0100
+Subject: [PATCH 2/2] win32u: Remove unnecessary config_key lazy
+ initializations.
+
+---
+ dlls/win32u/sysparams.c | 8 ++------
+ 1 file changed, 2 insertions(+), 6 deletions(-)
+
+diff --git a/dlls/win32u/sysparams.c b/dlls/win32u/sysparams.c
+index 471403440b6..d0fb0f6415a 100644
+--- a/dlls/win32u/sysparams.c
++++ b/dlls/win32u/sysparams.c
+@@ -565,8 +565,7 @@ static BOOL adapter_get_registry_settings( const struct adapter *adapter, DEVMOD
+ 
+     mutex = get_display_device_init_mutex();
+ 
+-    if (!config_key && !(config_key = reg_open_key( NULL, config_keyW, sizeof(config_keyW) ))) ret = FALSE;
+-    else if (!(hkey = reg_open_key( config_key, adapter->config_key, lstrlenW( adapter->config_key ) * sizeof(WCHAR) ))) ret = FALSE;
++    if (!(hkey = reg_open_key( config_key, adapter->config_key, lstrlenW( adapter->config_key ) * sizeof(WCHAR) ))) ret = FALSE;
+     else
+     {
+         ret = read_adapter_mode( hkey, ENUM_REGISTRY_SETTINGS, mode );
+@@ -585,7 +584,6 @@ static BOOL adapter_set_registry_settings( const struct adapter *adapter, const
+ 
+     mutex = get_display_device_init_mutex();
+ 
+-    if (!config_key && !(config_key = reg_open_key( NULL, config_keyW, sizeof(config_keyW) ))) ret = FALSE;
+     if (!(hkey = reg_open_key( config_key, adapter->config_key, lstrlenW( adapter->config_key ) * sizeof(WCHAR) ))) ret = FALSE;
+     else
+     {
+@@ -614,8 +612,7 @@ static BOOL adapter_get_current_settings( const struct adapter *adapter, DEVMODE
+ 
+     mutex = get_display_device_init_mutex();
+ 
+-    if (!config_key && !(config_key = reg_open_key( NULL, config_keyW, sizeof(config_keyW) ))) ret = FALSE;
+-    else if (!(hkey = reg_open_key( config_key, adapter->config_key, lstrlenW( adapter->config_key ) * sizeof(WCHAR) ))) ret = FALSE;
++    if (!(hkey = reg_open_key( config_key, adapter->config_key, lstrlenW( adapter->config_key ) * sizeof(WCHAR) ))) ret = FALSE;
+     else
+     {
+         ret = read_adapter_mode( hkey, ENUM_CURRENT_SETTINGS, mode );
+@@ -634,7 +631,6 @@ static BOOL adapter_set_current_settings( const struct adapter *adapter, const D
+ 
+     mutex = get_display_device_init_mutex();
+ 
+-    if (!config_key && !(config_key = reg_open_key( NULL, config_keyW, sizeof(config_keyW) ))) ret = FALSE;
+     if (!(hkey = reg_open_key( config_key, adapter->config_key, lstrlenW( adapter->config_key ) * sizeof(WCHAR) ))) ret = FALSE;
+     else
+     {
+-- 
+GitLab
+
+From d91eab24d245d13642cf2fd5d96a9f5851fdb240 Mon Sep 17 00:00:00 2001
+From: Zhiyi Zhang <zzhang@codeweavers.com>
+Date: Sat, 30 Dec 2023 13:11:34 +0800
+Subject: [PATCH] win32u: Fix a possible out-of-bounds write (Coverity).
+
+---
+ dlls/win32u/sysparams.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/dlls/win32u/sysparams.c b/dlls/win32u/sysparams.c
+index ad6e7dce39b3..a9563eaff84e 100644
+--- a/dlls/win32u/sysparams.c
++++ b/dlls/win32u/sysparams.c
+@@ -6121,7 +6121,7 @@ BOOL WINAPI NtUserSetSysColors( INT count, const INT *colors, const COLORREF *va
+     if (IS_INTRESOURCE(colors)) return FALSE; /* stupid app passes a color instead of an array */
+ 
+     for (i = 0; i < count; i++)
+-        if (colors[i] >= 0 && colors[i] <= ARRAY_SIZE( system_colors ))
++        if (colors[i] >= 0 && colors[i] < ARRAY_SIZE( system_colors ))
+             set_entry( &system_colors[colors[i]], values[i], 0, 0 );
+ 
+     /* Send WM_SYSCOLORCHANGE message to all windows */
+
+From 7710e37c479da9e78a03d14dcebaa001163e147c Mon Sep 17 00:00:00 2001
+From: Alexandre Julliard <julliard@winehq.org>
+Date: Thu, 9 Nov 2023 13:15:46 +0100
+Subject: [PATCH] win32u: Fix handling of process default DPI awareness.
+
+It got broken by the conversion to NTUSER_DPI* values.
+---
+ dlls/win32u/sysparams.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/win32u/sysparams.c b/dlls/win32u/sysparams.c
+index 5506abac7c66..4f2a299dd16e 100644
+--- a/dlls/win32u/sysparams.c
++++ b/dlls/win32u/sysparams.c
+@@ -2134,10 +2134,10 @@ DPI_AWARENESS get_thread_dpi_awareness(void)
+     struct ntuser_thread_info *info = NtUserGetThreadInfo();
+     ULONG_PTR context = info->dpi_awareness;
+ 
+-    if (!context) context = NtUserGetProcessDpiAwarenessContext( NULL );
+-
+     switch (context)
+     {
++    case 0: /* process default */
++        return NtUserGetProcessDpiAwarenessContext( NULL ) & 3;
+     case 0x10:
+     case 0x11:
+     case 0x12:
+
+From a75e2b49ca3446045639e933202d71ecdf217095 Mon Sep 17 00:00:00 2001
+From: Alexandros Frantzis <alexandros.frantzis@collabora.com>
+Date: Tue, 14 Nov 2023 10:11:15 +0200
+Subject: [PATCH] win32u: Assume thread dpi for rect in
+ NtUserIsWindowRectFullScreen.
+
+Assume that the window rect passed NtUserIsWindowRectFullScreen is
+expressed in terms of thread dpi and convert monitor rects accordingly
+for proper matching.
+---
+ dlls/win32u/sysparams.c | 9 +++++++--
+ 1 file changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/win32u/sysparams.c b/dlls/win32u/sysparams.c
+index 4f2a299dd16e..b134c5af6806 100644
+--- a/dlls/win32u/sysparams.c
++++ b/dlls/win32u/sysparams.c
+@@ -2327,11 +2327,16 @@ static BOOL is_window_rect_full_screen( const RECT *rect )
+ 
+     LIST_FOR_EACH_ENTRY( monitor, &monitors, struct monitor, entry )
+     {
++        RECT monrect;
++
+         if (!(monitor->dev.state_flags & DISPLAY_DEVICE_ACTIVE))
+             continue;
+ 
+-        if (rect->left <= monitor->rc_monitor.left && rect->right >= monitor->rc_monitor.right &&
+-            rect->top <= monitor->rc_monitor.top && rect->bottom >= monitor->rc_monitor.bottom)
++        monrect = map_dpi_rect( monitor->rc_monitor, get_monitor_dpi( monitor->handle ),
++                                get_thread_dpi() );
++
++        if (rect->left <= monrect.left && rect->right >= monrect.right &&
++            rect->top <= monrect.top && rect->bottom >= monrect.bottom)
+         {
+             ret = TRUE;
+             break;
+
+From 24614b28ee7fe9c72d5cc7d689956c719410a382 Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Wed, 31 Jul 2024 18:09:35 -0600
+Subject: [PATCH] nsiproxy.sys: Only get owning pid when needed in
+ udp_endpoint_enumerate_all().
+
+---
+ dlls/nsiproxy.sys/udp.c | 37 +++++++++++++++++++++++--------------
+ 1 file changed, 23 insertions(+), 14 deletions(-)
+
+diff --git a/dlls/nsiproxy.sys/udp.c b/dlls/nsiproxy.sys/udp.c
+index 3cb215c1c58..1db7b3df4eb 100644
+--- a/dlls/nsiproxy.sys/udp.c
++++ b/dlls/nsiproxy.sys/udp.c
+@@ -240,7 +240,7 @@ static NTSTATUS udp_endpoint_enumerate_all( void *key_data, UINT key_size, void
+ 
+         memset( &key, 0, sizeof(key) );
+         memset( &stat, 0, sizeof(stat) );
+-        pid_map = get_pid_map( &pid_map_size );
++        if (stat_out) pid_map = get_pid_map( &pid_map_size );
+ 
+         /* skip header line */
+         ptr = fgets( buf, sizeof(buf), fp );
+@@ -254,10 +254,13 @@ static NTSTATUS udp_endpoint_enumerate_all( void *key_data, UINT key_size, void
+             key.local.Ipv4.sin_addr.WS_s_addr = addr;
+             key.local.Ipv4.sin_port = htons( key.local.Ipv4.sin_port );
+ 
+-            stat.pid = find_owning_pid( pid_map, pid_map_size, inode );
+-            stat.create_time = 0; /* FIXME */
+-            stat.flags = 0; /* FIXME */
+-            stat.mod_info = 0; /* FIXME */
++            if (stat_out)
++            {
++                stat.pid = find_owning_pid( pid_map, pid_map_size, inode );
++                stat.create_time = 0; /* FIXME */
++                stat.flags = 0; /* FIXME */
++                stat.mod_info = 0; /* FIXME */
++            }
+ 
+             if (num < *count)
+             {
+@@ -290,10 +293,13 @@ static NTSTATUS udp_endpoint_enumerate_all( void *key_data, UINT key_size, void
+                 key.local.Ipv6.sin6_scope_id = find_ipv6_addr_scope( &key.local.Ipv6.sin6_addr, addr_scopes,
+                                                                      addr_scopes_size );
+ 
+-                stat.pid = find_owning_pid( pid_map, pid_map_size, inode );
+-                stat.create_time = 0; /* FIXME */
+-                stat.flags = 0; /* FIXME */
+-                stat.mod_info = 0; /* FIXME */
++                if (stat_out)
++                {
++                    stat.pid = find_owning_pid( pid_map, pid_map_size, inode );
++                    stat.create_time = 0; /* FIXME */
++                    stat.flags = 0; /* FIXME */
++                    stat.mod_info = 0; /* FIXME */
++                }
+ 
+                 if (num < *count)
+                 {
+@@ -344,7 +350,7 @@ static NTSTATUS udp_endpoint_enumerate_all( void *key_data, UINT key_size, void
+         if (len <= sizeof(struct xinpgen)) goto err;
+ 
+         addr_scopes = get_ipv6_addr_scope_table( &addr_scopes_size );
+-        pid_map = get_pid_map( &pid_map_size );
++        if (stat_out) pid_map = get_pid_map( &pid_map_size );
+ 
+         orig_xig = (struct xinpgen *)buf;
+         xig = orig_xig;
+@@ -393,10 +399,13 @@ static NTSTATUS udp_endpoint_enumerate_all( void *key_data, UINT key_size, void
+                                                                      addr_scopes_size );
+             }
+ 
+-            stat.pid = find_owning_pid( pid_map, pid_map_size, (UINT_PTR)sock->so_pcb );
+-            stat.create_time = 0; /* FIXME */
+-            stat.flags = !(in->inp_flags & INP_ANONPORT);
+-            stat.mod_info = 0; /* FIXME */
++            if (stat_out)
++            {
++                stat.pid = find_owning_pid( pid_map, pid_map_size, (UINT_PTR)sock->so_pcb );
++                stat.create_time = 0; /* FIXME */
++                stat.flags = !(in->inp_flags & INP_ANONPORT);
++                stat.mod_info = 0; /* FIXME */
++            }
+ 
+             if (num < *count)
+             {
+-- 
+GitLab
