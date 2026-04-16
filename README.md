@@ -16,8 +16,10 @@ Wine-NSPA 11.x is a **work in progress** built on top of upstream Wine 11.6. Eve
 |----------|-------------|
 | [Architecture Overview](https://nine7nine.github.io/Wine-NSPA/architecture.gen.html) | System architecture: RT priority mapping, CS-PI, NTSync PI, io_uring, SRW spin, pi_cond requeue-PI, SIMD optimizations. 9 SVG diagrams. |
 | [io_uring Architecture](https://nine7nine.github.io/Wine-NSPA/io_uring-architecture.gen.html) | Phase 1-3 io_uring integration: file I/O bypass, socket I/O, ntsync uring_fd. |
+| [Critical Section PI](https://nine7nine.github.io/Wine-NSPA/cs-pi.gen.html) | FUTEX_LOCK_PI on CRITICAL_SECTION: fast/slow path, PI chain, gating, fallback. |
 | [NTSync Kernel Driver](https://nine7nine.github.io/Wine-NSPA/ntsync-driver.gen.html) | NTSync driver architecture: upstream vs NSPA, 5 kernel patches, PI boost, uring_fd. |
 | [Shmem IPC Architecture](https://nine7nine.github.io/Wine-NSPA/shmem-ipc.gen.html) | Per-thread shared memory IPC: dispatcher model, PI boost protocol, global_lock PI. |
+| [RT Test Harness](https://nine7nine.github.io/Wine-NSPA/nspa-rt-test.gen.html) | Test architecture, 12 subcommands, runner script, watchdog, benchmarks. |
 | [Current State Dashboard](https://nine7nine.github.io/Wine-NSPA/current-state.gen.html) | Test dashboard: 10 tests across v3/v4/v5, NTSync driver status, PI chain validation. |
 | [Test Suite Comparison](https://nine7nine.github.io/Wine-NSPA/nspa-test-comparison.gen.html) | Full v3/v4/v5 comparison with per-thread metrics and latency data. |
 | [Sync Primitives Research](https://nine7nine.github.io/Wine-NSPA/sync-primitives-research.gen.html) | SRW spin, condvar PI, adaptive CS -- Windows vs glibc vs kernel analysis. |
