@@ -56,6 +56,8 @@
   strong { color: var(--fg); }
   em { color: var(--muted); font-style: italic; }
 </style>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/tokyo-night-dark.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
 </head><body>
 <h1>Wine-NSPA &ndash; io_uring I/O Architecture</h1>
 
@@ -80,22 +82,14 @@ Author: jordan Johnston</p>
 
 <h2>1. Overview</h2>
 
-<p>Wine&rsquo;s I/O model routes most file and socket operations through the wineserver &ndash; a single-process event loop that monitors file descriptors via <code>epoll</code>, dispatches readiness notifications to client threads, and manages async completion lifecycle. For RT audio workloads, this creates two performance bottlenecks:</p>
+<p>This document is the deep-dive companion to the <a href="architecture.gen.html">Wine-NSPA Architecture Overview</a>. It covers the design decisions, tradeoffs, and implementation details of io_uring integration across all three phases. For background on Wine&rsquo;s I/O model and why io_uring matters for RT audio, see the architecture page.</p>
+
+<p>The two bottlenecks targeted by this work:</p>
 
 <ol>
-<li><strong>Syscall overhead.</strong> Every async file read/write requires a server round-trip to register the operation, the server monitoring the fd via epoll, a server alert when the fd is ready, and another round-trip for completion.</li>
-<li><strong>Global lock contention.</strong> The wineserver serializes all dispatch through <code>global_lock</code> (a PI-aware mutex). Every fd event processed in the main loop holds this lock. More fds = longer hold times = more contention for shmem dispatchers.</li>
+<li><strong>Syscall overhead.</strong> 4+ kernel transitions per async file read (register + epoll + alert + read). io_uring collapses this to 1 (io_uring_enter).</li>
+<li><strong>Global lock contention.</strong> Every fd in server epoll extends <code>global_lock</code> hold time. Fewer server-monitored fds = shorter hold = less contention for shmem dispatchers.</li>
 </ol>
-
-
-<p>Linux&rsquo;s <strong>io_uring</strong> subsystem (kernel 5.1+, mature by 6.x) provides a submission/completion ring interface that can handle I/O entirely in the kernel, bypassing the wineserver for fd monitoring and data transfer. Wine-NSPA integrates io_uring into ntdll&rsquo;s Unix layer to:</p>
-
-<ul>
-<li>Remove the wineserver from file I/O critical paths</li>
-<li>Reduce epoll fd count (and therefore global_lock hold time)</li>
-<li>Eliminate poll() syscalls in synchronous I/O wait loops</li>
-<li>Preserve all existing behavior via transparent fallback</li>
-</ul>
 
 
 <h3>Relationship to Existing NSPA Infrastructure</h3>
@@ -160,32 +154,32 @@ Author: jordan Johnston</p>
 <h3>Per-Thread Ring Architecture</h3>
 
 <div class="diagram-container">
-<svg width="780" height="320" viewBox="0 0 780 320" xmlns="http://www.w3.org/2000/svg">
+<svg width="100%" viewBox="0 0 780 320" xmlns="http://www.w3.org/2000/svg">
   <style>
     .ur-box { fill: #24283b; stroke: #9aa5ce; stroke-width: 1.5; rx: 6; }
     .ur-box-new { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 2; rx: 6; }
-    .ur-box-pool { fill: #1a1a2a; stroke: #7aa2f7; stroke-width: 1.5; rx: 4; }
+    .ur-box-pool { fill: #1a1a2a; stroke: #7aa2f7; stroke-width: 1.5; rx: 6; }
     .ur-label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
     .ur-label-sm { fill: #c0caf5; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
     .ur-label-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .ur-label-yellow { fill: #e0af68; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
     .ur-label-cyan { fill: #7dcfff; font-size: 10px; font-family: 'JetBrains Mono', monospace; }
-    .ur-arrow { stroke: #9aa5ce; stroke-width: 1.5; fill: none; marker-end: url(#ur-arr); }
-    .ur-arrow-green { stroke: #9ece6a; stroke-width: 2; fill: none; marker-end: url(#ur-arr-g); }
+    .ur-arrow { stroke: #9aa5ce; stroke-width: 1.5; fill: none; }
+    .ur-arrow-green { stroke: #9ece6a; stroke-width: 2; fill: none; }
   </style>
   <defs>
-    <marker id="ur-arr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#9aa5ce"/></marker>
+    <marker id="ur-arr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#c0caf5"/></marker>
     <marker id="ur-arr-g" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#9ece6a"/></marker>
   </defs>
 
   <text x="390" y="20" class="ur-label-yellow" text-anchor="middle">Per-Thread io_uring Ring + Pool Allocator (TLS)</text>
 
   <!-- Thread N box -->
-  <rect x="15" y="35" width="750" height="130" rx="8" fill="none" stroke="#3b4261" stroke-width="1" stroke-dasharray="5,3"/>
+  <rect x="15" y="35" width="750" height="130" rx="6" fill="none" stroke="#3b4261" stroke-width="1" stroke-dasharray="5,3"/>
   <text x="35" y="55" class="ur-label-yellow">Thread N (TLS)</text>
 
   <!-- io_uring ring -->
-  <rect x="30" y="65" width="180" height="85" class="ur-box-new"/>
+  <rect x="30" y="65" width="180" height="85" rx="6" class="ur-box-new"/>
   <text x="120" y="85" class="ur-label-green" text-anchor="middle">thread_ring</text>
   <text x="120" y="100" class="ur-label-sm" text-anchor="middle">SINGLE_ISSUER</text>
   <text x="120" y="113" class="ur-label-sm" text-anchor="middle">COOP_TASKRUN</text>
@@ -193,7 +187,7 @@ Author: jordan Johnston</p>
   <text x="120" y="139" class="ur-label-sm" text-anchor="middle">CQ: 64 entries</text>
 
   <!-- Pool allocator -->
-  <rect x="240" y="65" width="230" height="85" class="ur-box-pool"/>
+  <rect x="240" y="65" width="230" height="85" rx="6" class="ur-box-pool"/>
   <text x="355" y="85" class="ur-label-cyan" text-anchor="middle">op_pool[32] (TLS static)</text>
   <text x="355" y="100" class="ur-label-sm" text-anchor="middle">uring_async_op structs</text>
   <text x="355" y="115" class="ur-label-sm" text-anchor="middle">op_free_head -> [0]->[1]->...->[31]->NULL</text>
@@ -201,7 +195,7 @@ Author: jordan Johnston</p>
   <text x="355" y="143" class="ur-label-green" text-anchor="middle">O(1) free: push head</text>
 
   <!-- State flags -->
-  <rect x="500" y="65" width="250" height="85" class="ur-box"/>
+  <rect x="500" y="65" width="250" height="85" rx="6" class="ur-box"/>
   <text x="625" y="82" class="ur-label" text-anchor="middle">ring_initialized (bool)</text>
   <text x="625" y="95" class="ur-label-sm" text-anchor="middle">ring_init_failed (bool)</text>
   <text x="625" y="108" class="ur-label-green" text-anchor="middle">ring_efd (eventfd, Phase 3)</text>
@@ -210,54 +204,54 @@ Author: jordan Johnston</p>
   <text x="625" y="146" class="ur-label-sm" text-anchor="middle">+ IORING_REGISTER_EVENTFD</text>
 
   <!-- Submit flow -->
-  <rect x="30" y="190" width="130" height="40" class="ur-box"/>
+  <rect x="30" y="190" width="130" height="40" rx="6" class="ur-box"/>
   <text x="95" y="207" class="ur-label-sm" text-anchor="middle">NtReadFile</text>
   <text x="95" y="221" class="ur-label-sm" text-anchor="middle">(async path)</text>
 
   <line x1="160" y1="210" x2="190" y2="210" class="ur-arrow"/>
 
-  <rect x="195" y="190" width="120" height="40" class="ur-box-pool"/>
+  <rect x="195" y="190" width="120" height="40" rx="6" class="ur-box-pool"/>
   <text x="255" y="207" class="ur-label-cyan" text-anchor="middle">op_pool_alloc()</text>
   <text x="255" y="221" class="ur-label-sm" text-anchor="middle">zero malloc</text>
 
   <line x1="315" y1="210" x2="345" y2="210" class="ur-arrow"/>
 
-  <rect x="350" y="190" width="110" height="40" class="ur-box-new"/>
+  <rect x="350" y="190" width="110" height="40" rx="6" class="ur-box-new"/>
   <text x="405" y="207" class="ur-label-green" text-anchor="middle">dup(fd)</text>
   <text x="405" y="221" class="ur-label-sm" text-anchor="middle">lifetime safety</text>
 
   <line x1="460" y1="210" x2="490" y2="210" class="ur-arrow-green"/>
 
-  <rect x="495" y="190" width="130" height="40" class="ur-box-new"/>
+  <rect x="495" y="190" width="130" height="40" rx="6" class="ur-box-new"/>
   <text x="560" y="207" class="ur-label-green" text-anchor="middle">io_uring_submit()</text>
   <text x="560" y="221" class="ur-label-sm" text-anchor="middle">1 syscall</text>
 
   <line x1="625" y1="210" x2="655" y2="210" class="ur-arrow"/>
 
-  <rect x="660" y="190" width="100" height="40" class="ur-box"/>
+  <rect x="660" y="190" width="100" height="40" rx="6" class="ur-box"/>
   <text x="710" y="207" class="ur-label" text-anchor="middle">kernel</text>
   <text x="710" y="221" class="ur-label-sm" text-anchor="middle">async I/O</text>
 
   <!-- Completion flow -->
-  <rect x="30" y="260" width="180" height="40" class="ur-box"/>
+  <rect x="30" y="260" width="180" height="40" rx="6" class="ur-box"/>
   <text x="120" y="277" class="ur-label-sm" text-anchor="middle">server_wait() / server_select()</text>
   <text x="120" y="291" class="ur-label-sm" text-anchor="middle">entry point</text>
 
   <line x1="210" y1="280" x2="245" y2="280" class="ur-arrow-green"/>
 
-  <rect x="250" y="260" width="200" height="40" class="ur-box-new"/>
+  <rect x="250" y="260" width="200" height="40" rx="6" class="ur-box-new"/>
   <text x="350" y="277" class="ur-label-green" text-anchor="middle">process_completions()</text>
   <text x="350" y="291" class="ur-label-sm" text-anchor="middle">drain CQ, complete_uring_op()</text>
 
   <line x1="450" y1="280" x2="485" y2="280" class="ur-arrow"/>
 
-  <rect x="490" y="260" width="135" height="40" class="ur-box"/>
+  <rect x="490" y="260" width="135" height="40" rx="6" class="ur-box"/>
   <text x="557" y="277" class="ur-label-sm" text-anchor="middle">complete (P1-2/P3)</text>
   <text x="557" y="291" class="ur-label-sm" text-anchor="middle">IOSB + event/IOCP</text>
 
   <line x1="625" y1="280" x2="655" y2="280" class="ur-arrow"/>
 
-  <rect x="660" y="260" width="100" height="40" class="ur-box-pool"/>
+  <rect x="660" y="260" width="100" height="40" rx="6" class="ur-box-pool"/>
   <text x="710" y="277" class="ur-label-cyan" text-anchor="middle">op_pool_free()</text>
   <text x="710" y="291" class="ur-label-sm" text-anchor="middle">+ close(dup_fd)</text>
 </svg>
@@ -271,7 +265,7 @@ Author: jordan Johnston</p>
 <h3>I/O Path Comparison Diagram</h3>
 
 <div class="diagram-container">
-<svg width="920" height="620" viewBox="0 0 920 620" xmlns="http://www.w3.org/2000/svg">
+<svg width="100%" viewBox="0 0 920 620" xmlns="http://www.w3.org/2000/svg">
   <style>
     .box-vanilla { fill: #24283b; stroke: #9aa5ce; stroke-width: 1.5; rx: 6; }
     .box-nspa { fill: #24283b; stroke: #7aa2f7; stroke-width: 2; rx: 6; }
@@ -284,7 +278,7 @@ Author: jordan Johnston</p>
     .label-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .label-red { fill: #f7768e; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .label-yellow { fill: #e0af68; font-size: 10px; font-family: 'JetBrains Mono', monospace; }
-    .label-muted { fill: #8c92b3; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+    .label-muted { fill: #c0caf5; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
     .label-cyan { fill: #7dcfff; font-size: 10px; font-family: 'JetBrains Mono', monospace; }
     .divider { stroke: #3b4261; stroke-width: 1; stroke-dasharray: 8,4; }
     .strike { stroke: #f7768e; stroke-width: 2; opacity: 0.6; }
@@ -303,57 +297,57 @@ Author: jordan Johnston</p>
   <!-- ===== LEFT: Vanilla Wine ===== -->
 
   <!-- Client thread -->
-  <rect x="40" y="50" width="340" height="28" class="box-vanilla"/>
+  <rect x="40" y="50" width="340" height="28" rx="6" class="box-vanilla"/>
   <text x="210" y="69" text-anchor="middle" class="label">NtReadFile(handle, async=TRUE)</text>
 
-  <line x1="210" y1="78" x2="210" y2="98" stroke="#9aa5ce" stroke-width="1" marker-end="url(#ioArr)"/>
+  <line x1="210" y1="78" x2="210" y2="98" stroke="#9aa5ce" stroke-width="1"/>
 
-  <rect x="40" y="100" width="340" height="28" class="box-vanilla"/>
+  <rect x="40" y="100" width="340" height="28" rx="6" class="box-vanilla"/>
   <text x="210" y="119" text-anchor="middle" class="label">register_async_file_read()</text>
 
-  <line x1="210" y1="128" x2="210" y2="148" stroke="#f7768e" stroke-width="1.5" marker-end="url(#ioArrR)"/>
+  <line x1="210" y1="128" x2="210" y2="148" stroke="#f7768e" stroke-width="1.5"/>
 
   <!-- Server round-trip 1 -->
-  <rect x="60" y="150" width="300" height="28" class="box-server"/>
+  <rect x="60" y="150" width="300" height="28" rx="6" class="box-server"/>
   <text x="210" y="169" text-anchor="middle" class="label-red">SERVER: register_async round-trip</text>
 
-  <line x1="210" y1="178" x2="210" y2="198" stroke="#f7768e" stroke-width="1.5" marker-end="url(#ioArrR)"/>
+  <line x1="210" y1="178" x2="210" y2="198" stroke="#f7768e" stroke-width="1.5"/>
 
   <!-- Server monitors -->
-  <rect x="60" y="200" width="300" height="45" class="box-server"/>
+  <rect x="60" y="200" width="300" height="45" rx="6" class="box-server"/>
   <text x="210" y="219" text-anchor="middle" class="label-red">Server: epoll monitors fd</text>
   <text x="210" y="236" text-anchor="middle" class="label-muted">global_lock held during dispatch</text>
 
-  <line x1="210" y1="245" x2="210" y2="265" stroke="#f7768e" stroke-width="1.5" marker-end="url(#ioArrR)"/>
+  <line x1="210" y1="245" x2="210" y2="265" stroke="#f7768e" stroke-width="1.5"/>
 
   <!-- Server alert -->
-  <rect x="60" y="267" width="300" height="28" class="box-server"/>
+  <rect x="60" y="267" width="300" height="28" rx="6" class="box-server"/>
   <text x="210" y="286" text-anchor="middle" class="label-red">Server: async_wake_up(ALERTED)</text>
 
-  <line x1="210" y1="295" x2="210" y2="315" stroke="#9aa5ce" stroke-width="1" marker-end="url(#ioArr)"/>
+  <line x1="210" y1="295" x2="210" y2="315" stroke="#9aa5ce" stroke-width="1"/>
 
   <!-- Client callback -->
-  <rect x="40" y="317" width="340" height="28" class="box-vanilla"/>
+  <rect x="40" y="317" width="340" height="28" rx="6" class="box-vanilla"/>
   <text x="210" y="336" text-anchor="middle" class="label">async_read_proc() callback</text>
 
-  <line x1="210" y1="345" x2="210" y2="365" stroke="#f7768e" stroke-width="1.5" marker-end="url(#ioArrR)"/>
+  <line x1="210" y1="345" x2="210" y2="365" stroke="#f7768e" stroke-width="1.5"/>
 
   <!-- Server round-trip 2 -->
-  <rect x="60" y="367" width="300" height="28" class="box-server"/>
+  <rect x="60" y="367" width="300" height="28" rx="6" class="box-server"/>
   <text x="210" y="386" text-anchor="middle" class="label-red">SERVER: server_get_unix_fd (again)</text>
 
-  <line x1="210" y1="395" x2="210" y2="415" stroke="#9aa5ce" stroke-width="1" marker-end="url(#ioArr)"/>
+  <line x1="210" y1="395" x2="210" y2="415" stroke="#9aa5ce" stroke-width="1"/>
 
-  <rect x="40" y="417" width="340" height="28" class="box-vanilla"/>
+  <rect x="40" y="417" width="340" height="28" rx="6" class="box-vanilla"/>
   <text x="210" y="436" text-anchor="middle" class="label">read(fd, buf, len)</text>
 
-  <line x1="210" y1="445" x2="210" y2="465" stroke="#9aa5ce" stroke-width="1" marker-end="url(#ioArr)"/>
+  <line x1="210" y1="445" x2="210" y2="465" stroke="#9aa5ce" stroke-width="1"/>
 
-  <rect x="40" y="467" width="340" height="28" class="box-vanilla"/>
+  <rect x="40" y="467" width="340" height="28" rx="6" class="box-vanilla"/>
   <text x="210" y="486" text-anchor="middle" class="label">set IOSB, signal event, IOCP</text>
 
   <!-- Cost summary -->
-  <rect x="50" y="520" width="320" height="80" rx="5" fill="#24283b" stroke="#3b4261" stroke-width="1"/>
+  <rect x="50" y="520" width="320" height="80" rx="6" fill="#24283b" stroke="#3b4261" stroke-width="1"/>
   <text x="210" y="540" text-anchor="middle" class="label-red">Cost per async read:</text>
   <text x="70" y="558" class="label-sm">2 server round-trips (register + get_fd)</text>
   <text x="70" y="573" class="label-sm">1 epoll monitoring cycle (global_lock)</text>
@@ -361,57 +355,57 @@ Author: jordan Johnston</p>
 
   <!-- ===== RIGHT: Wine-NSPA + io_uring ===== -->
 
-  <rect x="520" y="50" width="360" height="28" class="box-nspa"/>
+  <rect x="520" y="50" width="360" height="28" rx="6" class="box-nspa"/>
   <text x="700" y="69" text-anchor="middle" class="label">NtReadFile(handle, async=TRUE)</text>
 
-  <line x1="700" y1="78" x2="700" y2="98" stroke="#9ece6a" stroke-width="1.5" marker-end="url(#ioArrG)"/>
+  <line x1="700" y1="78" x2="700" y2="98" stroke="#9ece6a" stroke-width="1.5"/>
 
-  <rect x="520" y="100" width="360" height="28" class="box-nspa"/>
+  <rect x="520" y="100" width="360" height="28" rx="6" class="box-nspa"/>
   <text x="700" y="119" text-anchor="middle" class="label">server_get_unix_fd() (cached, no trip)</text>
 
-  <line x1="700" y1="128" x2="700" y2="148" stroke="#9ece6a" stroke-width="1.5" marker-end="url(#ioArrG)"/>
+  <line x1="700" y1="128" x2="700" y2="148" stroke="#9ece6a" stroke-width="1.5"/>
 
-  <rect x="530" y="150" width="340" height="28" class="box-new"/>
+  <rect x="530" y="150" width="340" height="28" rx="6" class="box-new"/>
   <text x="700" y="169" text-anchor="middle" class="label-green">dup(fd) &rarr; ring_fd (lifetime safe)</text>
 
-  <line x1="700" y1="178" x2="700" y2="198" stroke="#9ece6a" stroke-width="1.5" marker-end="url(#ioArrG)"/>
+  <line x1="700" y1="178" x2="700" y2="198" stroke="#9ece6a" stroke-width="1.5"/>
 
-  <rect x="530" y="200" width="340" height="45" class="box-new"/>
+  <rect x="530" y="200" width="340" height="45" rx="6" class="box-new"/>
   <text x="700" y="219" text-anchor="middle" class="label-green">io_uring_prep_read(ring_fd, buf, len)</text>
   <text x="700" y="236" text-anchor="middle" class="label-green">io_uring_submit()</text>
 
-  <line x1="700" y1="245" x2="700" y2="265" stroke="#9ece6a" stroke-width="1.5" marker-end="url(#ioArrG)"/>
+  <line x1="700" y1="245" x2="700" y2="265" stroke="#9ece6a" stroke-width="1.5"/>
 
-  <rect x="520" y="267" width="360" height="28" class="box-nspa"/>
+  <rect x="520" y="267" width="360" height="28" rx="6" class="box-nspa"/>
   <text x="700" y="286" text-anchor="middle" class="label">return STATUS_PENDING</text>
 
   <!-- Time passes -->
   <text x="700" y="310" text-anchor="middle" class="label-muted">... thread does other work ...</text>
 
-  <line x1="700" y1="318" x2="700" y2="338" stroke="#9ece6a" stroke-width="1.5" marker-end="url(#ioArrG)"/>
+  <line x1="700" y1="318" x2="700" y2="338" stroke="#9ece6a" stroke-width="1.5"/>
 
   <!-- Completion drain -->
-  <rect x="520" y="340" width="360" height="28" class="box-nspa"/>
+  <rect x="520" y="340" width="360" height="28" rx="6" class="box-nspa"/>
   <text x="700" y="359" text-anchor="middle" class="label">server_wait() &rarr; drain CQ</text>
 
-  <line x1="700" y1="368" x2="700" y2="388" stroke="#9ece6a" stroke-width="1.5" marker-end="url(#ioArrG)"/>
+  <line x1="700" y1="368" x2="700" y2="388" stroke="#9ece6a" stroke-width="1.5"/>
 
-  <rect x="530" y="390" width="340" height="45" class="box-new"/>
+  <rect x="530" y="390" width="340" height="45" rx="6" class="box-new"/>
   <text x="700" y="409" text-anchor="middle" class="label-green">CQE: result = bytes_read</text>
   <text x="700" y="426" text-anchor="middle" class="label-green">complete_uring_op() &rarr; file_complete_async()</text>
 
-  <line x1="700" y1="435" x2="700" y2="455" stroke="#9ece6a" stroke-width="1.5" marker-end="url(#ioArrG)"/>
+  <line x1="700" y1="435" x2="700" y2="455" stroke="#9ece6a" stroke-width="1.5"/>
 
-  <rect x="520" y="457" width="360" height="28" class="box-nspa"/>
+  <rect x="520" y="457" width="360" height="28" rx="6" class="box-nspa"/>
   <text x="700" y="476" text-anchor="middle" class="label">set IOSB, signal event, IOCP</text>
 
-  <line x1="700" y1="485" x2="700" y2="498" stroke="#7dcfff" stroke-width="1" marker-end="url(#ioArr)"/>
+  <line x1="700" y1="485" x2="700" y2="498" stroke="#7dcfff" stroke-width="1"/>
 
-  <rect x="530" y="498" width="340" height="18" rx="3" fill="#24283b" stroke="#3b4261" stroke-width="1"/>
+  <rect x="530" y="498" width="340" height="18" rx="6" fill="#24283b" stroke="#3b4261" stroke-width="1"/>
   <text x="700" y="511" text-anchor="middle" class="label-muted">close(ring_fd)</text>
 
   <!-- Cost summary -->
-  <rect x="530" y="530" width="340" height="80" rx="5" fill="#1a2a1a" stroke="#9ece6a" stroke-width="1.5"/>
+  <rect x="530" y="530" width="340" height="80" rx="6" fill="#1a2a1a" stroke="#9ece6a" stroke-width="1.5"/>
   <text x="700" y="550" text-anchor="middle" class="label-green">Cost per async read:</text>
   <text x="550" y="568" class="label-sm">0 server round-trips</text>
   <text x="550" y="583" class="label-sm">0 epoll monitoring (no global_lock)</text>
@@ -550,18 +544,15 @@ Before:                          After:
 
 <p>CQEs are drained cooperatively:</p>
 
-<p>```c
-// server.c — called before any blocking wait
+<pre><code class="language-c">// server.c — called before any blocking wait
 unsigned int server_select(&hellip;) {
     ntdll_io_uring_process_completions();  // drain CQ
     &hellip;
-}</p>
-
-<p>unsigned int server_wait(&hellip;) {
+}
+unsigned int server_wait(&hellip;) {
     ntdll_io_uring_process_completions();  // drain CQ
     &hellip;
-}
-```</p>
+}</code></pre>
 
 <p>When a CQE arrives, <code>complete_uring_op()</code> translates the result to NTSTATUS and calls <code>file_complete_async()</code> &ndash; the same function used by Wine&rsquo;s normal async completion path. This handles:</p>
 
@@ -677,21 +668,166 @@ unsigned int server_select(&hellip;) {
 
 <p>The key innovation is <strong>ALERTED-state interception</strong> &ndash; intercepting in the ALERTED block <em>before</em> <code>set_async_direct_result</code> is called:</p>
 
-<p>```
-Server: recv_socket → STATUS_ALERTED + wait_handle
+<pre><code class="language-c">Server: recv_socket → STATUS_ALERTED + wait_handle
 Client: try_recv(fd) → EAGAIN (not ready)
                                               ← interception point
   BEFORE: set_async_direct_result(PENDING)    ← would restart async on server
   NOW:    set bitmap + io_uring POLL_ADD      ← async stays ALERTED (frozen)
-          return STATUS_PENDING</p>
-
-<p>  &hellip; io_uring monitors fd &hellip;</p>
-
-<p>CQE fires:
+          return STATUS_PENDING
+  &hellip; io_uring monitors fd &hellip;
+CQE fires:
   try_recv(fd) → SUCCESS (data available)
   set_async_direct_result(SUCCESS, bytes)     ← server accepts (ALERTED preserved)
-  Server: completes async, signals event/IOCP
-```</p>
+  Server: completes async, signals event/IOCP</code></pre>
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 880 720" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .p3-bg { fill: #24283b; }
+    .p3-box-server { fill: #24283b; stroke: #7aa2f7; stroke-width: 2; rx: 6; }
+    .p3-box-old { fill: #2a1a1a; stroke: #f7768e; stroke-width: 2; rx: 6; }
+    .p3-box-new { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 2; rx: 6; }
+    .p3-box-uring { fill: #1a1a2a; stroke: #7dcfff; stroke-width: 2; rx: 6; }
+    .p3-box-intercept { fill: #2a2418; stroke: #e0af68; stroke-width: 2.5; rx: 6; }
+    .p3-box-neutral { fill: #24283b; stroke: #9aa5ce; stroke-width: 1.5; rx: 6; }
+    .p3-label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+    .p3-label-sm { fill: #c0caf5; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+    .p3-label-blue { fill: #7aa2f7; font-size: 11px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .p3-label-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .p3-label-red { fill: #f7768e; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .p3-label-cyan { fill: #7dcfff; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .p3-label-yellow { fill: #e0af68; font-size: 11px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .p3-label-muted { fill: #c0caf5; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+    .p3-arrow { stroke: #9aa5ce; stroke-width: 1.5; fill: none; }
+    .p3-arrow-blue { stroke: #7aa2f7; stroke-width: 2; fill: none; }
+    .p3-arrow-green { stroke: #9ece6a; stroke-width: 2; fill: none; }
+    .p3-arrow-red { stroke: #f7768e; stroke-width: 1.5; fill: none; }
+    .p3-arrow-cyan { stroke: #7dcfff; stroke-width: 2; fill: none; }
+    .p3-arrow-yellow { stroke: #e0af68; stroke-width: 2; fill: none; }
+  </style>
+  <defs>
+    <marker id="p3-arr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#c0caf5"/></marker>
+    <marker id="p3-arr-b" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#7aa2f7"/></marker>
+    <marker id="p3-arr-g" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#9ece6a"/></marker>
+    <marker id="p3-arr-r" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#f7768e"/></marker>
+    <marker id="p3-arr-c" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#7dcfff"/></marker>
+    <marker id="p3-arr-y" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#e0af68"/></marker>
+  </defs>
+
+  <!-- Title -->
+  <text x="440" y="22" class="p3-label-yellow" text-anchor="middle" font-size="13">ALERTED-State Interception Flow (Phase 3)</text>
+
+  <!-- Step 1: Server recv_socket -->
+  <rect x="240" y="38" width="400" height="38" rx="6" class="p3-box-server"/>
+  <text x="440" y="55" class="p3-label-blue" text-anchor="middle">Server: recv_socket()</text>
+  <text x="440" y="69" class="p3-label-sm" text-anchor="middle">returns STATUS_ALERTED + wait_handle</text>
+
+  <line x1="440" y1="76" x2="440" y2="96" class="p3-arrow-blue"/>
+
+  <!-- Step 2: Client try_recv EAGAIN -->
+  <rect x="240" y="98" width="400" height="38" rx="6" class="p3-box-neutral"/>
+  <text x="440" y="115" class="p3-label" text-anchor="middle">Client: try_recv(fd)</text>
+  <text x="440" y="129" class="p3-label-muted" text-anchor="middle">returns EAGAIN (data not ready yet)</text>
+
+  <line x1="440" y1="136" x2="440" y2="160" class="p3-arrow-yellow"/>
+
+  <!-- Step 3: INTERCEPTION POINT -->
+  <rect x="140" y="162" width="600" height="32" rx="6" class="p3-box-intercept"/>
+  <text x="440" y="183" class="p3-label-yellow" text-anchor="middle">INTERCEPTION POINT  --  before set_async_direct_result()</text>
+
+  <!-- Branch labels -->
+  <text x="230" y="208" class="p3-label-red" text-anchor="middle">OLD PATH</text>
+  <text x="560" y="208" class="p3-label-green" text-anchor="middle">NEW PATH (NSPA)</text>
+
+  <!-- Branch lines from interception point -->
+  <line x1="230" y1="194" x2="300" y2="240" class="p3-arrow-red"/>
+  <line x1="560" y1="194" x2="580" y2="240" class="p3-arrow-green"/>
+
+  <!-- OLD PATH: set_async_direct_result(PENDING) -->
+  <rect x="100" y="242" width="400" height="50" rx="6" class="p3-box-old"/>
+  <text x="300" y="240" class="p3-label-red" text-anchor="middle">set_async_direct_result(PENDING)</text>
+  <text x="300" y="254" class="p3-label-sm" text-anchor="middle">server restarts async</text>
+  <text x="300" y="266" class="p3-label-muted" text-anchor="middle">async re-queued, server monitors via epoll</text>
+
+  <line x1="300" y1="292" x2="230" y2="316" class="p3-arrow-red"/>
+
+  <!-- OLD PATH: epoll monitoring -->
+  <rect x="60" y="318" width="340" height="38" rx="6" class="p3-box-old"/>
+  <text x="230" y="335" class="p3-label-red" text-anchor="middle">Server: epoll monitors fd</text>
+  <text x="230" y="349" class="p3-label-muted" text-anchor="middle">global_lock held during dispatch</text>
+
+  <line x1="230" y1="356" x2="230" y2="380" class="p3-arrow-red"/>
+
+  <!-- OLD PATH: alert + callback -->
+  <rect x="60" y="382" width="340" height="38" rx="6" class="p3-box-old"/>
+  <text x="230" y="399" class="p3-label-red" text-anchor="middle">Server: async_wake_up(ALERTED)</text>
+  <text x="230" y="413" class="p3-label-muted" text-anchor="middle">client callback, re-fetches fd, completes</text>
+
+  <!-- OLD PATH: cost box -->
+  <rect x="60" y="432" width="300" height="32" rx="6" fill="#2a1a1a" stroke="#f7768e" stroke-width="1"/>
+  <text x="230" y="452" class="p3-label-red" text-anchor="middle">2 server round-trips + epoll cycle</text>
+
+  <!-- NEW PATH: bitmap + POLL_ADD -->
+  <rect x="480" y="222" width="380" height="62" rx="6" class="p3-box-new"/>
+  <text x="670" y="260" class="p3-label-green" text-anchor="middle">set E2 bitmap bit for fd</text>
+  <text x="670" y="276" class="p3-label-green" text-anchor="middle">io_uring POLL_ADD(fd, POLLIN)</text>
+  <text x="670" y="290" class="p3-label-sm" text-anchor="middle">async stays ALERTED (frozen on server)</text>
+  <text x="670" y="300" class="p3-label-muted" text-anchor="middle">return STATUS_PENDING</text>
+
+  <line x1="640" y1="304" x2="640" y2="334" class="p3-arrow-cyan"/>
+
+  <!-- NEW PATH: io_uring monitors -->
+  <rect x="480" y="336" width="340" height="48" rx="6" class="p3-box-uring"/>
+  <text x="640" y="355" class="p3-label-cyan" text-anchor="middle">io_uring monitors fd in kernel</text>
+  <text x="640" y="369" class="p3-label-sm" text-anchor="middle">no server involvement</text>
+  <text x="640" y="380" class="p3-label-muted" text-anchor="middle">no global_lock contention</text>
+
+  <line x1="640" y1="384" x2="640" y2="414" class="p3-arrow-cyan"/>
+
+  <!-- NEW PATH: CQE fires -->
+  <rect x="480" y="416" width="340" height="38" rx="6" class="p3-box-uring"/>
+  <text x="640" y="433" class="p3-label-cyan" text-anchor="middle">CQE fires: fd ready</text>
+  <text x="640" y="447" class="p3-label-muted" text-anchor="middle">eventfd wakes ntsync wait (sync) or drain (async)</text>
+
+  <line x1="640" y1="454" x2="640" y2="480" class="p3-arrow-green"/>
+
+  <!-- NEW PATH: try_recv SUCCESS -->
+  <rect x="480" y="482" width="340" height="38" rx="6" class="p3-box-new"/>
+  <text x="640" y="499" class="p3-label-green" text-anchor="middle">try_recv(fd) -- SUCCESS</text>
+  <text x="640" y="513" class="p3-label-sm" text-anchor="middle">data available, read completes</text>
+
+  <line x1="640" y1="520" x2="640" y2="546" class="p3-arrow-green"/>
+
+  <!-- NEW PATH: set_async_direct_result SUCCESS -->
+  <rect x="460" y="548" width="380" height="48" rx="6" class="p3-box-new"/>
+  <text x="640" y="566" class="p3-label-green" text-anchor="middle">set_async_direct_result(SUCCESS, bytes)</text>
+  <text x="640" y="582" class="p3-label-sm" text-anchor="middle">single server call with final result</text>
+  <text x="640" y="592" class="p3-label-muted" text-anchor="middle">ALERTED state preserved -- server accepts</text>
+
+  <line x1="640" y1="596" x2="640" y2="622" class="p3-arrow-blue"/>
+
+  <!-- NEW PATH: server completes -->
+  <rect x="480" y="624" width="340" height="38" rx="6" class="p3-box-server"/>
+  <text x="640" y="641" class="p3-label-blue" text-anchor="middle">Server: completes async</text>
+  <text x="640" y="655" class="p3-label-sm" text-anchor="middle">signals event / IOCP</text>
+
+  <!-- NEW PATH: cost box -->
+  <rect x="490" y="672" width="300" height="24" rx="6" fill="#1a2a1a" stroke="#9ece6a" stroke-width="1.5"/>
+  <text x="640" y="689" class="p3-label-green" text-anchor="middle">1 server call (completion only)</text>
+
+  <!-- Legend -->
+  <rect x="16" y="488" width="12" height="12" fill="#7aa2f7" rx="6"/>
+  <text x="34" y="499" class="p3-label-sm">Server operations</text>
+  <rect x="16" y="508" width="12" height="12" fill="#9ece6a" rx="6"/>
+  <text x="34" y="519" class="p3-label-sm">NSPA new path</text>
+  <rect x="16" y="528" width="12" height="12" fill="#f7768e" rx="6"/>
+  <text x="34" y="539" class="p3-label-sm">Old path (replaced)</text>
+  <rect x="16" y="548" width="12" height="12" fill="#7dcfff" rx="6"/>
+  <text x="34" y="559" class="p3-label-sm">io_uring kernel ops</text>
+  <rect x="16" y="568" width="12" height="12" fill="#e0af68" rx="6"/>
+  <text x="34" y="579" class="p3-label-sm">Interception point</text>
+</svg>
+</div>
 
 <p><strong>Why this works:</strong> When an async is ALERTED on the server, <code>terminated=1</code> and <code>async_waiting()</code> returns false. The server does <em>not</em> monitor the fd via epoll. The bitmap provides additional safety (<code>sock_get_poll_events</code> returns -1). Only one call to <code>set_async_direct_result</code> ever happens &ndash; from the CQE handler with the final result.</p>
 
@@ -754,7 +890,7 @@ After:   main_loop_epoll() processes (N - M) events (M = client-monitored socket
 <p><code>
 Phase A (immediate recv):  2000/2000, avg  95us, p99 162us
 Phase B (overlapped recv): 2000/2000, avg 113us, p99 189us, 2000 async (PENDING)
-Full suite: 20/20 PASS (10 tests x baseline + rt)
+Full suite: 22/22 PASS (11 tests x baseline + rt)
 </code></p>
 
 <hr />
@@ -936,4 +1072,5 @@ Full suite: 20/20 PASS (10 tests x baseline + rt)
 <li>Investigate K3 (ntsync multishot poll) for event-driven audio loops</li>
 </ol>
 
+<script>hljs.highlightAll();</script>
 </body></html>

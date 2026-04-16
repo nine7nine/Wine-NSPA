@@ -56,6 +56,8 @@
   strong { color: var(--fg); }
   em { color: var(--muted); font-style: italic; }
 </style>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/tokyo-night-dark.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
 </head><body>
 <h1>Wine-NSPA &ndash; Architecture &amp; Design Reference</h1>
 
@@ -75,7 +77,7 @@ Author: jordan Johnston</p>
 <li><a href="#8-audio-stack-architecture">Audio Stack Architecture</a></li>
 <li><a href="#9-qpc--timing">QPC &amp; Timing</a></li>
 <li><a href="#10-memory--large-pages">Memory &amp; Large Pages</a></li>
-<li><a href="#11-msvcrt-simd--synchronization-optimizations">msvcrt SIMD &amp; Synchronization Optimizations</a></li>
+<li><a href="#11-msvcrt-simd-optimizations">msvcrt SIMD Optimizations</a></li>
 <li><a href="#12-version-history">Version History</a></li>
 </ol>
 
@@ -165,12 +167,12 @@ Author: jordan Johnston</p>
 <tr>
 <td> winejack.drv (MIDI + audio) </td>
 <td> Wine driver </td>
-<td> MIDI SHIPPED / AUDIO WIP </td>
+<td> SHIPPED </td>
 </tr>
 <tr>
 <td> nspaASIO bridge </td>
 <td> Wine DLL </td>
-<td> PLANNED </td>
+<td> SHIPPED </td>
 </tr>
 <tr>
 <td> io_uring I/O bypass (Phase 1-3) </td>
@@ -195,6 +197,11 @@ Author: jordan Johnston</p>
 <tr>
 <td> pi_cond requeue-PI </td>
 <td> Wine libs/librtpi </td>
+<td> SHIPPED </td>
+</tr>
+<tr>
+<td> Win32 condvar PI (requeue-PI) </td>
+<td> Wine ntdll PE + Unix </td>
 <td> SHIPPED </td>
 </tr>
 <tr>
@@ -223,7 +230,7 @@ Author: jordan Johnston</p>
 <p>Side-by-side comparison of how vanilla Wine and Wine-NSPA handle the same architectural components. Every NSPA change is additive &ndash; the vanilla behavior is preserved when <code>NSPA_RT_PRIO</code> is unset.</p>
 
 <div class="diagram-container">
-<svg width="920" height="680" viewBox="0 0 920 680" xmlns="http://www.w3.org/2000/svg">
+<svg width="100%" viewBox="0 0 920 685" xmlns="http://www.w3.org/2000/svg">
   <style>
     .box-vanilla { fill: #24283b; stroke: #9aa5ce; stroke-width: 1.5; rx: 6; }
     .box-nspa { fill: #24283b; stroke: #7aa2f7; stroke-width: 2; rx: 6; }
@@ -236,8 +243,8 @@ Author: jordan Johnston</p>
     .label-accent { fill: #7aa2f7; font-size: 13px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .label-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .label-yellow { fill: #e0af68; font-size: 10px; font-family: 'JetBrains Mono', monospace; }
-    .arrow { stroke: #9aa5ce; stroke-width: 1; fill: none; marker-end: url(#arrowhead-muted); }
-    .arrow-nspa { stroke: #9ece6a; stroke-width: 1.5; fill: none; stroke-dasharray: 5,3; marker-end: url(#arrowhead-green); }
+    .arrow { stroke: #9aa5ce; stroke-width: 1; fill: none; }
+    .arrow-nspa { stroke: #9ece6a; stroke-width: 1.5; fill: none; stroke-dasharray: 5,3; }
     .divider { stroke: #3b4261; stroke-width: 1; stroke-dasharray: 8,4; }
   </style>
   <defs>
@@ -247,7 +254,7 @@ Author: jordan Johnston</p>
 
   <!-- Column headers -->
   <text x="210" y="30" class="label-accent" text-anchor="middle">Vanilla Wine</text>
-  <text x="700" y="30" class="label-accent" text-anchor="middle">Wine-NSPA</text>
+  <text x="630" y="30" class="label-accent" text-anchor="middle">Wine-NSPA</text>
   <line x1="455" y1="15" x2="455" y2="665" class="divider"/>
 
   <!-- === LEFT COLUMN: Vanilla Wine === -->
@@ -288,9 +295,9 @@ Author: jordan Johnston</p>
   <text x="210" y="518" class="label-muted" text-anchor="middle">4KB pages only</text>
 
   <!-- Kernel -->
-  <rect x="60" y="560" width="300" height="50" class="box-kernel"/>
-  <text x="210" y="582" class="label" text-anchor="middle">Linux Kernel</text>
-  <text x="210" y="598" class="label-muted" text-anchor="middle">PREEMPT_VOLUNTARY / PREEMPT</text>
+  <rect x="60" y="570" width="300" height="50" class="box-kernel"/>
+  <text x="210" y="592" class="label" text-anchor="middle">Linux Kernel</text>
+  <text x="210" y="608" class="label-muted" text-anchor="middle">PREEMPT_VOLUNTARY / PREEMPT</text>
 
   <!-- === RIGHT COLUMN: Wine-NSPA === -->
 
@@ -307,41 +314,42 @@ Author: jordan Johnston</p>
   <text x="670" y="200" class="label-green" text-anchor="middle">cross-thread map + lenient tier 1 path</text>
 
   <!-- Sync primitives -->
-  <rect x="480" y="230" width="380" height="80" class="box-nspa"/>
-  <text x="670" y="252" class="label" text-anchor="middle">Synchronization (v2.3 + client-side)</text>
-  <text x="670" y="270" class="label-green" text-anchor="middle">CS → FUTEX_LOCK_PI (priority inheritance)</text>
-  <text x="670" y="285" class="label-green" text-anchor="middle">Mutex → client-side NTSync (zero server trips)</text>
-  <text x="670" y="300" class="label-green" text-anchor="middle">priority-ordered wakeup via kernel driver</text>
+  <rect x="480" y="230" width="380" height="100" class="box-nspa"/>
+  <text x="670" y="250" class="label" text-anchor="middle">Synchronization (4 PI paths)</text>
+  <text x="670" y="268" class="label-green" text-anchor="middle">CS &rarr; FUTEX_LOCK_PI (priority inheritance)</text>
+  <text x="670" y="284" class="label-green" text-anchor="middle">Mutex &rarr; NTSync PI (5 kernel patches)</text>
+  <text x="670" y="300" class="label-green" text-anchor="middle">Condvar &rarr; requeue-PI (unix + Win32)</text>
+  <text x="670" y="316" class="label-green" text-anchor="middle">SRW spin (256 iters, RT skip)</text>
 
   <!-- NTSync -->
-  <rect x="480" y="330" width="380" height="60" class="box-nspa-new"/>
-  <text x="670" y="352" class="label" text-anchor="middle">NTSync + 5 NSPA kernel patches</text>
-  <text x="670" y="370" class="label-green" text-anchor="middle">raw_spinlock, prio-ordered, mutex PI boost</text>
+  <rect x="480" y="350" width="380" height="55" class="box-nspa-new"/>
+  <text x="670" y="372" class="label" text-anchor="middle">NTSync + 5 NSPA kernel patches</text>
+  <text x="670" y="390" class="label-green" text-anchor="middle">raw_spinlock, prio-ordered, PI boost v2, uring_fd, kmalloc</text>
 
   <!-- QPC -->
-  <rect x="480" y="410" width="380" height="50" class="box-nspa"/>
-  <text x="670" y="432" class="label" text-anchor="middle">QPC rdTSC Bypass</text>
-  <text x="670" y="448" class="label-green" text-anchor="middle">rdtsc direct read (~10ns, 100x faster)</text>
+  <rect x="480" y="425" width="380" height="50" class="box-nspa"/>
+  <text x="670" y="447" class="label" text-anchor="middle">QPC rdTSC Bypass</text>
+  <text x="670" y="463" class="label-green" text-anchor="middle">rdtsc direct read (~10ns, 100x faster)</text>
 
   <!-- Memory -->
-  <rect x="480" y="480" width="380" height="50" class="box-nspa"/>
-  <text x="670" y="502" class="label" text-anchor="middle">Large + Huge Pages</text>
-  <text x="670" y="518" class="label-green" text-anchor="middle">2MB large pages, 1GB hugepages, TLB reduction</text>
+  <rect x="480" y="495" width="380" height="50" class="box-nspa"/>
+  <text x="670" y="517" class="label" text-anchor="middle">Large + Huge Pages</text>
+  <text x="670" y="533" class="label-green" text-anchor="middle">2MB large pages, 1GB hugepages, TLB reduction</text>
 
   <!-- Kernel -->
-  <rect x="480" y="560" width="380" height="50" class="box-kernel-nspa"/>
-  <text x="670" y="582" class="label" text-anchor="middle">PREEMPT_RT Kernel</text>
-  <text x="670" y="598" class="label-green" text-anchor="middle">fully preemptible, rt_mutex PI chains, NTSync PI</text>
+  <rect x="480" y="570" width="380" height="50" class="box-kernel-nspa"/>
+  <text x="670" y="592" class="label" text-anchor="middle">PREEMPT_RT Kernel</text>
+  <text x="670" y="608" class="label-green" text-anchor="middle">fully preemptible, rt_mutex PI chains, NTSync PI</text>
 
   <!-- Legend -->
-  <rect x="60" y="635" width="16" height="16" class="box-vanilla"/>
-  <text x="85" y="648" class="label-muted">vanilla (unchanged)</text>
-  <rect x="250" y="635" width="16" height="16" class="box-nspa"/>
-  <text x="275" y="648" class="label-muted">NSPA modified</text>
-  <rect x="430" y="635" width="16" height="16" class="box-nspa-new"/>
-  <text x="455" y="648" class="label-muted">NSPA new component</text>
-  <rect x="630" y="635" width="16" height="16" class="box-kernel-nspa"/>
-  <text x="655" y="648" class="label-muted">NSPA kernel patches</text>
+  <rect x="60" y="645" width="16" height="16" class="box-vanilla"/>
+  <text x="85" y="658" class="label-muted">vanilla (unchanged)</text>
+  <rect x="250" y="645" width="16" height="16" class="box-nspa"/>
+  <text x="275" y="658" class="label-muted">NSPA modified</text>
+  <rect x="430" y="645" width="16" height="16" class="box-nspa-new"/>
+  <text x="455" y="658" class="label-muted">NSPA new component</text>
+  <rect x="630" y="645" width="16" height="16" class="box-kernel-nspa"/>
+  <text x="655" y="658" class="label-muted">NSPA kernel patches</text>
 </svg>
 </div>
 
@@ -357,7 +365,7 @@ Author: jordan Johnston</p>
 <h3>Architecture Diagram</h3>
 
 <div class="diagram-container">
-<svg width="900" height="680" viewBox="0 0 900 680" xmlns="http://www.w3.org/2000/svg">
+<svg width="100%" viewBox="0 0 900 680" xmlns="http://www.w3.org/2000/svg">
   <!-- Background -->
   <rect width="900" height="680" fill="transparent"/>
 
@@ -396,17 +404,19 @@ Author: jordan Johnston</p>
   <text x="230" y="245" text-anchor="middle" fill="#c8d0e8" font-size="11">Wine Process (e.g. DAW, plugin host)</text>
 
   <!-- PE side -->
-  <rect x="60" y="260" width="150" height="140" rx="5" fill="#24283b" stroke="#bb9af7" stroke-width="1.5"/>
+  <rect x="60" y="260" width="150" height="165" rx="6" fill="#24283b" stroke="#bb9af7" stroke-width="1.5"/>
   <text x="135" y="283" text-anchor="middle" fill="#bb9af7" font-size="12" font-weight="bold">PE Side</text>
   <text x="135" y="302" text-anchor="middle" fill="#c0caf5" font-size="9">Win32 app code</text>
   <text x="135" y="318" text-anchor="middle" fill="#c0caf5" font-size="9">ntdll.dll (PE)</text>
   <text x="135" y="334" text-anchor="middle" fill="#c0caf5" font-size="9">kernelbase.dll</text>
   <text x="135" y="350" text-anchor="middle" fill="#c0caf5" font-size="9">kernel32.dll</text>
-  <text x="135" y="370" text-anchor="middle" fill="#e0af68" font-size="8">CS-PI fast path here</text>
-  <text x="135" y="386" text-anchor="middle" fill="#e0af68" font-size="8">(TID CAS on LockSemaphore)</text>
+  <text x="135" y="370" text-anchor="middle" fill="#e0af68" font-size="8">CS-PI fast path (TID CAS)</text>
+  <text x="135" y="386" text-anchor="middle" fill="#e0af68" font-size="8">SRW spin (256 iters)</text>
+  <text x="135" y="402" text-anchor="middle" fill="#9ece6a" font-size="8">Condvar PI mapping table</text>
+  <text x="135" y="414" text-anchor="middle" fill="#9ece6a" font-size="8">+ requeue-PI syscalls</text>
 
   <!-- Unix side -->
-  <rect x="230" y="260" width="170" height="200" rx="5" fill="#24283b" stroke="#9ece6a" stroke-width="1.5"/>
+  <rect x="230" y="260" width="170" height="200" rx="6" fill="#24283b" stroke="#9ece6a" stroke-width="1.5"/>
   <text x="315" y="283" text-anchor="middle" fill="#9ece6a" font-size="12" font-weight="bold">Unix Side</text>
   <text x="315" y="302" text-anchor="middle" fill="#c0caf5" font-size="9">ntdll.so (Unixlib)</text>
   <text x="315" y="318" text-anchor="middle" fill="#c0caf5" font-size="9">sched_setscheduler()</text>
@@ -416,23 +426,23 @@ Author: jordan Johnston</p>
   <text x="315" y="386" text-anchor="middle" fill="#e0af68" font-size="8">RT prio self-promotion</text>
 
   <!-- io_uring box inside Unix Side -->
-  <rect x="242" y="395" width="146" height="55" rx="4" fill="#1a2a1a" stroke="#73daca" stroke-width="2"/>
+  <rect x="242" y="395" width="146" height="55" rx="6" fill="#1a2a1a" stroke="#73daca" stroke-width="2"/>
   <text x="315" y="413" text-anchor="middle" fill="#73daca" font-size="10" font-weight="bold">io_uring (per-thread)</text>
   <text x="315" y="428" text-anchor="middle" fill="#c0caf5" font-size="8">file + socket I/O bypass</text>
   <text x="315" y="441" text-anchor="middle" fill="#c0caf5" font-size="8">E2 bitmap + POLL_ADD</text>
 
   <!-- Arrow PE -> Unix -->
-  <line x1="210" y1="330" x2="230" y2="330" stroke="#9ece6a" stroke-width="1.5" marker-end="url(#arrowGreen)"/>
+  <line x1="210" y1="330" x2="230" y2="330" stroke="#9ece6a" stroke-width="1.5"/>
 
   <!-- Shared address space label -->
   <text x="230" y="475" text-anchor="middle" fill="#c8d0e8" font-size="9">Same address space (same process)</text>
 
   <!-- Socket to wineserver -->
-  <line x1="315" y1="260" x2="400" y2="140" stroke="#7aa2f7" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arrowBlue)"/>
+  <line x1="315" y1="260" x2="400" y2="140" stroke="#7aa2f7" stroke-width="1.5" stroke-dasharray="4,3"/>
   <text x="370" y="185" fill="#7aa2f7" font-size="9" transform="rotate(-40, 370, 185)">Unix socket IPC</text>
 
   <!-- Shmem path -->
-  <line x1="350" y1="260" x2="500" y2="140" stroke="#e0af68" stroke-width="1.5" marker-end="url(#arrowYellow)"/>
+  <line x1="350" y1="260" x2="500" y2="140" stroke="#e0af68" stroke-width="1.5"/>
   <text x="445" y="195" fill="#e0af68" font-size="9" transform="rotate(-35, 445, 195)">v1.5 shmem path</text>
 
   <!-- Kernel box -->
@@ -440,7 +450,7 @@ Author: jordan Johnston</p>
   <text x="660" y="283" text-anchor="middle" fill="#c8d0e8" font-size="11">Linux Kernel</text>
 
   <!-- NTSync device -->
-  <rect x="480" y="300" width="170" height="110" rx="5" fill="#24283b" stroke="#e0af68" stroke-width="1.5"/>
+  <rect x="480" y="300" width="170" height="110" rx="6" fill="#24283b" stroke="#e0af68" stroke-width="1.5"/>
   <text x="565" y="323" text-anchor="middle" fill="#e0af68" font-size="12" font-weight="bold">/dev/ntsync</text>
   <text x="565" y="342" text-anchor="middle" fill="#c0caf5" font-size="9">Sem / Mutex / Event</text>
   <text x="565" y="358" text-anchor="middle" fill="#c0caf5" font-size="9">Priority-ordered queues</text>
@@ -449,44 +459,46 @@ Author: jordan Johnston</p>
   <text x="565" y="402" text-anchor="middle" fill="#73daca" font-size="8">uring_fd CQE wakeup</text>
 
   <!-- Futex subsystem -->
-  <rect x="670" y="300" width="170" height="100" rx="5" fill="#24283b" stroke="#7dcfff" stroke-width="1.5"/>
+  <rect x="670" y="300" width="170" height="115" rx="6" fill="#24283b" stroke="#7dcfff" stroke-width="1.5"/>
   <text x="755" y="323" text-anchor="middle" fill="#7dcfff" font-size="12" font-weight="bold">futex subsystem</text>
-  <text x="755" y="345" text-anchor="middle" fill="#c0caf5" font-size="9">FUTEX_WAIT/WAKE</text>
-  <text x="755" y="363" text-anchor="middle" fill="#c0caf5" font-size="9">FUTEX_LOCK_PI</text>
-  <text x="755" y="381" text-anchor="middle" fill="#9ece6a" font-size="9">rt_mutex PI chain</text>
+  <text x="755" y="342" text-anchor="middle" fill="#c0caf5" font-size="9">FUTEX_WAIT/WAKE</text>
+  <text x="755" y="358" text-anchor="middle" fill="#c0caf5" font-size="9">FUTEX_LOCK_PI</text>
+  <text x="755" y="374" text-anchor="middle" fill="#9ece6a" font-size="9">FUTEX_WAIT_REQUEUE_PI</text>
+  <text x="755" y="390" text-anchor="middle" fill="#9ece6a" font-size="9">FUTEX_CMP_REQUEUE_PI</text>
+  <text x="755" y="406" text-anchor="middle" fill="#9ece6a" font-size="9">rt_mutex PI chain</text>
 
   <!-- io_uring kernel subsystem -->
-  <rect x="670" y="420" width="170" height="75" rx="5" fill="#1a2a1a" stroke="#73daca" stroke-width="1.5"/>
+  <rect x="670" y="420" width="170" height="75" rx="6" fill="#1a2a1a" stroke="#73daca" stroke-width="1.5"/>
   <text x="755" y="443" text-anchor="middle" fill="#73daca" font-size="12" font-weight="bold">io_uring</text>
   <text x="755" y="460" text-anchor="middle" fill="#c0caf5" font-size="9">POLL_ADD / READ / WRITE</text>
   <text x="755" y="476" text-anchor="middle" fill="#c0caf5" font-size="9">COOP_TASKRUN (RT-safe)</text>
   <text x="755" y="489" text-anchor="middle" fill="#73daca" font-size="8">no wineserver involvement</text>
 
   <!-- Scheduler -->
-  <rect x="500" y="520" width="240" height="60" rx="5" fill="#24283b" stroke="#ff9e64" stroke-width="1.5"/>
+  <rect x="500" y="520" width="240" height="60" rx="6" fill="#24283b" stroke="#ff9e64" stroke-width="1.5"/>
   <text x="620" y="543" text-anchor="middle" fill="#ff9e64" font-size="12" font-weight="bold">PREEMPT_RT Scheduler</text>
   <text x="620" y="560" text-anchor="middle" fill="#c0caf5" font-size="9">SCHED_FIFO / SCHED_RR</text>
   <text x="620" y="573" text-anchor="middle" fill="#c0caf5" font-size="9">sched_setscheduler() from Wine</text>
 
   <!-- Arrow from Unix side to NTSync -->
-  <line x1="400" y1="340" x2="480" y2="340" stroke="#e0af68" stroke-width="1.5" marker-end="url(#arrowYellow)"/>
+  <line x1="400" y1="340" x2="480" y2="340" stroke="#e0af68" stroke-width="1.5"/>
   <text x="440" y="335" text-anchor="middle" fill="#e0af68" font-size="8">ioctl</text>
 
   <!-- Arrow from Unix side to futex -->
-  <line x1="400" y1="365" x2="670" y2="365" stroke="#7dcfff" stroke-width="1.5" marker-end="url(#arrowCyan)"/>
+  <line x1="400" y1="365" x2="670" y2="365" stroke="#7dcfff" stroke-width="1.5"/>
   <text x="530" y="360" text-anchor="middle" fill="#7dcfff" font-size="8">syscall</text>
 
   <!-- Arrow from io_uring client to io_uring kernel (direct, bypasses wineserver) -->
-  <line x1="388" y1="425" x2="670" y2="450" stroke="#73daca" stroke-width="2" marker-end="url(#arrowLime)"/>
+  <line x1="388" y1="425" x2="670" y2="450" stroke="#73daca" stroke-width="2"/>
   <text x="530" y="430" text-anchor="middle" fill="#73daca" font-size="8">io_uring_enter (bypasses server)</text>
 
   <!-- Arrow from Unix side to scheduler -->
   <line x1="350" y1="460" x2="350" y2="550" stroke="#ff9e64" stroke-width="1" stroke-dasharray="4,3"/>
-  <line x1="350" y1="550" x2="500" y2="550" stroke="#ff9e64" stroke-width="1.5" marker-end="url(#arrowOrange)"/>
+  <line x1="350" y1="550" x2="500" y2="550" stroke="#ff9e64" stroke-width="1.5"/>
   <text x="420" y="545" text-anchor="middle" fill="#ff9e64" font-size="8">sched_setscheduler</text>
 
   <!-- Handle table detail -->
-  <rect x="60" y="500" width="320" height="90" rx="5" fill="#24283b" stroke="#3b4261" stroke-width="1"/>
+  <rect x="60" y="500" width="320" height="90" rx="6" fill="#24283b" stroke="#3b4261" stroke-width="1"/>
   <text x="220" y="520" text-anchor="middle" fill="#7aa2f7" font-size="11" font-weight="bold">Handle Table (fd cache)</text>
   <text x="220" y="536" text-anchor="middle" fill="#c0caf5" font-size="9">Server handles: index 0 upward (wineserver-assigned)</text>
   <text x="220" y="552" text-anchor="middle" fill="#9ece6a" font-size="9">Client handles: index ~524K downward (NSPA client-side)</text>
@@ -494,7 +506,7 @@ Author: jordan Johnston</p>
   <text x="220" y="582" text-anchor="middle" fill="#c8d0e8" font-size="8">Client handles bypass wineserver entirely for anon objects</text>
 
   <!-- Legend -->
-  <rect x="40" y="620" width="820" height="40" rx="4" fill="none" stroke="#3b4261" stroke-width="1"/>
+  <rect x="40" y="620" width="820" height="40" rx="6" fill="none" stroke="#3b4261" stroke-width="1"/>
   <circle cx="70" cy="640" r="5" fill="#bb9af7"/>
   <text x="80" y="644" fill="#c0caf5" font-size="9">PE (Win32)</text>
   <circle cx="155" cy="640" r="5" fill="#9ece6a"/>
@@ -510,7 +522,7 @@ Author: jordan Johnston</p>
   <circle cx="555" cy="640" r="5" fill="#7aa2f7"/>
   <text x="565" y="644" fill="#c0caf5" font-size="9">wineserver IPC</text>
   <line x1="660" y1="640" x2="690" y2="640" stroke="#9aa5ce" stroke-width="1.5" stroke-dasharray="4,3"/>
-  <text x="700" y="644" fill="#c0caf5" font-size="9">optional/fallback</text>
+  <text x="630" y="644" fill="#c0caf5" font-size="9">optional/fallback</text>
 </svg>
 </div>
 
@@ -529,7 +541,7 @@ Author: jordan Johnston</p>
 
 <h4>NTSync</h4>
 
-<p>Wine 11.x&rsquo;s primary synchronization backend. The <code>/dev/ntsync</code> kernel device (Elizabeth Figura, mainlined) implements Win32 semaphores, mutexes, and events with correct NT semantics (abandoned mutexes, WaitForMultipleObjects atomicity, etc.) directly in the kernel. NSPA adds three patches to this driver for PI support.</p>
+<p>Wine 11.x&rsquo;s primary synchronization backend. The <code>/dev/ntsync</code> kernel device (Elizabeth Figura, mainlined) implements Win32 semaphores, mutexes, and events with correct NT semantics (abandoned mutexes, WaitForMultipleObjects atomicity, etc.) directly in the kernel. NSPA adds five patches to this driver for PI support, io_uring integration, and PREEMPT_RT safety.</p>
 
 <h4>Client-Side Object Creation</h4>
 
@@ -538,7 +550,7 @@ Author: jordan Johnston</p>
 <p><strong>Events are excluded from client-side creation</strong> (a7b00453978). Client-created event handles destabilized Ableton Live, causing crashes in the handle lifecycle. Anonymous events remain on wineserver, where the server-side lifecycle management is proven stable. Mutexes and semaphores are stable client-side.</p>
 
 <div class="diagram-container">
-<svg width="780" height="280" viewBox="0 0 780 280" xmlns="http://www.w3.org/2000/svg">
+<svg width="100%" viewBox="0 0 780 280" xmlns="http://www.w3.org/2000/svg">
   <style>
     .cs-box { fill: #24283b; stroke: #9aa5ce; stroke-width: 1.5; rx: 6; }
     .cs-box-green { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 2; rx: 6; }
@@ -549,12 +561,12 @@ Author: jordan Johnston</p>
     .cs-label-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .cs-label-red { fill: #f7768e; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .cs-label-yellow { fill: #e0af68; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
-    .cs-arrow { stroke: #9aa5ce; stroke-width: 1.5; fill: none; marker-end: url(#cs-arr); }
-    .cs-arrow-green { stroke: #9ece6a; stroke-width: 2; fill: none; marker-end: url(#cs-arr-g); }
-    .cs-arrow-red { stroke: #f7768e; stroke-width: 1.5; fill: none; marker-end: url(#cs-arr-r); stroke-dasharray: 5,3; }
+    .cs-arrow { stroke: #9aa5ce; stroke-width: 1.5; fill: none; }
+    .cs-arrow-green { stroke: #9ece6a; stroke-width: 2; fill: none; }
+    .cs-arrow-red { stroke: #f7768e; stroke-width: 1.5; fill: none; stroke-dasharray: 5,3; }
   </style>
   <defs>
-    <marker id="cs-arr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#9aa5ce"/></marker>
+    <marker id="cs-arr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#c0caf5"/></marker>
     <marker id="cs-arr-g" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#9ece6a"/></marker>
     <marker id="cs-arr-r" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#f7768e"/></marker>
   </defs>
@@ -611,7 +623,7 @@ Author: jordan Johnston</p>
 <p>Forward-port of Torge Matthies&rsquo;s 2022 shmem wineserver IPC patch. Replaces socket-based request/reply with per-thread shared memory + futex signaling for small requests. The server side spawns a pthread per client thread that sits in <code>FUTEX_WAIT</code> and dispatches via the existing <code>req_handlers[]</code> array, serialized by a PI-aware <code>global_lock</code> around the main poll loop. v2.4 client-side boost raises the dispatcher&rsquo;s priority to match the client&rsquo;s RT priority for the duration of each request; the PI lock ensures this boost propagates through contention with other dispatchers or the main thread.</p>
 
 <div class="diagram-container">
-<svg width="780" height="300" viewBox="0 0 780 300" xmlns="http://www.w3.org/2000/svg">
+<svg width="100%" viewBox="0 0 780 300" xmlns="http://www.w3.org/2000/svg">
   <style>
     .shmem-box { fill: #24283b; stroke: #9aa5ce; stroke-width: 1.5; rx: 6; }
     .shmem-box-new { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 2; rx: 6; }
@@ -620,8 +632,8 @@ Author: jordan Johnston</p>
     .shmem-label-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .shmem-label-muted { fill: #e2e8f8; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
     .shmem-label-yellow { fill: #e0af68; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
-    .shmem-arrow { stroke: #9aa5ce; stroke-width: 1.5; fill: none; marker-end: url(#sh-arr); }
-    .shmem-arrow-new { stroke: #9ece6a; stroke-width: 2; fill: none; marker-end: url(#sh-arr-g); }
+    .shmem-arrow { stroke: #9aa5ce; stroke-width: 1.5; fill: none; }
+    .shmem-arrow-new { stroke: #9ece6a; stroke-width: 2; fill: none; }
     .shmem-strike { stroke: #f7768e; stroke-width: 2; }
   </style>
   <defs>
@@ -698,7 +710,7 @@ Author: jordan Johnston</p>
 <p>v2.4&rsquo;s manual PI boost called <code>sched_getscheduler()</code> + <code>sched_getparam()</code> + <code>sched_setscheduler()</code> on every request (6 syscalls per RT request including unboost). v2.5 caches the RT thread&rsquo;s scheduling policy and priority in TLS (<code>nspa_rt_cached_policy</code>, <code>nspa_rt_cached_prio</code>), eliminating the read syscalls. Only <code>sched_setscheduler()</code> fires — 2 syscalls per request (boost + unboost). Committed as <code>17621ba494c</code>.</p>
 
 <div class="diagram-container">
-<svg width="780" height="200" viewBox="0 0 780 200" xmlns="http://www.w3.org/2000/svg">
+<svg width="100%" viewBox="0 0 780 200" xmlns="http://www.w3.org/2000/svg">
   <style>
     .sp-box { fill: #24283b; stroke: #9aa5ce; stroke-width: 1.5; rx: 6; }
     .sp-box-new { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 2; rx: 6; }
@@ -708,11 +720,10 @@ Author: jordan Johnston</p>
     .sp-label-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .sp-label-red { fill: #f7768e; font-size: 10px; font-family: 'JetBrains Mono', monospace; }
     .sp-label-yellow { fill: #e0af68; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
-    .sp-strike { stroke: #f7768e; stroke-width: 2; }
-    .sp-arrow { stroke: #9aa5ce; stroke-width: 1.5; fill: none; marker-end: url(#sp-arr); }
+    .sp-arrow { stroke: #9aa5ce; stroke-width: 1.5; fill: none; }
   </style>
   <defs>
-    <marker id="sp-arr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#9aa5ce"/></marker>
+    <marker id="sp-arr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#c0caf5"/></marker>
   </defs>
 
   <text x="390" y="20" class="sp-label-yellow" text-anchor="middle">Shmem PI: v2.4 (6 syscalls) vs v2.5 (2 syscalls, cached)</text>
@@ -736,7 +747,6 @@ Author: jordan Johnston</p>
   <text x="745" y="60" class="sp-label-red">6 sys</text>
 
   <!-- Strikethrough -->
-  <line x1="80" y1="55" x2="730" y2="55" class="sp-strike"/>
 
   <!-- v2.5 row -->
   <text x="30" y="115" class="sp-label-green">v2.5:</text>
@@ -767,39 +777,37 @@ Author: jordan Johnston</p>
 <h3>Priority Mapping Diagram</h3>
 
 <div class="diagram-container">
-<svg width="880" height="580" viewBox="0 0 880 580" xmlns="http://www.w3.org/2000/svg">
+<svg width="100%" viewBox="0 0 780 580" xmlns="http://www.w3.org/2000/svg">
   <!-- Column headers -->
   <text x="80" y="30" text-anchor="middle" fill="#7aa2f7" font-size="12" font-weight="bold">Win32</text>
   <text x="240" y="30" text-anchor="middle" fill="#bb9af7" font-size="12" font-weight="bold">NT Band</text>
   <text x="440" y="30" text-anchor="middle" fill="#9ece6a" font-size="12" font-weight="bold">Linux SCHED_FIFO</text>
-  <text x="700" y="30" text-anchor="middle" fill="#e0af68" font-size="12" font-weight="bold">Role</text>
+  <text x="630" y="30" text-anchor="middle" fill="#e0af68" font-size="12" font-weight="bold">Role</text>
 
   <!-- Separator -->
-  <line x1="20" y1="40" x2="860" y2="40" stroke="#3b4261" stroke-width="1"/>
+  <line x1="20" y1="40" x2="760" y2="40" stroke="#3b4261" stroke-width="1"/>
 
   <!-- Reserved kernel zone -->
-  <rect x="370" y="50" width="140" height="30" rx="3" fill="#3a1a1a" stroke="#f7768e" stroke-width="1"/>
+  <rect x="370" y="50" width="140" height="30" rx="6" fill="#3a1a1a" stroke="#f7768e" stroke-width="1"/>
   <text x="440" y="70" text-anchor="middle" fill="#f7768e" font-size="10">99 (reserved)</text>
-  <text x="700" y="70" text-anchor="middle" fill="#c8d0e8" font-size="9">Kernel threads only</text>
+  <text x="630" y="70" text-anchor="middle" fill="#c8d0e8" font-size="9">Kernel threads only</text>
 
   <!-- JACK zone -->
-  <rect x="370" y="90" width="140" height="35" rx="3" fill="#1a2a1a" stroke="#9ece6a" stroke-width="1" stroke-dasharray="4,2"/>
+  <rect x="370" y="90" width="140" height="35" rx="6" fill="#1a2a1a" stroke="#9ece6a" stroke-width="1" stroke-dasharray="4,2"/>
   <text x="440" y="110" text-anchor="middle" fill="#9ece6a" font-size="10">88-89</text>
-  <text x="700" y="110" text-anchor="middle" fill="#9ece6a" font-size="9">JACK / PipeWire callbacks</text>
+  <text x="630" y="110" text-anchor="middle" fill="#9ece6a" font-size="9">JACK / PipeWire callbacks</text>
 
   <!-- TIME_CRITICAL -->
-  <rect x="20" y="135" width="120" height="30" rx="3" fill="#24283b" stroke="#7aa2f7" stroke-width="1.5"/>
+  <rect x="20" y="135" width="120" height="30" rx="6" fill="#24283b" stroke="#7aa2f7" stroke-width="1.5"/>
   <text x="80" y="155" text-anchor="middle" fill="#7aa2f7" font-size="10">TIME_CRITICAL</text>
-  <rect x="180" y="135" width="120" height="30" rx="3" fill="#24283b" stroke="#bb9af7" stroke-width="1.5"/>
+  <rect x="180" y="135" width="120" height="30" rx="6" fill="#24283b" stroke="#bb9af7" stroke-width="1.5"/>
   <text x="240" y="155" text-anchor="middle" fill="#bb9af7" font-size="10">31</text>
-  <rect x="370" y="135" width="140" height="30" rx="3" fill="#24283b" stroke="#e0af68" stroke-width="2"/>
+  <rect x="370" y="135" width="140" height="30" rx="6" fill="#24283b" stroke="#e0af68" stroke-width="2"/>
   <text x="440" y="155" text-anchor="middle" fill="#e0af68" font-size="11" font-weight="bold">80 = NSPA_RT_PRIO</text>
-  <text x="700" y="155" text-anchor="middle" fill="#e0af68" font-size="9">Audio callback ceiling</text>
-  <text x="700" y="168" text-anchor="middle" fill="#c8d0e8" font-size="8">Always SCHED_FIFO</text>
+  <text x="630" y="155" text-anchor="middle" fill="#e0af68" font-size="9">Audio callback ceiling</text>
+  <text x="630" y="168" text-anchor="middle" fill="#c8d0e8" font-size="8">Always SCHED_FIFO</text>
 
   <!-- Arrow showing ceiling -->
-  <line x1="510" y1="150" x2="550" y2="150" stroke="#e0af68" stroke-width="1.5" marker-end="url(#arrowYellow)"/>
-  <text x="580" y="148" fill="#e0af68" font-size="8">CEILING</text>
 
   <!-- NT 30 -->
   <text x="80" y="195" text-anchor="middle" fill="#c0caf5" font-size="9">(realtime +6)</text>
@@ -812,17 +820,17 @@ Author: jordan Johnston</p>
   <text x="440" y="220" text-anchor="middle" fill="#c0caf5" font-size="10">75</text>
 
   <!-- NT 24 = NORMAL (realtime class) -->
-  <rect x="20" y="235" width="120" height="30" rx="3" fill="#24283b" stroke="#7aa2f7" stroke-width="1"/>
+  <rect x="20" y="235" width="120" height="30" rx="6" fill="#24283b" stroke="#7aa2f7" stroke-width="1"/>
   <text x="80" y="255" text-anchor="middle" fill="#7aa2f7" font-size="10">NORMAL (RT cls)</text>
-  <rect x="180" y="235" width="120" height="30" rx="3" fill="#24283b" stroke="#bb9af7" stroke-width="1"/>
+  <rect x="180" y="235" width="120" height="30" rx="6" fill="#24283b" stroke="#bb9af7" stroke-width="1"/>
   <text x="240" y="255" text-anchor="middle" fill="#bb9af7" font-size="10">24</text>
-  <rect x="370" y="235" width="140" height="30" rx="3" fill="#24283b" stroke="#9ece6a" stroke-width="1"/>
+  <rect x="370" y="235" width="140" height="30" rx="6" fill="#24283b" stroke="#9ece6a" stroke-width="1"/>
   <text x="440" y="255" text-anchor="middle" fill="#9ece6a" font-size="10">73</text>
-  <text x="700" y="255" text-anchor="middle" fill="#c8d0e8" font-size="9">Policy from NSPA_RT_POLICY</text>
+  <text x="630" y="255" text-anchor="middle" fill="#c8d0e8" font-size="9">Policy from NSPA_RT_POLICY</text>
 
   <!-- Dotted line: RT band boundary -->
   <line x1="20" y1="283" x2="560" y2="283" stroke="#e0af68" stroke-width="1" stroke-dasharray="6,3"/>
-  <text x="590" y="287" fill="#e0af68" font-size="9">RT band boundary (NT 16)</text>
+  <text x="570" y="287" fill="#e0af68" font-size="9">RT band boundary (NT 16)</text>
 
   <!-- NT 16 = IDLE (realtime) -->
   <text x="80" y="308" text-anchor="middle" fill="#c0caf5" font-size="9">IDLE (RT cls)</text>
@@ -830,22 +838,22 @@ Author: jordan Johnston</p>
   <text x="440" y="308" text-anchor="middle" fill="#c0caf5" font-size="10">65</text>
 
   <!-- Wineserver gap -->
-  <rect x="370" y="325" width="140" height="30" rx="3" fill="#2a1a3a" stroke="#bb9af7" stroke-width="1.5"/>
+  <rect x="370" y="325" width="140" height="30" rx="6" fill="#2a1a3a" stroke="#bb9af7" stroke-width="1.5"/>
   <text x="440" y="345" text-anchor="middle" fill="#bb9af7" font-size="10">64 (wineserver)</text>
-  <text x="700" y="345" text-anchor="middle" fill="#bb9af7" font-size="9">v1.1: NSPA_RT_PRIO - 16</text>
-  <text x="700" y="358" text-anchor="middle" fill="#c8d0e8" font-size="8">Just below entire RT band</text>
+  <text x="630" y="345" text-anchor="middle" fill="#bb9af7" font-size="9">v1.1: NSPA_RT_PRIO - 16</text>
+  <text x="630" y="358" text-anchor="middle" fill="#c8d0e8" font-size="8">Just below entire RT band</text>
 
   <!-- Below RT -->
   <line x1="20" y1="370" x2="560" y2="370" stroke="#3b4261" stroke-width="1"/>
   <text x="440" y="395" text-anchor="middle" fill="#c8d0e8" font-size="10">1 .. 63 (unused)</text>
 
   <!-- SCHED_OTHER zone -->
-  <rect x="370" y="410" width="140" height="40" rx="3" fill="#24283b" stroke="#9aa5ce" stroke-width="1"/>
+  <rect x="370" y="410" width="140" height="40" rx="6" fill="#24283b" stroke="#9aa5ce" stroke-width="1"/>
   <text x="440" y="435" text-anchor="middle" fill="#c8d0e8" font-size="10">SCHED_OTHER</text>
-  <text x="700" y="435" text-anchor="middle" fill="#c8d0e8" font-size="9">NT 1..15, nice-based</text>
+  <text x="630" y="435" text-anchor="middle" fill="#c8d0e8" font-size="9">NT 1..15, nice-based</text>
 
   <!-- Lenient path explanation -->
-  <rect x="20" y="470" width="840" height="90" rx="5" fill="#24283b" stroke="#3b4261" stroke-width="1"/>
+  <rect x="20" y="470" width="740" height="90" rx="6" fill="#24283b" stroke="#3b4261" stroke-width="1"/>
   <text x="40" y="495" fill="#e0af68" font-size="11" font-weight="bold">Ceiling Mapping</text>
   <text x="40" y="515" fill="#c0caf5" font-size="10">fifo = NSPA_RT_PRIO - (31 - nt_band)</text>
   <text x="40" y="535" fill="#c8d0e8" font-size="9">NSPA_RT_PRIO is the ceiling. NT 31 maps here; lower RT bands scale linearly below it.</text>
@@ -919,117 +927,132 @@ Author: jordan Johnston</p>
 
 <p>Priority inversion is the primary failure mode for RT audio under Wine. An RT thread blocked on a lock held by a normal-priority thread can be delayed indefinitely while CFS time-slices the holder against dozens of other threads. NSPA addresses this with PI (priority inheritance) on two independent sync paths.</p>
 
-<h3>Dual-Path Synchronization Diagram</h3>
+<h3>4-Path Synchronization Diagram</h3>
 
 <div class="diagram-container">
-<svg width="880" height="600" viewBox="0 0 880 600" xmlns="http://www.w3.org/2000/svg">
-  <!-- Path A header -->
-  <rect x="20" y="20" width="400" height="30" rx="3" fill="#24283b" stroke="#7dcfff" stroke-width="1.5"/>
-  <text x="220" y="40" text-anchor="middle" fill="#7dcfff" font-size="12" font-weight="bold">Path A: CRITICAL_SECTION (CS-PI)</text>
+<svg width="100%" viewBox="0 0 880 680" xmlns="http://www.w3.org/2000/svg">
+  <!-- ═══ COLUMN HEADERS ═══ -->
+  <rect x="15" y="8" width="210" height="30" rx="6" fill="#24283b" stroke="#7dcfff" stroke-width="1.5"/>
+  <text x="120" y="28" text-anchor="middle" fill="#7dcfff" font-size="12" font-weight="bold">Path A: CS-PI</text>
+  <rect x="235" y="8" width="210" height="30" rx="6" fill="#24283b" stroke="#e0af68" stroke-width="1.5"/>
+  <text x="340" y="28" text-anchor="middle" fill="#e0af68" font-size="12" font-weight="bold">Path B: NTSync PI</text>
+  <rect x="455" y="8" width="210" height="30" rx="6" fill="#24283b" stroke="#9ece6a" stroke-width="1.5"/>
+  <text x="560" y="28" text-anchor="middle" fill="#9ece6a" font-size="12" font-weight="bold">Path C: pi_cond PI</text>
+  <rect x="675" y="8" width="195" height="30" rx="6" fill="#24283b" stroke="#bb9af7" stroke-width="1.5"/>
+  <text x="772" y="28" text-anchor="middle" fill="#bb9af7" font-size="12" font-weight="bold">Path D: Condvar PI</text>
 
-  <!-- Path B header -->
-  <rect x="460" y="20" width="400" height="30" rx="3" fill="#24283b" stroke="#e0af68" stroke-width="1.5"/>
-  <text x="660" y="40" text-anchor="middle" fill="#e0af68" font-size="12" font-weight="bold">Path B: Win32 Mutex (NTSync PI)</text>
+  <!-- ═══ ROW 1: Win32 API ═══ -->
+  <text x="440" y="62" text-anchor="middle" fill="#e0af68" font-size="10" font-weight="bold">Win32 API / Entry Point</text>
+  <rect x="15" y="72" width="210" height="32" rx="6" fill="#24283b" stroke="#bb9af7" stroke-width="1"/>
+  <text x="120" y="93" text-anchor="middle" fill="#bb9af7" font-size="10">EnterCriticalSection</text>
+  <rect x="235" y="72" width="210" height="32" rx="6" fill="#24283b" stroke="#bb9af7" stroke-width="1"/>
+  <text x="340" y="93" text-anchor="middle" fill="#bb9af7" font-size="10">WaitForSingleObject</text>
+  <rect x="455" y="72" width="210" height="32" rx="6" fill="#24283b" stroke="#9ece6a" stroke-width="1"/>
+  <text x="560" y="93" text-anchor="middle" fill="#9ece6a" font-size="10">pi_cond_wait() (unix)</text>
+  <rect x="675" y="72" width="195" height="32" rx="6" fill="#24283b" stroke="#bb9af7" stroke-width="1"/>
+  <text x="772" y="93" text-anchor="middle" fill="#bb9af7" font-size="10">SleepConditionVariableCS</text>
 
-  <!-- Path A flow -->
-  <rect x="60" y="70" width="320" height="28" rx="3" fill="#24283b" stroke="#bb9af7" stroke-width="1"/>
-  <text x="220" y="89" text-anchor="middle" fill="#bb9af7" font-size="10">EnterCriticalSection(&amp;cs)</text>
+  <line x1="120" y1="104" x2="120" y2="155" stroke="#7dcfff" stroke-width="1.5"/>
+  <line x1="340" y1="104" x2="340" y2="155" stroke="#7dcfff" stroke-width="1.5"/>
+  <line x1="560" y1="104" x2="560" y2="155" stroke="#9ece6a" stroke-width="1.5"/>
+  <line x1="772" y1="104" x2="772" y2="155" stroke="#7dcfff" stroke-width="1.5"/>
 
-  <line x1="220" y1="98" x2="220" y2="115" stroke="#9ece6a" stroke-width="1.5" marker-end="url(#arrowGreen)"/>
+  <!-- ═══ ROW 2: Wine ntdll layer ═══ -->
+  <text x="440" y="145" text-anchor="middle" fill="#e0af68" font-size="10" font-weight="bold">Wine ntdll (PE + Unix)</text>
+  <rect x="15" y="155" width="210" height="48" rx="6" fill="#24283b" stroke="#9ece6a" stroke-width="1"/>
+  <text x="120" y="175" text-anchor="middle" fill="#9ece6a" font-size="9">RtlEnterCriticalSection</text>
+  <text x="120" y="193" text-anchor="middle" fill="#c0caf5" font-size="8">TID CAS fast path / LOCK_PI slow</text>
+  <rect x="235" y="155" width="210" height="48" rx="6" fill="#24283b" stroke="#9ece6a" stroke-width="1"/>
+  <text x="340" y="175" text-anchor="middle" fill="#9ece6a" font-size="9">NtWaitForSingleObject</text>
+  <text x="340" y="193" text-anchor="middle" fill="#c0caf5" font-size="8">inproc_wait &rarr; ioctl(/dev/ntsync)</text>
+  <rect x="455" y="155" width="210" height="48" rx="6" fill="#24283b" stroke="#9ece6a" stroke-width="1"/>
+  <text x="560" y="175" text-anchor="middle" fill="#9ece6a" font-size="9">librtpi (header-only)</text>
+  <text x="560" y="193" text-anchor="middle" fill="#c0caf5" font-size="8">unlock mutex &rarr; sleep on condvar</text>
+  <rect x="675" y="155" width="195" height="48" rx="6" fill="#24283b" stroke="#9ece6a" stroke-width="1"/>
+  <text x="772" y="175" text-anchor="middle" fill="#9ece6a" font-size="9">NtNspaCondWaitPI</text>
+  <text x="772" y="193" text-anchor="middle" fill="#c0caf5" font-size="8">condvar&rarr;mutex map + 3 syscalls</text>
 
-  <rect x="60" y="115" width="320" height="28" rx="3" fill="#24283b" stroke="#bb9af7" stroke-width="1"/>
-  <text x="220" y="134" text-anchor="middle" fill="#bb9af7" font-size="10">RtlEnterCriticalSection (PE ntdll)</text>
+  <line x1="120" y1="203" x2="120" y2="255" stroke="#7dcfff" stroke-width="1.5"/>
+  <line x1="340" y1="203" x2="340" y2="255" stroke="#7dcfff" stroke-width="1.5"/>
+  <line x1="560" y1="203" x2="560" y2="255" stroke="#9ece6a" stroke-width="1.5"/>
+  <line x1="772" y1="203" x2="772" y2="255" stroke="#7dcfff" stroke-width="1.5"/>
 
-  <line x1="220" y1="143" x2="220" y2="160" stroke="#9ece6a" stroke-width="1.5" marker-end="url(#arrowGreen)"/>
+  <!-- ═══ ROW 3: Kernel mechanism ═══ -->
+  <text x="440" y="245" text-anchor="middle" fill="#e0af68" font-size="10" font-weight="bold">Linux Kernel Mechanism</text>
+  <rect x="15" y="255" width="210" height="48" rx="6" fill="#24283b" stroke="#7dcfff" stroke-width="1.5"/>
+  <text x="120" y="275" text-anchor="middle" fill="#7dcfff" font-size="10">FUTEX_LOCK_PI</text>
+  <text x="120" y="293" text-anchor="middle" fill="#c0caf5" font-size="8">kernel rt_mutex, transitive PI</text>
+  <rect x="235" y="255" width="210" height="48" rx="6" fill="#24283b" stroke="#e0af68" stroke-width="1.5"/>
+  <text x="340" y="275" text-anchor="middle" fill="#e0af68" font-size="10">/dev/ntsync (5 patches)</text>
+  <text x="340" y="293" text-anchor="middle" fill="#c0caf5" font-size="8">prio-ordered queues, sched_setattr</text>
+  <rect x="455" y="255" width="210" height="48" rx="6" fill="#24283b" stroke="#9ece6a" stroke-width="1.5"/>
+  <text x="560" y="275" text-anchor="middle" fill="#9ece6a" font-size="10">FUTEX_WAIT_REQUEUE_PI</text>
+  <text x="560" y="293" text-anchor="middle" fill="#c0caf5" font-size="8">atomic requeue onto PI mutex</text>
+  <rect x="675" y="255" width="195" height="48" rx="6" fill="#24283b" stroke="#9ece6a" stroke-width="1.5"/>
+  <text x="772" y="275" text-anchor="middle" fill="#9ece6a" font-size="10">FUTEX_WAIT_REQUEUE_PI</text>
+  <text x="772" y="293" text-anchor="middle" fill="#c0caf5" font-size="8">atomic requeue onto CS PI mutex</text>
 
-  <!-- Fast path box -->
-  <rect x="40" y="160" width="160" height="55" rx="3" fill="#1a3a1a" stroke="#9ece6a" stroke-width="1.5"/>
-  <text x="120" y="178" text-anchor="middle" fill="#9ece6a" font-size="9" font-weight="bold">FAST PATH (uncontended)</text>
-  <text x="120" y="193" text-anchor="middle" fill="#c0caf5" font-size="8">1. InterlockedInc(LockCount)</text>
-  <text x="120" y="206" text-anchor="middle" fill="#c0caf5" font-size="8">2. CAS(LockSem, 0, my_tid)</text>
+  <line x1="120" y1="303" x2="120" y2="355" stroke="#7dcfff" stroke-width="1.5"/>
+  <line x1="340" y1="303" x2="340" y2="355" stroke="#e0af68" stroke-width="1.5"/>
+  <line x1="560" y1="303" x2="560" y2="355" stroke="#9ece6a" stroke-width="1.5"/>
+  <line x1="772" y1="303" x2="772" y2="355" stroke="#9ece6a" stroke-width="1.5"/>
 
-  <!-- Slow path box -->
-  <rect x="220" y="160" width="180" height="55" rx="3" fill="#3a1a1a" stroke="#f7768e" stroke-width="1.5"/>
-  <text x="310" y="178" text-anchor="middle" fill="#f7768e" font-size="9" font-weight="bold">SLOW PATH (contended)</text>
-  <text x="310" y="193" text-anchor="middle" fill="#c0caf5" font-size="8">NtNspaLockCriticalSectionPI()</text>
-  <text x="310" y="206" text-anchor="middle" fill="#c0caf5" font-size="8">crosses to Unix side</text>
+  <!-- ═══ ROW 4: PI effect ═══ -->
+  <text x="440" y="345" text-anchor="middle" fill="#e0af68" font-size="10" font-weight="bold">PI Effect</text>
+  <rect x="15" y="355" width="210" height="48" rx="6" fill="#1a3a1a" stroke="#9ece6a" stroke-width="1.5"/>
+  <text x="120" y="375" text-anchor="middle" fill="#9ece6a" font-size="9">Holder boosted to waiter prio</text>
+  <text x="120" y="393" text-anchor="middle" fill="#c0caf5" font-size="8">deadlock detection, +1 CAS (~5ns)</text>
+  <rect x="235" y="355" width="210" height="48" rx="6" fill="#1a3a1a" stroke="#9ece6a" stroke-width="1.5"/>
+  <text x="340" y="375" text-anchor="middle" fill="#9ece6a" font-size="9">Owner boosted via sched_setattr</text>
+  <text x="340" y="393" text-anchor="middle" fill="#c0caf5" font-size="8">prio-ordered wakeup, boost_count</text>
+  <rect x="455" y="355" width="210" height="48" rx="6" fill="#1a3a1a" stroke="#9ece6a" stroke-width="1.5"/>
+  <text x="560" y="375" text-anchor="middle" fill="#9ece6a" font-size="9">Zero-gap: wake &rarr; own mutex</text>
+  <text x="560" y="393" text-anchor="middle" fill="#c0caf5" font-size="8">kernel requeues atomically</text>
+  <rect x="675" y="355" width="195" height="48" rx="6" fill="#1a3a1a" stroke="#9ece6a" stroke-width="1.5"/>
+  <text x="772" y="375" text-anchor="middle" fill="#9ece6a" font-size="9">Zero-gap: wake &rarr; own CS</text>
+  <text x="772" y="393" text-anchor="middle" fill="#c0caf5" font-size="8">kernel requeues atomically</text>
 
-  <line x1="310" y1="215" x2="310" y2="235" stroke="#7dcfff" stroke-width="1.5" marker-end="url(#arrowCyan)"/>
+  <line x1="120" y1="403" x2="120" y2="455" stroke="#7dcfff" stroke-width="1.5"/>
+  <line x1="340" y1="403" x2="340" y2="455" stroke="#e0af68" stroke-width="1.5"/>
+  <line x1="560" y1="403" x2="560" y2="455" stroke="#9ece6a" stroke-width="1.5"/>
+  <line x1="772" y1="403" x2="772" y2="455" stroke="#9ece6a" stroke-width="1.5"/>
 
-  <rect x="200" y="235" width="200" height="28" rx="3" fill="#24283b" stroke="#9ece6a" stroke-width="1.5"/>
-  <text x="300" y="254" text-anchor="middle" fill="#9ece6a" font-size="10">futex_lock_pi(LockSemaphore)</text>
+  <!-- ═══ ROW 5: Release / Signal ═══ -->
+  <text x="440" y="445" text-anchor="middle" fill="#e0af68" font-size="10" font-weight="bold">Release / Signal Path</text>
+  <rect x="15" y="455" width="210" height="48" rx="6" fill="#24283b" stroke="#7dcfff" stroke-width="1"/>
+  <text x="120" y="475" text-anchor="middle" fill="#7dcfff" font-size="9">LeaveCriticalSection</text>
+  <text x="120" y="493" text-anchor="middle" fill="#c0caf5" font-size="8">CAS(tid,0) or FUTEX_UNLOCK_PI</text>
+  <rect x="235" y="455" width="210" height="48" rx="6" fill="#24283b" stroke="#e0af68" stroke-width="1"/>
+  <text x="340" y="475" text-anchor="middle" fill="#e0af68" font-size="9">ReleaseMutex</text>
+  <text x="340" y="493" text-anchor="middle" fill="#c0caf5" font-size="8">ntsync_pi_drop, restore sched</text>
+  <rect x="455" y="455" width="210" height="48" rx="6" fill="#24283b" stroke="#9ece6a" stroke-width="1"/>
+  <text x="560" y="475" text-anchor="middle" fill="#9ece6a" font-size="9">pi_cond_signal</text>
+  <text x="560" y="493" text-anchor="middle" fill="#c0caf5" font-size="8">CMP_REQUEUE_PI (wake 1)</text>
+  <rect x="675" y="455" width="195" height="48" rx="6" fill="#24283b" stroke="#bb9af7" stroke-width="1"/>
+  <text x="772" y="475" text-anchor="middle" fill="#bb9af7" font-size="9">WakeConditionVariable</text>
+  <text x="772" y="493" text-anchor="middle" fill="#c0caf5" font-size="8">NtNspaCondSignalPI (map lookup)</text>
 
-  <line x1="300" y1="263" x2="300" y2="283" stroke="#7dcfff" stroke-width="1.5" marker-end="url(#arrowCyan)"/>
+  <!-- ═══ SCOPE ROW ═══ -->
+  <rect x="15" y="520" width="210" height="28" rx="6" fill="#24283b" stroke="#3b4261" stroke-width="1"/>
+  <text x="120" y="539" text-anchor="middle" fill="#c0caf5" font-size="8">Scope: all Win32 CriticalSections</text>
+  <rect x="235" y="520" width="210" height="28" rx="6" fill="#24283b" stroke="#3b4261" stroke-width="1"/>
+  <text x="340" y="539" text-anchor="middle" fill="#c0caf5" font-size="8">Scope: Win32 Mutex/Sem/Event</text>
+  <rect x="455" y="520" width="210" height="28" rx="6" fill="#24283b" stroke="#3b4261" stroke-width="1"/>
+  <text x="560" y="539" text-anchor="middle" fill="#c0caf5" font-size="8">Scope: audio, gstreamer, winebus</text>
+  <rect x="675" y="520" width="195" height="28" rx="6" fill="#24283b" stroke="#3b4261" stroke-width="1"/>
+  <text x="772" y="539" text-anchor="middle" fill="#c0caf5" font-size="8">Scope: Win32 CondVar + CS</text>
 
-  <rect x="140" y="283" width="260" height="50" rx="3" fill="#24283b" stroke="#7dcfff" stroke-width="2"/>
-  <text x="270" y="303" text-anchor="middle" fill="#7dcfff" font-size="10" font-weight="bold">Kernel rt_mutex PI chain</text>
-  <text x="270" y="320" text-anchor="middle" fill="#9ece6a" font-size="9">Holder boosted to waiter's priority</text>
+  <!-- ═══ NOT COVERED ═══ -->
+  <rect x="15" y="565" width="855" height="32" rx="6" fill="#24283b" stroke="#f7768e" stroke-width="1" stroke-dasharray="4,3"/>
+  <text x="440" y="586" text-anchor="middle" fill="#f7768e" font-size="9">Not covered: SleepConditionVariableSRW &mdash; SRW locks have no ownership, no PI target (unsolved in Linux kernel)</text>
 
-  <!-- Release path -->
-  <rect x="60" y="350" width="320" height="28" rx="3" fill="#24283b" stroke="#bb9af7" stroke-width="1"/>
-  <text x="220" y="369" text-anchor="middle" fill="#bb9af7" font-size="10">RtlLeaveCriticalSection (PE)</text>
+  <!-- ═══ GATING ═══ -->
+  <rect x="15" y="612" width="855" height="32" rx="6" fill="#24283b" stroke="#e0af68" stroke-width="1"/>
+  <text x="440" y="633" text-anchor="middle" fill="#e0af68" font-size="9">All 4 paths gated on NSPA_RT_PRIO &mdash; when unset, every code path is byte-identical to upstream Wine</text>
 
-  <line x1="220" y1="378" x2="220" y2="395" stroke="#9ece6a" stroke-width="1.5" marker-end="url(#arrowGreen)"/>
-
-  <rect x="60" y="395" width="145" height="35" rx="3" fill="#1a3a1a" stroke="#9ece6a" stroke-width="1"/>
-  <text x="132" y="410" text-anchor="middle" fill="#9ece6a" font-size="8">No waiters:</text>
-  <text x="132" y="423" text-anchor="middle" fill="#c0caf5" font-size="8">CAS(LockSem, tid, 0)</text>
-
-  <rect x="220" y="395" width="170" height="35" rx="3" fill="#3a1a1a" stroke="#f7768e" stroke-width="1"/>
-  <text x="305" y="410" text-anchor="middle" fill="#f7768e" font-size="8">FUTEX_WAITERS set:</text>
-  <text x="305" y="423" text-anchor="middle" fill="#c0caf5" font-size="8">NtNspaUnlockCriticalSectionPI()</text>
-
-  <!-- Path B flow -->
-  <rect x="500" y="70" width="320" height="28" rx="3" fill="#24283b" stroke="#bb9af7" stroke-width="1"/>
-  <text x="660" y="89" text-anchor="middle" fill="#bb9af7" font-size="10">WaitForSingleObject(hMutex, ...)</text>
-
-  <line x1="660" y1="98" x2="660" y2="115" stroke="#9ece6a" stroke-width="1.5" marker-end="url(#arrowGreen)"/>
-
-  <rect x="500" y="115" width="320" height="28" rx="3" fill="#24283b" stroke="#9ece6a" stroke-width="1.5"/>
-  <text x="660" y="134" text-anchor="middle" fill="#9ece6a" font-size="10">NtWaitForSingleObject (Unix ntdll)</text>
-
-  <line x1="660" y1="143" x2="660" y2="160" stroke="#9ece6a" stroke-width="1.5" marker-end="url(#arrowGreen)"/>
-
-  <rect x="500" y="160" width="320" height="28" rx="3" fill="#24283b" stroke="#9ece6a" stroke-width="1"/>
-  <text x="660" y="179" text-anchor="middle" fill="#9ece6a" font-size="10">inproc_wait() &mdash; resolve fd from cache</text>
-
-  <line x1="660" y1="188" x2="660" y2="208" stroke="#e0af68" stroke-width="1.5" marker-end="url(#arrowYellow)"/>
-
-  <rect x="490" y="208" width="340" height="28" rx="3" fill="#24283b" stroke="#e0af68" stroke-width="1.5"/>
-  <text x="660" y="227" text-anchor="middle" fill="#e0af68" font-size="10">linux_wait_objs: ioctl(NTSYNC_IOC_WAIT_ANY)</text>
-
-  <line x1="660" y1="236" x2="660" y2="256" stroke="#e0af68" stroke-width="1.5" marker-end="url(#arrowYellow)"/>
-
-  <!-- NTSync kernel path -->
-  <rect x="490" y="256" width="340" height="55" rx="3" fill="#24283b" stroke="#e0af68" stroke-width="2"/>
-  <text x="660" y="276" text-anchor="middle" fill="#e0af68" font-size="10" font-weight="bold">ntsync.c kernel driver</text>
-  <text x="660" y="293" text-anchor="middle" fill="#c0caf5" font-size="9">ntsync_insert_waiter() &mdash; priority-ordered queue</text>
-  <text x="660" y="306" text-anchor="middle" fill="#9ece6a" font-size="9">ntsync_pi_recalc() &mdash; sched_setattr_nocheck()</text>
-
-  <rect x="490" y="330" width="340" height="45" rx="3" fill="#24283b" stroke="#e0af68" stroke-width="1"/>
-  <text x="660" y="350" text-anchor="middle" fill="#c0caf5" font-size="9">On release: try_wake_any_mutex()</text>
-  <text x="660" y="365" text-anchor="middle" fill="#c0caf5" font-size="9">ntsync_pi_drop() &mdash; restore owner's sched params</text>
-
-  <!-- Client-side creation path -->
-  <rect x="470" y="400" width="390" height="95" rx="5" fill="#24283b" stroke="#3b4261" stroke-width="1"/>
-  <text x="665" y="420" text-anchor="middle" fill="#7aa2f7" font-size="11" font-weight="bold">Client-Side NTSync Object Creation</text>
-  <text x="665" y="440" text-anchor="middle" fill="#c0caf5" font-size="9">Anonymous CreateMutex:</text>
-  <text x="665" y="456" text-anchor="middle" fill="#9ece6a" font-size="9">alloc_client_handle() &rarr; ioctl(NTSYNC_IOC_CREATE_MUTEX) &rarr; cache fd</text>
-  <text x="665" y="475" text-anchor="middle" fill="#c0caf5" font-size="9">Named CreateMutex:</text>
-  <text x="665" y="491" text-anchor="middle" fill="#c8d0e8" font-size="9">wineserver creates obj &rarr; passes fd back &rarr; cache fd</text>
-
-  <!-- Key properties box -->
-  <rect x="20" y="450" width="420" height="130" rx="5" fill="#24283b" stroke="#3b4261" stroke-width="1"/>
-  <text x="230" y="472" text-anchor="middle" fill="#7aa2f7" font-size="11" font-weight="bold">PI Properties</text>
-  <text x="40" y="492" fill="#7dcfff" font-size="9">CS-PI (Path A):</text>
-  <text x="40" y="508" fill="#c0caf5" font-size="9">  Transitive (kernel rt_mutex chain)</text>
-  <text x="40" y="524" fill="#c0caf5" font-size="9">  Deadlock detection (kernel cycle check)</text>
-  <text x="40" y="540" fill="#c0caf5" font-size="9">  Cost: +1 CAS on uncontended path (~5ns)</text>
-  <text x="40" y="560" fill="#e0af68" font-size="9">NTSync PI (Path B):</text>
-  <text x="40" y="576" fill="#c0caf5" font-size="9">  Priority-ordered wakeup (patch 2)</text>
-  <text x="280" y="576" fill="#c0caf5" font-size="9">  Owner boost (patch 3)</text>
 </svg>
 </div>
+
 
 
 <h3>Path A: CRITICAL_SECTION PI (CS-PI)</h3>
@@ -1050,7 +1073,7 @@ Author: jordan Johnston</p>
 
 <h3>Path B: NTSync Mutex PI</h3>
 
-<p>Win32 <code>CreateMutex</code> + <code>WaitForSingleObject</code> goes through the <code>/dev/ntsync</code> kernel driver. NSPA&rsquo;s three kernel patches add PI to this path (see Section 6). The flow:</p>
+<p>Win32 <code>CreateMutex</code> + <code>WaitForSingleObject</code> goes through the <code>/dev/ntsync</code> kernel driver. NSPA&rsquo;s five kernel patches add PI, uring_fd, and PREEMPT_RT fixes to this path (see Section 6). The flow:</p>
 
 <ol>
 <li><code>NtWaitForSingleObject</code> &ndash;> <code>inproc_wait()</code> resolves the mutex&rsquo;s fd from the handle cache.</li>
@@ -1064,6 +1087,127 @@ Author: jordan Johnston</p>
 <h3>Fallback Behavior</h3>
 
 <p>Both PI paths degrade gracefully. CS-PI falls back to the legacy keyed-event wait if <code>FUTEX_LOCK_PI</code> returns <code>ENOSYS</code>. NTSync PI requires the patched kernel driver &ndash; without it, waiters are FIFO-ordered (upstream default) with no owner boost.</p>
+
+<h3>SRW Lock Spin Phase</h3>
+
+<p>Windows SRW locks (Slim Reader/Writer) spin briefly before entering the kernel wait path. NSPA implements this behavior:</p>
+
+<ul>
+<li><strong>256 spin iterations</strong> before transitioning to <code>FUTEX_WAIT</code> / <code>FUTEX_LOCK_PI</code></li>
+<li><strong>RT threads skip the spin phase entirely</strong> &ndash; a SCHED_FIFO thread spinning wastes its quantum and creates priority inversion when the lock holder is a lower-priority thread that cannot run while the spinner holds the CPU</li>
+<li><strong>Spin detection:</strong> <code>nspa_is_rt_thread()</code> checks cached scheduling policy (set during RT promotion)</li>
+</ul>
+
+<p>This matches Windows NT behavior where <code>SRWLock</code> uses a brief spin phase before blocking. The 256-iteration count is empirically chosen to cover the common case of short critical sections (sub-microsecond) without burning excessive cycles on longer holds.</p>
+
+<p><strong>Impact:</strong> Reduces kernel transitions for uncontended or briefly-contended SRW locks. The v5 NTSync d4 rapid throughput improved from 232K to 259K ops/s (+11.6%), consistent with fewer futex syscalls in the lock path.</p>
+
+<p>Implementation: <code>dlls/ntdll/sync.c</code> (SRW acquire path).</p>
+
+<h3>pi_cond Requeue-PI (Unix-Side Condvars)</h3>
+
+<p>Wine-NSPA&rsquo;s <code>pi_cond_t</code> (condition variable with PI support, from librtpi) uses <code>FUTEX_WAIT_REQUEUE_PI</code> and <code>FUTEX_CMP_REQUEUE_PI</code> to close the PI gap in condition variable wakeup. The waiter transitions directly from &ldquo;blocked on condvar&rdquo; to &ldquo;blocked on PI mutex with priority inheritance&rdquo; &ndash; no gap.</p>
+
+<p>Implementation: <code>libs/librtpi/rtpi.h</code> (header-only inline, <code>pi_cond_wait</code>, <code>pi_cond_signal</code>, <code>pi_cond_broadcast</code>).</p>
+
+<h3>Win32 Condvar PI (RtlSleepConditionVariableCS)</h3>
+
+<p>The same requeue-PI mechanism applied to PE-side Win32 condvars. When CS-PI is active and the CS is held non-recursively, <code>RtlSleepConditionVariableCS</code> takes the PI path: capture value, register condvar&rarr;mutex mapping, <code>NtNspaCondWaitPI</code> (unix: <code>FUTEX_UNLOCK_PI</code> + <code>FUTEX_WAIT_REQUEUE_PI</code>). On signal, kernel atomically requeues waiter onto PI mutex &ndash; zero gap.</p>
+
+<p><strong>Scope:</strong> CS-backed condvars only. SRW-backed condvars remain without PI (unsolved problem even in the Linux kernel).</p>
+
+<table>
+<thead>
+<tr>
+<th> PI Coverage Path </th>
+<th> Mechanism </th>
+<th> Scope </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> CS-PI </td>
+<td> <code>FUTEX_LOCK_PI</code> on LockSemaphore </td>
+<td> Win32 CriticalSection enter/leave </td>
+</tr>
+<tr>
+<td> NTSync PI </td>
+<td> Kernel ntsync driver (priority-ordered wakeup) </td>
+<td> Win32 Mutex/Semaphore/Event </td>
+</tr>
+<tr>
+<td> pi_cond requeue-PI </td>
+<td> <code>FUTEX_WAIT_REQUEUE_PI</code> in librtpi </td>
+<td> Unix-side condvars (audio, gstreamer) </td>
+</tr>
+<tr>
+<td> <strong>Win32 condvar PI</strong> </td>
+<td> <strong><code>FUTEX_WAIT_REQUEUE_PI</code> for <code>RtlSleepConditionVariableCS</code></strong> </td>
+<td> <strong>Win32 SleepConditionVariableCS</strong> </td>
+</tr>
+</tbody>
+</table>
+
+<h3>Condvar Requeue-PI Diagram</h3>
+
+<p>Both pi_cond (unix-side) and Win32 condvar PI (PE-side) use <code>FUTEX_WAIT_REQUEUE_PI</code> / <code>FUTEX_CMP_REQUEUE_PI</code> to atomically move waiters from the condvar futex onto the PI mutex chain &mdash; eliminating the priority inversion gap between wake and mutex reacquire.</p>
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 860 420" xmlns="http://www.w3.org/2000/svg">
+  <rect x="20" y="10" width="390" height="28" rx="6" fill="#24283b" stroke="#f7768e" stroke-width="1.5"/>
+  <text x="215" y="29" text-anchor="middle" fill="#f7768e" font-size="12" font-weight="bold">Old: plain FUTEX_WAIT (PI gap)</text>
+  <rect x="450" y="10" width="390" height="28" rx="6" fill="#24283b" stroke="#9ece6a" stroke-width="1.5"/>
+  <text x="645" y="29" text-anchor="middle" fill="#9ece6a" font-size="12" font-weight="bold">New: FUTEX_WAIT_REQUEUE_PI (no gap)</text>
+  <rect x="40" y="55" width="350" height="24" rx="6" fill="#24283b" stroke="#bb9af7" stroke-width="1"/>
+  <text x="215" y="72" text-anchor="middle" fill="#bb9af7" font-size="10">RT thread: pi_cond_wait(cond, mutex)</text>
+  <line x1="215" y1="79" x2="215" y2="95" stroke="#7dcfff" stroke-width="1.5"/>
+  <rect x="40" y="95" width="350" height="24" rx="6" fill="#24283b" stroke="#7dcfff" stroke-width="1"/>
+  <text x="215" y="112" text-anchor="middle" fill="#7dcfff" font-size="10">pi_mutex_unlock(mutex) &mdash; drop PI boost</text>
+  <line x1="215" y1="119" x2="215" y2="135" stroke="#7dcfff" stroke-width="1.5"/>
+  <rect x="40" y="135" width="350" height="24" rx="6" fill="#24283b" stroke="#7dcfff" stroke-width="1"/>
+  <text x="215" y="152" text-anchor="middle" fill="#7dcfff" font-size="10">FUTEX_WAIT(&amp;cond, seq) &mdash; sleep on condvar</text>
+  <line x1="215" y1="159" x2="215" y2="175" stroke="#e0af68" stroke-width="1.5"/>
+  <rect x="40" y="175" width="350" height="24" rx="6" fill="#24283b" stroke="#e0af68" stroke-width="1"/>
+  <text x="215" y="192" text-anchor="middle" fill="#e0af68" font-size="10">FUTEX_WAKE &mdash; signaler wakes us</text>
+  <line x1="215" y1="199" x2="215" y2="215" stroke="#f7768e" stroke-width="2"/>
+  <rect x="30" y="215" width="370" height="50" rx="6" fill="#24283b" stroke="#f7768e" stroke-width="2.5"/>
+  <text x="215" y="235" text-anchor="middle" fill="#f7768e" font-size="11" font-weight="bold">PI GAP &mdash; thread runnable, no boost</text>
+  <text x="215" y="252" text-anchor="middle" fill="#c0caf5" font-size="9">Can be preempted by lower-priority threads</text>
+  <line x1="215" y1="265" x2="215" y2="285" stroke="#f7768e" stroke-width="2"/>
+  <rect x="40" y="285" width="350" height="24" rx="6" fill="#24283b" stroke="#7dcfff" stroke-width="1"/>
+  <text x="215" y="302" text-anchor="middle" fill="#7dcfff" font-size="10">pi_mutex_lock(mutex) &mdash; manual reacquire</text>
+  <line x1="215" y1="309" x2="215" y2="325" stroke="#7dcfff" stroke-width="1.5"/>
+  <rect x="40" y="325" width="350" height="24" rx="6" fill="#24283b" stroke="#9ece6a" stroke-width="1"/>
+  <text x="215" y="342" text-anchor="middle" fill="#9ece6a" font-size="10">PI restored (kernel rt_mutex)</text>
+  <rect x="60" y="365" width="310" height="30" rx="6" fill="#24283b" stroke="#f7768e" stroke-width="1"/>
+  <text x="215" y="385" text-anchor="middle" fill="#f7768e" font-size="9">worst-case max: 53.8us (measured under RT load)</text>
+  <rect x="470" y="55" width="350" height="24" rx="6" fill="#24283b" stroke="#bb9af7" stroke-width="1"/>
+  <text x="645" y="72" text-anchor="middle" fill="#bb9af7" font-size="10">RT thread: pi_cond_wait(cond, mutex)</text>
+  <line x1="645" y1="79" x2="645" y2="95" stroke="#7dcfff" stroke-width="1.5"/>
+  <rect x="470" y="95" width="350" height="24" rx="6" fill="#24283b" stroke="#7dcfff" stroke-width="1"/>
+  <text x="645" y="112" text-anchor="middle" fill="#7dcfff" font-size="10">pi_mutex_unlock(mutex) &mdash; drop PI boost</text>
+  <line x1="645" y1="119" x2="645" y2="135" stroke="#7dcfff" stroke-width="1.5"/>
+  <rect x="470" y="135" width="350" height="24" rx="6" fill="#24283b" stroke="#9ece6a" stroke-width="1.5"/>
+  <text x="645" y="152" text-anchor="middle" fill="#9ece6a" font-size="10">FUTEX_WAIT_REQUEUE_PI(&amp;cond, &amp;mutex)</text>
+  <line x1="645" y1="159" x2="645" y2="175" stroke="#e0af68" stroke-width="1.5"/>
+  <rect x="470" y="175" width="350" height="24" rx="6" fill="#24283b" stroke="#e0af68" stroke-width="1"/>
+  <text x="645" y="192" text-anchor="middle" fill="#e0af68" font-size="10">FUTEX_CMP_REQUEUE_PI &mdash; signaler requeues</text>
+  <line x1="645" y1="199" x2="645" y2="215" stroke="#9ece6a" stroke-width="2"/>
+  <rect x="460" y="215" width="370" height="50" rx="6" fill="#1a3a1a" stroke="#9ece6a" stroke-width="2.5"/>
+  <text x="645" y="235" text-anchor="middle" fill="#9ece6a" font-size="11" font-weight="bold">ATOMIC &mdash; requeued onto PI mutex chain</text>
+  <text x="645" y="252" text-anchor="middle" fill="#c0caf5" font-size="9">Kernel transfers waiter directly, no userspace gap</text>
+  <line x1="645" y1="265" x2="645" y2="285" stroke="#9ece6a" stroke-width="2"/>
+  <rect x="470" y="285" width="350" height="24" rx="6" fill="#24283b" stroke="#9ece6a" stroke-width="1.5"/>
+  <text x="645" y="302" text-anchor="middle" fill="#9ece6a" font-size="10">Mutex acquired &mdash; PI already in effect</text>
+  <line x1="645" y1="309" x2="645" y2="325" stroke="#9ece6a" stroke-width="1.5"/>
+  <rect x="470" y="325" width="350" height="24" rx="6" fill="#24283b" stroke="#9ece6a" stroke-width="1"/>
+  <text x="645" y="342" text-anchor="middle" fill="#9ece6a" font-size="10">Unbroken PI through entire path</text>
+  <rect x="490" y="365" width="310" height="30" rx="6" fill="#24283b" stroke="#9ece6a" stroke-width="1"/>
+  <text x="645" y="385" text-anchor="middle" fill="#9ece6a" font-size="9">worst-case max: 31.6us (-41% vs old, under RT load)</text>
+</svg>
+</div>
+
+<p>Full details: <a href="condvar-pi-requeue.gen.html">Win32 Condvar PI documentation</a> (architecture, syscall interface, mapping table design, 2 SVG diagrams).</p>
 
 <hr />
 
@@ -1083,8 +1227,7 @@ Author: jordan Johnston</p>
 
 <p><strong>Fix:</strong> Replace <code>list_add_tail()</code> with <code>ntsync_insert_waiter()</code>, which walks the waiter list and inserts the new entry before the first entry with lower scheduling priority (<code>task-&gt;prio</code>). Same-priority waiters are FIFO within their level. This matches Windows NT scheduling semantics exactly.</p></blockquote>
 
-<p><code>c
-static void ntsync_insert_waiter(struct ntsync_q_entry *new_entry,
+<pre><code class="language-c">static void ntsync_insert_waiter(struct ntsync_q_entry *new_entry,
                                  struct list_head *head)
 {
     struct ntsync_q_entry *entry;
@@ -1095,8 +1238,7 @@ static void ntsync_insert_waiter(struct ntsync_q_entry *new_entry,
         }
     }
     list_add_tail(&amp;new_entry-&gt;node, head);
-}
-</code></p>
+}</code></pre>
 
 <h3>Patch 3: Mutex owner PI boost (v2, 2026-04-15)</h3>
 
@@ -1106,41 +1248,39 @@ static void ntsync_insert_waiter(struct ntsync_q_entry *new_entry,
 
 <p><strong>v2 fixes three bugs from v1:</strong> (a) multi-object PI corruption when a task held multiple boosted mutexes, (b) zero PI for <code>WaitForMultipleObjects(bWaitAll=TRUE)</code>, &copy; stale <code>normal_prio</code> comparison causing boost/unboost thrashing. Test results: philosophers RT max wait 1620→865us (-46.6%), ntsync d8 PI contention 479→239ms (-50.1%).</p></blockquote>
 
-<p>```c
-/<em> Per-task tracking — saves orig_attr once, restores when boost_count reaches 0 </em>/
+<pre><code class="language-c">/* Per-task tracking — saves orig_attr once, restores when boost_count reaches 0 */
 po = find_pi_owner(dev, owner);
-base_prio = po ? po->orig_normal_prio : owner->normal_prio;</p>
+base_prio = po ? po-&gt;orig_normal_prio : owner-&gt;normal_prio;
 
-<p>if (highest_prio &lt; base_prio &amp;&amp; !was_boosted) {
+if (highest_prio &lt; base_prio &amp;&amp; !was_boosted) {
     if (!po) {
         po = kzalloc(sizeof(*po), GFP_ATOMIC);
-        po->orig_attr = capture_sched(owner);
-        po->orig_normal_prio = owner->normal_prio;
-        list_add(&amp;po->node, &amp;dev->boosted_owners);
+        po-&gt;orig_attr = capture_sched(owner);
+        po-&gt;orig_normal_prio = owner-&gt;normal_prio;
+        list_add(&amp;po-&gt;node, &amp;dev-&gt;boosted_owners);
     }
-    po->boost_count++;
-    obj->u.mutex.pi_boosted = true;
+    po-&gt;boost_count++;
+    obj-&gt;u.mutex.pi_boosted = true;
 }
-if (needs_boost &amp;&amp; highest_prio &lt; owner->prio)
-    sched_setattr_nocheck(owner, &amp;boost);
-```</p>
+if (needs_boost &amp;&amp; highest_prio &lt; owner-&gt;prio)
+    sched_setattr_nocheck(owner, &amp;boost);</code></pre>
 
 <div class="diagram-container">
-<svg width="780" height="340" viewBox="0 0 780 340" xmlns="http://www.w3.org/2000/svg">
+<svg width="100%" viewBox="0 0 780 340" xmlns="http://www.w3.org/2000/svg">
   <style>
     .pi-box { fill: #24283b; stroke: #9aa5ce; stroke-width: 1.5; rx: 6; }
     .pi-box-new { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 2; rx: 6; }
-    .pi-box-data { fill: #1a1a2a; stroke: #7aa2f7; stroke-width: 1.5; rx: 4; }
+    .pi-box-data { fill: #1a1a2a; stroke: #7aa2f7; stroke-width: 1.5; rx: 6; }
     .pi-label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
     .pi-label-sm { fill: #c0caf5; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
     .pi-label-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .pi-label-yellow { fill: #e0af68; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
     .pi-label-cyan { fill: #7dcfff; font-size: 10px; font-family: 'JetBrains Mono', monospace; }
-    .pi-arrow { stroke: #9aa5ce; stroke-width: 1.5; fill: none; marker-end: url(#pi-arr); }
-    .pi-arrow-green { stroke: #9ece6a; stroke-width: 2; fill: none; marker-end: url(#pi-arr-g); }
+    .pi-arrow { stroke: #9aa5ce; stroke-width: 1.5; fill: none; }
+    .pi-arrow-green { stroke: #9ece6a; stroke-width: 2; fill: none; }
   </style>
   <defs>
-    <marker id="pi-arr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#9aa5ce"/></marker>
+    <marker id="pi-arr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#c0caf5"/></marker>
     <marker id="pi-arr-g" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#9ece6a"/></marker>
   </defs>
 
@@ -1344,37 +1484,37 @@ if (needs_boost &amp;&amp; highest_prio &lt; owner->prio)
 <h3>Audio Path Diagram</h3>
 
 <div class="diagram-container">
-<svg width="880" height="530" viewBox="0 0 880 530" xmlns="http://www.w3.org/2000/svg">
+<svg width="100%" viewBox="0 0 880 530" xmlns="http://www.w3.org/2000/svg">
   <!-- winealsa comparison (top) -->
   <text x="440" y="25" text-anchor="middle" fill="#f7768e" font-size="12" font-weight="bold">winealsa.drv (Vanilla Wine)</text>
 
-  <rect x="30" y="45" width="130" height="45" rx="5" fill="#24283b" stroke="#bb9af7" stroke-width="1.5"/>
+  <rect x="30" y="45" width="130" height="45" rx="6" fill="#24283b" stroke="#bb9af7" stroke-width="1.5"/>
   <text x="95" y="65" text-anchor="middle" fill="#bb9af7" font-size="10" font-weight="bold">Windows App</text>
   <text x="95" y="80" text-anchor="middle" fill="#c0caf5" font-size="8">(game / DAW / media)</text>
 
   <line x1="160" y1="67" x2="195" y2="67" stroke="#565f89" stroke-width="1.5"/>
 
-  <rect x="195" y="45" width="130" height="45" rx="5" fill="#24283b" stroke="#7aa2f7" stroke-width="1.5"/>
+  <rect x="195" y="45" width="130" height="45" rx="6" fill="#24283b" stroke="#7aa2f7" stroke-width="1.5"/>
   <text x="260" y="65" text-anchor="middle" fill="#7aa2f7" font-size="10" font-weight="bold">WASAPI</text>
   <text x="260" y="80" text-anchor="middle" fill="#c0caf5" font-size="8">mmdevapi</text>
 
   <line x1="325" y1="67" x2="360" y2="67" stroke="#565f89" stroke-width="1.5"/>
 
-  <rect x="360" y="45" width="160" height="45" rx="5" fill="#24283b" stroke="#f7768e" stroke-width="1.5"/>
+  <rect x="360" y="45" width="160" height="45" rx="6" fill="#24283b" stroke="#f7768e" stroke-width="1.5"/>
   <text x="440" y="65" text-anchor="middle" fill="#f7768e" font-size="10" font-weight="bold">winealsa.drv</text>
   <text x="440" y="80" text-anchor="middle" fill="#f7768e" font-size="8">NtDelayExecution timer loop</text>
 
   <line x1="520" y1="67" x2="555" y2="67" stroke="#565f89" stroke-width="1.5"/>
 
-  <rect x="555" y="45" width="100" height="45" rx="5" fill="#24283b" stroke="#565f89" stroke-width="1.5"/>
+  <rect x="555" y="45" width="100" height="45" rx="6" fill="#24283b" stroke="#565f89" stroke-width="1.5"/>
   <text x="605" y="65" text-anchor="middle" fill="#c0caf5" font-size="10">ALSA</text>
-  <text x="605" y="80" text-anchor="middle" fill="#565f89" font-size="8">PCM device</text>
+  <text x="605" y="80" text-anchor="middle" fill="#c0caf5" font-size="8">PCM device</text>
 
   <line x1="655" y1="67" x2="690" y2="67" stroke="#565f89" stroke-width="1.5"/>
 
-  <rect x="690" y="45" width="130" height="45" rx="5" fill="#24283b" stroke="#565f89" stroke-width="1.5"/>
+  <rect x="690" y="45" width="130" height="45" rx="6" fill="#24283b" stroke="#565f89" stroke-width="1.5"/>
   <text x="755" y="65" text-anchor="middle" fill="#c0caf5" font-size="10">PipeWire</text>
-  <text x="755" y="80" text-anchor="middle" fill="#565f89" font-size="8">extra hop to JACK</text>
+  <text x="755" y="80" text-anchor="middle" fill="#c0caf5" font-size="8">extra hop to JACK</text>
 
   <text x="440" y="108" text-anchor="middle" fill="#f7768e" font-size="9">pthread_mutex in timer | no exclusive mode | no ASIO | scalar loops | drift-prone timer</text>
 
@@ -1384,25 +1524,25 @@ if (needs_boost &amp;&amp; highest_prio &lt; owner->prio)
   <!-- winejack WASAPI path -->
   <text x="440" y="150" text-anchor="middle" fill="#9ece6a" font-size="12" font-weight="bold">winejack.drv WASAPI Path (Wine-NSPA)</text>
 
-  <rect x="30" y="170" width="130" height="45" rx="5" fill="#24283b" stroke="#bb9af7" stroke-width="1.5"/>
+  <rect x="30" y="170" width="130" height="45" rx="6" fill="#24283b" stroke="#bb9af7" stroke-width="1.5"/>
   <text x="95" y="190" text-anchor="middle" fill="#bb9af7" font-size="10" font-weight="bold">Windows App</text>
   <text x="95" y="205" text-anchor="middle" fill="#c0caf5" font-size="8">(game / media)</text>
 
   <line x1="160" y1="192" x2="195" y2="192" stroke="#9ece6a" stroke-width="1.5"/>
 
-  <rect x="195" y="170" width="130" height="45" rx="5" fill="#24283b" stroke="#7aa2f7" stroke-width="1.5"/>
+  <rect x="195" y="170" width="130" height="45" rx="6" fill="#24283b" stroke="#7aa2f7" stroke-width="1.5"/>
   <text x="260" y="190" text-anchor="middle" fill="#7aa2f7" font-size="10" font-weight="bold">WASAPI</text>
   <text x="260" y="205" text-anchor="middle" fill="#c0caf5" font-size="8">mmdevapi</text>
 
   <line x1="325" y1="192" x2="360" y2="192" stroke="#9ece6a" stroke-width="1.5"/>
 
-  <rect x="360" y="170" width="200" height="45" rx="5" fill="#24283b" stroke="#9ece6a" stroke-width="2"/>
+  <rect x="360" y="170" width="200" height="45" rx="6" fill="#24283b" stroke="#9ece6a" stroke-width="2"/>
   <text x="460" y="190" text-anchor="middle" fill="#9ece6a" font-size="10" font-weight="bold">winejack.drv</text>
   <text x="460" y="205" text-anchor="middle" fill="#9ece6a" font-size="8">lock-free RT | SSE2 | PI mutex</text>
 
   <line x1="560" y1="192" x2="595" y2="192" stroke="#9ece6a" stroke-width="1.5"/>
 
-  <rect x="595" y="170" width="130" height="45" rx="5" fill="#24283b" stroke="#ff9e64" stroke-width="1.5"/>
+  <rect x="595" y="170" width="130" height="45" rx="6" fill="#24283b" stroke="#ff9e64" stroke-width="1.5"/>
   <text x="660" y="190" text-anchor="middle" fill="#ff9e64" font-size="10" font-weight="bold">JACK</text>
   <text x="660" y="205" text-anchor="middle" fill="#c0caf5" font-size="8">direct, no ALSA hop</text>
 
@@ -1419,30 +1559,30 @@ if (needs_boost &amp;&amp; highest_prio &lt; owner->prio)
   <text x="440" y="305" text-anchor="middle" fill="#ff9e64" font-size="11" font-weight="bold">JACK process_callback (RT thread, SCHED_FIFO)</text>
 
   <!-- Steps inside callback -->
-  <rect x="100" y="315" width="200" height="28" rx="3" fill="none" stroke="#7dcfff" stroke-width="1"/>
+  <rect x="100" y="315" width="200" height="28" rx="6" fill="none" stroke="#7dcfff" stroke-width="1"/>
   <text x="200" y="334" text-anchor="middle" fill="#7dcfff" font-size="9">1. MIDI I/O (lock-free ringbuffer)</text>
 
-  <rect x="100" y="350" width="200" height="28" rx="3" fill="none" stroke="#9ece6a" stroke-width="1"/>
+  <rect x="100" y="350" width="200" height="28" rx="6" fill="none" stroke="#9ece6a" stroke-width="1"/>
   <text x="200" y="369" text-anchor="middle" fill="#9ece6a" font-size="9">2. JACK capture &#x2192; ASIO input (memcpy)</text>
 
-  <rect x="310" y="315" width="200" height="63" rx="3" fill="none" stroke="#e0af68" stroke-width="2"/>
+  <rect x="310" y="315" width="200" height="63" rx="6" fill="none" stroke="#e0af68" stroke-width="2"/>
   <text x="410" y="335" text-anchor="middle" fill="#e0af68" font-size="10" font-weight="bold">3. bufferSwitch()</text>
   <text x="410" y="353" text-anchor="middle" fill="#c0caf5" font-size="8">Host fills output via futex</text>
   <text x="410" y="368" text-anchor="middle" fill="#c0caf5" font-size="8">same-period round-trip</text>
 
-  <rect x="520" y="315" width="260" height="28" rx="3" fill="none" stroke="#9ece6a" stroke-width="1"/>
+  <rect x="520" y="315" width="260" height="28" rx="6" fill="none" stroke="#9ece6a" stroke-width="1"/>
   <text x="650" y="334" text-anchor="middle" fill="#9ece6a" font-size="9">4. ASIO output &#x2192; JACK ports (memcpy)</text>
 
-  <rect x="520" y="350" width="260" height="28" rx="3" fill="none" stroke="#9aa5ce" stroke-width="1"/>
+  <rect x="520" y="350" width="260" height="28" rx="6" fill="none" stroke="#9aa5ce" stroke-width="1"/>
   <text x="650" y="369" text-anchor="middle" fill="#c8d0e8" font-size="9">5. WASAPI streams (games, media)</text>
 
   <!-- Latency result -->
-  <rect x="100" y="390" width="680" height="35" rx="3" fill="#1a3a1a" stroke="#9ece6a" stroke-width="1"/>
+  <rect x="100" y="390" width="680" height="35" rx="6" fill="#1a3a1a" stroke="#9ece6a" stroke-width="1"/>
   <text x="440" y="405" text-anchor="middle" fill="#9ece6a" font-size="10" font-weight="bold">Output latency = exactly 1 JACK period (theoretical minimum)</text>
   <text x="440" y="420" text-anchor="middle" fill="#c0caf5" font-size="9">Data written in bufferSwitch is output in the SAME period. MIDI is synchronized.</text>
 
   <!-- Latency comparison -->
-  <rect x="80" y="485" width="720" height="35" rx="5" fill="#24283b" stroke="#3b4261" stroke-width="1"/>
+  <rect x="80" y="485" width="720" height="35" rx="6" fill="#24283b" stroke="#3b4261" stroke-width="1"/>
   <text x="260" y="507" text-anchor="middle" fill="#f7768e" font-size="9">winealsa: drift-prone timer, no ASIO, extra ALSA&#x2192;PipeWire hop</text>
   <text x="640" y="507" text-anchor="middle" fill="#9ece6a" font-size="9">winejack: hardware-synced, ASIO+WASAPI+MIDI unified, 1 period</text>
 </svg>
@@ -1543,30 +1683,26 @@ if (needs_boost &amp;&amp; highest_prio &lt; owner->prio)
 
 <p>Wine&rsquo;s QPC calls <code>monotonic_counter()</code> which uses <code>clock_gettime(CLOCK_BOOTTIME)</code> (falling back to <code>CLOCK_MONOTONIC</code>). This is a vDSO-accelerated call on modern kernels (~26ns). Without vDSO it becomes a real syscall (~328ns, 12.5x slower). The preloader&rsquo;s vDSO preservation port (Jinoh Kang series) ensures the vDSO is never deleted &ndash; if ASLR places it in a reserved address range, the preloader relocates it via <code>mremap</code> instead of removing it from the auxiliary vector. The TSC frequency is calibrated at init via <code>/sys/devices/system/cpu/cpu*/cpufreq/base_frequency</code> for accurate jiffies-to-TSC conversion.</p>
 
-<p><code>c
-static inline ULONGLONG monotonic_counter(void)
+<pre><code class="language-c">static inline ULONGLONG monotonic_counter(void)
 {
     struct timespec ts;
     if (!clock_gettime( CLOCK_BOOTTIME, &amp;ts ))
         return ts.tv_sec * (ULONGLONG)TICKSPERSEC + ts.tv_nsec / 100;
     ...
-}
-</code></p>
+}</code></pre>
 
 <h3>PR_SET_TIMERSLACK</h3>
 
 <p>When an application calls <code>NtSetTimerResolution</code> (the backend for <code>timeBeginPeriod</code>), NSPA translates the requested resolution to a Linux timer slack value via <code>prctl(PR_SET_TIMERSLACK, slack_ns)</code>. The default Linux timer slack is 50us; setting it to 1ns gives sub-millisecond timer precision for <code>Sleep()</code>, <code>poll()</code>, <code>nanosleep()</code>, and futex waits.</p>
 
-<p><code>c
-if (set)
+<pre><code class="language-c">if (set)
 {
     unsigned long slack_ns = (unsigned long)res * 100;  /* 100ns units -&gt; ns */
     if (slack_ns &lt; 1) slack_ns = 1;
     prctl( PR_SET_TIMERSLACK, slack_ns );
 }
 else
-    prctl( PR_SET_TIMERSLACK, 0 );  /* reset to default */
-</code></p>
+    prctl( PR_SET_TIMERSLACK, 0 );  /* reset to default */</code></pre>
 
 <blockquote><p><strong>Why this matters:</strong> Many audio apps call <code>timeBeginPeriod(1)</code> expecting 1ms timer precision. Without timer slack adjustment, Linux&rsquo;s default 50us slack on top of CFS scheduling jitter can turn a <code>Sleep(1)</code> into a 2-3ms delay. With <code>PR_SET_TIMERSLACK</code> set to match the requested resolution, timer expirations fire at their requested time.</p></blockquote>
 
@@ -1630,9 +1766,9 @@ else
 
 <hr />
 
-<h2>11. msvcrt SIMD &amp; Synchronization Optimizations</h2>
+<h2>11. msvcrt SIMD Optimizations</h2>
 
-<h3>msvcrt SIMD Memory/String Operations</h3>
+<h3>SIMD Memory/String Operations</h3>
 
 <p>Wine&rsquo;s msvcrt provides the C runtime for Win32 applications, including <code>memcpy</code>, <code>memmove</code>, <code>memchr</code>, <code>strlen</code>, and <code>memcmp</code>. Upstream Wine uses scalar C implementations or minimal hand-written assembly. NSPA replaces these with SIMD-optimized implementations:</p>
 
@@ -1685,153 +1821,6 @@ else
 <p><strong>Why it matters for RT:</strong> These functions are called thousands of times per audio buffer cycle &ndash; buffer copies in WASAPI/ASIO, socket I/O data movement, string parsing in API calls. The v5 test results show measurable impact: +4.7% CS throughput, +27% baseline socket-io throughput, -7% process startup time.</p>
 
 <p>Implementation: <code>dlls/msvcrt/string.c</code> (all five functions), <code>dlls/msvcrt/math.c</code> (AVX detection), <code>dlls/msvcrt/msvcrt.h</code> (avx_supported declaration).</p>
-
-<h3>SRW Lock Spin Phase</h3>
-
-<p>Windows SRW locks (Slim Reader/Writer) spin briefly before entering the kernel wait path. NSPA implements this behavior:</p>
-
-<ul>
-<li><strong>256 spin iterations</strong> before transitioning to <code>FUTEX_WAIT</code> / <code>FUTEX_LOCK_PI</code></li>
-<li><strong>RT threads skip the spin phase entirely</strong> &ndash; a SCHED_FIFO thread spinning wastes its quantum and creates priority inversion when the lock holder is a lower-priority thread that cannot run while the spinner holds the CPU</li>
-<li><strong>Spin detection:</strong> <code>nspa_is_rt_thread()</code> checks cached scheduling policy (set during RT promotion)</li>
-</ul>
-
-
-<p>This matches Windows NT behavior where <code>SRWLock</code> uses a brief spin phase before blocking. The 256-iteration count is empirically chosen to cover the common case of short critical sections (sub-microsecond) without burning excessive cycles on longer holds.</p>
-
-<p><strong>Impact:</strong> Reduces kernel transitions for uncontended or briefly-contended SRW locks. The v5 NTSync d4 rapid throughput improved from 232K to 259K ops/s (+11.6%), consistent with fewer futex syscalls in the lock path.</p>
-
-<p>Implementation: <code>dlls/ntdll/sync.c</code> (SRW acquire path).</p>
-
-<h3>pi_cond Requeue-PI</h3>
-
-<p>Wine-NSPA&rsquo;s <code>pi_cond_t</code> (condition variable with PI support, from librtpi) uses <code>FUTEX_WAIT_REQUEUE_PI</code> and <code>FUTEX_CMP_REQUEUE_PI</code> to close the PI gap in condition variable wakeup:</p>
-
-<p><strong>The problem:</strong> A standard <code>pthread_cond_signal</code> + <code>pthread_mutex_lock</code> sequence has a window where the woken thread is runnable but has not yet acquired the mutex. During this window, the thread has no PI protection &ndash; a lower-priority thread can preempt it, even though it is about to become a mutex owner that higher-priority threads are waiting for.</p>
-
-<p><strong>The solution:</strong> <code>FUTEX_CMP_REQUEUE_PI</code> atomically moves a waiter from the condition variable&rsquo;s futex to the mutex&rsquo;s PI futex. The waiter transitions directly from &ldquo;blocked on condvar&rdquo; to &ldquo;blocked on PI mutex with priority inheritance&rdquo; &ndash; no gap. When the mutex is released, the highest-priority requeued waiter is woken with PI protection already in place.</p>
-
-<table>
-<thead>
-<tr>
-<th> Operation </th>
-<th> Without Requeue-PI </th>
-<th> With Requeue-PI </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> <code>cond_signal</code> </td>
-<td> Wake thread, thread races for mutex </td>
-<td> Requeue thread onto PI mutex atomically </td>
-</tr>
-<tr>
-<td> PI gap </td>
-<td> Thread runnable but unprotected </td>
-<td> <strong>No gap &ndash; PI transfers atomically</strong> </td>
-</tr>
-<tr>
-<td> Kernel transitions </td>
-<td> <code>FUTEX_WAKE</code> + <code>FUTEX_LOCK_PI</code> (2) </td>
-<td> <code>FUTEX_CMP_REQUEUE_PI</code> (1) </td>
-</tr>
-</tbody>
-</table>
-
-
-<p>This closes the last PI gap in NSPA&rsquo;s synchronization infrastructure. With requeue-PI, the full path from condition variable through mutex acquisition maintains unbroken priority inheritance.</p>
-
-<div class="diagram-container">
-<svg width="860" height="420" viewBox="0 0 860 420" xmlns="http://www.w3.org/2000/svg">
-  <!-- Column headers -->
-  <rect x="20" y="10" width="390" height="28" rx="3" fill="#24283b" stroke="#f7768e" stroke-width="1.5"/>
-  <text x="215" y="29" text-anchor="middle" fill="#f7768e" font-size="12" font-weight="bold">Old: plain FUTEX_WAIT (PI gap)</text>
-
-  <rect x="450" y="10" width="390" height="28" rx="3" fill="#24283b" stroke="#9ece6a" stroke-width="1.5"/>
-  <text x="645" y="29" text-anchor="middle" fill="#9ece6a" font-size="12" font-weight="bold">New: FUTEX_WAIT_REQUEUE_PI (no gap)</text>
-
-  <!-- OLD PATH -->
-  <rect x="40" y="55" width="350" height="24" rx="3" fill="#24283b" stroke="#bb9af7" stroke-width="1"/>
-  <text x="215" y="72" text-anchor="middle" fill="#bb9af7" font-size="10">RT thread: pi_cond_wait(cond, mutex)</text>
-
-  <line x1="215" y1="79" x2="215" y2="95" stroke="#7dcfff" stroke-width="1.5"/>
-
-  <rect x="40" y="95" width="350" height="24" rx="3" fill="#24283b" stroke="#7dcfff" stroke-width="1"/>
-  <text x="215" y="112" text-anchor="middle" fill="#7dcfff" font-size="10">pi_mutex_unlock(mutex) — drop PI boost</text>
-
-  <line x1="215" y1="119" x2="215" y2="135" stroke="#7dcfff" stroke-width="1.5"/>
-
-  <rect x="40" y="135" width="350" height="24" rx="3" fill="#24283b" stroke="#7dcfff" stroke-width="1"/>
-  <text x="215" y="152" text-anchor="middle" fill="#7dcfff" font-size="10">FUTEX_WAIT(&amp;cond, seq) — sleep on condvar</text>
-
-  <line x1="215" y1="159" x2="215" y2="175" stroke="#e0af68" stroke-width="1.5"/>
-
-  <rect x="40" y="175" width="350" height="24" rx="3" fill="#24283b" stroke="#e0af68" stroke-width="1"/>
-  <text x="215" y="192" text-anchor="middle" fill="#e0af68" font-size="10">FUTEX_WAKE — signaler wakes us</text>
-
-  <line x1="215" y1="199" x2="215" y2="215" stroke="#f7768e" stroke-width="2"/>
-
-  <!-- PI GAP highlighted -->
-  <rect x="30" y="215" width="370" height="50" rx="5" fill="#3a1a1a" stroke="#f7768e" stroke-width="2.5"/>
-  <text x="215" y="235" text-anchor="middle" fill="#f7768e" font-size="11" font-weight="bold">⚠ PI GAP — thread runnable, no boost</text>
-  <text x="215" y="252" text-anchor="middle" fill="#c0caf5" font-size="9">Can be preempted by lower-priority threads</text>
-
-  <line x1="215" y1="265" x2="215" y2="285" stroke="#f7768e" stroke-width="2"/>
-
-  <rect x="40" y="285" width="350" height="24" rx="3" fill="#24283b" stroke="#7dcfff" stroke-width="1"/>
-  <text x="215" y="302" text-anchor="middle" fill="#7dcfff" font-size="10">pi_mutex_lock(mutex) — manual reacquire</text>
-
-  <line x1="215" y1="309" x2="215" y2="325" stroke="#7dcfff" stroke-width="1.5"/>
-
-  <rect x="40" y="325" width="350" height="24" rx="3" fill="#24283b" stroke="#9ece6a" stroke-width="1"/>
-  <text x="215" y="342" text-anchor="middle" fill="#9ece6a" font-size="10">PI restored (kernel rt_mutex)</text>
-
-  <rect x="60" y="365" width="310" height="30" rx="3" fill="#24283b" stroke="#f7768e" stroke-width="1"/>
-  <text x="215" y="385" text-anchor="middle" fill="#f7768e" font-size="9">worst-case max: 53.8µs (measured under RT load)</text>
-
-  <!-- NEW PATH -->
-  <rect x="470" y="55" width="350" height="24" rx="3" fill="#24283b" stroke="#bb9af7" stroke-width="1"/>
-  <text x="645" y="72" text-anchor="middle" fill="#bb9af7" font-size="10">RT thread: pi_cond_wait(cond, mutex)</text>
-
-  <line x1="645" y1="79" x2="645" y2="95" stroke="#7dcfff" stroke-width="1.5"/>
-
-  <rect x="470" y="95" width="350" height="24" rx="3" fill="#24283b" stroke="#7dcfff" stroke-width="1"/>
-  <text x="645" y="112" text-anchor="middle" fill="#7dcfff" font-size="10">pi_mutex_unlock(mutex) — drop PI boost</text>
-
-  <line x1="645" y1="119" x2="645" y2="135" stroke="#7dcfff" stroke-width="1.5"/>
-
-  <rect x="470" y="135" width="350" height="24" rx="3" fill="#24283b" stroke="#9ece6a" stroke-width="1.5"/>
-  <text x="645" y="152" text-anchor="middle" fill="#9ece6a" font-size="10">FUTEX_WAIT_REQUEUE_PI(&amp;cond, &amp;mutex)</text>
-
-  <line x1="645" y1="159" x2="645" y2="175" stroke="#e0af68" stroke-width="1.5"/>
-
-  <rect x="470" y="175" width="350" height="24" rx="3" fill="#24283b" stroke="#e0af68" stroke-width="1"/>
-  <text x="645" y="192" text-anchor="middle" fill="#e0af68" font-size="10">FUTEX_CMP_REQUEUE_PI — signaler requeues</text>
-
-  <line x1="645" y1="199" x2="645" y2="215" stroke="#9ece6a" stroke-width="2"/>
-
-  <!-- ATOMIC REQUEUE highlighted -->
-  <rect x="460" y="215" width="370" height="50" rx="5" fill="#1a3a1a" stroke="#9ece6a" stroke-width="2.5"/>
-  <text x="645" y="235" text-anchor="middle" fill="#9ece6a" font-size="11" font-weight="bold">✓ ATOMIC — requeued onto PI mutex chain</text>
-  <text x="645" y="252" text-anchor="middle" fill="#c0caf5" font-size="9">Kernel transfers waiter directly, no userspace gap</text>
-
-  <line x1="645" y1="265" x2="645" y2="285" stroke="#9ece6a" stroke-width="2"/>
-
-  <rect x="470" y="285" width="350" height="24" rx="3" fill="#24283b" stroke="#9ece6a" stroke-width="1.5"/>
-  <text x="645" y="302" text-anchor="middle" fill="#9ece6a" font-size="10">Mutex acquired — PI already in effect</text>
-
-  <line x1="645" y1="309" x2="645" y2="325" stroke="#9ece6a" stroke-width="1.5"/>
-
-  <rect x="470" y="325" width="350" height="24" rx="3" fill="#24283b" stroke="#9ece6a" stroke-width="1"/>
-  <text x="645" y="342" text-anchor="middle" fill="#9ece6a" font-size="10">Unbroken PI through entire path</text>
-
-  <rect x="490" y="365" width="310" height="30" rx="3" fill="#24283b" stroke="#9ece6a" stroke-width="1"/>
-  <text x="645" y="385" text-anchor="middle" fill="#9ece6a" font-size="9">worst-case max: 31.6µs (-41% vs old, under RT load)</text>
-</svg>
-</div>
-
-
-<p>Implementation: <code>libs/librtpi/rtpi.h</code> (header-only inline, <code>pi_cond_wait</code>, <code>pi_cond_signal</code>, <code>pi_cond_broadcast</code>).</p>
 
 <hr />
 
@@ -1915,6 +1904,11 @@ else
 <td> sync </td>
 <td> pi_cond requeue-PI upgrade (FUTEX_WAIT_REQUEUE_PI / FUTEX_CMP_REQUEUE_PI) </td>
 <td> <code>libs/librtpi/rtpi.h</code> </td>
+</tr>
+<tr>
+<td> sync </td>
+<td> Win32 condvar PI: FUTEX_WAIT_REQUEUE_PI for RtlSleepConditionVariableCS (condvar&rarr;mutex mapping table + 3 new syscalls) </td>
+<td> <code>dlls/ntdll/sync.c</code>, <code>dlls/ntdll/unix/sync.c</code>, <code>dlls/ntdll/ntsyscalls.h</code> </td>
 </tr>
 </tbody>
 </table>
@@ -2015,7 +2009,11 @@ else
 </tr>
 <tr>
 <td> <code>libs/librtpi/pi_cond.c</code> </td>
-<td> Requeue-PI condition variable (FUTEX_WAIT_REQUEUE_PI) </td>
+<td> Requeue-PI condition variable for unix-side consumers (FUTEX_WAIT_REQUEUE_PI) </td>
+</tr>
+<tr>
+<td> <code>dlls/ntdll/sync.c</code> + <code>unix/sync.c</code> </td>
+<td> Win32 condvar PI: requeue-PI for RtlSleepConditionVariableCS (3 new syscalls + mapping table) </td>
 </tr>
 <tr>
 <td> <code>dlls/combase/apartment.c</code> </td>
@@ -2031,5 +2029,6 @@ else
 
 <hr />
 
-<p>Wine-NSPA Architecture Reference | Generated 2026-04-15 | Wine 11.6 + NSPA RT patchset</p>
+<p>Wine-NSPA Architecture Reference | Generated 2026-04-16 | Wine 11.6 + NSPA RT patchset</p>
+<script>hljs.highlightAll();</script>
 </body></html>

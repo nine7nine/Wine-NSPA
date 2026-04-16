@@ -56,6 +56,8 @@
   strong { color: var(--fg); }
   em { color: var(--muted); font-style: italic; }
 </style>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/tokyo-night-dark.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
 </head><body>
 <h1>Wine Window Decoration Feedback Loop — Investigation Report</h1>
 
@@ -179,9 +181,7 @@ NSPA_CFG 0x1009a config_vis (389,59)-(2430,1818) stored_vis (389,59)-(2430,1899)
 <h3>The SWP_FRAMECHANGED amplifier</h3>
 
 <p>In <code>apply_window_pos</code> (dlls/win32u/window.c:2277):
-<code>c
-if (old_surface != new_surface) swp_flags |= SWP_FRAMECHANGED;
-</code>
+<pre><code class="language-c">if (old_surface != new_surface) swp_flags |= SWP_FRAMECHANGED;</code></pre>
 Any visible rect change that triggers a new surface forces <code>SWP_FRAMECHANGED</code>, which triggers <code>WM_NCCALCSIZE</code>, which recalculates the NC area, which changes the visible rect — amplifying the loop.</p>
 
 <hr />
@@ -288,22 +288,18 @@ Any visible rect change that triggers a new surface forces <code>SWP_FRAMECHANGE
 
 <h3>The visible rect model</h3>
 
-<p><code>c
-struct window_rects {
+<pre><code class="language-c">struct window_rects {
     RECT window;   // Full Win32 window area (including NC frame)
     RECT client;   // Client area (from WM_NCCALCSIZE)
     RECT visible;  // X11/Wayland surface area (from get_visible_rect)
-};
-</code></p>
+};</code></pre>
 
 <p><code>visible = window - decoration_offsets</code> where offsets come from <code>NtUserAdjustWindowRect</code> (Wine&rsquo;s NC metrics). The problem: these offsets don&rsquo;t match the actual WM frame.</p>
 
 <h3>How to reproduce</h3>
 
 <p>Any decorated window on any Linux WM. Simple test:
-<code>bash
-wine notepad  # then maximize, resize, move — watch for drift/flicker
-</code></p>
+<pre><code class="language-bash">wine notepad  # then maximize, resize, move — watch for drift/flicker</code></pre></p>
 
 <p>Ableton Live is a good test case because it&rsquo;s large and the artifacts are very visible.</p>
 
@@ -333,9 +329,7 @@ wine notepad  # then maximize, resize, move — watch for drift/flicker
 <h3>3. Break the surface-change → FRAMECHANGED → NCCALCSIZE loop</h3>
 
 <p>In <code>apply_window_pos</code>:
-<code>c
-if (old_surface != new_surface) swp_flags |= SWP_FRAMECHANGED;
-</code>
+<pre><code class="language-c">if (old_surface != new_surface) swp_flags |= SWP_FRAMECHANGED;</code></pre>
 This forces NC recalculation whenever the surface changes. If the visible rect changes by even 1px (due to the offset mismatch), a new surface is created, FRAMECHANGED fires, NCCALCSIZE runs, and the cycle amplifies.</p>
 
 <p>Consider: only set FRAMECHANGED when the surface size actually changes, not just the surface pointer.</p>
@@ -429,4 +423,5 @@ NSPA_CFG 0x1009a config_vis (389,59)-(2430,1818) stored_vis (389,59)-(2430,1899)
 3. <code>get_visible_rect</code>: upstream behavior restored (EqualRect + NtUserAdjustWindowRect)
 4. Diagnostic ERR traces (NSPA_DBG, NSPA_CFG) — should be removed before shipping
 5. WS_EX_LAYERED MWM exclusion removed (from earlier session, still correct)</p>
+<script>hljs.highlightAll();</script>
 </body></html>
