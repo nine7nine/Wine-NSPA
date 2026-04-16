@@ -2,7 +2,7 @@
 <html lang="en"><head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Wine-NSPA RT -- Current State & Investigation Targets</title>
+<title>Wine-NSPA RT -- Current State (v5)</title>
 <style>
   :root {
     --bg: #1a1b26; --fg: #c0caf5; --accent: #7aa2f7;
@@ -57,19 +57,13 @@
   em { color: var(--muted); font-style: italic; }
 </style>
 </head><body>
-<h1>Wine-NSPA RT &ndash; Current State &amp; Investigation Targets</h1>
+<h1>Wine-NSPA RT &ndash; Current State (v5)</h1>
 
-<p>Kernel: 6.19.11-rt1-1-nspa (PREEMPT_RT) | CONFIG_NTSYNC=m (5 patches: PI v2 + uring_fd + kmalloc fix)
+<p>Kernel: 6.19.11-rt1-1-nspa (PREEMPT_RT) | CONFIG_NTSYNC=m (5 patches)
 Wine-NSPA 11.6 | <code>NSPA_RT_PRIO=80 NSPA_RT_POLICY=FF</code> | 2026-04-15
-nspa_rt_test.exe v5 via <code>run_rt_tests.sh</code> (10 tests, baseline + rt)
-<strong>Update 2026-04-13:</strong> vDSO preloader port shipped (12.5x timing penalty prevented) | winejack.drv audio stack shipped (WASAPI+ASIO+MIDI unified, zero-latency ASIO via futex) | wineserver <code>global_lock</code> upgraded to PI-aware mutex (FUTEX_LOCK_PI)
-<strong>Update 2026-04-14:</strong> Ableton Live 12 Lite windowing workaround committed as <code>f795984ed19</code> (<code>win32u,x11drv: avoid custom nonclient resize feedback</code>) | startup -> activation -> main window path reaches usable state in local validation | workaround suppresses the runaway menubar/content growth loop but is not yet a clean upstream-quality fix
-<strong>Update 2026-04-15:</strong> ntsync kernel PI v2 — 3 bugs fixed (multi-object corruption, wait_all PI gap, stale normal_prio comparison) | patch 1003 rewritten, module rebuilt | ntsync autoload added (/etc/modules-load.d/) | Wine RT guardrail: CRITICAL warning when /dev/ntsync missing with NSPA_RT_PRIO set | io_uring Phase 1+2 pool allocator committed
-<strong>Update 2026-04-15 (Phase 3):</strong> io_uring socket I/O bypass committed (cc9610c187c) | E2 shared bitmap approach (no protocol change) | ntsync kernel uring_fd extension for CQE wakeup | ntsync PI kmalloc fix (pre-allocate before raw_spinlock) | socket-io test added | shmem PI futex redesign attempted and REJECTED (deadlocks on SMP) | v2.5 manual boost confirmed correct
-<strong>Update 2026-04-15 (Phase 3 overlapped):</strong> overlapped socket bypass WORKING via ALERTED-state interception (a645adc66ed) | 5th approach after 4 crashes (signal reentrancy, deadlock, double-completion, ALERTED/PENDING race) | async stays ALERTED on server → no epoll monitoring → CQE handler calls set_async_direct_result once | Phase B: 2000/2000 overlapped recv, avg 113µs | full suite 20/20 PASS | io_uring Phase 1+2+3 COMPLETE
-<strong>Update 2026-04-15 (v5):</strong> msvcrt SIMD optimizations (AVX memcpy/memmove, SSE2 memchr/strlen/memcmp, runtime CPU dispatch) | SRW lock spin phase (256 iters, skipped for RT threads) | pi_cond requeue-PI upgrade (FUTEX_WAIT_REQUEUE_PI/FUTEX_CMP_REQUEUE_PI) | CoWaitForMultipleHandles correctness rewrite (removes 100-msg hack) | v5 full suite 20/20 PASS | RT throughput +4.7%, d8 CFS reversal resolved, baseline socket-io +27%</p>
+nspa_rt_test.exe v5 via <code>run_rt_tests.sh</code> (10 tests, baseline + rt)</p>
 
-<p><strong>All tests PASS — Phase 1+2+3 io_uring COMPLETE (sync+overlapped) — NTSync PI v2 + uring_fd — SIMD + SRW spin + requeue-PI — all RT subsystems healthy</strong></p>
+<p><strong>20/20 PASS &ndash; all RT subsystems healthy</strong></p>
 
 <hr />
 
@@ -83,9 +77,9 @@ nspa_rt_test.exe v5 via <code>run_rt_tests.sh</code> (10 tests, baseline + rt)
 <th> Test </th>
 <th> Status </th>
 <th> Key Metric </th>
-<th> v3 Value </th>
-<th> v4 Value </th>
-<th> v5 Value </th>
+<th> v3 </th>
+<th> v4 </th>
+<th> v5 </th>
 <th> Assessment </th>
 </tr>
 </thead>
@@ -97,7 +91,7 @@ nspa_rt_test.exe v5 via <code>run_rt_tests.sh</code> (10 tests, baseline + rt)
 <td> 288K ops/s </td>
 <td> 312K ops/s </td>
 <td> 327K ops/s </td>
-<td> <strong>+4.7% v4→v5 — SIMD benefit</strong> </td>
+<td> <strong>+4.7% v4->v5</strong> </td>
 </tr>
 <tr>
 <td> philosophers </td>
@@ -106,7 +100,7 @@ nspa_rt_test.exe v5 via <code>run_rt_tests.sh</code> (10 tests, baseline + rt)
 <td> 1620 us </td>
 <td> 601 us </td>
 <td> 1301 us </td>
-<td> <strong>CFS variance, PI still correct</strong> </td>
+<td> CFS variance, PI correct </td>
 </tr>
 <tr>
 <td> fork-mutex </td>
@@ -115,25 +109,25 @@ nspa_rt_test.exe v5 via <code>run_rt_tests.sh</code> (10 tests, baseline + rt)
 <td> 1024 ms </td>
 <td> 1021 ms </td>
 <td> 948 ms </td>
-<td> <strong>-7.1% v4→v5 — faster startup</strong> </td>
+<td> <strong>-7.1% v4->v5</strong> </td>
 </tr>
 <tr>
 <td> cs-contention </td>
 <td> PASS </td>
-<td> min wait (PI hold) </td>
+<td> PI hold time </td>
 <td> 474 ms </td>
 <td> 213 ms </td>
 <td> 202 ms </td>
-<td> <strong>matches uncontended work time</strong> </td>
+<td> matches uncontended work </td>
 </tr>
 <tr>
 <td> signal-recursion </td>
 <td> PASS </td>
-<td> elapsed (no sync) </td>
+<td> elapsed </td>
 <td> 61 ms </td>
 <td> 60 ms </td>
 <td> 57 ms </td>
-<td> no exception-path regression </td>
+<td> no regression </td>
 </tr>
 <tr>
 <td> large-pages </td>
@@ -142,52 +136,52 @@ nspa_rt_test.exe v5 via <code>run_rt_tests.sh</code> (10 tests, baseline + rt)
 <td> LargePage=1 </td>
 <td> LargePage=1 </td>
 <td> LargePage=1 </td>
-<td> <strong>PAGEMAP_SCAN path confirmed</strong> </td>
+<td> PAGEMAP_SCAN confirmed </td>
 </tr>
 <tr>
 <td> ntsync-d4 </td>
 <td> 8/8 </td>
-<td> PI contention RT avg </td>
+<td> PI avg wait </td>
 <td> 238 ms </td>
 <td> 387 ms </td>
 <td> 270 ms </td>
-<td> <strong>-30.2% v4→v5</strong> </td>
+<td> <strong>-30% v4->v5</strong> </td>
 </tr>
 <tr>
 <td> ntsync-d8 </td>
 <td> 8/8 </td>
-<td> PI contention RT avg </td>
+<td> PI avg wait </td>
 <td> 479 ms </td>
 <td> 419 ms </td>
 <td> 201 ms </td>
-<td> <strong>-52.0% v4→v5, CFS reversal fixed</strong> </td>
+<td> <strong>-52% v4->v5</strong> </td>
 </tr>
 <tr>
 <td> ntsync-d12 </td>
 <td> 8/8 </td>
-<td> transitive chain wait </td>
+<td> chain wait </td>
 <td> 226 ms </td>
 <td> 207 ms </td>
 <td> 96 ms </td>
-<td> <strong>scales to depth 12, O(1) RT wait</strong> </td>
+<td> scales to depth 12 </td>
 </tr>
 <tr>
 <td> socket-io A </td>
 <td> PASS </td>
-<td> immediate recv avg </td>
+<td> recv avg </td>
 <td> &ndash; </td>
 <td> 95.2 us </td>
 <td> 95.8 us </td>
-<td> <strong>stable baseline</strong> </td>
+<td> stable </td>
 </tr>
 <tr>
 <td> socket-io B </td>
 <td> PASS </td>
-<td> deferred recv avg </td>
+<td> recv avg </td>
 <td> &ndash; </td>
 <td> 113.2 us </td>
 <td> 115.4 us </td>
-<td> <strong>overlapped stable</strong> </td>
+<td> overlapped stable </td>
 </tr>
 </tbody>
 </table>
@@ -195,9 +189,163 @@ nspa_rt_test.exe v5 via <code>run_rt_tests.sh</code> (10 tests, baseline + rt)
 
 <hr />
 
-<h2>2. NTSync Driver Status</h2>
+<h2>2. Component Status</h2>
 
-<h3>2.1 Module and Handle Verification</h3>
+<h3>Priority Inheritance Coverage</h3>
+
+<table>
+<thead>
+<tr>
+<th> PI Path </th>
+<th> Mechanism </th>
+<th> Scope </th>
+<th> Status </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> CS-PI </td>
+<td> <code>FUTEX_LOCK_PI</code> on <code>LockSemaphore</code> </td>
+<td> All Win32 critical sections </td>
+<td> <strong>Shipped</strong> </td>
+</tr>
+<tr>
+<td> NTSync PI </td>
+<td> Kernel <code>sched_setattr_nocheck</code> on mutex owner </td>
+<td> Win32 <code>CreateMutex</code> / <code>WaitForSingleObject</code> </td>
+<td> <strong>Shipped (5 kernel patches)</strong> </td>
+</tr>
+<tr>
+<td> Condvar PI </td>
+<td> <code>FUTEX_WAIT_REQUEUE_PI</code> / <code>FUTEX_CMP_REQUEUE_PI</code> </td>
+<td> All <code>pi_cond_t</code> consumers (ntdll, audio, gstreamer) </td>
+<td> <strong>Shipped (v5)</strong> </td>
+</tr>
+<tr>
+<td> SRW PI </td>
+<td> Not implemented </td>
+<td> SRW locks (<code>RTL_SRWLOCK</code>) </td>
+<td> <strong>Deferred</strong> (unsolved problem, even Linux lacks rwlock PI) </td>
+</tr>
+</tbody>
+</table>
+
+
+<h3>io_uring Integration</h3>
+
+<table>
+<thead>
+<tr>
+<th> Phase </th>
+<th> What </th>
+<th> Status </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> 1 </td>
+<td> Sync poll replacement </td>
+<td> <strong>Shipped</strong> </td>
+</tr>
+<tr>
+<td> 2 </td>
+<td> Async file I/O server bypass + TLS pool </td>
+<td> <strong>Shipped</strong> </td>
+</tr>
+<tr>
+<td> 3 </td>
+<td> Socket I/O via ALERTED-state interception (sync + overlapped) </td>
+<td> <strong>Shipped</strong> </td>
+</tr>
+</tbody>
+</table>
+
+
+<h3>Synchronization Optimizations (v5)</h3>
+
+<table>
+<thead>
+<tr>
+<th> Feature </th>
+<th> What </th>
+<th> Status </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> SRW spin phase </td>
+<td> 256-iteration spin before parking, RT threads skip </td>
+<td> <strong>Shipped</strong> </td>
+</tr>
+<tr>
+<td> pi_cond requeue-PI </td>
+<td> <code>FUTEX_WAIT_REQUEUE_PI</code> closes PI gap in condvar wake </td>
+<td> <strong>Shipped</strong> </td>
+</tr>
+<tr>
+<td> CS DYNAMIC_SPIN </td>
+<td> <code>RTL_CRITICAL_SECTION_FLAG_DYNAMIC_SPIN</code> implementation </td>
+<td> Planned </td>
+</tr>
+<tr>
+<td> msvcrt SIMD </td>
+<td> AVX memcpy/memmove, SSE2 memchr/strlen/memcmp </td>
+<td> <strong>Shipped</strong> </td>
+</tr>
+<tr>
+<td> CoWait fix </td>
+<td> CoWaitForMultipleHandles correctness rewrite </td>
+<td> <strong>Shipped</strong> </td>
+</tr>
+</tbody>
+</table>
+
+
+<h3>Infrastructure</h3>
+
+<table>
+<thead>
+<tr>
+<th> Component </th>
+<th> Status </th>
+<th> Notes </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> vDSO preloader port </td>
+<td> <strong>Shipped</strong> </td>
+<td> 13-patch series, preserves vDSO (12.5x timing improvement) </td>
+</tr>
+<tr>
+<td> Wineserver global_lock PI </td>
+<td> <strong>Shipped</strong> </td>
+<td> <code>pi_mutex_t</code> via FUTEX_LOCK_PI </td>
+</tr>
+<tr>
+<td> librtpi tree-wide sweep </td>
+<td> <strong>Shipped</strong> </td>
+<td> <code>pthread_mutex</code> -> <code>pi_mutex</code> across ntdll, audio, gstreamer </td>
+</tr>
+<tr>
+<td> Shmem PI futex redesign </td>
+<td> <strong>Rejected</strong> </td>
+<td> Deadlocks on SMP, manual boost (v2.5) is correct </td>
+</tr>
+<tr>
+<td> NTSync module autoload </td>
+<td> <strong>Shipped</strong> </td>
+<td> <code>/etc/modules-load.d/ntsync.conf</code> + Wine guardrail </td>
+</tr>
+</tbody>
+</table>
+
+
+<hr />
+
+<h2>3. NTSync Driver Validation</h2>
+
+<h3>Module and Handle Verification</h3>
 
 <table>
 <thead>
@@ -215,102 +363,60 @@ nspa_rt_test.exe v5 via <code>run_rt_tests.sh</code> (10 tests, baseline + rt)
 </tr>
 <tr>
 <td> client-side handles </td>
-<td> Handle <code>0x1FFC00</code> in client range (520K down from max) </td>
-<td> <strong>confirmed &ndash; bypasses wineserver</strong> </td>
+<td> Handle in client range (bypasses wineserver) </td>
+<td> <strong>confirmed</strong> </td>
 </tr>
 <tr>
 <td> kernel mutex objects </td>
-<td> <code>0x1FFBFC</code>, <code>0x1FFBF0</code> &ndash; distinct NTSync handles </td>
+<td> Distinct NTSync handles per object </td>
 <td> <strong>confirmed</strong> </td>
 </tr>
 </tbody>
 </table>
 
 
-<h3>2.1b Client-Side NTSync Object Creation</h3>
-
-<p>Anonymous sync objects are created directly on <code>/dev/ntsync</code> client-side (f863fa180ca), bypassing wineserver for creation and wait. <strong>Events are excluded</strong> — client-created event handles destabilized Ableton Live, so anonymous events remain on wineserver (a7b00453978). Mutexes and semaphores are stable client-side.</p>
+<h3>Client-Side Object Creation</h3>
 
 <table>
 <thead>
 <tr>
 <th> Object Type </th>
 <th> Creation Path </th>
-<th> Wait Path </th>
 <th> PI Support </th>
 </tr>
 </thead>
 <tbody>
 <tr>
 <td> Mutex (anonymous) </td>
-<td> Client → ioctl(NTSYNC_IOC_CREATE_MUTEX) </td>
-<td> Client → ioctl(NTSYNC_IOC_WAIT_ANY) </td>
-<td> <strong>PI v2 (kernel driver)</strong> </td>
+<td> Client -> ioctl(NTSYNC_IOC_CREATE_MUTEX) </td>
+<td> <strong>PI v2</strong> </td>
 </tr>
 <tr>
 <td> Semaphore (anonymous) </td>
-<td> Client → ioctl(NTSYNC_IOC_CREATE_SEM) </td>
-<td> Client → ioctl(NTSYNC_IOC_WAIT_ANY) </td>
-<td> No PI (no owner concept) </td>
+<td> Client -> ioctl(NTSYNC_IOC_CREATE_SEM) </td>
+<td> No PI (no owner) </td>
 </tr>
 <tr>
 <td> Event (anonymous) </td>
-<td> <strong>Wineserver</strong> → ioctl(NTSYNC_IOC_CREATE_EVENT) </td>
-<td> Client → ioctl(NTSYNC_IOC_WAIT_ANY) </td>
+<td> <strong>Wineserver</strong> (client-side destabilized Ableton) </td>
 <td> N/A </td>
 </tr>
 <tr>
 <td> Named objects </td>
 <td> Wineserver (all types) </td>
-<td> Client via fd received from server </td>
-<td> Same as above per type </td>
+<td> Per type </td>
 </tr>
 </tbody>
 </table>
 
 
-<h3>2.2 Kernel Patch Validation Matrix</h3>
-
-<table>
-<thead>
-<tr>
-<th> Kernel Patch </th>
-<th> Validated By </th>
-<th> Evidence </th>
-<th> Status </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> 0001: raw_spinlock + rt_mutex hardening </td>
-<td> all 9 tests (no lockup under PREEMPT_RT) </td>
-<td> 18/18 PASS, no watchdog triggers, no soft-lockup warnings </td>
-<td> <strong>validated</strong> </td>
-</tr>
-<tr>
-<td> 0002: priority-ordered waiter queues </td>
-<td> ntsync-d4/d8/d12 sub-test 3 (priority wakeup) </td>
-<td> 5-7 waiters correct wake order at all 3 depths, both modes </td>
-<td> <strong>validated</strong> </td>
-</tr>
-<tr>
-<td> 0003: mutex owner PI boost <strong>v2</strong> </td>
-<td> philosophers + ntsync-d4/d8 PI contention </td>
-<td> Phil RT max wait 1620→865us (-46.6%); d8 RT PI avg 479→239ms (-50.1%) </td>
-<td> <strong>validated — 3 bugs fixed</strong> </td>
-</tr>
-</tbody>
-</table>
-
-
-<h3>2.3 Priority-Ordered Wakeup (d4 run, representative)</h3>
+<h3>Priority-Ordered Wakeup (verified)</h3>
 
 <table>
 <thead>
 <tr>
 <th> Priority </th>
 <th> Win32 Value </th>
-<th> wake_us </th>
 <th> Delta from TC </th>
 <th> Order </th>
 </tr>
@@ -319,49 +425,42 @@ nspa_rt_test.exe v5 via <code>run_rt_tests.sh</code> (10 tests, baseline + rt)
 <tr>
 <td> TIME_CRITICAL </td>
 <td> 15 </td>
-<td> 2542030506 </td>
 <td> +0 us </td>
 <td> <strong>1st</strong> </td>
 </tr>
 <tr>
 <td> HIGHEST </td>
 <td> 2 </td>
-<td> 2542030528 </td>
 <td> +22 us </td>
 <td> <strong>2nd</strong> </td>
 </tr>
 <tr>
 <td> ABOVE_NORMAL </td>
 <td> 1 </td>
-<td> 2542030556 </td>
 <td> +50 us </td>
 <td> <strong>3rd</strong> </td>
 </tr>
 <tr>
 <td> NORMAL </td>
 <td> 0 </td>
-<td> 2542030567 </td>
 <td> +61 us </td>
 <td> <strong>4th</strong> </td>
 </tr>
 <tr>
 <td> BELOW_NORMAL </td>
 <td> -1 </td>
-<td> 2542030575 </td>
 <td> +69 us </td>
 <td> <strong>5th</strong> </td>
 </tr>
 <tr>
 <td> LOWEST </td>
 <td> -2 </td>
-<td> 2542030588 </td>
 <td> +82 us </td>
 <td> <strong>6th</strong> </td>
 </tr>
 <tr>
 <td> IDLE </td>
 <td> -15 </td>
-<td> 2542030651 </td>
 <td> +145 us </td>
 <td> <strong>7th</strong> </td>
 </tr>
@@ -369,47 +468,39 @@ nspa_rt_test.exe v5 via <code>run_rt_tests.sh</code> (10 tests, baseline + rt)
 </table>
 
 
-<h3>2.4 Transitive PI Chain Scaling</h3>
+<h3>Transitive PI Chain Scaling</h3>
 
 <table>
 <thead>
 <tr>
 <th> Chain Depth </th>
-<th> RT Wait (ms) </th>
-<th> Per-Hop Increment </th>
-<th> Tail Holder Elapsed </th>
+<th> v5 RT Wait (ms) </th>
+<th> Assessment </th>
 </tr>
 </thead>
 <tbody>
 <tr>
 <td> 4 </td>
-<td> 236 </td>
-<td> ~50 ms </td>
-<td> 437 ms </td>
+<td> 270 </td>
+<td> PI boost correct </td>
 </tr>
 <tr>
 <td> 8 </td>
-<td> 235 </td>
-<td> ~50 ms </td>
-<td> 639 ms </td>
+<td> 201 </td>
+<td> <strong>-52% from v4</strong> </td>
 </tr>
 <tr>
 <td> 12 </td>
-<td> 226 </td>
-<td> ~50 ms </td>
-<td> 1002 ms </td>
+<td> 96 </td>
+<td> Scales to depth 12, O(1) RT wait </td>
 </tr>
 </tbody>
 </table>
 
 
-<blockquote><p><strong>Key finding:</strong> RT wait time does NOT increase with chain depth. The tail holder does the same CPU work (~220ms); <code>ntsync_pi_recalc()</code> propagates boost faster than the tail finishes. Confirmed O(1) for RT wait up to depth 12. No further depth testing needed.</p></blockquote>
-
 <hr />
 
-<h2>3. RT Priority Mapping Status</h2>
-
-<h3>3.1 Mapping Table (<code>NSPA_RT_PRIO=80</code>)</h3>
+<h2>4. RT Priority Mapping</h2>
 
 <p>Formula: <code>fifo_prio = nspa_rt_prio_base - (31 - nt_band)</code>, clamped to <code>[1..98]</code>.</p>
 
@@ -420,7 +511,6 @@ nspa_rt_test.exe v5 via <code>run_rt_tests.sh</code> (10 tests, baseline + rt)
 <th> Win32 Value </th>
 <th> NT Band </th>
 <th> FIFO Priority </th>
-<th> Notes </th>
 </tr>
 </thead>
 <tbody>
@@ -429,457 +519,149 @@ nspa_rt_test.exe v5 via <code>run_rt_tests.sh</code> (10 tests, baseline + rt)
 <td> -15 </td>
 <td> 16 </td>
 <td> 65 </td>
-<td> </td>
 </tr>
 <tr>
 <td> LOWEST (realtime class) </td>
 <td> -2 </td>
 <td> 22 </td>
 <td> 71 </td>
-<td> </td>
 </tr>
 <tr>
 <td> BELOW_NORMAL (realtime class) </td>
 <td> -1 </td>
 <td> 23 </td>
 <td> 72 </td>
-<td> </td>
 </tr>
 <tr>
 <td> NORMAL (realtime class) </td>
 <td> 0 </td>
 <td> 24 </td>
 <td> 73 </td>
-<td> standard RT band </td>
 </tr>
 <tr>
 <td> ABOVE_NORMAL (realtime class) </td>
 <td> 1 </td>
 <td> 25 </td>
 <td> 74 </td>
-<td> </td>
 </tr>
 <tr>
 <td> HIGHEST (realtime class) </td>
 <td> 2 </td>
 <td> 26 </td>
 <td> 75 </td>
-<td> </td>
 </tr>
 <tr>
 <td> TIME_CRITICAL </td>
 <td> 15 </td>
 <td> 31 </td>
 <td> <strong>80</strong> </td>
-<td> client RT ceiling, always SCHED_FIFO </td>
 </tr>
 <tr>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-</tr>
-<tr>
-<td> wineserver main </td>
+<td> wineserver </td>
 <td> &ndash; </td>
 <td> &ndash; </td>
 <td> <strong>64</strong> </td>
-<td> SCHED_FIFO, below all client RT </td>
-</tr>
-<tr>
-<td> kernel threads </td>
-<td> &ndash; </td>
-<td> &ndash; </td>
-<td> 99 </td>
-<td> reserved, never used by Wine </td>
 </tr>
 </tbody>
 </table>
 
 
-<blockquote><p><strong>Ceiling mapping:</strong> <code>NSPA_RT_PRIO</code> is the max client RT priority, not a midpoint. <code>TIME_CRITICAL</code> is special-cased to NT band 31 and maps exactly to that ceiling. Standard REALTIME-class priorities scale linearly below it (<code>NT 24 -&gt; 73</code>, <code>NT 16 -&gt; 65</code> when <code>NSPA_RT_PRIO=80</code>). The v3 wake-order test now uses only the 7 standard Win32 priority values because non-standard values (3-14) bypass the <code>TIME_CRITICAL</code> special case and can otherwise outrank it.</p></blockquote>
-
 <hr />
 
-<h2>4. Wineserver <code>global_lock</code> PI &ndash; SHIPPED</h2>
-
-<p>Converted <code>server/fd.c:global_lock</code> from <code>pthread_mutex_t</code> to <code>pi_mutex_t</code> (FUTEX_LOCK_PI). This lock serializes all wineserver dispatch between the main epoll loop and per-client shmem dispatcher pthreads (NSPA v1.5). With PI, when a high-priority dispatcher (boosted by v2.4 client PI) contends with a lower-priority holder, the holder is automatically boosted via the kernel&rsquo;s rt_mutex PI chain.</p>
-
-<h3>Background</h3>
-
-<p>Upstream wineserver is single-threaded &ndash; no locks. NSPA v1.5 added per-client shmem dispatcher pthreads, requiring <code>global_lock</code> to serialize state access. The original librtpi sweep excluded <code>server/</code> because the audit assumed &ldquo;single-threaded event loop = no contention.&rdquo; That assumption was wrong &ndash; the v1.5 dispatchers create real contention, and without PI the lock was a priority inversion hazard when v2.4 client-side boost raised a dispatcher&rsquo;s priority above the lock holder&rsquo;s.</p>
-
-<h3>Impact (v3 baseline vs PI, RT mode, NSPA_RT_PRIO=80)</h3>
+<h2>5. Known Issues &amp; Open Work</h2>
 
 <table>
 <thead>
 <tr>
-<th> Test </th>
-<th> Metric </th>
-<th> v3 baseline </th>
-<th> With PI </th>
-<th> Change </th>
+<th> Item </th>
+<th> Priority </th>
+<th> Status </th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td> cs-contention </td>
-<td> holder work time </td>
-<td> 475 ms </td>
-<td> 216 ms </td>
-<td> <strong>2.2x faster</strong> </td>
+<td> Wow64 rebuild </td>
+<td> MEDIUM </td>
+<td> 32-bit DLLs may be stale, needs clean <code>--enable-archs=i386,x86_64</code> rebuild </td>
 </tr>
 <tr>
-<td> philosophers </td>
-<td> RT max wait </td>
-<td> 1620 us </td>
-<td> 692 us </td>
-<td> <strong>2.3x lower</strong> </td>
+<td> CS DYNAMIC_SPIN </td>
+<td> LOW </td>
+<td> Flag is FIXME stub, heap ops would benefit from ~4000 spincount </td>
+</tr>
+<tr>
+<td> Ableton windowing </td>
+<td> WORKAROUND </td>
+<td> Committed workaround suppresses resize loop, not upstream-quality </td>
+</tr>
+<tr>
+<td> arm64ec build error </td>
+<td> LOW </td>
+<td> <code>make install</code> pulls in arm64ec objects, unrelated to our changes </td>
+</tr>
+</tbody>
+</table>
+
+
+<hr />
+
+<h2>6. Test Harness</h2>
+
+<p><code>nspa_rt_test.exe</code> &ndash; 12 subcommands (10 in the automated suite + 2 benchmarks):</p>
+
+<table>
+<thead>
+<tr>
+<th> Command </th>
+<th> What </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> priority </td>
+<td> RT priority mapping validation (11 threads, 2 phases) </td>
+</tr>
+<tr>
+<td> cs-contention </td>
+<td> CS-PI under SCHED_FIFO vs SCHED_OTHER contention </td>
 </tr>
 <tr>
 <td> rapidmutex </td>
-<td> throughput </td>
-<td> 301K ops/s </td>
-<td> 326K ops/s </td>
-<td> <strong>+8%</strong> </td>
+<td> CRITICAL_SECTION stress (1 RT + 3 load threads) </td>
 </tr>
 <tr>
-<td> ntsync-d4 </td>
-<td> PI contention avg </td>
-<td> ~238 ms </td>
-<td> ~220 ms </td>
-<td> consistent </td>
+<td> philosophers </td>
+<td> Dining philosophers with transitive PI chain </td>
 </tr>
 <tr>
 <td> fork-mutex </td>
-<td> child total max </td>
-<td> no change </td>
-<td> no change </td>
-<td> no regression </td>
+<td> Rapid CreateProcess stress (100 spawns) </td>
+</tr>
+<tr>
+<td> signal-recursion </td>
+<td> PAGE_GUARD fault stress (virtual_mutex validation) </td>
+</tr>
+<tr>
+<td> large-pages </td>
+<td> VirtualAlloc(MEM_LARGE_PAGES) end-to-end </td>
+</tr>
+<tr>
+<td> ntsync </td>
+<td> NTSync PI + priority wakeup (5 sub-tests, configurable depth) </td>
+</tr>
+<tr>
+<td> socket-io </td>
+<td> Async TCP loopback latency (io_uring Phase 3) </td>
+</tr>
+<tr>
+<td> srw-bench </td>
+<td> SRW lock contention benchmark (acquire latency + ops/sec) </td>
 </tr>
 </tbody>
 </table>
 
 
-<p>18/18 PASS, zero regressions.</p>
+<p>Run: <code>bash nspa/run_rt_tests.sh</code> (automated) or <code>wine nspa_rt_test.exe &lt;command&gt;</code> (individual).</p>
 
-<h3>Files changed</h3>
-
-<ul>
-<li><code>server/fd.c</code> &ndash; <code>pthread_mutex_t global_lock</code> -> <code>pi_mutex_t global_lock = PI_MUTEX_INIT(0)</code>, all <code>pthread_mutex_lock/unlock</code> -> <code>pi_mutex_lock/unlock</code></li>
-<li><code>server/file.h</code> &ndash; declaration updated, <code>#include &lt;rtpi.h&gt;</code> added</li>
-<li><code>server/thread.c</code> &ndash; all <code>pthread_mutex_lock/unlock(&amp;global_lock)</code> -> <code>pi_mutex_lock/unlock</code></li>
-</ul>
-
-
-<h3>RT/PI Audit Finding</h3>
-
-<p>During this investigation, we validated that the server&rsquo;s <code>add_queue()</code> / <code>wake_up()</code> priority ordering (originally planned as a separate change) is <strong>already handled by ntsync kernel patch 1002</strong>. With ntsync loaded, all sync primitives (events, mutexes, semaphores &ndash; both named and anonymous) go through the ntsync kernel driver for waiting, which provides priority-ordered waiter queues. The server-side <code>add_queue()</code> is never exercised for these objects. Confirmed by the <code>wake-order</code> test subcommand: 50/50 PASS regardless of server-side queue order.</p>
-
-<hr />
-
-<h2>5. vDSO Preloader Port (0029) &ndash; SHIPPED</h2>
-
-<p>Commit <code>239ca470158</code> &ndash; full port of Jinoh Kang&rsquo;s 13-patch vDSO preloader series (patches 01-07, 09, 11-13) to Wine 11.6. Replaces the previous minimal port that ignored vvar pages.</p>
-
-<h3>What it does</h3>
-
-<ul>
-<li><strong>VMA-aware reservation</strong> &ndash; reads <code>/proc/self/maps</code>, reserves around existing mappings instead of <code>MAP_FIXED</code> clobbering</li>
-<li><strong>Proper vDSO+vvar relocation</strong> via <code>mremap</code> when they conflict with reserved ranges</li>
-<li><strong>Kernel safety test</strong> on i386 (signal handler verifies vDSO tracking after mremap)</li>
-<li><strong>Stack relocation</strong> when stack conflicts with reserved ranges</li>
-<li><strong>Configurable:</strong> <code>WINEPRELOADREMAPVDSO=force|skip|on-conflict</code> (default: on-conflict)</li>
-</ul>
-
-
-<p><strong>Bug found during porting:</strong> Patch 06 (EHDR unmapping) breaks child process creation on static-pie x86_64 preloader. Intentionally omitted.</p>
-
-<h3>Benchmark Results (native Linux, 2M iterations)</h3>
-
-<table>
-<thead>
-<tr>
-<th>                    </th>
-<th> vDSO (preserved) </th>
-<th> syscall (deleted) </th>
-<th> penalty   </th>
-<th> ratio  </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> <code>clock_gettime</code>    </td>
-<td> 26.3 ns          </td>
-<td> 328.2 ns          </td>
-<td> +301.9 ns </td>
-<td> 12.5x  </td>
-</tr>
-<tr>
-<td> <code>gettimeofday</code>     </td>
-<td> 27.5 ns          </td>
-<td> 319.1 ns          </td>
-<td> +291.6 ns </td>
-<td> 11.6x  </td>
-</tr>
-</tbody>
-</table>
-
-
-<h3>RT Audio Impact (when vDSO would be deleted without this patch)</h3>
-
-<table>
-<thead>
-<tr>
-<th> Buffer size </th>
-<th> Budget </th>
-<th> 10 timing calls </th>
-<th> 100 timing calls </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> 48kHz/1024 </td>
-<td> 21.3 ms </td>
-<td> +3.0 us (0.014%) </td>
-<td> +30.2 us (0.14%) </td>
-</tr>
-<tr>
-<td> 48kHz/64 </td>
-<td> 1.33 ms </td>
-<td> +3.0 us (0.23%) </td>
-<td> +30.2 us (<strong>2.26%</strong>) </td>
-</tr>
-</tbody>
-</table>
-
-
-<h3>Validation</h3>
-
-<ul>
-<li>Tested with <code>WINEPRELOADREMAPVDSO=force</code> on both 64-bit and 32-bit Chromaphone</li>
-<li>vDSO preserved in all Wine processes (5/5 checked)</li>
-<li>No regression in QPC latency (~22 ns, rdtsc bypass)</li>
-</ul>
-
-
-<p><strong>Note:</strong> On the current kernel (6.19.11-rt1-1-nspa), vDSO is not in a reserved range, so the default <code>on-conflict</code> mode takes no action. The value is defensive &ndash; protects against kernels/configs where ASLR places vDSO in reserved ranges. The VMA-aware reservation is independently valuable as a correctness improvement.</p>
-
-<h2>6. Ableton Live 12 Lite Windowing Workaround &ndash; SHIPPED</h2>
-
-<p>Long-running Wine 11.6 regression in the normal desktop/X11 windowing path, separate from the RT/NTSync stack. The currently committed workaround is app-compat focused and was validated locally from <code>wine/build</code> on 2026-04-14.</p>
-
-<table>
-<thead>
-<tr>
-<th> Area </th>
-<th> Status </th>
-<th> Notes </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> Startup sequence </td>
-<td> <strong>usable</strong> </td>
-<td> splash -> activation -> main window reached again </td>
-</tr>
-<tr>
-<td> Menubar growth loop </td>
-<td> <strong>suppressed</strong> </td>
-<td> old runaway content/menubar expansion no longer reproduces in the committed build </td>
-</tr>
-<tr>
-<td> Main window content mapping </td>
-<td> <strong>much improved</strong> </td>
-<td> black/blank main window behavior substantially reduced </td>
-</tr>
-<tr>
-<td> Resize behavior </td>
-<td> <strong>improved, not perfect</strong> </td>
-<td> some edge-triggered vertical correction / repaint artifacts still possible </td>
-</tr>
-<tr>
-<td> Fix quality </td>
-<td> <strong>workaround</strong> </td>
-<td> committed because it materially improves behavior without a known broader regression so far </td>
-</tr>
-</tbody>
-</table>
-
-
-<h3>Files in the workaround stack</h3>
-
-<ul>
-<li><code>dlls/win32u/window.c</code></li>
-<li><code>dlls/win32u/defwnd.c</code></li>
-<li><code>dlls/win32u/driver.c</code></li>
-<li><code>dlls/winex11.drv/window.c</code></li>
-<li><code>dlls/winex11.drv/event.c</code></li>
-<li><code>dlls/winex11.drv/init.c</code></li>
-<li><code>dlls/winex11.drv/x11drv.h</code></li>
-<li><code>dlls/winex11.drv/x11drv_main.c</code></li>
-<li><code>include/wine/gdi_driver.h</code></li>
-</ul>
-
-
-<h3>Behavior summary</h3>
-
-<ul>
-<li>X11 <code>_NET_FRAME_EXTENTS</code> are now used in the visible/window mapping path.</li>
-<li><code>win32u</code> preserves the default non-client layout when a decorated menu window briefly reports <code>client == window</code>.</li>
-<li>Nested same-window size-only <code>WM_WINDOWPOSCHANGED</code> recursion is suppressed.</li>
-<li>Newly exposed client regions are explicitly invalidated after move/resize.</li>
-</ul>
-
-
-<hr />
-
-<h2>7. Investigation Targets</h2>
-
-<blockquote><p><strong>1. PI contention variability (d4 vs d8/d12)</strong> [MEDIUM]</p>
-
-<p><strong>What we know:</strong> d4 RT PI avg is 238ms (8 samples, range 219-286ms). d8 and d12 show ~479ms avg (3 samples each, very tight range 477-481ms). The d4 run used 8 PI iterations, giving more opportunity for the holder to get CPU time. The d8/d12 runs only used 3 iterations.</p>
-
-<p><strong>What we don&rsquo;t know:</strong> Is the d8/d12 higher avg caused by CFS load placement (4 busyloop threads competing for the SCHED_OTHER holder&rsquo;s CPU), or by fewer samples masking variance? The d4 run also has a 67ms spread (219-286) suggesting CFS is the variable.</p>
-
-<p><strong>What would answer it:</strong> CPU pinning via <code>taskset</code> (pin holder + load threads to separate cores). Or increase d8/d12 iteration count to 8 to match d4.</p>
-
-<p><strong>Impact:</strong> Understanding, not a bug. PI boost is confirmed working at all depths.</p>
-
-<p><strong>2. Philosophers RT max wait 1620us</strong> [RESOLVED — PI v2]</p>
-
-<p><strong>Answer (2026-04-15):</strong> The cost was from buggy PI code, not sched_setattr_nocheck or list walk. The v3 <code>ntsync_pi_recalc</code> compared against <code>owner-&gt;normal_prio</code> which was already modified by <code>sched_setattr_nocheck</code> after a boost. This caused the comparison to fail on downward recalc, leading to unnecessary boost/unboost thrashing. PI v2 compares against saved <code>orig_normal_prio</code>, eliminating the thrashing. Result: <strong>1620us → 865us (-46.6%)</strong>.</p>
-
-<p><strong>3. Kernel mutex vs CS throughput gap</strong> [LOW]</p>
-
-<p><strong>What we know:</strong> ntsync rapid mutex: ~250K ops/s (kernel ioctl path). CS rapidmutex: ~301K ops/s (futex fast path with user-space spin). The ~20% gap is expected &ndash; CS has a user-space fast path (<code>InterlockedCompareExchange</code> on the lock word) that avoids the syscall entirely when uncontended. ntsync kernel mutex always takes an ioctl.</p>
-
-<p><strong>What we don&rsquo;t know:</strong> Exact syscall overhead breakdown. Is it fixed ioctl dispatch cost, or does ntsync_pi_recalc add measurable overhead even in the uncontended case?</p>
-
-<p><strong>What would answer it:</strong> <code>perf stat</code> comparing ioctl enter/exit cycles vs futex enter/exit cycles. Or add an <code>unlikely()</code>-gated fast path in ntsync for uncontended mutex acquire.</p>
-
-<p><strong>Impact:</strong> Low &ndash; applications use CriticalSection for hot-path locking, not kernel mutexes. The kernel path is for cross-process sync which is inherently slower.</p>
-
-<p><strong>4. Wow64 rebuild</strong> [MEDIUM]</p>
-
-<p><strong>What we know:</strong> Last full rebuild was partial. 32-bit (i386) DLLs may be stale relative to the current 64-bit build.</p>
-
-<p><strong>What we don&rsquo;t know:</strong> Whether any current test failures or behavior differences are caused by the stale 32-bit components. All current tests run as 64-bit PE binaries, so 32-bit issues would only surface with 32-bit Windows applications.</p>
-
-<p><strong>What would answer it:</strong> Clean <code>configure --enable-archs=i386,x86_64</code> followed by <code>make -j2 &amp;&amp; make install prefix=/usr</code>.</p>
-
-<p><strong>Impact:</strong> Required for 32-bit Windows application compatibility (many games, older DAW plugins).</p>
-
-<p><strong>5. ntsync module autoload</strong> [CRITICAL — RESOLVED]</p>
-
-<p><strong>What we learned:</strong> Without ntsync loaded at wineserver startup, <code>get_inproc_device_fd()</code> caches <code>fd = -1</code> permanently. ALL sync waits serialize through wineserver global_lock. Under Ableton&rsquo;s heavy threading, this causes priority inversion and deadlocks. This was NOT &ldquo;convenience only&rdquo; — it was a correctness issue.</p>
-
-<p><strong>Resolution:</strong> <code>echo ntsync | sudo tee /etc/modules-load.d/ntsync.conf</code>. Wine guardrail added in server/thread.c — loud CRITICAL warning when RT mode is active but /dev/ntsync is missing.</p>
-
-<p><strong>6. ntsync PI bugs (kernel driver)</strong> [HIGH — RESOLVED]</p>
-
-<p><strong>What we found (2026-04-15):</strong> Three PI bugs in the NSPA ntsync kernel patches:</p>
-
-<p>(a) <strong>Multi-object PI corruption:</strong> Per-object <code>orig_attr</code> save/restore broke when a task held multiple mutexes being PI-boosted. Second mutex saved already-boosted scheduling as &ldquo;original&rdquo;. On first mutex unboost, owner dropped to SCHED_OTHER while second mutex still had RT waiters.</p>
-
-<p>(b) <strong>wait_all had zero PI:</strong> <code>ntsync_wait_all()</code> added entries to <code>obj-&gt;all_waiters</code> but never called <code>ntsync_pi_recalc()</code>. The recalc function only scanned <code>any_waiters</code>. WaitAll with mutexes = no PI boost at all.</p>
-
-<p>&copy; <strong>Stale normal_prio comparison:</strong> After boost, <code>sched_setattr_nocheck</code> changed <code>owner-&gt;normal_prio</code> to reflect boosted state. When the highest-prio waiter left, <code>highest_prio &lt; owner-&gt;normal_prio</code> evaluated false (both RT-level), so the boost was dropped entirely instead of being adjusted to remaining waiters' priority.</p>
-
-<p><strong>Resolution:</strong> Patch 1003 rewritten with per-device <code>ntsync_pi_owner</code> tracking (saves orig_attr once per task, restores only when ALL boosts removed), all_waiters scanning in PI recalc, and PI recalc calls in wait_all queue/dequeue paths. Module built, tested clean.</p></blockquote>
-
-<hr />
-
-<h2>8. Test Harness Status</h2>
-
-<h3>5.1 v3 Bug Fixes (shipped)</h3>
-
-<table>
-<thead>
-<tr>
-<th> # </th>
-<th> Bug </th>
-<th> Impact </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> 1 </td>
-<td> <code>now_us()</code> QPC integer overflow (~44 min uptime) </td>
-<td> Negative timestamps &ndash;> false PASS on priority wakeup </td>
-</tr>
-<tr>
-<td> 2 </td>
-<td> Priority wakeup sentinel <code>prev_time &gt; 0</code> </td>
-<td> Never triggered with negative timestamps </td>
-</tr>
-<tr>
-<td> 3 </td>
-<td> Load threads were SCHED_FIFO under REALTIME class </td>
-<td> System lockup &ndash; FIFO busyloops pinned all cores </td>
-</tr>
-<tr>
-<td> 4 </td>
-<td> <code>Sleep(0)</code> = no-op for FIFO threads </td>
-<td> Load threads never yielded to desktop </td>
-</tr>
-<tr>
-<td> 5 </td>
-<td> CPU-bound work at FIFO 80+ monopolized cores </td>
-<td> Desktop froze for 1-2s per iteration </td>
-</tr>
-<tr>
-<td> 6 </td>
-<td> No ntsync module detection </td>
-<td> Tests ran against futex path, not ntsync </td>
-</tr>
-<tr>
-<td> 7 </td>
-<td> Non-standard Win32 priority values (7-14) </td>
-<td> Bypassed TC ceiling clamp </td>
-</tr>
-</tbody>
-</table>
-
-
-<h3>5.2 Remaining Improvements (not yet built)</h3>
-
-<table>
-<thead>
-<tr>
-<th> Improvement </th>
-<th> Purpose </th>
-<th> Priority </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> Histogram mode </td>
-<td> Per-test latency distribution (P50/P95/P99/max) instead of just min/avg/max </td>
-<td> MEDIUM </td>
-</tr>
-<tr>
-<td> Automated baseline-vs-RT diff </td>
-<td> Machine-readable JSON output + diff script to generate comparison tables automatically </td>
-<td> MEDIUM </td>
-</tr>
-<tr>
-<td> Per-test CPU pinning </td>
-<td> <code>taskset</code> support to eliminate CFS load placement variance in PI contention tests </td>
-<td> LOW </td>
-</tr>
-<tr>
-<td> Longer soak mode </td>
-<td> Run all tests in a loop for N minutes to catch rare races / priority inversions </td>
-<td> LOW </td>
-</tr>
-</tbody>
-</table>
-
-
-<hr />
-
-<p>Raw logs: <code>wine/nspa/docs/logs/v5/rt_*.log</code> | Full comparison report: <code>nspa-test-comparison.gen.html</code>
-Generated: 2026-04-15 | Wine-NSPA RT test harness v5 — SIMD + SRW spin + requeue-PI</p>
+<p>Raw logs: <code>nspa/docs/logs/v5/</code></p>
 </body></html>

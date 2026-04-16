@@ -1,0 +1,1137 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Wine-NSPA -- NTSync Kernel Driver</title>
+<style>
+  :root {
+    --bg: #1a1b26; --fg: #c0caf5; --accent: #7aa2f7;
+    --green: #9ece6a; --red: #f7768e; --yellow: #e0af68;
+    --surface: #24283b; --border: #3b4261; --muted: #8c92b3;
+    --purple: #bb9af7; --orange: #ff9e64; --cyan: #7dcfff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+    background: var(--bg); color: var(--fg);
+    max-width: 1100px; margin: 0 auto; padding: 2rem 1.5rem;
+    line-height: 1.7;
+  }
+  h1 { color: var(--accent); font-size: 1.5rem; margin: 1.5rem 0 0.5rem; }
+  h2 { color: var(--accent); font-size: 1.2rem; margin: 2rem 0 0.75rem;
+       border-bottom: 1px solid var(--border); padding-bottom: 0.3rem; }
+  h3 { color: var(--yellow); font-size: 1rem; margin: 1.25rem 0 0.5rem; }
+  h4 { color: var(--cyan); font-size: 0.95rem; margin: 1rem 0 0.4rem; }
+  p, li { font-size: 0.85rem; margin-bottom: 0.5rem; }
+  ul, ol { padding-left: 1.5rem; margin-bottom: 0.75rem; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  table {
+    width: 100%; border-collapse: collapse;
+    margin: 0.75rem 0 1rem; font-size: 0.8rem;
+  }
+  th, td {
+    padding: 0.4rem 0.75rem; text-align: left;
+    border: 1px solid var(--border);
+  }
+  th { background: var(--surface); color: var(--accent); font-weight: 600; }
+  td { background: var(--bg); }
+  code {
+    background: var(--surface); padding: 0.15rem 0.4rem;
+    border-radius: 3px; font-size: 0.82rem; color: var(--cyan);
+  }
+  pre {
+    background: var(--surface); padding: 1rem; border-radius: 6px;
+    overflow-x: auto; margin: 0.75rem 0 1rem;
+    border: 1px solid var(--border);
+  }
+  pre code { background: none; padding: 0; font-size: 0.8rem; color: var(--fg); }
+  blockquote {
+    background: var(--surface); border-left: 3px solid var(--accent);
+    padding: 0.75rem 1rem; margin: 1rem 0; border-radius: 0 4px 4px 0;
+    font-size: 0.82rem;
+  }
+  blockquote strong { color: var(--yellow); }
+  hr { border: none; border-top: 1px solid var(--border); margin: 2rem 0; }
+  strong { color: var(--fg); }
+  em { color: var(--muted); font-style: italic; }
+</style>
+</head><body>
+<h1>Wine-NSPA &ndash; NTSync Kernel Driver</h1>
+
+<p>Linux-NSPA 6.19.11-rt1-1 (PREEMPT_RT), CONFIG_NTSYNC=m | 2026-04-15
+Author: Jordan Johnston</p>
+
+<h2>Table of Contents</h2>
+
+<ol>
+<li><a href="#1-overview">Overview</a></li>
+<li><a href="#2-upstream-vs-nspa-comparison">Upstream vs NSPA Comparison</a></li>
+<li><a href="#3-driver-architecture">Driver Architecture</a></li>
+<li><a href="#4-patch-1-raw_spinlock--rt_mutex-hardening">Patch 1: raw_spinlock + rt_mutex Hardening</a></li>
+<li><a href="#5-patch-2-priority-ordered-waiter-queues">Patch 2: Priority-Ordered Waiter Queues</a></li>
+<li><a href="#6-patch-3-mutex-owner-pi-boost-v2">Patch 3: Mutex Owner PI Boost v2</a></li>
+<li><a href="#7-patch-4-uring_fd-extension">Patch 4: uring_fd Extension</a></li>
+<li><a href="#8-patch-5-gfp_atomic-pre-allocation">Patch 5: GFP_ATOMIC Pre-Allocation</a></li>
+<li><a href="#9-client-side-object-creation">Client-Side Object Creation</a></li>
+<li><a href="#10-validation">Validation</a></li>
+</ol>
+
+
+<hr />
+
+<h2>1. Overview</h2>
+
+<p>NTSync is a Linux kernel driver (<code>drivers/misc/ntsync.c</code>, <code>/dev/ntsync</code>) that implements Windows NT synchronization primitives &ndash; mutexes, semaphores, and events &ndash; directly in the kernel. Upstream Wine uses it to replace the wineserver-mediated sync path for these objects, eliminating cross-process round-trips for wait/wake operations.</p>
+
+<p>For Wine-NSPA, upstream ntsync is necessary but insufficient. The upstream driver uses FIFO waiter queues and has no priority inheritance, which means:</p>
+
+<ul>
+<li><strong>Priority inversion:</strong> An RT audio thread waiting on a mutex held by a SCHED_OTHER thread gets no help. The holder competes for CPU against dozens of CFS threads while the RT thread starves.</li>
+<li><strong>Wrong wakeup order:</strong> When multiple threads wait on the same object, the longest-waiting thread is woken first (FIFO), not the highest-priority thread. This violates Windows NT scheduling semantics and causes RT threads to wait behind lower-priority threads.</li>
+<li><strong>PREEMPT_RT incompatibility:</strong> The upstream <code>spinlock_t</code> becomes a sleeping lock on PREEMPT_RT, changing timing assumptions. The upstream <code>mutex</code> does not carry PI.</li>
+</ul>
+
+
+<p>Wine-NSPA applies five kernel patches to ntsync that make it RT-safe, priority-correct, and PI-aware. Together with the userspace CS-PI path (FUTEX_LOCK_PI on CRITICAL_SECTION), these patches close all priority inversion vectors in Wine&rsquo;s synchronization stack.</p>
+
+<hr />
+
+<h2>2. Upstream vs NSPA Comparison</h2>
+
+<div class="diagram-container">
+<svg width="940" height="720" viewBox="0 0 940 720" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .ns-box { fill: #24283b; stroke: #9aa5ce; stroke-width: 1.5; rx: 6; }
+    .ns-box-nspa { fill: #24283b; stroke: #7aa2f7; stroke-width: 2; rx: 6; }
+    .ns-box-new { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 2; rx: 6; }
+    .ns-box-bad { fill: #2a1a1a; stroke: #f7768e; stroke-width: 1.5; rx: 6; }
+    .ns-box-kernel { fill: #1a1a2a; stroke: #bb9af7; stroke-width: 1.5; rx: 6; }
+    .ns-label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+    .ns-label-sm { fill: #c0caf5; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+    .ns-label-accent { fill: #7aa2f7; font-size: 13px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .ns-label-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .ns-label-red { fill: #f7768e; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .ns-label-yellow { fill: #e0af68; font-size: 10px; font-family: 'JetBrains Mono', monospace; }
+    .ns-label-muted { fill: #8c92b3; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+    .ns-label-cyan { fill: #7dcfff; font-size: 10px; font-family: 'JetBrains Mono', monospace; }
+    .ns-label-purple { fill: #bb9af7; font-size: 10px; font-family: 'JetBrains Mono', monospace; }
+    .ns-divider { stroke: #3b4261; stroke-width: 1; stroke-dasharray: 8,4; }
+    .ns-strike { stroke: #f7768e; stroke-width: 2; opacity: 0.6; }
+  </style>
+  <defs>
+    <marker id="nsArr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#c8d0e8"/></marker>
+    <marker id="nsArrG" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#9ece6a"/></marker>
+    <marker id="nsArrR" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#f7768e"/></marker>
+    <marker id="nsArrY" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#e0af68"/></marker>
+  </defs>
+
+  <!-- Column headers -->
+  <text x="220" y="28" class="ns-label-accent" text-anchor="middle">Upstream NTSync</text>
+  <text x="710" y="28" class="ns-label-accent" text-anchor="middle">Wine-NSPA NTSync</text>
+  <line x1="465" y1="10" x2="465" y2="710" class="ns-divider"/>
+
+  <!-- ===== LEFT: Upstream NTSync ===== -->
+
+  <!-- Locking -->
+  <rect x="30" y="50" width="390" height="28" class="ns-box"/>
+  <text x="225" y="69" text-anchor="middle" class="ns-label">spinlock_t obj->lock</text>
+
+  <line x1="225" y1="78" x2="225" y2="98" stroke="#9aa5ce" stroke-width="1" marker-end="url(#nsArr)"/>
+
+  <rect x="50" y="100" width="350" height="40" class="ns-box-bad"/>
+  <text x="225" y="118" text-anchor="middle" class="ns-label-red">On PREEMPT_RT: becomes rt_mutex (sleeps)</text>
+  <text x="225" y="132" text-anchor="middle" class="ns-label-muted">Changes timing, breaks non-preemptibility assumption</text>
+
+  <line x1="225" y1="140" x2="225" y2="160" stroke="#9aa5ce" stroke-width="1" marker-end="url(#nsArr)"/>
+
+  <rect x="30" y="162" width="390" height="28" class="ns-box"/>
+  <text x="225" y="181" text-anchor="middle" class="ns-label">mutex wait_all_lock (no PI)</text>
+
+  <!-- Waiter queue -->
+  <line x1="225" y1="190" x2="225" y2="215" stroke="#9aa5ce" stroke-width="1" marker-end="url(#nsArr)"/>
+
+  <rect x="30" y="218" width="390" height="55" class="ns-box-bad"/>
+  <text x="225" y="238" text-anchor="middle" class="ns-label-red">FIFO waiter queue</text>
+  <text x="225" y="255" text-anchor="middle" class="ns-label-sm">list_add_tail(&amp;entry->node, &amp;obj->any_waiters)</text>
+  <text x="225" y="268" text-anchor="middle" class="ns-label-muted">Longest-waiting thread wakes first, regardless of priority</text>
+
+  <!-- Wake path -->
+  <line x1="225" y1="273" x2="225" y2="298" stroke="#f7768e" stroke-width="1.5" marker-end="url(#nsArrR)"/>
+
+  <rect x="30" y="300" width="390" height="55" class="ns-box-bad"/>
+  <text x="225" y="320" text-anchor="middle" class="ns-label-red">No PI boost</text>
+  <text x="225" y="337" text-anchor="middle" class="ns-label-sm">RT waiter blocks on mutex held by SCHED_OTHER</text>
+  <text x="225" y="350" text-anchor="middle" class="ns-label-muted">Holder time-sliced by CFS, unbounded inversion</text>
+
+  <!-- No uring -->
+  <line x1="225" y1="355" x2="225" y2="380" stroke="#9aa5ce" stroke-width="1" marker-end="url(#nsArr)"/>
+
+  <rect x="30" y="383" width="390" height="40" class="ns-box"/>
+  <text x="225" y="401" text-anchor="middle" class="ns-label">args.pad = 0 (reserved, must be zero)</text>
+  <text x="225" y="416" text-anchor="middle" class="ns-label-muted">No io_uring integration -- CQEs wait until timeout</text>
+
+  <!-- Allocation -->
+  <line x1="225" y1="423" x2="225" y2="448" stroke="#9aa5ce" stroke-width="1" marker-end="url(#nsArr)"/>
+
+  <rect x="30" y="450" width="390" height="28" class="ns-box"/>
+  <text x="225" y="469" text-anchor="middle" class="ns-label">N/A (no PI allocation needed)</text>
+
+  <!-- Summary -->
+  <rect x="30" y="510" width="390" height="95" rx="5" fill="#24283b" stroke="#3b4261" stroke-width="1"/>
+  <text x="225" y="532" text-anchor="middle" class="ns-label-red">Upstream limitations:</text>
+  <text x="50" y="550" class="ns-label-sm">FIFO wakeup (not priority-ordered)</text>
+  <text x="50" y="566" class="ns-label-sm">No PI boost (unbounded priority inversion)</text>
+  <text x="50" y="582" class="ns-label-sm">spinlock_t sleeps on PREEMPT_RT</text>
+  <text x="50" y="598" class="ns-label-sm">No io_uring CQE wakeup</text>
+
+  <!-- ===== RIGHT: NSPA NTSync ===== -->
+
+  <!-- Locking -->
+  <rect x="510" y="50" width="400" height="28" class="ns-box-new"/>
+  <text x="710" y="69" text-anchor="middle" class="ns-label-green">raw_spinlock_t obj->lock (Patch 1)</text>
+
+  <line x1="710" y1="78" x2="710" y2="98" stroke="#9ece6a" stroke-width="1.5" marker-end="url(#nsArrG)"/>
+
+  <rect x="530" y="100" width="360" height="40" class="ns-box-new"/>
+  <text x="710" y="118" text-anchor="middle" class="ns-label-green">True spin on PREEMPT_RT (never sleeps)</text>
+  <text x="710" y="132" text-anchor="middle" class="ns-label-sm">Short critical sections: obj state updates only</text>
+
+  <line x1="710" y1="140" x2="710" y2="160" stroke="#9ece6a" stroke-width="1.5" marker-end="url(#nsArrG)"/>
+
+  <rect x="510" y="162" width="400" height="28" class="ns-box-new"/>
+  <text x="710" y="181" text-anchor="middle" class="ns-label-green">rt_mutex wait_all_lock (PI-aware)</text>
+
+  <!-- Waiter queue -->
+  <line x1="710" y1="190" x2="710" y2="215" stroke="#9ece6a" stroke-width="1.5" marker-end="url(#nsArrG)"/>
+
+  <rect x="510" y="218" width="400" height="55" class="ns-box-new"/>
+  <text x="710" y="238" text-anchor="middle" class="ns-label-green">Priority-ordered waiter queue (Patch 2)</text>
+  <text x="710" y="255" text-anchor="middle" class="ns-label-sm">ntsync_insert_waiter(): sorted by task->prio</text>
+  <text x="710" y="268" text-anchor="middle" class="ns-label-sm">Highest-priority waiter always wakes first (NT semantics)</text>
+
+  <!-- PI boost -->
+  <line x1="710" y1="273" x2="710" y2="298" stroke="#9ece6a" stroke-width="1.5" marker-end="url(#nsArrG)"/>
+
+  <rect x="510" y="300" width="400" height="55" class="ns-box-new"/>
+  <text x="710" y="320" text-anchor="middle" class="ns-label-green">Mutex owner PI boost v2 (Patch 3)</text>
+  <text x="710" y="337" text-anchor="middle" class="ns-label-sm">ntsync_pi_recalc(): sched_setattr_nocheck()</text>
+  <text x="710" y="350" text-anchor="middle" class="ns-label-sm">Per-task ntsync_pi_owner, boost_count, orig_attr save/restore</text>
+
+  <!-- uring_fd -->
+  <line x1="710" y1="355" x2="710" y2="380" stroke="#9ece6a" stroke-width="1.5" marker-end="url(#nsArrG)"/>
+
+  <rect x="510" y="383" width="400" height="40" class="ns-box-new"/>
+  <text x="710" y="401" text-anchor="middle" class="ns-label-green">uring_fd extension (Patch 4)</text>
+  <text x="710" y="416" text-anchor="middle" class="ns-label-sm">args.pad repurposed: io_uring eventfd wakes ntsync waits</text>
+
+  <!-- Pre-allocation -->
+  <line x1="710" y1="423" x2="710" y2="448" stroke="#9ece6a" stroke-width="1.5" marker-end="url(#nsArrG)"/>
+
+  <rect x="510" y="450" width="400" height="28" class="ns-box-new"/>
+  <text x="710" y="469" text-anchor="middle" class="ns-label-green">GFP_ATOMIC pre-allocation (Patch 5)</text>
+
+  <!-- Summary -->
+  <rect x="510" y="510" width="400" height="95" rx="5" fill="#1a2a1a" stroke="#9ece6a" stroke-width="1.5"/>
+  <text x="710" y="532" text-anchor="middle" class="ns-label-green">NSPA additions:</text>
+  <text x="530" y="550" class="ns-label-sm">Priority-ordered wakeup (NT-faithful)</text>
+  <text x="530" y="566" class="ns-label-sm">PI boost: owner promoted to waiter's priority</text>
+  <text x="530" y="582" class="ns-label-sm">raw_spinlock + rt_mutex (PREEMPT_RT safe)</text>
+  <text x="530" y="598" class="ns-label-sm">io_uring CQE wakeup via uring_fd</text>
+
+  <!-- Impact metrics at bottom -->
+  <rect x="30" y="630" width="880" height="70" rx="6" fill="#24283b" stroke="#3b4261" stroke-width="1"/>
+  <text x="470" y="652" text-anchor="middle" class="ns-label-yellow">Impact: v4 (upstream-like) to v5 (NSPA patched)</text>
+  <text x="160" y="672" text-anchor="middle" class="ns-label-sm">ntsync-d4: RT PI avg 387 to 270ms (-30%)</text>
+  <text x="470" y="672" text-anchor="middle" class="ns-label-sm">ntsync-d8: RT PI avg 419 to 201ms (-52%)</text>
+  <text x="780" y="672" text-anchor="middle" class="ns-label-sm">ntsync-d12: scales to depth 12</text>
+  <text x="470" y="690" text-anchor="middle" class="ns-label-green">philosophers: RT max_wait 1620 to 865us (-46.6%)</text>
+</svg>
+</div>
+
+
+<hr />
+
+<h2>3. Driver Architecture</h2>
+
+<p>The ntsync driver exposes a character device (<code>/dev/ntsync</code>) opened once per Wine process. Object creation returns file descriptors; wait/wake operations use ioctls on the device fd.</p>
+
+<h3>Object Types</h3>
+
+<table>
+<thead>
+<tr>
+<th> Type </th>
+<th> Kernel struct field </th>
+<th> Signaled when </th>
+<th> Wake behavior </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> <strong>Mutex</strong> </td>
+<td> <code>obj-&gt;u.mutex</code> </td>
+<td> <code>count == 0</code> (unowned) or owner re-acquires </td>
+<td> Ownership transfers to highest-priority waiter </td>
+</tr>
+<tr>
+<td> <strong>Semaphore</strong> </td>
+<td> <code>obj-&gt;u.sem</code> </td>
+<td> <code>count &gt; 0</code> </td>
+<td> Decrement count, wake highest-priority waiter </td>
+</tr>
+<tr>
+<td> <strong>Event</strong> </td>
+<td> <code>obj-&gt;u.event</code> </td>
+<td> <code>signaled == true</code> </td>
+<td> Manual: wake all, auto: wake one + reset </td>
+</tr>
+</tbody>
+</table>
+
+
+<h3>Wait/Wake Paths</h3>
+
+<p><strong>Wait path</strong> (<code>NTSYNC_IOC_WAIT_ANY</code> / <code>NTSYNC_IOC_WAIT_ALL</code>):</p>
+
+<ol>
+<li>Userspace calls <code>ioctl(device_fd, NTSYNC_IOC_WAIT_ANY, &amp;args)</code> with an array of object fds.</li>
+<li>Kernel allocates <code>ntsync_q</code> with one <code>ntsync_q_entry</code> per object.</li>
+<li>For wait-any: each entry is inserted into its object&rsquo;s <code>any_waiters</code> list via <code>ntsync_insert_waiter()</code> (priority-ordered). For wait-all: entries go into <code>all_waiters</code> under <code>wait_all_lock</code>.</li>
+<li>If any object is immediately signaled, <code>try_wake_any()</code> / <code>try_wake_all()</code> fires synchronously.</li>
+<li>Otherwise, <code>ntsync_schedule()</code> puts the thread to sleep via <code>schedule_hrtimeout_range_clock()</code>.</li>
+<li>On wakeup: entries are removed from waiter lists, PI is recalculated, objects are released.</li>
+</ol>
+
+
+<p><strong>Wake path</strong> (object state change):</p>
+
+<ol>
+<li>A release ioctl (e.g. <code>NTSYNC_IOC_UNLOCK_MUTEX</code>) changes object state.</li>
+<li><code>try_wake_any_mutex()</code> walks the <code>any_waiters</code> list (highest-priority first due to sorted insertion).</li>
+<li>First satisfiable waiter gets ownership transferred: <code>obj-&gt;u.mutex.owner = q-&gt;owner</code>, <code>wake_up_process(q-&gt;task)</code>.</li>
+<li><code>ntsync_pi_drop()</code> removes the old owner&rsquo;s boost; <code>ntsync_pi_set_owner()</code> recalculates for the new owner.</li>
+</ol>
+
+
+<h3>Locking Hierarchy</h3>
+
+<p><code>
+raw_spinlock_t obj-&gt;lock       -- per-object, protects object state + waiter lists
+rt_mutex       dev-&gt;wait_all_lock  -- device-wide, serializes wait-all operations
+raw_spinlock_t dev-&gt;boost_lock     -- device-wide, protects boosted_owners list
+</code></p>
+
+<p>The <code>obj_lock()</code> fast path acquires only <code>obj-&gt;lock</code>. When <code>obj-&gt;dev_locked</code> is set (another thread is doing a wait-all), <code>obj_lock()</code> falls back to acquiring <code>wait_all_lock</code> first. This avoids ABBA deadlocks between per-object and device-wide locks.</p>
+
+<hr />
+
+<h2>4. Patch 1: raw_spinlock + rt_mutex Hardening</h2>
+
+<p><strong>Problem:</strong> Upstream ntsync uses <code>spinlock_t</code> for <code>obj-&gt;lock</code> and <code>mutex</code> for <code>wait_all_lock</code>. On PREEMPT_RT kernels, <code>spinlock_t</code> becomes a sleeping <code>rt_mutex</code> and <code>mutex</code> becomes a PI-less sleeping lock. This changes the driver&rsquo;s timing characteristics &ndash; code paths that assume short non-preemptible critical sections (object state updates, waiter list manipulation) can now be preempted mid-update.</p>
+
+<p><strong>Fix:</strong> Convert to explicit RT-aware types:</p>
+
+<table>
+<thead>
+<tr>
+<th> Field </th>
+<th> Upstream </th>
+<th> NSPA </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> <code>obj-&gt;lock</code> </td>
+<td> <code>spinlock_t</code> </td>
+<td> <code>raw_spinlock_t</code> </td>
+</tr>
+<tr>
+<td> <code>dev-&gt;wait_all_lock</code> </td>
+<td> <code>struct mutex</code> </td>
+<td> <code>struct rt_mutex</code> </td>
+</tr>
+</tbody>
+</table>
+
+
+<p>```c
+/<em> Per-object: true spin semantics, even on PREEMPT_RT </em>/
+raw_spin_lock_init(&amp;obj->lock);
+raw_spin_lock(&amp;obj->lock);
+raw_spin_unlock(&amp;obj->lock);</p>
+
+<p>/<em> Device-wide: PI-aware sleeping lock for wait-all serialization </em>/
+rt_mutex_init(&amp;dev->wait_all_lock);
+rt_mutex_lock(&amp;dev->wait_all_lock);
+rt_mutex_unlock(&amp;dev->wait_all_lock);
+```</p>
+
+<p><code>raw_spinlock_t</code> is appropriate here because the critical sections are short (tens of instructions) and only manipulate in-memory state. The <code>rt_mutex</code> for <code>wait_all_lock</code> provides PI inheritance for the device-wide lock &ndash; a thread holding <code>wait_all_lock</code> is boosted if a higher-priority thread blocks on it.</p>
+
+<hr />
+
+<h2>5. Patch 2: Priority-Ordered Waiter Queues</h2>
+
+<p><strong>Problem:</strong> Upstream ntsync uses <code>list_add_tail()</code> to append waiters to the queue. All wakeups are FIFO &ndash; the thread that called <code>WaitForSingleObject</code> first is woken first, regardless of scheduling priority. This violates Windows NT semantics, where the highest-priority waiting thread is always woken first.</p>
+
+<p><strong>Fix:</strong> Replace <code>list_add_tail()</code> with <code>ntsync_insert_waiter()</code>, which performs a sorted insertion based on <code>task-&gt;prio</code> (kernel internal priority, lower value = higher scheduling priority). Same-priority waiters maintain FIFO order within their priority level.</p>
+
+<p>```c
+static void ntsync_insert_waiter(struct ntsync_q_entry <em>new_entry,
+                                 struct list_head </em>head)
+{
+    struct ntsync_q_entry *entry;</p>
+
+<pre><code>list_for_each_entry(entry, head, node) {
+    if (new_entry-&gt;q-&gt;task-&gt;prio &lt; entry-&gt;q-&gt;task-&gt;prio) {
+        list_add_tail(&amp;new_entry-&gt;node, &amp;entry-&gt;node);
+        return;
+    }
+}
+list_add_tail(&amp;new_entry-&gt;node, head);
+</code></pre>
+
+<p>}
+```</p>
+
+<p>The function walks the existing waiter list until it finds an entry with a numerically higher (lower scheduling priority) <code>task-&gt;prio</code>, then inserts before that entry. If no such entry exists (the new waiter has the lowest priority), it appends to the tail.</p>
+
+<div class="diagram-container">
+<svg width="820" height="420" viewBox="0 0 820 420" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .wq-box { fill: #24283b; stroke: #9aa5ce; stroke-width: 1.5; rx: 5; }
+    .wq-box-rt { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 2; rx: 5; }
+    .wq-box-new { fill: #1a1a3a; stroke: #7aa2f7; stroke-width: 2; rx: 5; }
+    .wq-box-bad { fill: #2a1a1a; stroke: #f7768e; stroke-width: 1.5; rx: 5; }
+    .wq-label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+    .wq-label-sm { fill: #c0caf5; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+    .wq-label-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .wq-label-red { fill: #f7768e; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .wq-label-yellow { fill: #e0af68; font-size: 11px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .wq-label-cyan { fill: #7dcfff; font-size: 10px; font-family: 'JetBrains Mono', monospace; }
+    .wq-label-purple { fill: #bb9af7; font-size: 10px; font-family: 'JetBrains Mono', monospace; }
+    .wq-label-muted { fill: #8c92b3; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+    .wq-arrow { stroke: #9aa5ce; stroke-width: 1.5; fill: none; marker-end: url(#wqArr); }
+    .wq-arrow-green { stroke: #9ece6a; stroke-width: 2; fill: none; marker-end: url(#wqArrG); }
+    .wq-arrow-blue { stroke: #7aa2f7; stroke-width: 2; fill: none; marker-end: url(#wqArrB); }
+  </style>
+  <defs>
+    <marker id="wqArr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#9aa5ce"/></marker>
+    <marker id="wqArrG" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#9ece6a"/></marker>
+    <marker id="wqArrB" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#7aa2f7"/></marker>
+  </defs>
+
+  <!-- Title -->
+  <text x="410" y="24" class="wq-label-yellow" text-anchor="middle">Priority-Ordered Waiter Queue Insertion</text>
+
+  <!-- ===== TOP: Upstream FIFO ===== -->
+  <text x="410" y="55" class="wq-label-red" text-anchor="middle">Upstream: list_add_tail() -- FIFO order</text>
+
+  <!-- Existing waiters -->
+  <rect x="40" y="68" width="120" height="50" class="wq-box-bad"/>
+  <text x="100" y="88" text-anchor="middle" class="wq-label-sm">Thread A</text>
+  <text x="100" y="102" text-anchor="middle" class="wq-label-red">prio 120 (CFS)</text>
+  <text x="100" y="114" text-anchor="middle" class="wq-label-muted">arrived 1st</text>
+
+  <line x1="160" y1="93" x2="190" y2="93" class="wq-arrow"/>
+
+  <rect x="195" y="68" width="120" height="50" class="wq-box-bad"/>
+  <text x="255" y="88" text-anchor="middle" class="wq-label-sm">Thread B</text>
+  <text x="255" y="102" text-anchor="middle" class="wq-label-red">prio 49 (RT)</text>
+  <text x="255" y="114" text-anchor="middle" class="wq-label-muted">arrived 2nd</text>
+
+  <line x1="315" y1="93" x2="345" y2="93" class="wq-arrow"/>
+
+  <rect x="350" y="68" width="120" height="50" class="wq-box-bad"/>
+  <text x="410" y="88" text-anchor="middle" class="wq-label-sm">Thread C</text>
+  <text x="410" y="102" text-anchor="middle" class="wq-label-red">prio 120 (CFS)</text>
+  <text x="410" y="114" text-anchor="middle" class="wq-label-muted">arrived 3rd</text>
+
+  <line x1="470" y1="93" x2="500" y2="93" class="wq-arrow"/>
+
+  <!-- New waiter appended at tail -->
+  <rect x="505" y="68" width="140" height="50" class="wq-box-new"/>
+  <text x="575" y="88" text-anchor="middle" class="wq-label-cyan">NEW: Thread D</text>
+  <text x="575" y="102" text-anchor="middle" class="wq-label-cyan">prio 15 (FIFO)</text>
+  <text x="575" y="114" text-anchor="middle" class="wq-label-muted">highest prio, last!</text>
+
+  <!-- Wake arrow -->
+  <text x="730" y="80" text-anchor="middle" class="wq-label-red">Wake order:</text>
+  <text x="730" y="95" text-anchor="middle" class="wq-label-sm">A, B, C, D</text>
+  <text x="730" y="110" text-anchor="middle" class="wq-label-red">RT waits behind CFS</text>
+
+  <!-- Separator -->
+  <line x1="20" y1="140" x2="800" y2="140" stroke="#3b4261" stroke-width="1" stroke-dasharray="6,3"/>
+
+  <!-- ===== BOTTOM: NSPA priority-ordered ===== -->
+  <text x="410" y="170" class="wq-label-green" text-anchor="middle">NSPA: ntsync_insert_waiter() -- priority-ordered</text>
+
+  <!-- Step 1: existing queue -->
+  <text x="50" y="195" class="wq-label-muted">Before insertion:</text>
+
+  <rect x="40" y="205" width="120" height="50" class="wq-box-rt"/>
+  <text x="100" y="225" text-anchor="middle" class="wq-label-sm">Thread B</text>
+  <text x="100" y="239" text-anchor="middle" class="wq-label-green">prio 49 (RT)</text>
+
+  <line x1="160" y1="230" x2="190" y2="230" class="wq-arrow-green"/>
+
+  <rect x="195" y="205" width="120" height="50" class="wq-box"/>
+  <text x="255" y="225" text-anchor="middle" class="wq-label-sm">Thread A</text>
+  <text x="255" y="239" text-anchor="middle" class="wq-label-sm">prio 120 (CFS)</text>
+
+  <line x1="315" y1="230" x2="345" y2="230" class="wq-arrow"/>
+
+  <rect x="350" y="205" width="120" height="50" class="wq-box"/>
+  <text x="410" y="225" text-anchor="middle" class="wq-label-sm">Thread C</text>
+  <text x="410" y="239" text-anchor="middle" class="wq-label-sm">prio 120 (CFS)</text>
+
+  <!-- Step 2: insertion walk -->
+  <text x="50" y="285" class="wq-label-muted">Insert Thread D (prio 15):</text>
+
+  <!-- Walk visualization -->
+  <rect x="40" y="295" width="120" height="50" class="wq-box-rt"/>
+  <text x="100" y="315" text-anchor="middle" class="wq-label-sm">Thread B</text>
+  <text x="100" y="329" text-anchor="middle" class="wq-label-green">prio 49</text>
+
+  <!-- Walk arrow with check -->
+  <text x="180" y="310" text-anchor="middle" class="wq-label-cyan">15 &lt; 49?</text>
+  <text x="180" y="325" text-anchor="middle" class="wq-label-green">YES</text>
+
+  <!-- Arrow showing insertion point -->
+  <line x1="180" y1="332" x2="180" y2="355" stroke="#7aa2f7" stroke-width="2" marker-end="url(#wqArrB)"/>
+  <text x="180" y="370" text-anchor="middle" class="wq-label-cyan">insert before B</text>
+
+  <!-- Step 3: result -->
+  <text x="50" y="400" class="wq-label-muted">After insertion:</text>
+
+  <rect x="40" y="365" width="130" height="45" class="wq-box-new"/>
+  <text x="105" y="385" text-anchor="middle" class="wq-label-cyan">Thread D (prio 15)</text>
+  <text x="105" y="399" text-anchor="middle" class="wq-label-green">wakes 1st</text>
+
+  <line x1="170" y1="387" x2="200" y2="387" class="wq-arrow-blue"/>
+
+  <rect x="205" y="365" width="120" height="45" class="wq-box-rt"/>
+  <text x="265" y="385" text-anchor="middle" class="wq-label-sm">Thread B (prio 49)</text>
+  <text x="265" y="399" text-anchor="middle" class="wq-label-sm">wakes 2nd</text>
+
+  <line x1="325" y1="387" x2="355" y2="387" class="wq-arrow"/>
+
+  <rect x="360" y="365" width="120" height="45" class="wq-box"/>
+  <text x="420" y="385" text-anchor="middle" class="wq-label-sm">Thread A (prio 120)</text>
+  <text x="420" y="399" text-anchor="middle" class="wq-label-sm">wakes 3rd</text>
+
+  <line x1="480" y1="387" x2="510" y2="387" class="wq-arrow"/>
+
+  <rect x="515" y="365" width="120" height="45" class="wq-box"/>
+  <text x="575" y="385" text-anchor="middle" class="wq-label-sm">Thread C (prio 120)</text>
+  <text x="575" y="399" text-anchor="middle" class="wq-label-sm">wakes 4th (FIFO)</text>
+
+  <!-- Wake order annotation -->
+  <text x="730" y="383" text-anchor="middle" class="wq-label-green">Wake order:</text>
+  <text x="730" y="398" text-anchor="middle" class="wq-label-sm">D, B, A, C</text>
+</svg>
+</div>
+
+
+<p>Both <code>any_waiters</code> (wait-any) and <code>all_waiters</code> (wait-all) queues use sorted insertion. The <code>try_wake_any_mutex()</code> function naturally wakes the highest-priority waiter by taking the first satisfiable entry from the sorted list.</p>
+
+<hr />
+
+<h2>6. Patch 3: Mutex Owner PI Boost v2</h2>
+
+<p><strong>Problem:</strong> When a SCHED_FIFO thread (e.g. prio 15) waits on a mutex held by a SCHED_OTHER thread (prio 120), the holder is time-sliced by CFS against all other normal-priority threads. The RT waiter&rsquo;s bounded latency guarantee is violated &ndash; it can be delayed indefinitely while the holder fails to run.</p>
+
+<p><strong>Fix (v2):</strong> <code>ntsync_pi_recalc()</code> boosts the mutex holder to the scheduling priority of the highest-priority waiter via <code>sched_setattr_nocheck()</code>. A per-device tracking structure (<code>ntsync_pi_owner</code>) saves the holder&rsquo;s original scheduling attributes and counts how many mutex objects are contributing boosts to that task.</p>
+
+<h3>PI Boost Chain</h3>
+
+<div class="diagram-container">
+<svg width="820" height="470" viewBox="0 0 820 470" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .pi-box { fill: #24283b; stroke: #9aa5ce; stroke-width: 1.5; rx: 6; }
+    .pi-box-new { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 2; rx: 6; }
+    .pi-box-data { fill: #1a1a2a; stroke: #7aa2f7; stroke-width: 1.5; rx: 4; }
+    .pi-box-track { fill: #1a1a2a; stroke: #bb9af7; stroke-width: 1.5; rx: 4; }
+    .pi-box-warn { fill: #2a2a1a; stroke: #e0af68; stroke-width: 1.5; rx: 4; }
+    .pi-label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+    .pi-label-sm { fill: #c0caf5; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+    .pi-label-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .pi-label-yellow { fill: #e0af68; font-size: 11px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .pi-label-cyan { fill: #7dcfff; font-size: 10px; font-family: 'JetBrains Mono', monospace; }
+    .pi-label-purple { fill: #bb9af7; font-size: 10px; font-family: 'JetBrains Mono', monospace; }
+    .pi-label-red { fill: #f7768e; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .pi-label-muted { fill: #8c92b3; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+    .pi-arrow { stroke: #9aa5ce; stroke-width: 1.5; fill: none; marker-end: url(#piArr); }
+    .pi-arrow-green { stroke: #9ece6a; stroke-width: 2; fill: none; marker-end: url(#piArrG); }
+    .pi-arrow-purple { stroke: #bb9af7; stroke-width: 2; fill: none; marker-end: url(#piArrP); }
+  </style>
+  <defs>
+    <marker id="piArr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#9aa5ce"/></marker>
+    <marker id="piArrG" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#9ece6a"/></marker>
+    <marker id="piArrP" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#bb9af7"/></marker>
+  </defs>
+
+  <text x="410" y="22" class="pi-label-yellow" text-anchor="middle">NTSync PI Boost v2: Full Chain</text>
+
+  <!-- Stage 1: RT thread waits -->
+  <rect x="20" y="38" width="380" height="80" rx="6" fill="none" stroke="#3b4261" stroke-width="1" stroke-dasharray="5,3"/>
+  <text x="30" y="55" class="pi-label-yellow">1. RT thread calls WaitForSingleObject(hMutex)</text>
+
+  <rect x="35" y="62" width="150" height="45" class="pi-box-new"/>
+  <text x="110" y="80" text-anchor="middle" class="pi-label-green">RT waiter</text>
+  <text x="110" y="95" text-anchor="middle" class="pi-label-sm">SCHED_FIFO prio 15</text>
+
+  <line x1="185" y1="85" x2="220" y2="85" class="pi-arrow-green"/>
+
+  <rect x="225" y="62" width="160" height="45" class="pi-box"/>
+  <text x="305" y="80" text-anchor="middle" class="pi-label-sm">ntsync_insert_waiter()</text>
+  <text x="305" y="95" text-anchor="middle" class="pi-label-sm">sorted into any_waiters</text>
+
+  <!-- Stage 2: ntsync_pi_recalc -->
+  <rect x="420" y="38" width="380" height="155" rx="6" fill="none" stroke="#3b4261" stroke-width="1" stroke-dasharray="5,3"/>
+  <text x="430" y="55" class="pi-label-yellow">2. ntsync_pi_recalc(obj)</text>
+
+  <rect x="435" y="62" width="175" height="35" class="pi-box-data"/>
+  <text x="522" y="78" text-anchor="middle" class="pi-label-cyan">scan any_waiters</text>
+  <text x="522" y="90" text-anchor="middle" class="pi-label-sm">+ all_waiters</text>
+
+  <line x1="610" y1="80" x2="635" y2="80" class="pi-arrow"/>
+
+  <rect x="640" y="62" width="145" height="35" class="pi-box-data"/>
+  <text x="712" y="78" text-anchor="middle" class="pi-label-cyan">highest_prio = 15</text>
+  <text x="712" y="90" text-anchor="middle" class="pi-label-sm">(RT waiter's prio)</text>
+
+  <line x1="712" y1="97" x2="712" y2="115" class="pi-arrow"/>
+
+  <rect x="435" y="108" width="345" height="35" class="pi-box-track"/>
+  <text x="607" y="124" text-anchor="middle" class="pi-label-purple">compare vs orig_normal_prio (120, CFS)</text>
+  <text x="607" y="138" text-anchor="middle" class="pi-label-sm">15 &lt; 120? YES -- boost needed</text>
+
+  <line x1="607" y1="143" x2="607" y2="160" class="pi-arrow-purple"/>
+
+  <rect x="435" y="155" width="345" height="30" class="pi-box-new"/>
+  <text x="607" y="175" text-anchor="middle" class="pi-label-green">find/create ntsync_pi_owner, boost_count++</text>
+
+  <!-- Stage 3: PI owner tracking -->
+  <rect x="20" y="200" width="380" height="125" rx="6" fill="none" stroke="#3b4261" stroke-width="1" stroke-dasharray="5,3"/>
+  <text x="30" y="217" class="pi-label-yellow">3. Per-task PI owner tracking</text>
+
+  <rect x="35" y="225" width="350" height="88" class="pi-box-track"/>
+  <text x="210" y="242" text-anchor="middle" class="pi-label-purple">ntsync_pi_owner</text>
+  <text x="210" y="258" text-anchor="middle" class="pi-label-sm">task: owner task_struct*</text>
+  <text x="210" y="272" text-anchor="middle" class="pi-label-sm">orig_attr: { SCHED_OTHER, nice 0 }</text>
+  <text x="210" y="286" text-anchor="middle" class="pi-label-sm">orig_normal_prio: 120</text>
+  <text x="210" y="300" text-anchor="middle" class="pi-label-green">boost_count: 2 (mutex M1 + M2 boosting)</text>
+
+  <!-- Stage 4: sched_setattr -->
+  <rect x="420" y="200" width="380" height="60" rx="6" fill="none" stroke="#3b4261" stroke-width="1" stroke-dasharray="5,3"/>
+  <text x="430" y="217" class="pi-label-yellow">4. Apply boost</text>
+
+  <rect x="435" y="225" width="350" height="28" class="pi-box-new"/>
+  <text x="610" y="244" text-anchor="middle" class="pi-label-green">sched_setattr_nocheck(owner, { SCHED_FIFO, prio=84 })</text>
+
+  <!-- Arrow from tracking to sched_setattr -->
+  <line x1="385" y1="260" x2="430" y2="239" class="pi-arrow-green"/>
+
+  <!-- Stage 5: Release / drop -->
+  <rect x="20" y="340" width="780" height="120" rx="6" fill="none" stroke="#3b4261" stroke-width="1" stroke-dasharray="5,3"/>
+  <text x="30" y="357" class="pi-label-yellow">5. On mutex release: ntsync_pi_drop(obj)</text>
+
+  <rect x="35" y="365" width="180" height="35" class="pi-box"/>
+  <text x="125" y="380" text-anchor="middle" class="pi-label-sm">obj.pi_boosted = false</text>
+  <text x="125" y="393" text-anchor="middle" class="pi-label-sm">boost_count--</text>
+
+  <line x1="215" y1="382" x2="250" y2="382" class="pi-arrow"/>
+
+  <rect x="255" y="365" width="180" height="35" class="pi-box-warn"/>
+  <text x="345" y="380" text-anchor="middle" class="pi-label-yellow">boost_count > 0?</text>
+  <text x="345" y="393" text-anchor="middle" class="pi-label-sm">Another mutex still boosting</text>
+
+  <!-- Two branches -->
+  <line x1="435" y1="372" x2="475" y2="372" class="pi-arrow"/>
+  <text x="520" y="370" text-anchor="middle" class="pi-label-muted">YES: keep boost</text>
+  <text x="520" y="385" text-anchor="middle" class="pi-label-sm">(conservative over-boost, safe)</text>
+
+  <line x1="435" y1="393" x2="475" y2="410" class="pi-arrow-green"/>
+  <rect x="480" y="400" width="300" height="45" class="pi-box-new"/>
+  <text x="630" y="416" text-anchor="middle" class="pi-label-green">NO (boost_count == 0): restore original</text>
+  <text x="630" y="432" text-anchor="middle" class="pi-label-sm">sched_setattr_nocheck(owner, &amp;po->orig_attr)</text>
+  <text x="630" y="445" text-anchor="middle" class="pi-label-sm">list_del(&amp;po->node); kfree(po);</text>
+</svg>
+</div>
+
+
+<h3>Key Design Decisions</h3>
+
+<p><strong>Per-task tracking, not per-object:</strong> When a task holds mutexes M1 and M2, both with RT waiters, the task&rsquo;s <code>ntsync_pi_owner</code> has <code>boost_count=2</code>. The original scheduling attributes are saved once (on the first boost) and restored only when <code>boost_count</code> reaches zero. Between removal of the first and last boost, the task is conservatively over-boosted &ndash; it runs at too-high priority, never too-low.</p>
+
+<p><strong>Compare against orig_normal_prio, not normal_prio:</strong> After <code>sched_setattr_nocheck()</code> boosts a task, <code>normal_prio</code> changes to reflect the boosted priority. Comparing waiters against the post-boost <code>normal_prio</code> would cause thrashing: the comparison would conclude no boost is needed (waiter prio is now equal to the boosted <code>normal_prio</code>), unboost, then re-boost on the next recalc. Using <code>orig_normal_prio</code> from the tracking struct is stable.</p>
+
+<p><strong>Lazy owner_task resolution:</strong> When Wine creates a mutex via the wineserver, <code>current</code> is the wineserver thread, not the Win32 owning thread. <code>owner_task</code> starts NULL and is resolved lazily on the first unlock ioctl (where <code>current</code> is the actual Win32 thread).</p>
+
+<h3>v2 Bug Fixes (3 bugs from v1)</h3>
+
+<table>
+<thead>
+<tr>
+<th> Bug </th>
+<th> v1 Behavior </th>
+<th> v2 Fix </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> Multi-object PI corruption </td>
+<td> Single global <code>orig_attr</code> overwritten when 2nd mutex boosted </td>
+<td> Per-task <code>ntsync_pi_owner</code> with <code>boost_count</code> </td>
+</tr>
+<tr>
+<td> Zero PI for WaitAll </td>
+<td> <code>all_waiters</code> list not scanned </td>
+<td> <code>ntsync_pi_recalc()</code> scans both <code>any_waiters</code> and <code>all_waiters</code> </td>
+</tr>
+<tr>
+<td> Stale normal_prio comparison </td>
+<td> <code>owner-&gt;normal_prio</code> changes after boost, causing thrash </td>
+<td> Compare against <code>po-&gt;orig_normal_prio</code> (saved pre-boost value) </td>
+</tr>
+</tbody>
+</table>
+
+
+<h3>PI recalc() core logic</h3>
+
+<p>```c
+static void ntsync_pi_recalc(struct ntsync_obj <em>obj)
+{
+    struct task_struct </em>owner = obj->u.mutex.owner_task;
+    int highest_prio = MAX_PRIO;</p>
+
+<pre><code>/* Scan BOTH wait lists for highest-priority waiter */
+list_for_each_entry(entry, &amp;obj-&gt;any_waiters, node) {
+    if (entry-&gt;q-&gt;task-&gt;prio &lt; highest_prio)
+        highest_prio = entry-&gt;q-&gt;task-&gt;prio;
+}
+list_for_each_entry(entry, &amp;obj-&gt;all_waiters, node) {
+    if (entry-&gt;q-&gt;task-&gt;prio &lt; highest_prio)
+        highest_prio = entry-&gt;q-&gt;task-&gt;prio;
+}
+
+raw_spin_lock(&amp;dev-&gt;boost_lock);
+
+po = find_pi_owner(dev, owner);
+/* Compare against ORIGINAL priority, not current (which may be boosted) */
+base_prio = po ? po-&gt;orig_normal_prio : owner-&gt;normal_prio;
+
+if (highest_prio &lt; base_prio &amp;&amp; !was_boosted) {
+    /* First boost for this object -- find or create per-task tracking */
+    if (!po) {
+        po = new_po;  /* pre-allocated (Patch 5) */
+        po-&gt;orig_attr = capture_sched(owner);
+        po-&gt;orig_normal_prio = owner-&gt;normal_prio;
+        list_add(&amp;po-&gt;node, &amp;dev-&gt;boosted_owners);
+        new_po = NULL;
+    }
+    po-&gt;boost_count++;
+    obj-&gt;u.mutex.pi_boosted = true;
+}
+
+if (needs_boost &amp;&amp; highest_prio &lt; owner-&gt;prio)
+    sched_setattr_nocheck(owner, &amp;boost_attr);
+
+raw_spin_unlock(&amp;dev-&gt;boost_lock);
+kfree(new_po);  /* free if not consumed */
+</code></pre>
+
+<p>}
+```</p>
+
+<hr />
+
+<h2>7. Patch 4: uring_fd Extension</h2>
+
+<p><strong>Problem:</strong> When a thread is blocked inside <code>NTSYNC_IOC_WAIT_ANY</code> (or <code>WAIT_ALL</code>) and an io_uring CQE arrives (e.g. socket data ready), there is no mechanism to wake the thread. The CQE sits in the completion ring until the ntsync wait times out or another ntsync object is signaled. For RT audio, this adds an entire timeout period of unnecessary latency to socket I/O completions.</p>
+
+<p><strong>Fix:</strong> Repurpose the reserved <code>pad</code> field in <code>ntsync_wait_args</code> as <code>uring_fd</code>. When userspace passes a valid eventfd (registered with <code>IORING_REGISTER_EVENTFD</code> on the thread&rsquo;s io_uring ring), the ntsync wait ioctl monitors it alongside the ntsync objects using the standard <code>poll_initwait</code>/<code>vfs_poll</code> kernel pattern.</p>
+
+<h3>Protocol</h3>
+
+<ol>
+<li><strong>Userspace</strong> (ntdll <code>linux_wait_objs()</code>): sets <code>args.pad = uring_fd</code> (the io_uring eventfd).</li>
+<li><strong>Kernel</strong> (<code>ntsync_wait_any</code>): calls <code>fget(args.uring_fd)</code> to get the eventfd&rsquo;s <code>struct file</code>.</li>
+<li><strong>Kernel</strong> (<code>ntsync_schedule</code>): calls <code>poll_initwait(&amp;pwq)</code> + <code>vfs_poll(uring_file, &amp;pwq.pt)</code> to register on the eventfd&rsquo;s wait queue.</li>
+<li>In the schedule loop, each iteration checks <code>vfs_poll(uring_file, NULL)</code>. If <code>EPOLLIN</code> is set (CQE available), the ioctl sets <code>args.index = NTSYNC_INDEX_URING_READY</code> (0xFFFFFFFE) and returns.</li>
+<li><strong>Userspace</strong> reads and discards the eventfd counter, drains CQEs via <code>process_completions()</code>, and re-enters the ntsync wait.</li>
+</ol>
+
+
+<h3>Kernel changes</h3>
+
+<p>```c
+/<em> ntsync_schedule() &ndash; modified to accept uring_file </em>/
+static int ntsync_schedule(struct ntsync_q <em>q, const struct ntsync_wait_args </em>args,
+                           struct file *uring_file)
+{
+    struct poll_wqueues uring_pwq;</p>
+
+<pre><code>if (uring_file) {
+    poll_initwait(&amp;uring_pwq);
+    vfs_poll(uring_file, &amp;uring_pwq.pt);  /* register on eventfd wqh */
+}
+
+do {
+    /* ... signal/timeout checks ... */
+
+    if (uring_file) {
+        __poll_t mask = vfs_poll(uring_file, NULL);
+        if (mask &amp; EPOLLIN) {
+            int signaled = -1;
+            atomic_try_cmpxchg(&amp;q-&gt;signaled, &amp;signaled,
+                               NTSYNC_INDEX_URING_READY);
+            ret = 0;
+            break;
+        }
+    }
+
+    ret = schedule_hrtimeout_range_clock(...);
+} while (ret &lt; 0);
+
+if (uring_file)
+    poll_freewait(&amp;uring_pwq);
+
+return ret;
+</code></pre>
+
+<p>}
+```</p>
+
+<h3>Userspace handling</h3>
+
+<p>```c
+/<em> dlls/ntdll/unix/sync.c </em>/</p>
+
+<h1>define NTSYNC_INDEX_URING_READY 0xFFFFFFFEu</h1>
+
+<p>/<em> In linux_wait_objs(): </em>/
+args.pad = uring_fd > 0 ? uring_fd : 0;</p>
+
+<p>/<em> After ioctl returns: </em>/
+if (args.index == NTSYNC_INDEX_URING_READY)
+{
+    uint64_t val;
+    read(uring_fd, &amp;val, sizeof(val));  /<em> consume eventfd counter </em>/
+    return STATUS_URING_COMPLETION;     /<em> caller drains CQEs, retries </em>/
+}
+```</p>
+
+<p>The <code>pad</code> field reuse is ABI-compatible: upstream requires <code>pad == 0</code> and returns <code>EINVAL</code> otherwise. NSPA relaxes this check (<code>args.flags &amp; ~NTSYNC_WAIT_REALTIME</code> only) and interprets nonzero <code>pad</code> as <code>uring_fd</code>.</p>
+
+<hr />
+
+<h2>8. Patch 5: GFP_ATOMIC Pre-Allocation</h2>
+
+<p><strong>Problem:</strong> Patch 3&rsquo;s <code>ntsync_pi_recalc()</code> originally called <code>kzalloc(sizeof(*po), GFP_ATOMIC)</code> while holding <code>dev-&gt;boost_lock</code> (a <code>raw_spinlock</code>). On PREEMPT_RT kernels, the slab allocator&rsquo;s internal <code>rt_spin_lock</code> can sleep, which triggers a <code>__schedule_bug</code> (BUG: scheduling while atomic) when called under a raw spinlock.</p>
+
+<p><code>GFP_ATOMIC</code> prevents the allocator from sleeping on memory pressure &ndash; it does not prevent the PREEMPT_RT slab lock from sleeping. On non-RT kernels this works fine because slab locks are plain spinlocks (disable preemption). On PREEMPT_RT, they are sleeping locks.</p>
+
+<p><strong>Fix:</strong> Pre-allocate the <code>ntsync_pi_owner</code> struct <strong>before</strong> acquiring the raw spinlock. Pass the pre-allocated pointer into the locked section; consume it only if a new owner entry is actually needed. Free the unconsumed allocation after releasing the lock.</p>
+
+<p>```c
+static void ntsync_pi_recalc(struct ntsync_obj <em>obj)
+{
+    struct ntsync_pi_owner </em>new_po = NULL;</p>
+
+<pre><code>/* Pre-allocate BEFORE taking the raw spinlock.
+ * On PREEMPT_RT, kzalloc can sleep (slab rt_spin_lock). */
+new_po = kzalloc(sizeof(*new_po), GFP_ATOMIC);
+
+/* ... scan waiter lists ... */
+
+raw_spin_lock(&amp;dev-&gt;boost_lock);
+
+if (needs_boost &amp;&amp; !was_boosted) {
+    if (!po) {
+        if (unlikely(!new_po))
+            goto out;
+        /* initialize and consume new_po */
+        new_po-&gt;task = owner;
+        new_po-&gt;orig_attr = ...;
+        list_add(&amp;new_po-&gt;node, &amp;dev-&gt;boosted_owners);
+        po = new_po;
+        new_po = NULL;  /* consumed -- don't free below */
+    }
+    po-&gt;boost_count++;
+}
+</code></pre>
+
+<p>out:
+    raw_spin_unlock(&amp;dev->boost_lock);
+    kfree(new_po);  /<em> free if pre-allocated but not consumed (NULL is safe) </em>/
+}
+```</p>
+
+<p>The allocation still uses <code>GFP_ATOMIC</code> because <code>ntsync_pi_recalc()</code> is called from ioctl paths that may hold <code>obj-&gt;lock</code> (a raw spinlock) in the caller. The key insight is that moving the allocation before <code>boost_lock</code> is sufficient &ndash; the caller&rsquo;s <code>obj-&gt;lock</code> is a different raw spinlock and the slab allocator&rsquo;s rt_spin_lock nesting with it is legal on PREEMPT_RT (raw spinlocks nest with sleeping locks, not with each other &ndash; but the slab lock is a sleeping lock on RT).</p>
+
+<hr />
+
+<h2>9. Client-Side Object Creation</h2>
+
+<p>Wine-NSPA creates anonymous ntsync objects client-side, bypassing the wineserver entirely for the fast path. This eliminates a server round-trip for every <code>CreateMutex</code>, <code>CreateSemaphore</code>, and <code>CreateEvent</code> call when the object does not need a name (the common case for application-internal synchronization).</p>
+
+<h3>alloc_client_handle() Path</h3>
+
+<p>```
+Anonymous CreateMutex:
+  alloc_client_handle()          &ndash; allocate a Wine handle from client-side pool
+  ioctl(NTSYNC_IOC_CREATE_MUTEX) &ndash; kernel creates ntsync object, returns fd
+  cache fd in handle table       &ndash; subsequent waits resolve fd without server</p>
+
+<p>Named CreateMutex:
+  wineserver creates obj         &ndash; needs server for namespace management
+  passes fd back to client       &ndash; via SCM_RIGHTS over Unix socket
+  cache fd in handle table       &ndash; subsequent waits same fast path
+```</p>
+
+<p>The client handle pool uses a simple atomic decrement (<code>InterlockedDecrement(&amp;client_handle_next)</code>) to allocate negative handle values that do not collide with server-allocated handles. Wait operations (<code>NtWaitForSingleObject</code>) resolve the handle to a cached fd via <code>inproc_wait()</code>, then call <code>linux_wait_objs()</code> which issues the kernel ioctl directly.</p>
+
+<p>Currently, client-side creation is enabled for mutexes and semaphores. Event object creation is client-capable at the kernel level but disabled in the Wine client due to stability issues with certain applications (Ableton Live).</p>
+
+<hr />
+
+<h2>10. Validation</h2>
+
+<h3>Priority Wakeup Ordering</h3>
+
+<p>Tested with 5 waiters at different priorities on a single ntsync mutex. All waiters woke in correct priority order in both baseline and RT modes across all test runs (v4 and v5).</p>
+
+<table>
+<thead>
+<tr>
+<th> Waiter </th>
+<th> Priority </th>
+<th> Expected Wake Order </th>
+<th> Actual (Baseline) </th>
+<th> Actual (RT) </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> Thread 1 </td>
+<td> SCHED_FIFO prio 50 </td>
+<td> 1st </td>
+<td> 1st </td>
+<td> 1st </td>
+</tr>
+<tr>
+<td> Thread 2 </td>
+<td> SCHED_FIFO prio 40 </td>
+<td> 2nd </td>
+<td> 2nd </td>
+<td> 2nd </td>
+</tr>
+<tr>
+<td> Thread 3 </td>
+<td> SCHED_FIFO prio 30 </td>
+<td> 3rd </td>
+<td> 3rd </td>
+<td> 3rd </td>
+</tr>
+<tr>
+<td> Thread 4 </td>
+<td> SCHED_FIFO prio 20 </td>
+<td> 4th </td>
+<td> 4th </td>
+<td> 4th </td>
+</tr>
+<tr>
+<td> Thread 5 </td>
+<td> SCHED_OTHER (CFS) </td>
+<td> 5th </td>
+<td> 5th </td>
+<td> 5th </td>
+</tr>
+</tbody>
+</table>
+
+
+<h3>PI Contention: v4 to v5 Comparison</h3>
+
+<p>PI contention measures how long an RT thread waits on a mutex held by a CFS thread doing a CPU-bound work loop. Lower is better &ndash; it means the PI boost is getting the holder on-core faster.</p>
+
+<table>
+<thead>
+<tr>
+<th> Depth </th>
+<th> v4 RT avg </th>
+<th> v5 RT avg </th>
+<th> Delta </th>
+<th> Notes </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> d4 </td>
+<td> 387 ms </td>
+<td> 270 ms </td>
+<td> <strong>-30.2%</strong> </td>
+<td> 8/8 samples, tight range </td>
+</tr>
+<tr>
+<td> d8 </td>
+<td> 419 ms </td>
+<td> 201 ms </td>
+<td> <strong>-52.0%</strong> </td>
+<td> v4 had CFS reversal (RT worse than baseline), v5 resolved </td>
+</tr>
+<tr>
+<td> d12 </td>
+<td> scales </td>
+<td> scales </td>
+<td> flat </td>
+<td> Chain propagation correct, no degradation </td>
+</tr>
+</tbody>
+</table>
+
+
+<h3>PI Chain Scaling (v5)</h3>
+
+<p>Transitive PI chains tested up to depth 12. RT wait time does not increase with chain depth beyond the tail holder&rsquo;s work time (~235ms for a 100M-iteration CPU loop).</p>
+
+<table>
+<thead>
+<tr>
+<th> Metric </th>
+<th> d4 </th>
+<th> d8 </th>
+<th> d12 </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> RT PI avg wait </td>
+<td> 270 ms </td>
+<td> 201 ms </td>
+<td> ~235 ms </td>
+</tr>
+<tr>
+<td> All sub-tests PASS </td>
+<td> 8/8 </td>
+<td> 8/8 </td>
+<td> 8/8 </td>
+</tr>
+<tr>
+<td> Priority wakeup correct </td>
+<td> Yes </td>
+<td> Yes </td>
+<td> Yes </td>
+</tr>
+<tr>
+<td> Chain propagation correct </td>
+<td> Yes </td>
+<td> Yes </td>
+<td> Yes </td>
+</tr>
+</tbody>
+</table>
+
+
+<h3>Rapid Kernel Mutex Throughput</h3>
+
+<table>
+<thead>
+<tr>
+<th> Metric </th>
+<th> v4 RT </th>
+<th> v5 RT </th>
+<th> Delta </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> Throughput </td>
+<td> 232K ops/s </td>
+<td> 259K ops/s </td>
+<td> <strong>+11.6%</strong> </td>
+</tr>
+<tr>
+<td> RT max_wait </td>
+<td> 54 us </td>
+<td> 47 us </td>
+<td> -13.0% </td>
+</tr>
+<tr>
+<td> Counter correctness </td>
+<td> 400K/400K </td>
+<td> 400K/400K </td>
+<td> correct </td>
+</tr>
+</tbody>
+</table>
+
+
+<h3>Philosophers (Integration Test)</h3>
+
+<p>The philosophers test exercises contention between RT and CFS threads on ntsync mutexes with random hold patterns.</p>
+
+<table>
+<thead>
+<tr>
+<th> Metric </th>
+<th> v4 RT </th>
+<th> v5 RT </th>
+<th> Delta </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> RT max_wait </td>
+<td> 1620 us </td>
+<td> 865 us </td>
+<td> <strong>-46.6%</strong> </td>
+</tr>
+</tbody>
+</table>
+
+
+<h3>Mixed WFMO</h3>
+
+<p><code>WaitForMultipleObjects</code> (both wait-any and wait-all modes) tested with mixed object types (mutex + semaphore + event). All sub-tests PASS in both baseline and RT modes across d4/d8/d12.</p>
+
+<hr />
+
+<h2>File References</h2>
+
+<table>
+<thead>
+<tr>
+<th> File </th>
+<th> Purpose </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> <code>drivers/misc/ntsync.c</code> (kernel) </td>
+<td> NTSync driver with all 5 NSPA patches </td>
+</tr>
+<tr>
+<td> <code>include/uapi/linux/ntsync.h</code> (kernel) </td>
+<td> UAPI header: ioctls, <code>ntsync_wait_args</code>, <code>NTSYNC_INDEX_URING_READY</code> </td>
+</tr>
+<tr>
+<td> <code>dlls/ntdll/unix/sync.c</code> (Wine) </td>
+<td> Client-side ntsync integration: <code>linux_wait_objs()</code>, <code>alloc_client_handle()</code>, uring_fd retry loop </td>
+</tr>
+<tr>
+<td> <code>dlls/ntdll/unix/io_uring.c</code> (Wine) </td>
+<td> io_uring ring management, eventfd registration </td>
+</tr>
+<tr>
+<td> <code>programs/nspa_rt_test/main.c</code> (Wine) </td>
+<td> RT test suite: PI contention, priority wakeup, chain scaling </td>
+</tr>
+</tbody>
+</table>
+
+</body></html>

@@ -60,7 +60,7 @@
 <h1>Sync Primitives Research: SRW Spin, Adaptive CS, Condvar PI</h1>
 
 <p><strong>Date:</strong> 2026-04-15
-<strong>Status:</strong> Research complete — ready for design decisions</p>
+<strong>Status:</strong> B (SRW spin) and C1 (pi_cond requeue-PI) IMPLEMENTED. A (CS DYNAMIC_SPIN) planned. C2 (SRW PI) deferred.</p>
 
 <hr />
 
@@ -448,42 +448,40 @@ condvar-PI are solid, and document that SRW locks are not PI-protected.</p>
 
 <hr />
 
-<h2>7. Implementation Priority</h2>
+<h2>7. Implementation Status</h2>
 
 <ol>
-<li><p><strong>B — SRW spin phase</strong> (~256 iterations, bounded)</p>
+<li><p><strong>B — SRW spin phase</strong> &ndash; <strong>IMPLEMENTED</strong> (commit <code>005b55b4d8d</code>)</p>
 
 <ul>
-<li>Highest impact: every contended SRW acquire is currently a syscall</li>
-<li>Matches Windows behavior</li>
-<li>Simple to implement, easy to validate</li>
-<li>Low risk</li>
+<li>256-iteration spin in <code>RtlAcquireSRWLockExclusive</code> and <code>RtlAcquireSRWLockShared</code></li>
+<li>RT threads (NSPA_RT_PRIO active) skip spinning entirely</li>
+<li>Disabled on single-CPU systems</li>
+<li>Validated: 429 ntdll sync tests, 0 failures. RT suite 20/20 PASS.</li>
 </ul>
 </li>
-<li><p><strong>C1 — pi_cond requeue-PI</strong></p>
+<li><p><strong>C1 — pi_cond requeue-PI</strong> &ndash; <strong>IMPLEMENTED</strong> (commit <code>43862d8b591</code>)</p>
 
 <ul>
-<li>Fixes a known, documented PI gap</li>
-<li>Upstream librtpi already has the implementation</li>
-<li>Bounded task with clear correctness benefit</li>
-<li>Medium risk (futex requeue semantics are tricky)</li>
+<li><code>FUTEX_WAIT_REQUEUE_PI</code> / <code>FUTEX_CMP_REQUEUE_PI</code> in <code>libs/librtpi/rtpi.h</code></li>
+<li>Closes PI gap across all pi_cond consumers (ntdll, audio, gstreamer)</li>
+<li>Benchmark: worst-case max 53.8us -> 31.6us (-41%) under RT load</li>
+<li>RT suite 20/20 PASS.</li>
 </ul>
 </li>
-<li><p><strong>A — CS DYNAMIC_SPIN</strong></p>
+<li><p><strong>A — CS DYNAMIC_SPIN</strong> &ndash; <strong>Planned</strong></p>
 
 <ul>
-<li>Low impact (PI path handles most contention)</li>
-<li>But apps may depend on the flag working (CRT heap uses it)</li>
-<li>Easy to implement</li>
-<li>Low risk</li>
+<li>Implement <code>RTL_CRITICAL_SECTION_FLAG_DYNAMIC_SPIN</code> (~4000 spincount)</li>
+<li>Gate behind <code>!nspa_cs_pi_active()</code></li>
+<li>Low priority (PI path handles most contention)</li>
 </ul>
 </li>
-<li><p><strong>C2 — SRW PI</strong></p>
+<li><p><strong>C2 — SRW PI</strong> &ndash; <strong>Deferred indefinitely</strong></p>
 
 <ul>
-<li>Don&rsquo;t pursue now</li>
-<li>Unsolved problem, even Linux kernel doesn&rsquo;t have it</li>
-<li>Document the limitation instead</li>
+<li>Unsolved problem, even Linux kernel doesn&rsquo;t have rwlock PI</li>
+<li>Documented as a known limitation</li>
 </ul>
 </li>
 </ol>
@@ -494,32 +492,10 @@ condvar-PI are solid, and document that SRW locks are not PI-protected.</p>
 <h2>8. Open Questions</h2>
 
 <ul>
-<li class="github_checkbox"><input disabled="" type="checkbox"/> Benchmark: how much latency does the SRW zero-spin cost in practice?
-
-<ul>
-<li>Need a micro-benchmark: contended SRW acquire/release cycle latency</li>
-<li>Compare: no spin vs 256-spin vs 1024-spin</li>
-</ul>
-</li>
-<li class="github_checkbox"><input disabled="" type="checkbox"/> Does FUTEX_WAIT_REQUEUE_PI work correctly with our alert-based wait?
-
-<ul>
-<li>pi_cond uses raw futex, not RtlWaitOnAddress — should be fine</li>
-<li>But need to verify kernel version requirements</li>
-</ul>
-</li>
-<li class="github_checkbox"><input disabled="" type="checkbox"/> What kernel version first supports FUTEX_CMP_REQUEUE_PI?
-
-<ul>
-<li>Believed to be 2.6.31+ (2009) — safe to assume available</li>
-</ul>
-</li>
-<li class="github_checkbox"><input disabled="" type="checkbox"/> Should SRW spin count be tunable via env var for benchmarking?
-
-<ul>
-<li>NSPA_SRW_SPIN_COUNT=256 (default) — useful during development</li>
-</ul>
-</li>
+<li class="github_checkbox"><input disabled="" type="checkbox" checked="checked"/> <del>Benchmark: SRW zero-spin cost</del> — Implemented srw-bench subcommand</li>
+<li class="github_checkbox"><input disabled="" type="checkbox" checked="checked"/> <del>FUTEX_WAIT_REQUEUE_PI compatibility</del> — Works, kernel 2.6.31+ (2009)</li>
+<li class="github_checkbox"><input disabled="" type="checkbox"/> Should SRW spin count be tunable via env var for benchmarking?</li>
+<li class="github_checkbox"><input disabled="" type="checkbox"/> CS DYNAMIC_SPIN: what spincount do Windows apps actually request?</li>
 </ul>
 
 </body></html>
