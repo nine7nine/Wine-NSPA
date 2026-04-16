@@ -1,0 +1,525 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sync Primitives Research: SRW Spin, Adaptive CS, Condvar PI</title>
+<style>
+  :root {
+    --bg: #1a1b26; --fg: #c0caf5; --accent: #7aa2f7;
+    --green: #9ece6a; --red: #f7768e; --yellow: #e0af68;
+    --surface: #24283b; --border: #3b4261; --muted: #8c92b3;
+    --purple: #bb9af7; --orange: #ff9e64; --cyan: #7dcfff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+    background: var(--bg); color: var(--fg);
+    max-width: 1100px; margin: 0 auto; padding: 2rem 1.5rem;
+    line-height: 1.7;
+  }
+  h1 { color: var(--accent); font-size: 1.5rem; margin: 1.5rem 0 0.5rem; }
+  h2 { color: var(--accent); font-size: 1.2rem; margin: 2rem 0 0.75rem;
+       border-bottom: 1px solid var(--border); padding-bottom: 0.3rem; }
+  h3 { color: var(--yellow); font-size: 1rem; margin: 1.25rem 0 0.5rem; }
+  h4 { color: var(--cyan); font-size: 0.95rem; margin: 1rem 0 0.4rem; }
+  p, li { font-size: 0.85rem; margin-bottom: 0.5rem; }
+  ul, ol { padding-left: 1.5rem; margin-bottom: 0.75rem; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  table {
+    width: 100%; border-collapse: collapse;
+    margin: 0.75rem 0 1rem; font-size: 0.8rem;
+  }
+  th, td {
+    padding: 0.4rem 0.75rem; text-align: left;
+    border: 1px solid var(--border);
+  }
+  th { background: var(--surface); color: var(--accent); font-weight: 600; }
+  td { background: var(--bg); }
+  code {
+    background: var(--surface); padding: 0.15rem 0.4rem;
+    border-radius: 3px; font-size: 0.82rem; color: var(--cyan);
+  }
+  pre {
+    background: var(--surface); padding: 1rem; border-radius: 6px;
+    overflow-x: auto; margin: 0.75rem 0 1rem;
+    border: 1px solid var(--border);
+  }
+  pre code { background: none; padding: 0; font-size: 0.8rem; color: var(--fg); }
+  blockquote {
+    background: var(--surface); border-left: 3px solid var(--accent);
+    padding: 0.75rem 1rem; margin: 1rem 0; border-radius: 0 4px 4px 0;
+    font-size: 0.82rem;
+  }
+  blockquote strong { color: var(--yellow); }
+  hr { border: none; border-top: 1px solid var(--border); margin: 2rem 0; }
+  strong { color: var(--fg); }
+  em { color: var(--muted); font-style: italic; }
+</style>
+</head><body>
+<h1>Sync Primitives Research: SRW Spin, Adaptive CS, Condvar PI</h1>
+
+<p><strong>Date:</strong> 2026-04-15
+<strong>Status:</strong> Research complete — ready for design decisions</p>
+
+<hr />
+
+<h2>1. Windows Behavior (what apps expect)</h2>
+
+<h3>SRW Locks</h3>
+
+<ul>
+<li><strong>Spin count:</strong> ~1024 iterations hardcoded, using <code>pause</code> instruction</li>
+<li><strong>Spin on single CPU:</strong> Disabled (forced to 0)</li>
+<li><strong>Parking:</strong> NtWaitForAlertByThreadId (same as WaitOnAddress), per-thread futex</li>
+<li><strong>Bit layout (x64):</strong> bit0=exclusive_held, bit1=waking, bit2=multi_shared, bit3=shared_waiters, upper bits=shared_count OR wait_block_ptr</li>
+<li><strong>Wait blocks:</strong> Stack-allocated on waiter&rsquo;s stack, linked list</li>
+<li><strong>PI support:</strong> NONE. Windows has no PI for SRW locks. Only kernel Mutant objects get PI.</li>
+<li><strong>Wake:</strong> NtAlertThreadByThreadId (single) or NtAlertMultipleThreadByThreadId (all)</li>
+</ul>
+
+
+<h3>Critical Sections</h3>
+
+<ul>
+<li><strong>Default SpinCount:</strong> 0 (unless caller sets it)</li>
+<li><strong>RTL_CRITICAL_SECTION_FLAG_DYNAMIC_SPIN:</strong> System substitutes ~2000-4000, ignores caller&rsquo;s value</li>
+<li><strong>Heap lock SpinCount:</strong> 4000</li>
+<li><strong>Spin loop:</strong> test LockCount → YieldProcessor() → decrement counter → repeat</li>
+<li><strong>Early bailout:</strong> if LockCount > 0 (multiple waiters), stop spinning</li>
+<li><strong>PI support:</strong> NONE on Windows. Our NSPA CS-PI via FUTEX_LOCK_PI is novel.</li>
+</ul>
+
+
+<h3>WaitOnAddress</h3>
+
+<ul>
+<li><strong>No internal spin phase.</strong> Goes directly to kernel wait.</li>
+<li><strong>Callers</strong> (SRW locks) do their own spinning before calling WaitOnAddress.</li>
+</ul>
+
+
+<h3>Condition Variables</h3>
+
+<ul>
+<li><strong>No PI.</strong> Pure user-mode, kernel doesn&rsquo;t know what resource is waited on.</li>
+</ul>
+
+
+<hr />
+
+<h2>2. Linux/glibc Behavior (what our platform provides)</h2>
+
+<h3>glibc Adaptive Mutex (PTHREAD_MUTEX_ADAPTIVE_NP)</h3>
+
+<ul>
+<li><strong>Spin count:</strong> 100 iterations (fixed, <code>MAX_ADAPTIVE_COUNT</code>)</li>
+<li><strong>Algorithm:</strong> Simple loop — <code>atomic_load_relaxed</code> + <code>_mm_pause()</code>, decrement counter</li>
+<li><strong>No exponential backoff, no contention adaptation, no owner-on-CPU check</strong></li>
+<li><strong>After 100 spins:</strong> Falls through to <code>futex(FUTEX_WAIT)</code></li>
+<li><strong>Key weakness vs kernel:</strong> Spins blindly without knowing if owner is running</li>
+</ul>
+
+
+<h3>glibc pthread_rwlock</h3>
+
+<ul>
+<li><strong>Spin count:</strong> ZERO. No spinning at all — direct <code>futex(FUTEX_WAIT)</code> on contention</li>
+<li><strong>Writer preference (NONRECURSIVE_NP):</strong> When writer waiting, new readers block</li>
+<li><strong>Uses two futex addresses</strong> (readers/writers) for selective waking</li>
+<li><strong>Note:</strong> PTHREAD_RWLOCK_PREFER_WRITER_NP is a no-op (identical to PREFER_READER)</li>
+</ul>
+
+
+<h3>Linux Kernel rwsem (CONFIG_RWSEM_SPIN_ON_OWNER)</h3>
+
+<ul>
+<li><strong>The gold standard for rwlock spinning.</strong> Three-layer approach:</li>
+<li><strong>Layer 1 — Entry gate</strong> (<code>rwsem_can_spin_on_owner</code>):
+
+<ul>
+<li>Skip if <code>need_resched()</code>, NONSPINNABLE bit set, or owner NOT on CPU</li>
+<li>Key insight: <strong>only spin if owner is actively running on a CPU core</strong></li>
+</ul>
+</li>
+<li><strong>Layer 2 — OSQ (Optimistic Spin Queue):</strong>
+
+<ul>
+<li>MCS-style queue lock serializes spinners — only ONE thread spins on the rwsem at a time</li>
+<li>Others queue behind the OSQ head, spinning on their own local variable (cache-friendly)</li>
+</ul>
+</li>
+<li><strong>Layer 3 — Owner-spin loop</strong> (<code>rwsem_spin_on_owner</code>):
+
+<ul>
+<li><strong>No fixed iteration count</strong> — spins as long as same owner is on-CPU</li>
+<li>After 1000 iterations without owner change, adds <code>cpu_relax()</code></li>
+<li>RT tasks get only ONE extra retry when owner is NULL</li>
+</ul>
+</li>
+<li><strong>Reader-owned spin:</strong> Time-capped at <code>(10 + nr_readers/2)us</code>, max 25us
+
+<ul>
+<li>Checked every 16 iterations to avoid sched_clock() overhead</li>
+</ul>
+</li>
+<li><strong>Handoff:</strong> After 4ms in wait queue, writer sets handoff bit (forced transfer)
+
+<ul>
+<li>RT/DL tasks set handoff immediately (no timeout)</li>
+</ul>
+</li>
+</ul>
+
+
+<h3>Linux Kernel Mutex Adaptive Spin (CONFIG_MUTEX_SPIN_ON_OWNER)</h3>
+
+<ul>
+<li>Same OSQ + owner-on-CPU pattern as rwsem</li>
+<li>Only spin while owner task is running on a CPU core</li>
+<li>Falls to sleep when owner goes off-CPU or <code>need_resched()</code></li>
+<li><strong>Unbounded iteration count</strong> (bounded by owner&rsquo;s time on CPU)</li>
+</ul>
+
+
+<h3>PI for Read-Write Locks — State of the Art</h3>
+
+<ul>
+<li><strong>Linux kernel:</strong> PI for rwlocks is <strong>explicitly unsupported</strong>
+
+<ul>
+<li>Documentation: &ldquo;only a single owner may own a lock (i.e. no read-write lock support)&rdquo;</li>
+<li>Fundamental problem: PI requires single owner, rwlocks have N readers</li>
+<li>Multi-reader PI is undefined for SCHED_DEADLINE (what bandwidth per reader?)</li>
+</ul>
+</li>
+<li><strong>PREEMPT_RT approach:</strong> Rebuild rw_semaphore on rt_mutex
+
+<ul>
+<li>Writers acquire rt_mutex first (get PI from blocked readers)</li>
+<li>Readers in slow path go through rt_mutex (acquire+release)</li>
+<li><strong>Asymmetry:</strong> Readers CAN boost waiting writer, but writer CANNOT boost multiple readers</li>
+<li>Known limitation: low-priority reader can starve high-priority writer</li>
+</ul>
+</li>
+<li><strong>No FUTEX_RDLOCK_PI or equivalent</strong> exists in Linux</li>
+<li><strong>Academic:</strong> RWPIP (Reader-Writer Priority Inheritance Protocol) requires O(N) boosts per writer block — never productively deployed</li>
+<li><strong>Practical answer for RT:</strong> Avoid rwlocks in RT-critical paths. Use PI mutexes, RCU, or seqlocks.</li>
+</ul>
+
+
+<hr />
+
+<h2>3. Wine Current Implementation</h2>
+
+<h3>SRW Locks (dlls/ntdll/sync.c:852-967)</h3>
+
+<ul>
+<li><strong>Spin count:</strong> ZERO. CAS loop → immediate RtlWaitOnAddress on contention</li>
+<li><strong>Bit layout:</strong> struct srw_lock { short exclusive_waiters; unsigned short owners; } = 4 bytes
+
+<ul>
+<li>exclusive_waiters: bit0 = held_exclusive, bits1-15 = waiter count</li>
+<li>owners: shared owner count (0-65535)</li>
+</ul>
+</li>
+<li><strong>Wait:</strong> RtlWaitOnAddress → user-space FIFO queue → NtWaitForAlertByThreadId → futex_wait</li>
+<li><strong>Wake:</strong> RtlWakeAddressSingle → NtAlertThreadByThreadId → futex_wake_one</li>
+<li><strong>No spin phase, no PI, no adaptive behavior</strong></li>
+</ul>
+
+
+<h3>Critical Sections (dlls/ntdll/sync.c:703-747)</h3>
+
+<ul>
+<li><strong>NSPA CS-PI path:</strong> nspa_cs_enter_pi() uses FUTEX_LOCK_PI (sync.c:341-409)</li>
+<li><strong>Static spin:</strong> Fixed YieldProcessor() loop with early bailout on LockCount > 0</li>
+<li><strong>DYNAMIC_SPIN flag:</strong> FIXME stub (sync.c:568)</li>
+</ul>
+
+
+<h3>RtlWaitOnAddress (dlls/ntdll/sync.c:1257-1386)</h3>
+
+<ul>
+<li><strong>No spin phase.</strong> Compare-under-spinlock → add to FIFO queue → NtWaitForAlertByThreadId</li>
+<li><strong>256-entry hash table</strong> of futex_queues indexed by addr >> 4</li>
+<li><strong>Fairness:</strong> FIFO (list_add_tail)</li>
+<li><strong>Indirect futex:</strong> Does NOT futex on the lock word — futexes on per-thread alert entry</li>
+</ul>
+
+
+<h3>Condition Variables (dlls/ntdll/sync.c:1092-1193)</h3>
+
+<ul>
+<li><strong>Thin wrapper:</strong> release lock → RtlWaitOnAddress(condvar) → reacquire lock</li>
+<li><strong>No PI awareness.</strong> Wake is InterlockedIncrement + RtlWakeAddressSingle/All.</li>
+</ul>
+
+
+<hr />
+
+<h2>4. librtpi Capabilities</h2>
+
+<h3>What it provides</h3>
+
+<ul>
+<li><strong>pi_mutex_t:</strong> FUTEX_LOCK_PI-based mutex, user-space fast path via CAS on TID</li>
+<li><strong>pi_cond_t:</strong> Condition variable with PI mutex integration</li>
+<li><strong>No pi_rwlock_t.</strong> Reader-writer locks not supported anywhere in librtpi.</li>
+</ul>
+
+
+<h3>What&rsquo;s integrated in Wine-NSPA</h3>
+
+<ul>
+<li>Tree-wide pthread_mutex → pi_mutex replacement (ntdll unix, audio drivers, gstreamer)</li>
+<li>CS-PI via raw FUTEX_LOCK_PI in sync.c (PE-side critical sections)</li>
+<li>pi_cond in audio drivers (alsamidi, jackmidi, pulse)</li>
+</ul>
+
+
+<h3>Critical gap: pi_cond doesn&rsquo;t use requeue-PI</h3>
+
+<ul>
+<li>Wine-NSPA rtpi.h uses plain FUTEX_WAIT/FUTEX_WAKE for condvars</li>
+<li>Upstream librtpi uses FUTEX_WAIT_REQUEUE_PI / FUTEX_CMP_REQUEUE_PI</li>
+<li>Our gap: woken thread doesn&rsquo;t get PI on mutex holder until explicit relock attempt</li>
+<li>TODO comment at libs/librtpi/rtpi.h:30-31 acknowledges this</li>
+<li><strong>Impact:</strong> Window of priority inversion between condvar wake and mutex reacquire</li>
+</ul>
+
+
+<hr />
+
+<h2>5. Spin Count Comparison Table</h2>
+
+<table>
+<thead>
+<tr>
+<th> Implementation </th>
+<th> Spin Count </th>
+<th> Algorithm </th>
+<th> Owner-Aware </th>
+<th> PI Support </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> <strong>Windows SRW</strong> </td>
+<td> ~1024 (fixed) </td>
+<td> test + pause loop </td>
+<td> No </td>
+<td> No </td>
+</tr>
+<tr>
+<td> <strong>Windows CS</strong> </td>
+<td> 0 or caller-set (DYNAMIC_SPIN: ~2000-4000) </td>
+<td> test + YieldProcessor </td>
+<td> No </td>
+<td> No (kernel Mutant only) </td>
+</tr>
+<tr>
+<td> <strong>glibc adaptive mutex</strong> </td>
+<td> 100 (fixed) </td>
+<td> atomic_load + pause </td>
+<td> No </td>
+<td> Separate (PTHREAD_PRIO_INHERIT) </td>
+</tr>
+<tr>
+<td> <strong>glibc rwlock</strong> </td>
+<td> 0 (no spinning) </td>
+<td> Direct futex wait </td>
+<td> No </td>
+<td> No </td>
+</tr>
+<tr>
+<td> <strong>Kernel mutex</strong> </td>
+<td> Unbounded (owner-tracking) </td>
+<td> OSQ + spin while owner on CPU </td>
+<td> <strong>Yes</strong> </td>
+<td> Via rt_mutex on PREEMPT_RT </td>
+</tr>
+<tr>
+<td> <strong>Kernel rwsem (writer)</strong> </td>
+<td> Unbounded (owner) + 10-25us (reader-owned) </td>
+<td> OSQ + owner tracking + time cap </td>
+<td> <strong>Yes</strong> </td>
+<td> Partial (writer only) on PREEMPT_RT </td>
+</tr>
+<tr>
+<td> <strong>Wine SRW (current)</strong> </td>
+<td> 0 (no spinning) </td>
+<td> Direct RtlWaitOnAddress </td>
+<td> No </td>
+<td> No </td>
+</tr>
+<tr>
+<td> <strong>Wine CS (NSPA)</strong> </td>
+<td> Static (caller-set) </td>
+<td> YieldProcessor + early bailout </td>
+<td> No </td>
+<td> <strong>FUTEX_LOCK_PI</strong> </td>
+</tr>
+</tbody>
+</table>
+
+
+<hr />
+
+<h2>6. Design Decisions</h2>
+
+<h3>B — SRW Lock Spin Phase (RECOMMENDED FIRST)</h3>
+
+<p><strong>Approach: Fixed bounded spin, matching Windows behavior.</strong></p>
+
+<p><code>
+RtlAcquireSRWLockExclusive:
+    CAS attempt (existing fast path)
+    if failed AND NumberOfProcessors &gt; 1:
+        for i = 0..SRW_SPIN_COUNT:
+            read lock word
+            if lock free: retry CAS
+            if exclusive_waiters high: break early (contention)
+            YieldProcessor()  // pause instruction
+        // fall through to existing RtlWaitOnAddress path
+</code></p>
+
+<p><strong>Spin count choice:</strong> ~256 iterations.
+- Windows uses ~1024 but we have higher syscall overhead (Wine→futex indirection)
+- glibc uses 100 but that&rsquo;s for mutexes, not rwlocks
+- 256 is a reasonable middle ground — enough to catch short critical sections,
+  bounded enough to avoid RT starvation
+- Can tune later with benchmarks</p>
+
+<p><strong>RT thread consideration:</strong>
+- On RT threads (detected via NSPA_RT_PRIO env or sched_getscheduler), use a SHORTER
+  spin count (~32-64) to minimize holder starvation window, then fall to futex
+- This matches kernel rwsem behavior where RT tasks get limited retries</p>
+
+<p><strong>No per-instance state needed.</strong> Global constant + NumberOfProcessors check.</p>
+
+<h3>A — CS Adaptive Spin / DYNAMIC_SPIN</h3>
+
+<p><strong>Approach: Implement the DYNAMIC_SPIN flag properly.</strong></p>
+
+<p>When <code>RTL_CRITICAL_SECTION_FLAG_DYNAMIC_SPIN</code> is passed:
+- Substitute system default spincount (~4000, matching Windows)
+- Store the flag in SpinCount high bit (existing pattern)
+- Optionally: adaptive adjustment based on acquire cost (port 0010 algorithm)</p>
+
+<p>Gate behind <code>!nspa_cs_pi_active()</code> — when PI is active, the kernel handles
+contention better than userspace spinning.</p>
+
+<h3>C1 — pi_cond Requeue-PI Upgrade (RECOMMENDED SECOND)</h3>
+
+<p><strong>Approach: Port upstream librtpi&rsquo;s FUTEX_CMP_REQUEUE_PI usage.</strong></p>
+
+<p>This is a concrete, bounded fix for a known PI gap:
+- Replace <code>FUTEX_WAIT</code> with <code>FUTEX_WAIT_REQUEUE_PI</code> in pi_cond_wait
+- Replace <code>FUTEX_WAKE</code> with <code>FUTEX_CMP_REQUEUE_PI</code> in pi_cond_signal/broadcast
+- Waiters get atomically requeued to the PI mutex&rsquo;s futex on wakeup
+- Eliminates the inversion window between wake and mutex reacquire</p>
+
+<p><strong>Constraint:</strong> FUTEX_WAIT_REQUEUE_PI requires the target mutex to be a PI futex
+(FUTEX_LOCK_PI format). Our pi_mutex already is — so this should work.</p>
+
+<p><strong>Constraint:</strong> This only helps code paths using pi_cond (audio drivers, unix-side
+mutexes). It does NOT help Windows-side condition variables (RtlSleepConditionVariableCS)
+because those use RtlWaitOnAddress, not pi_cond.</p>
+
+<h3>C2 — SRW PI (FUTURE RESEARCH)</h3>
+
+<p><strong>Status: Unsolved problem. Not ready for implementation.</strong></p>
+
+<p>The fundamental issue: SRW locks have no owner. PI requires an owner. Options:
+- <strong>External hash table</strong> mapping lock address → owner TID (like RtlWaitOnAddress&rsquo;s queue)
+  - Adds overhead to every acquire/release (hash lookup + store)
+  - Race conditions on reader tracking (multiple owners)
+- <strong>PREEMPT_RT approach:</strong> Serialize exclusive access through an rt_mutex behind the SRW
+  - Only exclusive waiters get PI (readers don&rsquo;t)
+  - Changes lock semantics (acquisition order, fairness)
+- <strong>Accept the limitation:</strong> Windows itself has no SRW PI. Apps don&rsquo;t expect it.
+  - Focus PI effort on CS (already done) and condvar (C1)
+  - For RT paths that need PI, apps should use CS not SRW</p>
+
+<p><strong>Recommendation:</strong> Don&rsquo;t pursue SRW PI now. The effort-to-benefit ratio is poor
+given that PI for rwlocks is unsolved even in Linux. Instead, ensure CS-PI and
+condvar-PI are solid, and document that SRW locks are not PI-protected.</p>
+
+<hr />
+
+<h2>7. Implementation Priority</h2>
+
+<ol>
+<li><p><strong>B — SRW spin phase</strong> (~256 iterations, bounded)</p>
+
+<ul>
+<li>Highest impact: every contended SRW acquire is currently a syscall</li>
+<li>Matches Windows behavior</li>
+<li>Simple to implement, easy to validate</li>
+<li>Low risk</li>
+</ul>
+</li>
+<li><p><strong>C1 — pi_cond requeue-PI</strong></p>
+
+<ul>
+<li>Fixes a known, documented PI gap</li>
+<li>Upstream librtpi already has the implementation</li>
+<li>Bounded task with clear correctness benefit</li>
+<li>Medium risk (futex requeue semantics are tricky)</li>
+</ul>
+</li>
+<li><p><strong>A — CS DYNAMIC_SPIN</strong></p>
+
+<ul>
+<li>Low impact (PI path handles most contention)</li>
+<li>But apps may depend on the flag working (CRT heap uses it)</li>
+<li>Easy to implement</li>
+<li>Low risk</li>
+</ul>
+</li>
+<li><p><strong>C2 — SRW PI</strong></p>
+
+<ul>
+<li>Don&rsquo;t pursue now</li>
+<li>Unsolved problem, even Linux kernel doesn&rsquo;t have it</li>
+<li>Document the limitation instead</li>
+</ul>
+</li>
+</ol>
+
+
+<hr />
+
+<h2>8. Open Questions</h2>
+
+<ul>
+<li class="github_checkbox"><input disabled="" type="checkbox"/> Benchmark: how much latency does the SRW zero-spin cost in practice?
+
+<ul>
+<li>Need a micro-benchmark: contended SRW acquire/release cycle latency</li>
+<li>Compare: no spin vs 256-spin vs 1024-spin</li>
+</ul>
+</li>
+<li class="github_checkbox"><input disabled="" type="checkbox"/> Does FUTEX_WAIT_REQUEUE_PI work correctly with our alert-based wait?
+
+<ul>
+<li>pi_cond uses raw futex, not RtlWaitOnAddress — should be fine</li>
+<li>But need to verify kernel version requirements</li>
+</ul>
+</li>
+<li class="github_checkbox"><input disabled="" type="checkbox"/> What kernel version first supports FUTEX_CMP_REQUEUE_PI?
+
+<ul>
+<li>Believed to be 2.6.31+ (2009) — safe to assume available</li>
+</ul>
+</li>
+<li class="github_checkbox"><input disabled="" type="checkbox"/> Should SRW spin count be tunable via env var for benchmarking?
+
+<ul>
+<li>NSPA_SRW_SPIN_COUNT=256 (default) — useful during development</li>
+</ul>
+</li>
+</ul>
+
+</body></html>

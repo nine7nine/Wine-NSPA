@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>shmem-pi-futex-redesign</title>
+<style>
+  :root {
+    --bg: #1a1b26; --fg: #c0caf5; --accent: #7aa2f7;
+    --green: #9ece6a; --red: #f7768e; --yellow: #e0af68;
+    --surface: #24283b; --border: #3b4261; --muted: #8c92b3;
+    --purple: #bb9af7; --orange: #ff9e64; --cyan: #7dcfff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+    background: var(--bg); color: var(--fg);
+    max-width: 1100px; margin: 0 auto; padding: 2rem 1.5rem;
+    line-height: 1.7;
+  }
+  h1 { color: var(--accent); font-size: 1.5rem; margin: 1.5rem 0 0.5rem; }
+  h2 { color: var(--accent); font-size: 1.2rem; margin: 2rem 0 0.75rem;
+       border-bottom: 1px solid var(--border); padding-bottom: 0.3rem; }
+  h3 { color: var(--yellow); font-size: 1rem; margin: 1.25rem 0 0.5rem; }
+  h4 { color: var(--cyan); font-size: 0.95rem; margin: 1rem 0 0.4rem; }
+  p, li { font-size: 0.85rem; margin-bottom: 0.5rem; }
+  ul, ol { padding-left: 1.5rem; margin-bottom: 0.75rem; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  table {
+    width: 100%; border-collapse: collapse;
+    margin: 0.75rem 0 1rem; font-size: 0.8rem;
+  }
+  th, td {
+    padding: 0.4rem 0.75rem; text-align: left;
+    border: 1px solid var(--border);
+  }
+  th { background: var(--surface); color: var(--accent); font-weight: 600; }
+  td { background: var(--bg); }
+  code {
+    background: var(--surface); padding: 0.15rem 0.4rem;
+    border-radius: 3px; font-size: 0.82rem; color: var(--cyan);
+  }
+  pre {
+    background: var(--surface); padding: 1rem; border-radius: 6px;
+    overflow-x: auto; margin: 0.75rem 0 1rem;
+    border: 1px solid var(--border);
+  }
+  pre code { background: none; padding: 0; font-size: 0.8rem; color: var(--fg); }
+  blockquote {
+    background: var(--surface); border-left: 3px solid var(--accent);
+    padding: 0.75rem 1rem; margin: 1rem 0; border-radius: 0 4px 4px 0;
+    font-size: 0.82rem;
+  }
+  blockquote strong { color: var(--yellow); }
+  hr { border: none; border-top: 1px solid var(--border); margin: 2rem 0; }
+  strong { color: var(--fg); }
+  em { color: var(--muted); font-style: italic; }
+</style>
+</head><body>
+<h1>Shmem IPC PI Futex Redesign — REJECTED</h1>
+
+<p>Date: 2026-04-14 (updated 2026-04-15)
+Status: REJECTED — deadlocks on SMP. Manual boost (v2.5) is correct.
+Note: Implemented and tested 2026-04-15. Deadlocks due to FUTEX_LOCK_PI
+      unlock/re-acquire race in dispatcher loop. See &ldquo;Post-mortem&rdquo; at end.
+      The shmem PI v2.5 (cached sched state, 6→2 syscalls) remains the
+      correct approach (commit 17621ba494c).</p>
+
+<h2>Overview</h2>
+
+<p>Replace the manual sched_setscheduler-based PI boost in the shmem IPC
+path with kernel-managed FUTEX_LOCK_PI. Eliminates a race window,
+removes ~60 lines of manual boost code, and provides atomic, correct
+priority inheritance through the kernel&rsquo;s rt_mutex PI chain.</p>
+
+<h2>Current protocol (NSPA v2.4)</h2>
+
+<p>The shmem futex word is a plain signaling futex (0=idle, 1=request):</p>
+
+<p>  Dispatcher:                          Client:
+    futex_wait(futex, 0)  &lt;-sleeping     write request
+                                          CAS futex 0->1
+                                          futex_wake
+    wakes, sees futex==1                  nspa_shm_pi_boost():
+    global_lock.lock()                      read dispatcher TID (atomic)
+    dispatch request                        sched_getscheduler (syscall)
+    write reply                             sched_getparam (syscall)
+    CAS futex 1->0                          sched_setscheduler (syscall)
+    global_lock.unlock()                  futex_wait(futex, 1)  &lt;-sleeping
+    futex_wake  &mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&ndash;>  wakes, reads reply
+                                          nspa_shm_pi_unboost():
+                                            sched_setscheduler (syscall)</p>
+
+<p>Race window: between TID read and sched_setscheduler, the dispatcher
+could change state (e.g. another client&rsquo;s unboost lowering it). The
+window is small but not zero.</p>
+
+<p>Manual boost: 3 syscalls (getscheduler + getparam + setscheduler).
+Manual unboost: 1 syscall. Total: 4 extra syscalls per request.</p>
+
+<h2>Proposed protocol: PI futex</h2>
+
+<p>Two futex words in shmem:
+  pi_lock  — FUTEX_LOCK_PI word (TID-based ownership, kernel rt_mutex)
+  notify   — plain futex for client->dispatcher wakeup</p>
+
+<p>  Dispatcher startup:
+    futex_lock_pi(pi_lock)  -> owns it (TID stored in futex word)</p>
+
+<p>  Dispatcher loop:                     Client:
+    futex_wait(notify, 0) &lt;-sleeping     write request
+                                          notify = 1
+                                          futex_wake(notify)
+    wakes                                 futex_lock_pi(pi_lock)  &lt;-blocks
+    global_lock.lock()                     | kernel PI: boosts dispatcher
+    dispatch request                       | ATOMIC — no race window
+    write reply                            | transitive through global_lock
+    global_lock.unlock()                   |
+    futex_unlock_pi(pi_lock) &mdash;&mdash;&mdash;->  wakes (now owns pi_lock)
+                                          reads reply
+                                          futex_unlock_pi(pi_lock)
+    futex_lock_pi(pi_lock) &lt;-reacquire
+    goto loop</p>
+
+<p>Why this works:
+  1. Dispatcher holds pi_lock while idle. Kernel tracks TID ownership.
+  2. Client&rsquo;s futex_lock_pi blocks and atomically boosts dispatcher via
+     kernel rt_mutex PI chain. No race window, no TID read, no
+     sched_setscheduler.
+  3. PI is task-level: even though dispatcher sleeps on notify (different
+     futex), the PI boost from pi_lock applies to the task_struct. When
+     dispatcher wakes from notify, it runs at boosted priority.
+  4. Transitive PI: dispatcher (boosted) -> global_lock (pi_mutex) ->
+     if contended, kernel boosts the global_lock holder too. Full chain.
+  5. futex_unlock_pi wakes client AND removes boost atomically.
+  6. Robust futex: if either side dies, FUTEX_OWNER_DIED is set.
+     Other side can detect and handle gracefully.</p>
+
+<h2>What this eliminates</h2>
+
+<ul>
+<li>nspa_shm_pi_boost()           ~50 lines  (server.c)</li>
+<li>nspa_shm_pi_unboost()          ~7 lines  (server.c)</li>
+<li>struct nspa_shm_boost_state     ~6 lines  (server.c)</li>
+<li>server_dispatch_tid field       ~2 lines  (shmem struct)</li>
+<li>TID publish in dispatcher       ~5 lines  (thread.c)</li>
+<li>4 sched_* syscalls per request   (runtime)</li>
+<li>The race window                  (correctness)</li>
+</ul>
+
+
+<h2>What changes</h2>
+
+<p>  dlls/ntdll/unix/unix_private.h  — struct request_shm: futex -> pi_lock + notify    ~5 LOC
+  dlls/ntdll/unix/server.c        — send/wait protocol: CAS+wake/wait -> lock_pi    ~30 LOC changed
+  server/thread.h                 — server-side struct: same layout change            ~3 LOC
+  server/thread.c                 — dispatcher loop: same protocol change            ~25 LOC changed
+  (remove)                        — boost/unboost/boost_state/TID publish           -60 LOC</p>
+
+<p>  Net: approximately -30 lines (removes more than it adds).</p>
+
+<p>  librtpi is in-tree (libs/librtpi/rtpi.h). The pi_lock can use
+  the existing pi_mutex_t type and pi_mutex_lock/pi_mutex_unlock
+  on both client and server sides.</p>
+
+<h2>Rebase impact</h2>
+
+<p>  The changed files (server.c, thread.c, unix_private.h) already carry
+  heavy NSPA patches. However, the change is a simplification — removing
+  code and replacing one protocol with a cleaner one. The diff is
+  smaller than the current boost code it replaces.</p>
+
+<h2>Concerns and mitigations</h2>
+
+<ol>
+<li><p>futex_lock_pi is slightly more expensive than plain futex_wait
+ (rt_mutex setup overhead). But we remove 4 sched_* syscalls per
+ request, so net syscall count drops.</p></li>
+<li><p>Lock ordering: client acquires pi_lock, dispatcher holds
+ global_lock. No circular dependency — pi_lock is always acquired
+ by client, global_lock by dispatcher. The PI chain is linear:
+ client -> pi_lock -> dispatcher -> global_lock -> holder.</p></li>
+<li><p>Teardown: current protocol uses futex=-1 for shutdown. New protocol
+ needs equivalent — e.g. set notify=-1 and wake, dispatcher checks
+ before re-acquiring pi_lock.</p></li>
+<li><p>Spurious wakeups: futex_wait(notify) can return spuriously.
+ Dispatcher must re-check notify value, same as current futex==1
+ check. No change in structure.</p></li>
+<li><p>aarch64 barriers: futex_lock_pi/unlock_pi imply full memory
+ barriers (they go through the kernel). The explicit
+ __atomic_thread_fence calls around dispatch can be simplified
+ or removed.</p></li>
+</ol>
+
+
+<h2>Relationship to io_uring work</h2>
+
+<p>  This is independent of the io_uring integration. It improves the
+  shmem IPC path regardless of whether io_uring is used for file/socket
+  I/O. However, both reduce server-side overhead:
+    - io_uring: removes file/socket fds from server epoll
+    - PI futex: removes 4 syscalls per shmem request
+  Together they compound — less kernel work per request, lower latency.</p>
+
+<h2>Future: kernel FUTEX_LOCK_PI in io_uring</h2>
+
+<p>  io_uring&rsquo;s IORING_OP_FUTEX_WAIT does NOT support PI (uses futex2
+  interface, no PI flag).  Confirmed (2026-04-15): io_uring itself uses
+  kernel wait queues for CQE waits, NOT futexes — so there is no
+  conflict with FUTEX_LOCK_PI on other addresses.</p>
+
+<p>  A unified io_uring wait (sync objects + I/O + shmem PI in a single
+  io_uring_enter) would require adding FUTEX_LOCK_PI support to the
+  io_uring futex subsystem — a significant kernel change touching both
+  io_uring/futex.c and core futex code.  We control the NSPA kernel,
+  so this remains a possible future extension, but is not currently
+  planned.</p>
+
+<h2>Post-mortem: Why This Doesn&rsquo;t Work (2026-04-15)</h2>
+
+<p>  Implemented the full protocol (all 4 files changed, compiled clean)
+  and tested. Deadlocks immediately on startup.</p>
+
+<p>  The bug — dispatcher unlock/re-acquire race on SMP:</p>
+
+<p>  After the dispatcher processes a request, the protocol requires:
+    1. Dispatcher: FUTEX_UNLOCK_PI(pi_lock) — wake client
+    2. Dispatcher: FUTEX_LOCK_PI(pi_lock) — re-acquire for next request</p>
+
+<p>  If the dispatcher is faster than the client (common on SMP — the
+  dispatcher finishes processing before the client thread reaches
+  FUTEX_LOCK_PI after the WAKE(notify) syscall returns):</p>
+
+<pre><code>1. Dispatcher UNLOCK_PI — no waiters (client hasn't blocked yet),
+   kernel just clears the futex word to 0
+2. Dispatcher LOCK_PI — re-acquires immediately (futex was 0)
+3. Dispatcher WAIT(notify, 0) — sleeps, holding pi_lock
+4. Client LOCK_PI(pi_lock) — blocks (dispatcher holds it)
+5. DEADLOCK: client waits for pi_lock, dispatcher waits for notify.
+   Reply is written but client can never read it.
+</code></pre>
+
+<p>  Root cause: FUTEX_LOCK_PI can&rsquo;t serve as BOTH reply notification AND
+  PI mechanism. The unlock/re-acquire cycle has a window where ownership
+  transfer to the client isn&rsquo;t guaranteed — UNLOCK_PI only transfers
+  atomically IF a waiter is already blocked.</p>
+
+<p>  Why manual sched_setscheduler works: it&rsquo;s non-blocking. The PI boost
+  is applied independently from the reply wait (FUTEX_WAIT on the state
+  futex). The two mechanisms are decoupled.</p>
+
+<p>  Why this wasn&rsquo;t caught in design review: the protocol is correct under
+  the assumption that the client always reaches LOCK_PI before the
+  dispatcher reaches UNLOCK_PI. This holds when the dispatcher does
+  significant work (long request processing), but fails for fast/trivial
+  requests where the dispatcher can complete the entire cycle before the
+  client&rsquo;s next syscall.</p>
+
+<p>  Conclusion: v2.5 manual boost (2 syscalls per RT request) is the
+  correct approach for the shmem IPC protocol. FUTEX_LOCK_PI would
+  require a kernel extension (e.g. combined notify+PI atomic operation)
+  to work here.</p>
+</body></html>
