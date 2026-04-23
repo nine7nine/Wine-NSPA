@@ -1,0 +1,977 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Wine-NSPA -- Local-File Bypass Architecture</title>
+<style>
+  :root {
+    --bg: #1a1b26; --fg: #c0caf5; --accent: #7aa2f7;
+    --green: #9ece6a; --red: #f7768e; --yellow: #e0af68;
+    --surface: #24283b; --border: #3b4261; --muted: #8c92b3;
+    --purple: #bb9af7; --orange: #ff9e64; --cyan: #7dcfff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+    background: var(--bg); color: var(--fg);
+    max-width: 1100px; margin: 0 auto; padding: 2rem 1.5rem;
+    line-height: 1.7;
+  }
+  h1 { color: var(--accent); font-size: 1.5rem; margin: 1.5rem 0 0.5rem; }
+  h2 { color: var(--accent); font-size: 1.2rem; margin: 2rem 0 0.75rem;
+       border-bottom: 1px solid var(--border); padding-bottom: 0.3rem; }
+  h3 { color: var(--yellow); font-size: 1rem; margin: 1.25rem 0 0.5rem; }
+  h4 { color: var(--cyan); font-size: 0.95rem; margin: 1rem 0 0.4rem; }
+  p, li { font-size: 0.85rem; margin-bottom: 0.5rem; }
+  ul, ol { padding-left: 1.5rem; margin-bottom: 0.75rem; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  table {
+    width: 100%; border-collapse: collapse;
+    margin: 0.75rem 0 1rem; font-size: 0.8rem;
+  }
+  th, td {
+    padding: 0.4rem 0.75rem; text-align: left;
+    border: 1px solid var(--border);
+  }
+  th { background: var(--surface); color: var(--accent); font-weight: 600; }
+  td { background: var(--bg); }
+  code {
+    background: var(--surface); padding: 0.15rem 0.4rem;
+    border-radius: 3px; font-size: 0.82rem; color: var(--cyan);
+  }
+  pre {
+    background: var(--surface); padding: 1rem; border-radius: 6px;
+    overflow-x: auto; margin: 0.75rem 0 1rem;
+    border: 1px solid var(--border);
+  }
+  pre code { background: none; padding: 0; font-size: 0.8rem; color: var(--fg); }
+  blockquote {
+    background: var(--surface); border-left: 3px solid var(--accent);
+    padding: 0.75rem 1rem; margin: 1rem 0; border-radius: 0 4px 4px 0;
+    font-size: 0.82rem;
+  }
+  blockquote strong { color: var(--yellow); }
+  hr { border: none; border-top: 1px solid var(--border); margin: 2rem 0; }
+  strong { color: var(--fg); }
+  em { color: var(--muted); font-style: italic; }
+</style>
+</head><body>
+<h1>Wine-NSPA &ndash; Local-File Bypass Architecture</h1>
+
+<p>Wine 11.6 + NSPA RT patchset | Kernel 6.19.x-rt with NTSync PI | 2026-04-23
+Author: jordan Johnston</p>
+
+<h2>Table of Contents</h2>
+
+<ol>
+<li><a href="#1-overview">Overview</a></li>
+<li><a href="#2-motivation">Motivation</a></li>
+<li><a href="#3-design-principles">Design Principles</a></li>
+<li><a href="#4-vanilla-wine-vs-wine-nspa-file-open">Vanilla Wine vs Wine-NSPA File Open</a></li>
+<li><a href="#5-handle-range--per-process-table">Handle Range &amp; Per-Process Table</a></li>
+<li><a href="#6-shared-inode-table--sharing-arbitration">Shared Inode Table &amp; Sharing Arbitration</a></li>
+<li><a href="#7-lazy-server-handle-promotion">Lazy Server-Handle Promotion</a></li>
+<li><a href="#8-dispatch-flow">Dispatch Flow</a></li>
+<li><a href="#9-eligibility-criteria">Eligibility Criteria</a></li>
+<li><a href="#10-nt-api-coverage-matrix">NT API Coverage Matrix</a></li>
+<li><a href="#11-file-manifest-post-reorg">File Manifest (post-reorg)</a></li>
+<li><a href="#12-debug-gating">Debug Gating</a></li>
+<li><a href="#13-results--profiler-numbers">Results &amp; Profiler Numbers</a></li>
+<li><a href="#14-known-gaps--roadmap">Known Gaps &amp; Roadmap</a></li>
+<li><a href="#15-phase-history">Phase History</a></li>
+</ol>
+
+
+<hr />
+
+<h2>1. Overview</h2>
+
+<p>Wine-NSPA&rsquo;s <strong>local-file bypass</strong> (<code>NSPA_LOCAL_FILES=1</code>) services read-only regular-file <code>NtCreateFile</code> calls entirely within the client process. Every eligible open would otherwise cost a full wineserver round-trip: the client builds a <code>create_file</code> request, the server allocates a <code>struct file</code> + inode tracking + handle entry, returns a server-visible handle, then every subsequent <code>NtReadFile</code> / <code>NtQueryInformationFile</code> / etc fires another round-trip. For an app like Ableton Live 12 Lite that does roughly <strong>28,500 file opens in a single startup session</strong> &ndash; DLL manifests, <code>.pyc</code> files, theme resources, Live Library indexes &ndash; those round-trips dominate startup profile and show up as real latency on the main thread.</p>
+
+<p>The bypass routes eligible opens to a client-private handle range, maintains a per-process table that owns the unix fd, and exposes the unix fd to every Wine I/O path via a thin fast-path check inside <code>server_get_unix_fd</code>. When an API needs server-side state (section mapping, query-by-handle, inheritance), the bypass <em>lazily promotes</em> the local handle to a server-recognised handle on demand.</p>
+
+<p>The feature is invisible to Win32 applications: same <code>CreateFile</code> semantics, same sharing arbitration, same <code>io-&gt;Information = FILE_OPENED</code> return value, same behaviour on every downstream API. Apps see identical functional behaviour whether the bypass is enabled or not &ndash; the difference is measurable only in profiler output and perceived startup latency.</p>
+
+<hr />
+
+<h2>2. Motivation</h2>
+
+<p>Ableton&rsquo;s startup profile exposed a large population of short-lived file opens:</p>
+
+<table>
+<thead>
+<tr>
+<th> Pattern </th>
+<th> Example </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> DLL manifest lookups </td>
+<td> <code>C:\windows\winsxs\manifests\amd64_microsoft.windows.common-controls_*.manifest</code> </td>
+</tr>
+<tr>
+<td> Python bytecode loads </td>
+<td> <code>.../Resources/Python/abl.live/**/*.pyc</code> </td>
+</tr>
+<tr>
+<td> Theme resources </td>
+<td> <code>C:\windows\resources\themes\aero\aero.msstyles</code> </td>
+</tr>
+<tr>
+<td> Clock source probes </td>
+<td> <code>/sys/bus/clocksource/devices/clocksource0/current_clocksource</code> </td>
+</tr>
+<tr>
+<td> Ableton library indexes </td>
+<td> <code>C:\users\ninez\AppData\Local\Ableton\Live Database\Live-files-*.db</code> </td>
+</tr>
+<tr>
+<td> Live Packs </td>
+<td> <code>C:\ProgramData\Ableton\Live 12 Lite\Resources\Graphics.alp</code> </td>
+</tr>
+</tbody>
+</table>
+
+
+<p>Each open is cheap on its own (a few µs) but the aggregate is hundreds of millisecond-scale server traffic during startup &ndash; and the startup is happening on the main thread, which is where paint and UI dispatch live. Eliminating the server round-trip on these opens directly reduces time-to-first-paint and reduces steady-state priority-inversion risk on the RT audio path (server&rsquo;s single-threaded main loop services all requests).</p>
+
+<p>Other candidate workloads with similar profiles: plugin scanners (hundreds of VST probe opens), .NET apps (thousands of assembly-manifest reads at JIT time), installers (cache-file probes), and any Windows application using Python or Lua as an embedded runtime.</p>
+
+<hr />
+
+<h2>3. Design Principles</h2>
+
+<ul>
+<li><strong>Client-private handle range.</strong> The bypass issues handles from a fixed high range <code>[0x7FFFC000, 0x80000000)</code> that is disjoint from the server&rsquo;s normal handle allocation (low-to-mid) and from the NTSync client-handle range. Any caller that does <code>nspa_local_file_is_local_handle(h)</code> can cheaply tell whether a handle is ours.</li>
+<li><strong>Per-process table, not process-shared.</strong> Local handles are invalid in any other process. The table is a plain linked list under a PI mutex &ndash; no shared memory, no cross-process lookups. Cross-process handle duplication falls back to promotion through the server.</li>
+<li><strong>Shared inode table for sharing arbitration.</strong> The only thing multiple processes need to agree on is <em>sharing</em>: if another process opens a file with <code>FILE_SHARE_NONE</code> we must honour that. A server-published shmem region carries <code>(dev, inode) -&gt; (aggregate-access, aggregate-sharing, refcount)</code> so client-side arbitration matches what server-side <code>check_sharing</code> would enforce.</li>
+<li><strong>Lazy promotion.</strong> On first API that genuinely needs a server-visible handle (<code>NtQueryInformationFile</code>, <code>NtDuplicateObject</code>, <code>NtCreateSection</code>, &hellip;), the bypass does a single <code>nspa_create_file_from_unix_fd</code> RPC that hands the unix fd to the server and gets back a real server handle. Subsequent calls on the same local handle reuse the cached promoted handle.</li>
+<li><strong>RT-safe fast path.</strong> Once the table + inode shmem are warm, the bypass open path is <code>stat()</code> + linked-list-walk-under-lock + <code>open()</code> + list insert &ndash; no syscall other than the two that are inherent to the work. No lazy-init on the hot path (see Phase 1A.9 init-fix).</li>
+<li><strong>Transparent fallback.</strong> Every disqualifier returns <code>STATUS_NOT_SUPPORTED</code> and the caller falls through to the normal <code>server_create_file</code> path. Anything the bypass doesn&rsquo;t handle is handled by vanilla Wine unchanged.</li>
+<li><strong>Tight correctness envelope.</strong> Only <code>FILE_OPEN</code> / <code>FILE_OPEN_IF</code>-on-existing-file dispositions, only read-only access masks, only regular files, only synchronous (<code>FILE_SYNCHRONOUS_IO_*</code>) opens. Anything outside the envelope goes to the server.</li>
+</ul>
+
+
+<hr />
+
+<h2>4. Vanilla Wine vs Wine-NSPA File Open</h2>
+
+<div class="diagram-container">
+<svg width="920" height="580" viewBox="0 0 920 580" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .box-vanilla { fill: #24283b; stroke: #9aa5ce; stroke-width: 1.5; rx: 6; }
+    .box-nspa { fill: #24283b; stroke: #7aa2f7; stroke-width: 2; rx: 6; }
+    .box-new { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 2; rx: 6; }
+    .box-server { fill: #2a1a1a; stroke: #f7768e; stroke-width: 1.5; rx: 6; }
+    .box-kernel { fill: #1a1a2a; stroke: #bb9af7; stroke-width: 1.5; rx: 6; }
+    .label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+    .label-sm { fill: #c0caf5; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+    .label-accent { fill: #7aa2f7; font-size: 13px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .label-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .label-red { fill: #f7768e; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .label-yellow { fill: #e0af68; font-size: 10px; font-family: 'JetBrains Mono', monospace; }
+    .label-muted { fill: #8c92b3; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+    .divider { stroke: #3b4261; stroke-width: 1; stroke-dasharray: 8,4; }
+  </style>
+  <defs>
+    <marker id="lfA" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#c8d0e8"/></marker>
+    <marker id="lfG" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#9ece6a"/></marker>
+    <marker id="lfR" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#f7768e"/></marker>
+  </defs>
+
+  <text x="220" y="24" class="label-accent" text-anchor="middle">Vanilla Wine: every open = server RTT</text>
+  <text x="700" y="24" class="label-accent" text-anchor="middle">Wine-NSPA: local bypass for eligible opens</text>
+  <line x1="460" y1="8" x2="460" y2="570" class="divider"/>
+
+  <!-- LEFT -->
+  <rect x="40" y="45" width="340" height="28" class="box-vanilla"/>
+  <text x="210" y="64" text-anchor="middle" class="label">NtCreateFile (ntdll unix)</text>
+  <line x1="210" y1="73" x2="210" y2="93" stroke="#f7768e" stroke-width="1.5" marker-end="url(#lfR)"/>
+
+  <rect x="60" y="95" width="300" height="28" class="box-server"/>
+  <text x="210" y="114" text-anchor="middle" class="label-red">SERVER: create_file request</text>
+  <line x1="210" y1="123" x2="210" y2="143" stroke="#f7768e" stroke-width="1.5" marker-end="url(#lfR)"/>
+
+  <rect x="60" y="145" width="300" height="60" class="box-server"/>
+  <text x="210" y="163" text-anchor="middle" class="label-red">open(), stat(), check_sharing</text>
+  <text x="210" y="180" text-anchor="middle" class="label-red">alloc struct fd + struct file</text>
+  <text x="210" y="197" text-anchor="middle" class="label-muted">global_lock held during sharing arbitration</text>
+  <line x1="210" y1="205" x2="210" y2="225" stroke="#f7768e" stroke-width="1.5" marker-end="url(#lfR)"/>
+
+  <rect x="60" y="227" width="300" height="28" class="box-server"/>
+  <text x="210" y="246" text-anchor="middle" class="label-red">alloc_handle (server range)</text>
+  <line x1="210" y1="255" x2="210" y2="275" stroke="#9aa5ce" stroke-width="1" marker-end="url(#lfA)"/>
+
+  <rect x="40" y="277" width="340" height="28" class="box-vanilla"/>
+  <text x="210" y="296" text-anchor="middle" class="label">reply: server handle 0x14</text>
+  <line x1="210" y1="305" x2="210" y2="325" stroke="#9aa5ce" stroke-width="1" marker-end="url(#lfA)"/>
+
+  <rect x="40" y="327" width="340" height="28" class="box-vanilla"/>
+  <text x="210" y="346" text-anchor="middle" class="label">NtReadFile: another server RTT</text>
+  <line x1="210" y1="355" x2="210" y2="375" stroke="#f7768e" stroke-width="1.5" marker-end="url(#lfR)"/>
+
+  <rect x="60" y="377" width="300" height="42" class="box-server"/>
+  <text x="210" y="395" text-anchor="middle" class="label-red">get_handle_fd -> SCM_RIGHTS</text>
+  <text x="210" y="412" text-anchor="middle" class="label-muted">client mmaps + pread; close on needs_close</text>
+
+  <text x="210" y="465" text-anchor="middle" class="label-yellow">Cost per open-read-close: 3+ server RTTs</text>
+  <text x="210" y="483" text-anchor="middle" class="label-muted">~5-10µs each, ~15-30µs wall on an otherwise idle server</text>
+  <text x="210" y="501" text-anchor="middle" class="label-muted">under RT contention: unbounded</text>
+
+  <!-- RIGHT -->
+  <rect x="520" y="45" width="340" height="28" class="box-nspa"/>
+  <text x="690" y="64" text-anchor="middle" class="label">NtCreateFile (ntdll unix)</text>
+  <line x1="690" y1="73" x2="690" y2="93" stroke="#9ece6a" stroke-width="1.5" marker-end="url(#lfG)"/>
+
+  <rect x="540" y="95" width="300" height="28" class="box-new"/>
+  <text x="690" y="114" text-anchor="middle" class="label-green">nspa_local_file_try_bypass</text>
+  <line x1="690" y1="123" x2="690" y2="143" stroke="#9ece6a" stroke-width="1.5" marker-end="url(#lfG)"/>
+
+  <rect x="540" y="145" width="300" height="75" class="box-new"/>
+  <text x="690" y="163" text-anchor="middle" class="label-green">stat() -&gt; (dev, inode)</text>
+  <text x="690" y="180" text-anchor="middle" class="label-green">check_and_publish via shmem table</text>
+  <text x="690" y="197" text-anchor="middle" class="label-green">open() O_RDONLY</text>
+  <text x="690" y="214" text-anchor="middle" class="label-muted">per-bucket PI mutex, no server call</text>
+  <line x1="690" y1="220" x2="690" y2="240" stroke="#9ece6a" stroke-width="1.5" marker-end="url(#lfG)"/>
+
+  <rect x="540" y="242" width="300" height="28" class="box-new"/>
+  <text x="690" y="261" text-anchor="middle" class="label-green">alloc local handle (0x7FFF xxxx)</text>
+  <line x1="690" y1="270" x2="690" y2="290" stroke="#9ece6a" stroke-width="1.5" marker-end="url(#lfG)"/>
+
+  <rect x="540" y="292" width="300" height="28" class="box-nspa"/>
+  <text x="690" y="311" text-anchor="middle" class="label">return local handle</text>
+  <line x1="690" y1="320" x2="690" y2="340" stroke="#9aa5ce" stroke-width="1" marker-end="url(#lfA)"/>
+
+  <rect x="520" y="342" width="340" height="28" class="box-nspa"/>
+  <text x="690" y="361" text-anchor="middle" class="label">NtReadFile(local_handle)</text>
+  <line x1="690" y1="370" x2="690" y2="390" stroke="#9ece6a" stroke-width="1.5" marker-end="url(#lfG)"/>
+
+  <rect x="540" y="392" width="300" height="42" class="box-new"/>
+  <text x="690" y="410" text-anchor="middle" class="label-green">server_get_unix_fd fast path</text>
+  <text x="690" y="427" text-anchor="middle" class="label-green">table lookup -&gt; pread(fd)</text>
+
+  <text x="690" y="465" text-anchor="middle" class="label-green">Cost per open-read-close: 0 server RTTs</text>
+  <text x="690" y="483" text-anchor="middle" class="label-muted">stat + open + pread; everything local</text>
+  <text x="690" y="501" text-anchor="middle" class="label-muted">promotion happens only on API that needs server state</text>
+</svg>
+</div>
+
+
+<hr />
+
+<h2>5. Handle Range &amp; Per-Process Table</h2>
+
+<h3>5.1 Handle range</h3>
+
+<p>Local handles are allocated from the fixed range <code>[NSPA_LF_HANDLE_BASE, 0x80000000)</code> where <code>NSPA_LF_HANDLE_BASE = 0x80000000 - NSPA_LF_HANDLE_CAP*4</code> with <code>NSPA_LF_HANDLE_CAP = 4096</code>. That gives an exact 16 KiB handle window disjoint from:</p>
+
+<ul>
+<li>Server&rsquo;s normal handle allocation (starts at <code>0x4</code>, grows up)</li>
+<li>Wine&rsquo;s pseudo-handles (<code>~0..~5</code>)</li>
+<li>The NTSync client-handle range (near <code>INPROC_SYNC_CACHE_TOTAL</code>)</li>
+</ul>
+
+
+<p><code>nspa_local_file_is_local_handle(h)</code> is a constant-time range check: <code>base &lt;= h &lt; 0x80000000 &amp;&amp; h != 0x7FFFFFFF</code> (the last exclusion is for the <code>CURRENT_PROCESS</code> pseudo-handle which would otherwise land inside the range). The check is called from every NT-API intercept site to decide whether to take the bypass path or fall through.</p>
+
+<h3>5.2 Per-process table</h3>
+
+<p><code>c
+struct nspa_local_open {
+    struct list       entry;
+    HANDLE            handle;         /* local-range handle returned to app */
+    HANDLE            server_handle;  /* lazy-promoted; 0 until first promote */
+    int               unix_fd;
+    unsigned long long device;
+    unsigned long long inode;
+    unsigned int      access;
+    unsigned int      sharing;
+    unsigned int      options;        /* FILE_OPEN options: SYNC_IO_NONALERT, etc */
+    unsigned int      attributes;     /* OBJ_INHERIT forwarded on promote */
+    WCHAR            *nt_name;        /* original NT path for GetFinalPathNameByHandle */
+    USHORT            nt_name_len;
+};
+</code></p>
+
+<p>Protected by a single process-wide PI mutex (<code>nspa_lf_opens_mutex</code>). Linear list &ndash; walk is O(N) per lookup. For Ableton&rsquo;s typical workload the list reaches a few hundred entries at peak; the walk is in the noise next to a server RTT it avoids.</p>
+
+<p>Table add (on mint) and remove (on close) are the only writers. Every other operation (lookup, promote lookup) is a read under the same lock. The lock is a PI mutex because RT-priority threads occasionally open files at init and we cannot have a low-priority thread holding the lock against the audio callback.</p>
+
+<hr />
+
+<h2>6. Shared Inode Table &amp; Sharing Arbitration</h2>
+
+<p>Windows file sharing (<code>FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE</code>) has cross-process semantics: if Process A opens <code>foo</code> with <code>sharing=0</code>, Process B&rsquo;s open of <code>foo</code> must fail with <code>STATUS_SHARING_VIOLATION</code>. Any pure-local bypass has to see what other processes have done on the same <code>(device, inode)</code>.</p>
+
+<h3>6.1 Shmem layout</h3>
+
+<p>The wineserver publishes a <code>NSPA_INODE_BUCKETS</code> = 1024 bucket hash table as a memfd-backed shmem region. Each bucket has 4 slots of <code>(dev, inode, agg_access, agg_sharing, refcount)</code> + a per-bucket PI mutex. Clients map the region read-only for arbitration lookups, read-write on the mutex word for publishing their own opens.</p>
+
+<p><code>
+┌───────────────────────────────────────────────┐
+│ nspa_inode_table_shm_t (~160 KB)              │
+├───────────────────────────────────────────────┤
+│  buckets[0..1023]                             │
+│   ├─ lock_storage (pi_mutex_t, 64 B)          │
+│   ├─ slot[0] (dev, ino, access, share, ref)   │
+│   ├─ slot[1]                                  │
+│   ├─ slot[2]                                  │
+│   └─ slot[3]                                  │
+└───────────────────────────────────────────────┘
+</code></p>
+
+<p>Bucket index = hash(dev, inode) mod 1024. Slot selection is linear within the bucket (first free or matching). If all 4 slots are full and none match, the bypass returns <code>STATUS_NOT_SUPPORTED</code> and the open falls back to the server &ndash; this is an overflow-safety valve, not a correctness path.</p>
+
+<h3>6.2 Arbitration logic</h3>
+
+<p><code>nspa_local_file_check_and_publish_open</code> atomically checks the existing aggregate against the new open&rsquo;s access/sharing mask, returning <code>STATUS_SHARING_VIOLATION</code> if they conflict. Matching the server&rsquo;s algorithm exactly:</p>
+
+<ul>
+<li>Pending opens add <code>access</code> to <code>agg_access</code> and intersect <code>sharing</code> with <code>agg_sharing</code>.</li>
+<li>A new open must satisfy: <code>(agg_access &amp; ~my_sharing) == 0</code> AND <code>(my_access &amp; ~agg_sharing) == 0</code>.</li>
+</ul>
+
+
+<p>This lives in <code>nspa_local_file_check_sharing_algorithm()</code>. The server-side publish hooks (<code>nspa_inode_publish_slot</code>) mirror the same rule from the server side whenever a non-bypass open creates or clears an inode entry. Arbitration therefore sees the <em>union</em> of bypass and non-bypass opens.</p>
+
+<hr />
+
+<h2>7. Lazy Server-Handle Promotion</h2>
+
+<p>The LF table returns a local-range handle to the application. Most Nt-API intercepts can service the call from the local unix fd directly (<code>NtReadFile</code>, <code>NtWriteFile</code>, <code>NtQueryInformationFile</code> for <code>FileBasicInformation</code> / <code>FilePositionInformation</code> / etc). But some APIs <em>require</em> a server-visible handle:</p>
+
+<ul>
+<li><code>NtCreateSection</code> &ndash; section object lives on the server</li>
+<li><code>NtDuplicateObject</code> &ndash; dup goes through <code>SERVER_START_REQ(dup_handle)</code></li>
+<li><code>NtQueryInformationFile</code> for classes the server handles (e.g. <code>FileNameInformation</code>)</li>
+<li><code>NtQueryObject</code> &ndash; <code>ObjectName</code> / <code>ObjectBasic</code> / <code>ObjectType</code> all server-side</li>
+<li><code>NtQuerySecurityObject</code>, <code>NtSetSecurityObject</code></li>
+<li><code>NtMakePermanentObject</code>, <code>NtMakeTemporaryObject</code></li>
+<li><code>NtCompareObjects</code></li>
+</ul>
+
+
+<p>For these, the bypass lazily promotes the local handle: on first call needing server state, it issues a single <code>nspa_create_file_from_unix_fd</code> RPC:</p>
+
+<ol>
+<li><code>wine_server_send_fd(unix_fd)</code> &ndash; SCM_RIGHTS transfers a dup of the fd to the server</li>
+<li>Server&rsquo;s handler wraps the fd in a <code>struct fd</code> + <code>struct file_obj</code> + stores the NT path</li>
+<li>Server calls <code>alloc_handle</code> and returns a normal server-range handle</li>
+<li>Client stores the server handle in the LF entry&rsquo;s <code>server_handle</code> field</li>
+</ol>
+
+
+<p>Subsequent calls on the same local handle reuse the cached server handle &ndash; no second RPC. <code>nspa_promote_if_local(h)</code> is the one-line helper that every intercept site calls:</p>
+
+<p>```c
+HANDLE nspa_promote_if_local( HANDLE h );</p>
+
+<p>// Returns <code>h</code> unchanged if not local-range.
+// Returns the promoted server handle (cached if already promoted) if local-range.
+// Returns <code>h</code> unchanged if promotion failed (caller falls back to server path).
+```</p>
+
+<p>This is Phase 1A.4.a lazy-promotion. The alternative &ndash; eagerly promoting at mint time &ndash; was rejected because most file opens in Ableton&rsquo;s workload never touch a server-requiring API; they read, maybe query a position, and close. Eager promotion would cost an RPC per open; lazy promotion costs an RPC per <em>distinct file that escapes the read-only happy path</em>.</p>
+
+<h3>7.1 <code>attributes</code> plumbing</h3>
+
+<p>The promote RPC forwards <code>ObjectAttributes-&gt;Attributes</code> (typically <code>OBJ_CASE_INSENSITIVE</code>, plus <code>OBJ_INHERIT</code> when <code>bInheritHandles=TRUE</code> is set on <code>CreateProcess</code>). The server&rsquo;s <code>alloc_handle_entry</code> translates <code>OBJ_INHERIT</code> to <code>RESERVED_INHERIT</code> on the handle&rsquo;s access mask, which is how Wine tracks inheritable handles for <code>copy_handle_table</code> during <code>CreateProcess</code>. Without the forwarding, inheritable local-range handles would be silently dropped by the inheritance walk.</p>
+
+<hr />
+
+<h2>8. Dispatch Flow</h2>
+
+<div class="diagram-container">
+<svg width="920" height="640" viewBox="0 0 920 640" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .box-gate { fill: #24283b; stroke: #7aa2f7; stroke-width: 2; rx: 6; }
+    .box-fast { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 2; rx: 6; }
+    .box-slow { fill: #2a1a1a; stroke: #f7768e; stroke-width: 1.5; rx: 6; }
+    .box-api { fill: #24283b; stroke: #e0af68; stroke-width: 1.5; rx: 6; }
+    .label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+    .label-sm { fill: #c0caf5; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+    .label-accent { fill: #7aa2f7; font-size: 13px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .label-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .label-red { fill: #f7768e; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .label-yellow { fill: #e0af68; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .label-muted { fill: #8c92b3; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+  </style>
+  <defs>
+    <marker id="df1" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#c8d0e8"/></marker>
+    <marker id="df2" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#9ece6a"/></marker>
+    <marker id="df3" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#f7768e"/></marker>
+  </defs>
+
+  <text x="460" y="24" class="label-accent" text-anchor="middle">NtCreateFile bypass dispatch + downstream intercepts</text>
+
+  <rect x="340" y="50" width="240" height="32" class="box-api"/>
+  <text x="460" y="70" text-anchor="middle" class="label">app: CreateFileA(...)</text>
+
+  <line x1="460" y1="82" x2="460" y2="102" stroke="#c8d0e8" stroke-width="1.5" marker-end="url(#df1)"/>
+
+  <rect x="320" y="104" width="280" height="52" class="box-gate"/>
+  <text x="460" y="124" text-anchor="middle" class="label-yellow">eligibility gate (file.c:4706)</text>
+  <text x="460" y="142" text-anchor="middle" class="label-muted">disposition FILE_OPEN|FILE_OPEN_IF, sync, read-only</text>
+
+  <line x1="320" y1="130" x2="140" y2="200" stroke="#f7768e" stroke-width="1.5" marker-end="url(#df3)"/>
+  <text x="180" y="170" class="label-red" text-anchor="start">fail gate</text>
+  <rect x="40" y="200" width="200" height="32" class="box-slow"/>
+  <text x="140" y="220" text-anchor="middle" class="label-red">server create_file RTT</text>
+
+  <line x1="460" y1="156" x2="460" y2="180" stroke="#9ece6a" stroke-width="1.5" marker-end="url(#df2)"/>
+
+  <rect x="320" y="182" width="280" height="76" class="box-fast"/>
+  <text x="460" y="202" text-anchor="middle" class="label-green">nspa_local_file_try_bypass</text>
+  <text x="460" y="220" text-anchor="middle" class="label-sm">stat() + S_ISREG check</text>
+  <text x="460" y="236" text-anchor="middle" class="label-sm">check_and_publish via inode shmem</text>
+  <text x="460" y="252" text-anchor="middle" class="label-sm">open() + table_add</text>
+
+  <line x1="320" y1="240" x2="160" y2="290" stroke="#f7768e" stroke-width="1.5" marker-end="url(#df3)"/>
+  <text x="200" y="270" class="label-red" text-anchor="start">SHARING_VIOLATION or NOT_SUPPORTED</text>
+
+  <line x1="460" y1="258" x2="460" y2="282" stroke="#9ece6a" stroke-width="1.5" marker-end="url(#df2)"/>
+
+  <rect x="340" y="284" width="240" height="32" class="box-api"/>
+  <text x="460" y="304" text-anchor="middle" class="label">local handle 0x7FFFC4xx</text>
+
+  <line x1="460" y1="316" x2="460" y2="340" stroke="#c8d0e8" stroke-width="1.5" marker-end="url(#df1)"/>
+
+  <rect x="100" y="342" width="720" height="42" class="box-api"/>
+  <text x="460" y="360" text-anchor="middle" class="label">app uses the handle: NtReadFile / NtQuery* / NtSet* / NtFsCtl / NtDeviceIoCtl / ...</text>
+  <text x="460" y="376" text-anchor="middle" class="label-muted">every NT-API entry point checks nspa_local_file_is_local_handle</text>
+
+  <line x1="300" y1="384" x2="200" y2="410" stroke="#9ece6a" stroke-width="1.5" marker-end="url(#df2)"/>
+  <line x1="620" y1="384" x2="720" y2="410" stroke="#9ece6a" stroke-width="1.5" marker-end="url(#df2)"/>
+
+  <rect x="60" y="412" width="280" height="52" class="box-fast"/>
+  <text x="200" y="432" text-anchor="middle" class="label-green">NtReadFile / NtWriteFile</text>
+  <text x="200" y="450" text-anchor="middle" class="label-sm">server_get_unix_fd fast path -&gt; pread(fd)</text>
+
+  <rect x="580" y="412" width="280" height="52" class="box-fast"/>
+  <text x="720" y="432" text-anchor="middle" class="label-green">NtQuery*InformationFile etc</text>
+  <text x="720" y="450" text-anchor="middle" class="label-sm">nspa_promote_if_local -&gt; server RPC</text>
+
+  <line x1="720" y1="464" x2="720" y2="486" stroke="#f7768e" stroke-width="1" marker-end="url(#df3)"/>
+  <rect x="580" y="488" width="280" height="42" class="box-slow"/>
+  <text x="720" y="506" text-anchor="middle" class="label-red">nspa_create_file_from_unix_fd</text>
+  <text x="720" y="520" text-anchor="middle" class="label-muted">one-time per local handle; cached</text>
+
+  <line x1="460" y1="556" x2="460" y2="580" stroke="#c8d0e8" stroke-width="1" marker-end="url(#df1)"/>
+  <rect x="340" y="582" width="240" height="42" class="box-fast"/>
+  <text x="460" y="600" text-anchor="middle" class="label-green">NtClose (local path)</text>
+  <text x="460" y="616" text-anchor="middle" class="label-muted">close(fd) + remove entry + server close if promoted</text>
+</svg>
+</div>
+
+
+<hr />
+
+<h2>9. Eligibility Criteria</h2>
+
+<p>The bypass accepts only a tightly-scoped subset. The eligibility gate in <code>file.c</code>&rsquo;s <code>NtCreateFile</code>:</p>
+
+<p><code>c
+if (!loader_open &amp;&amp;
+    !attr-&gt;RootDirectory &amp;&amp; !attr-&gt;SecurityDescriptor &amp;&amp;
+    (disposition == FILE_OPEN || disposition == FILE_OPEN_IF) &amp;&amp;
+    !(options &amp; (FILE_OPEN_BY_FILE_ID | FILE_DIRECTORY_FILE | FILE_DELETE_ON_CLOSE)) &amp;&amp;
+    (options &amp; (FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT)) &amp;&amp;
+    !(access &amp; ~(FILE_READ_DATA | FILE_READ_ATTRIBUTES | FILE_READ_EA |
+                 READ_CONTROL | SYNCHRONIZE | GENERIC_READ)))
+{
+    NTSTATUS bypass = nspa_local_file_try_bypass( ... );
+    if (bypass == STATUS_SUCCESS) return STATUS_SUCCESS;
+    if (bypass == STATUS_SHARING_VIOLATION) { status = bypass; goto done; }
+    /* STATUS_NOT_SUPPORTED -&gt; fall through */
+}
+</code></p>
+
+<p>Disqualifiers and their reasons:</p>
+
+<table>
+<thead>
+<tr>
+<th> Condition </th>
+<th> Why rejected </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> <code>loader_open</code> (<code>.dll</code> / <code>.drv</code> / <code>.sys</code> / <code>.exe</code>) </td>
+<td> Wine&rsquo;s loader owns its own open path for these; we don&rsquo;t want to race with it. </td>
+</tr>
+<tr>
+<td> <code>attr-&gt;RootDirectory != 0</code> </td>
+<td> Relative opens would need <code>openat()</code> against a server-handle root &ndash; not worth the complexity. </td>
+</tr>
+<tr>
+<td> <code>attr-&gt;SecurityDescriptor != 0</code> </td>
+<td> Custom SD means the caller wants server-enforced access control. </td>
+</tr>
+<tr>
+<td> <code>disposition != FILE_OPEN</code> &amp;&amp; <code>!= FILE_OPEN_IF</code> </td>
+<td> Create / overwrite / supersede need server-side atomicity on existence checks. </td>
+</tr>
+<tr>
+<td> <code>options &amp; FILE_OPEN_BY_FILE_ID</code> </td>
+<td> Open-by-ID walks the server&rsquo;s inode -> name mapping. </td>
+</tr>
+<tr>
+<td> <code>options &amp; FILE_DIRECTORY_FILE</code> </td>
+<td> Directories use <code>NtQueryDirectoryFile</code> streaming &ndash; different bypass target, not in scope. </td>
+</tr>
+<tr>
+<td> <code>options &amp; FILE_DELETE_ON_CLOSE</code> </td>
+<td> Atomic-delete semantics need server ordering. </td>
+</tr>
+<tr>
+<td> <code>options</code> lacks any <code>FILE_SYNCHRONOUS_IO_*</code> flag </td>
+<td> OVERLAPPED opens route through <code>register_async_file_read</code> which takes the handle to the server &ndash; local handle would fail STATUS_INVALID_HANDLE. </td>
+</tr>
+<tr>
+<td> Any access bit outside the read-only mask </td>
+<td> Write access has sharing-arbitration corners we don&rsquo;t cover in MVP. </td>
+</tr>
+</tbody>
+</table>
+
+
+<p><code>FILE_OPEN_FOR_BACKUP_INTENT</code>, <code>FILE_NO_INTERMEDIATE_BUFFERING</code>, <code>FILE_WRITE_THROUGH</code>, <code>FILE_OPEN_REPARSE_POINT</code>, <code>FILE_RANDOM_ACCESS</code>, <code>FILE_SEQUENTIAL_ONLY</code> are all <em>accepted</em> &ndash; they either have no semantic we need to enforce client-side or map cleanly to <code>open()</code> flags.</p>
+
+<hr />
+
+<h2>10. NT API Coverage Matrix</h2>
+
+<p>Every handle-consuming NT API in ntdll/unix and server/ either:</p>
+
+<ul>
+<li><strong>(intercept)</strong> has a local-handle intercept at its top that promotes on demand</li>
+<li><strong>(fast path)</strong> services the call from the local unix fd without server contact</li>
+<li><strong>(pass-through)</strong> doesn&rsquo;t care about local handles (e.g. works on SID not handle)</li>
+</ul>
+
+
+<table>
+<thead>
+<tr>
+<th> NT API </th>
+<th> Strategy </th>
+<th> File / Line </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> <code>NtCreateFile</code> </td>
+<td> bypass dispatch </td>
+<td> <code>dlls/ntdll/unix/file.c</code> </td>
+</tr>
+<tr>
+<td> <code>NtReadFile</code>, <code>NtWriteFile</code> </td>
+<td> fast path via <code>server_get_unix_fd</code> </td>
+<td> <code>dlls/ntdll/unix/file.c</code> </td>
+</tr>
+<tr>
+<td> <code>NtQueryInformationFile</code> </td>
+<td> intercept + promote </td>
+<td> <code>dlls/ntdll/unix/file.c</code> </td>
+</tr>
+<tr>
+<td> <code>NtSetInformationFile</code> </td>
+<td> intercept + promote </td>
+<td> <code>dlls/ntdll/unix/file.c</code> </td>
+</tr>
+<tr>
+<td> <code>NtFsControlFile</code> </td>
+<td> intercept + promote </td>
+<td> <code>dlls/ntdll/unix/file.c</code> </td>
+</tr>
+<tr>
+<td> <code>NtDeviceIoControlFile</code> </td>
+<td> intercept + promote </td>
+<td> <code>dlls/ntdll/unix/file.c</code> </td>
+</tr>
+<tr>
+<td> <code>NtFlushBuffersFileEx</code> </td>
+<td> intercept + promote </td>
+<td> <code>dlls/ntdll/unix/file.c</code> </td>
+</tr>
+<tr>
+<td> <code>NtCancelIoFile</code>, <code>NtCancelSynchronousIoFile</code> </td>
+<td> intercept + promote </td>
+<td> <code>dlls/ntdll/unix/file.c</code> </td>
+</tr>
+<tr>
+<td> <code>NtLockFile</code> </td>
+<td> intercept + promote </td>
+<td> <code>dlls/ntdll/unix/file.c</code> </td>
+</tr>
+<tr>
+<td> <code>NtQueryVolumeInformationFile</code> </td>
+<td> intercept + promote </td>
+<td> <code>dlls/ntdll/unix/file.c</code> </td>
+</tr>
+<tr>
+<td> <code>NtQueryObject</code> </td>
+<td> intercept + traced promote </td>
+<td> <code>dlls/ntdll/unix/file.c</code> </td>
+</tr>
+<tr>
+<td> <code>NtSetInformationObject</code> </td>
+<td> intercept + promote </td>
+<td> <code>dlls/ntdll/unix/file.c</code> </td>
+</tr>
+<tr>
+<td> <code>NtCreateSection</code> </td>
+<td> dedicated <code>nspa_create_mapping_from_unix_fd</code> RPC </td>
+<td> <code>dlls/ntdll/unix/sync.c</code> </td>
+</tr>
+<tr>
+<td> <code>NtDuplicateObject</code> (same-process) </td>
+<td> intercept + promote + DUPLICATE_CLOSE_SOURCE LF cleanup </td>
+<td> <code>dlls/ntdll/unix/server.c</code> </td>
+</tr>
+<tr>
+<td> <code>NtCompareObjects</code> </td>
+<td> intercept + promote (both args) </td>
+<td> <code>dlls/ntdll/unix/server.c</code> </td>
+</tr>
+<tr>
+<td> <code>NtQuerySecurityObject</code> </td>
+<td> intercept + promote </td>
+<td> <code>dlls/ntdll/unix/security.c</code> </td>
+</tr>
+<tr>
+<td> <code>NtSetSecurityObject</code> </td>
+<td> intercept + promote </td>
+<td> <code>dlls/ntdll/unix/security.c</code> </td>
+</tr>
+<tr>
+<td> <code>NtMakePermanentObject</code> </td>
+<td> intercept + promote </td>
+<td> <code>dlls/ntdll/unix/sync.c</code> </td>
+</tr>
+<tr>
+<td> <code>NtMakeTemporaryObject</code> </td>
+<td> intercept + promote </td>
+<td> <code>dlls/ntdll/unix/sync.c</code> </td>
+</tr>
+<tr>
+<td> <code>NtClose</code> </td>
+<td> LF close path (close fd + remove entry + server-close promoted) </td>
+<td> <code>dlls/ntdll/unix/server.c</code> </td>
+</tr>
+<tr>
+<td> <code>CreateProcess</code> inheritance (legacy <code>bInheritHandles=TRUE</code>) </td>
+<td> <code>nspa_local_file_promote_inheritable</code> before <code>new_process</code> RPC </td>
+<td> <code>dlls/ntdll/unix/process.c</code> </td>
+</tr>
+<tr>
+<td> <code>CreateProcess</code> inheritance (STARTUPINFOEX <code>PS_ATTRIBUTE_HANDLE_LIST</code>) </td>
+<td> <strong>deferred</strong> &ndash; synchronous promote-per-handle introduced a one-frame menu-paint delay; proper fix is batched promote RPC </td>
+<td> <code>dlls/ntdll/unix/process.c</code> </td>
+</tr>
+</tbody>
+</table>
+
+
+<hr />
+
+<h2>11. File Manifest (post-reorg)</h2>
+
+<p>All NSPA-specific source lives under a <code>nspa/</code> subdirectory in each module. Upstream Wine files carry only single-line intercept hook calls, keeping rebase-against-upstream conflicts minimal.</p>
+
+<p>```
+dlls/ntdll/unix/nspa/
+├── local_file.c         &ndash; LF table, bypass dispatch, promote helpers
+├── local_timer.c        &ndash; NT timer local dispatcher
+└── debug.h              &ndash; NSPA_TRACE macro, compile + runtime gated</p>
+
+<p>dlls/win32u/nspa/
+├── msg_ring.c           &ndash; Message bypass (POST/SEND rings)
+└── local_wm_timer.c     &ndash; WM_TIMER local dispatcher</p>
+
+<p>server/nspa/
+├── local_file.c         &ndash; inode-aggregation shmem + promote handler
+├── local_file.h         &ndash; server-side declarations
+├── profile.c            &ndash; wineserver per-request-type profiler
+└── debug.h              &ndash; server-side NSPA_TRACE macro
+```</p>
+
+<p>Upstream diffs against vanilla Wine are narrow:</p>
+
+<ul>
+<li><code>dlls/ntdll/unix/file.c</code>: eligibility gate (8 lines) + 10 one-line intercept calls</li>
+<li><code>dlls/ntdll/unix/server.c</code>: one call to <code>nspa_local_file_try_get_unix_fd()</code>, one promote in <code>NtDuplicateObject</code>, one LF-close entry in <code>NtClose</code></li>
+<li><code>dlls/ntdll/unix/sync.c</code>: LF-handle branch in <code>NtCreateSection</code>, two promote lines in <code>NtMake{Permanent,Temporary}Object</code></li>
+<li><code>dlls/ntdll/unix/security.c</code>: two promote lines</li>
+<li><code>dlls/ntdll/unix/process.c</code>: <code>alloc_handle_list</code> was extended (prong A, currently deferred &ndash; see §14) + <code>nspa_local_file_promote_inheritable()</code> call before <code>new_process</code> RPC</li>
+<li><code>server/file.c</code>: one call to <code>nspa_lf_trace_promote()</code> inside the existing <code>nspa_create_file_from_unix_fd</code> handler</li>
+</ul>
+
+
+<hr />
+
+<h2>12. Debug Gating</h2>
+
+<p>Trace emission is both compile-time gated (<code>NSPA_DEBUG</code>, default on; pass <code>-DNSPA_DEBUG=0</code> for a release build) and runtime gated via cached env checks.</p>
+
+<p>```c</p>
+
+<h1>if NSPA_DEBUG</h1>
+
+<h1>define NSPA_TRACE_ENABLED_FN(name) \</h1>
+
+<pre><code>static inline int nspa_trace_##name##_enabled(void) { \
+    static int cache = -1; \
+    int v = __atomic_load_n( &amp;cache, __ATOMIC_RELAXED ); \
+    if (v &lt; 0) { \
+        v = getenv( "NSPA_" #name ) ? 1 : 0; \
+        __atomic_store_n( &amp;cache, v, __ATOMIC_RELAXED ); \
+    } \
+    return v; \
+}
+</code></pre>
+
+<p>NSPA_TRACE_ENABLED_FN(LF_TRACE)
+NSPA_TRACE_ENABLED_FN(LF_TRACE_SRV)
+/<em> &hellip; </em>/</p>
+
+<h1>define NSPA_TRACE(name, &hellip;) \</h1>
+
+<pre><code>do { if (nspa_trace_##name##_enabled()) fprintf( stderr, __VA_ARGS__ ); } while (0)
+</code></pre>
+
+<h1>else</h1>
+
+<h1>define NSPA_TRACE(name, &hellip;) ((void)0)</h1>
+
+<h1>endif</h1>
+
+<p>```</p>
+
+<ul>
+<li>First call per TU does a single <code>getenv()</code>; subsequent calls are a relaxed atomic load + not-taken branch when the env is unset (production default).</li>
+<li>Trace <em>emission</em> lives inside <code>nspa/*.c</code> &ndash; upstream Wine files have zero <code>NSPA_TRACE</code> calls. Trace-worthy hooks in upstream code (e.g. the LF fast path in <code>server_get_unix_fd</code>) have been extracted into helpers (<code>nspa_local_file_try_get_unix_fd</code>, <code>nspa_promote_if_local_traced</code>) that the upstream file calls, and all trace logic lives inside those helpers.</li>
+</ul>
+
+
+<hr />
+
+<h2>13. Results &amp; Profiler Numbers</h2>
+
+<p>Ableton Live 12 Lite, 95-second playback window, <code>NSPA_PROFILE=1</code> with all prod gates. Baseline is the pre-LF fullprod run (2026-04-21); &ldquo;post-LF&rdquo; is the 2026-04-23 run after the complete stack landed.</p>
+
+<table>
+<thead>
+<tr>
+<th> Request </th>
+<th style="text-align:right;"> Pre-LF (baseline) </th>
+<th style="text-align:right;"> Post-LF </th>
+<th style="text-align:right;"> Delta </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> <code>send_message</code> </td>
+<td style="text-align:right;"> 32,342 </td>
+<td style="text-align:right;"> 325 </td>
+<td style="text-align:right;"> <strong>-99%</strong> </td>
+</tr>
+<tr>
+<td> <code>get_message_reply</code> </td>
+<td style="text-align:right;"> 7,557 </td>
+<td style="text-align:right;"> 0 </td>
+<td style="text-align:right;"> -100% </td>
+</tr>
+<tr>
+<td> <code>send_hardware_message</code> </td>
+<td style="text-align:right;"> 1,249 </td>
+<td style="text-align:right;"> 0 </td>
+<td style="text-align:right;"> -100% </td>
+</tr>
+<tr>
+<td> <code>accept_hardware_message</code> </td>
+<td style="text-align:right;"> 1,205 </td>
+<td style="text-align:right;"> 0 </td>
+<td style="text-align:right;"> -100% </td>
+</tr>
+<tr>
+<td> <code>set_cursor</code> </td>
+<td style="text-align:right;"> 1,766 </td>
+<td style="text-align:right;"> 0 </td>
+<td style="text-align:right;"> -100% </td>
+</tr>
+<tr>
+<td> <code>get_key_state</code> </td>
+<td style="text-align:right;"> 1,166 </td>
+<td style="text-align:right;"> 0 </td>
+<td style="text-align:right;"> -100% </td>
+</tr>
+<tr>
+<td> <code>get_window_children_from_point</code> </td>
+<td style="text-align:right;"> 1,705 </td>
+<td style="text-align:right;"> 0 </td>
+<td style="text-align:right;"> -100% </td>
+</tr>
+<tr>
+<td> <code>create_file</code> </td>
+<td style="text-align:right;"> 60 </td>
+<td style="text-align:right;"> 0 </td>
+<td style="text-align:right;"> -100% </td>
+</tr>
+<tr>
+<td> <code>close_handle</code> </td>
+<td style="text-align:right;"> 62 </td>
+<td style="text-align:right;"> 0 </td>
+<td style="text-align:right;"> -100% </td>
+</tr>
+<tr>
+<td> AudioCalc thread server requests </td>
+<td style="text-align:right;"> 27 mentions </td>
+<td style="text-align:right;"> <strong>0</strong> </td>
+<td style="text-align:right;"> complete audio-path offload </td>
+</tr>
+<tr>
+<td> Server handler total CPU </td>
+<td style="text-align:right;"> 686.8 ms </td>
+<td style="text-align:right;"> 571.6 ms </td>
+<td style="text-align:right;"> <strong>-16.8%</strong> </td>
+</tr>
+</tbody>
+</table>
+
+
+<p>The 99% drop on <code>send_message</code> is msg-ring (documented separately) rather than LF &ndash; they compose, and the full NSPA bypass stack is what produces the aggregate numbers. LF&rsquo;s direct contribution shows as the zero rows on <code>create_file</code> / <code>close_handle</code> / <code>get_handle_fd</code>: those are steady-state during playback, but during startup the LF bypass eats roughly <strong>28,500 file opens</strong> that would otherwise each cost a server RTT plus a <code>get_handle_fd</code> return-trip.</p>
+
+<p>The bottom-line metric is server handler CPU: 16.8% less server work across the board despite a 10x higher raw request count. The replacement traffic (ring wakeups, hook chain) is ~0.05 µs per request where the replaced traffic was 8+ µs per request.</p>
+
+<hr />
+
+<h2>14. Known Gaps &amp; Roadmap</h2>
+
+<h3>14.1 Cross-process <code>DuplicateHandle</code> of a local-range source</h3>
+
+<p>The same-process path is covered. Cross-process dup where the source lives in <em>another</em> Wine-NSPA process&rsquo;s local-range is not &ndash; the server has no access to the remote&rsquo;s LF table. Fix would require a cross-process LF promotion RPC. Rare in DAW workloads; parked.</p>
+
+<h3>14.2 <code>STARTUPINFOEX PROC_THREAD_ATTRIBUTE_HANDLE_LIST</code> local-range inheritance</h3>
+
+<p>Phase 1A.9 prong A (synchronous <code>get_or_promote</code> per handle in the explicit inheritance list) was deferred because the per-handle promote RPC on the CreateProcess-calling thread surfaced as a visible menu-content-paint delay (&ldquo;black menu flash&rdquo;). Legacy <code>bInheritHandles=TRUE</code> via prong B (<code>nspa_local_file_promote_inheritable</code>) is unaffected and covers the common case.</p>
+
+<p>Proper fix options (ranked):</p>
+
+<ol>
+<li><strong>Batched promote RPC</strong> &ndash; single server round-trip that promotes an array of local handles. Caps the CreateProcess cost at one RTT regardless of list length.</li>
+<li><strong>Async pre-promotion at mint time</strong> &ndash; if the open carried <code>OBJ_INHERIT</code>, fire the promote RPC off the critical path so the server handle is already cached when <code>alloc_handle_list</code> runs. Lower CreateProcess latency but higher complexity.</li>
+</ol>
+
+
+<h3>14.3 Eligibility widening</h3>
+
+<p>The current envelope captures the hot path. Anything outside it falls back cleanly. Worth widening only when a real workload demands:</p>
+
+<ul>
+<li><code>FILE_OVERWRITE_IF</code> / <code>FILE_SUPERSEDE</code> (cache writes, plugin DB updates)</li>
+<li>Any write access (file saves, recorded audio, log append)</li>
+<li><code>FILE_DIRECTORY_FILE</code> (directory handles &ndash; different primitive, <code>NtQueryDirectoryFile</code> streaming)</li>
+<li><code>FILE_DELETE_ON_CLOSE</code> (temp-file semantics)</li>
+</ul>
+
+
+<p>None of these has a profile-visible cost today; keep them on the server path.</p>
+
+<hr />
+
+<h2>15. Phase History</h2>
+
+<table>
+<thead>
+<tr>
+<th> Phase </th>
+<th> Commit </th>
+<th> Scope </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> 1A.0 </td>
+<td> <code>bbea50591a4</code> </td>
+<td> Diagnostic scaffolding </td>
+</tr>
+<tr>
+<td> 1A.1.a-c </td>
+<td> <code>5fe0bff087c</code> .. <code>fc79ed3</code> </td>
+<td> Shared inode-table shmem + publish hooks + client reader </td>
+</tr>
+<tr>
+<td> 1A.2.a-e </td>
+<td> <code>8c43fcbfb1f</code> .. <code>99254f1</code> </td>
+<td> Per-bucket PI lock + slot subentries + client publish API + <code>NtCreateFile</code> bypass dispatch + read/write routing </td>
+</tr>
+<tr>
+<td> 1A.3 </td>
+<td> <code>836cfa2</code> .. <code>c71e8fc</code> </td>
+<td> Section-handle promotion infrastructure + audit conclusions </td>
+</tr>
+<tr>
+<td> 1A.4.a </td>
+<td> <code>35f8897</code> </td>
+<td> Lazy server-handle promotion + PI mutex on table </td>
+</tr>
+<tr>
+<td> 1A.4 partial </td>
+<td> <code>eb9c6d8454d</code> </td>
+<td> <code>Nt*File</code> hooks (b-e) </td>
+</tr>
+<tr>
+<td> 1A.5 </td>
+<td> <code>43f68f1</code> </td>
+<td> Final ship-stable + audit findings </td>
+</tr>
+<tr>
+<td> 1A.5+ </td>
+<td> <code>7a03f51</code> </td>
+<td> Wider <code>Nt*File</code> coverage (audit-driven) </td>
+</tr>
+<tr>
+<td> 1A.6 </td>
+<td> <code>73426aa72c4</code> </td>
+<td> Promoted-fd correctness (<code>nt_name</code> plumb, <code>GENERIC_*</code> access map) </td>
+</tr>
+<tr>
+<td> 1A.6 follow-up </td>
+<td> <code>69bde5a825e</code> </td>
+<td> <code>NtQueryObject</code> + <code>NtSetInformationObject</code> promote </td>
+</tr>
+<tr>
+<td> 1A.7 </td>
+<td> <code>2b193aa0590</code> </td>
+<td> <code>NtDuplicateObject</code> same-process promote (fixes Ableton .als load) </td>
+</tr>
+<tr>
+<td> 1A.8 </td>
+<td> <code>86e17b75986</code> </td>
+<td> Object-generic API audit sweep (<code>NtCompareObjects</code>, security, permanence) </td>
+</tr>
+<tr>
+<td> 1A.9 </td>
+<td> <code>18c209da804</code> </td>
+<td> <code>OVERLAPPED</code> reject + <code>FILE_OPEN_IF</code> widen + CreateProcess inheritance (prong B) + <code>attributes</code> plumbing </td>
+</tr>
+<tr>
+<td> Menu-flash fix </td>
+<td> <code>641dd63a313</code> + <code>72c59b04337</code> + <code>6edea95126f</code> </td>
+<td> Init <code>nspa_lf_handle_base</code> at declaration + defer prong A + gate QS_TIMER synth on caller&rsquo;s filter </td>
+</tr>
+<tr>
+<td> Reorg A-D </td>
+<td> <code>e81f4a3817f</code> .. <code>cc491efe052</code> </td>
+<td> File moves into <code>nspa/</code> subdirs + intercept-site collapse + debug gating </td>
+</tr>
+</tbody>
+</table>
+
+
+<hr />
+</body></html>

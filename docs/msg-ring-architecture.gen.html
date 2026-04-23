@@ -76,6 +76,7 @@ Author: jordan Johnston</p>
 <li><a href="#9-results--ballpark-reduction">Results &amp; Ballpark Reduction</a></li>
 <li><a href="#10-file-manifest">File Manifest</a></li>
 <li><a href="#11-phase-history">Phase History</a></li>
+<li><a href="#12-future-extensions-ranked-by-wineserver-load-reduction">Future Extensions (ranked)</a></li>
 </ol>
 
 
@@ -1108,6 +1109,117 @@ if (info-&gt;nspa_sender_tid &amp;&amp; remove) {
 <li>Packed-data SEND messages (MSG_OTHER_PROCESS) stay on server &ndash; ring slots don&rsquo;t carry variable-length payload today. Expansion is possible with an extra side-channel buffer if needed.</li>
 </ul>
 
+
+<hr />
+
+<h2>12. Future Extensions (ranked by wineserver-load reduction)</h2>
+
+<p>Today&rsquo;s scope captures roughly 48 % of <code>get_posted_message</code> server calls on busy Ableton playback (the 43,559 / 90,681 ring-arbitrated fraction from §9).  The remaining 52 % is split across several message categories the ring doesn&rsquo;t yet handle.  Ranked by expected server-load reduction:</p>
+
+<h3>Tier 1 &ndash; highest traffic, biggest win</h3>
+
+<table>
+<thead>
+<tr>
+<th> # </th>
+<th> Extension </th>
+<th> Why it matters </th>
+<th> Complexity </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> 1 </td>
+<td> <strong><code>WM_TIMER</code> local injection</strong> </td>
+<td> DAWs + editors pump UI at 60+ Hz with timers.  Each tick = 1 wineserver RTT today to post WM_TIMER to the target thread.  Per-thread timers in a playing Ableton: hundreds of RTTs / sec.  Biggest single server-load source we still hit. </td>
+<td> High &ndash; client-side timer expiry tracking + direct ring injection; must stay consistent with server&rsquo;s <code>SetTimer</code> / <code>KillTimer</code> state. </td>
+</tr>
+<tr>
+<td> 2 </td>
+<td> <strong><code>WM_PAINT</code> / invalidation cascade</strong> </td>
+<td> DWM-Sync-driven redraw loops + <code>InvalidateRect</code> chains fire many paint-chain messages.  Common in refresh-intensive apps (DAWs, editors, video, games).  Hundreds of RTTs / sec in busy UI. </td>
+<td> High &ndash; paint message generation + coalescing currently server-side; extending ring to signal invalidation between peer threads requires careful coordination. </td>
+</tr>
+</tbody>
+</table>
+
+
+<h3>Tier 2 &ndash; broader app coverage, medium win</h3>
+
+<table>
+<thead>
+<tr>
+<th> # </th>
+<th> Extension </th>
+<th> Why it matters </th>
+<th> Complexity </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> 3 </td>
+<td> <strong>Thread messages (<code>hwnd == 0</code>)</strong> </td>
+<td> <code>PostThreadMessage</code> used heavily by WebView2, auth pumps, COM apartments, custom event loops.  Quiet in Ableton specifically but broadens coverage to browser / enterprise workloads. </td>
+<td> Low &ndash; ring slots already carry sender/dest tid; mostly a matter of removing the &ldquo;skip thread-msg&rdquo; early-return and adjusting dispatch fallback. </td>
+</tr>
+<tr>
+<td> 4 </td>
+<td> <strong>Hook dispatch (<code>WH_CALLWNDPROC</code>, <code>WH_GETMESSAGE</code>, etc.)</strong> </td>
+<td> Every message passing through a thread with an in-process hook = one server call to hook-dispatch today.  Acts as a multiplier on other captures: the more messages hook, the more the existing capture compounds into further savings. </td>
+<td> Medium &ndash; hook chain ordering + filter semantics must match exactly.  Same-process hooks are ring-eligible. </td>
+</tr>
+</tbody>
+</table>
+
+
+<h3>Tier 3 &ndash; targeted unlocks, smaller per-extension win</h3>
+
+<table>
+<thead>
+<tr>
+<th> # </th>
+<th> Extension </th>
+<th> Why it matters </th>
+<th> Complexity </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> 5 </td>
+<td> <strong>Packed-data SEND (<code>MSG_OTHER_PROCESS</code> same-process)</strong> </td>
+<td> Registered window messages with <code>lparam</code> pointing at variable-size structs.  Used for cross-AS or serialised IPC.  Rare in pure DAW workloads. </td>
+<td> Medium &ndash; add a side-channel memfd for payloads; slot holds <code>(offset, size)</code> into it. </td>
+</tr>
+<tr>
+<td> 6 </td>
+<td> <strong>Callback SEND (<code>MSG_CALLBACK</code> / <code>MSG_CALLBACK_RESULT</code>)</strong> </td>
+<td> <code>SendMessageCallbackA/W</code> async-reply pattern.  Not high-frequency in most apps. </td>
+<td> Medium &ndash; extend reply ring to invoke callback locally on reply arrival; handle callback identity + security. </td>
+</tr>
+<tr>
+<td> 7 </td>
+<td> <strong><code>SendInput</code> intra-process synthesis</strong> </td>
+<td> Rare automation use cases where apps inject input into their own threads. </td>
+<td> Low &ndash; small addition but very niche. </td>
+</tr>
+</tbody>
+</table>
+
+
+<h3>Out-of-scope (architectural mismatches)</h3>
+
+<ul>
+<li><strong>Cross-process messaging</strong> &ndash; ring pointers (HWND, WPARAM / LPARAM dereferences) are per-address-space.  Cross-process messaging must stay on the server path unless we add a full translation layer (effectively a redesign).</li>
+<li><strong>DDE</strong> &ndash; registered-message handling is separate from the normal message dispatch machinery; not a natural fit for the ring.</li>
+<li><strong>Hardware input queueing</strong> &ndash; <code>thread_input</code> is a different shared structure with server-owned state; out of scope for the per-thread bypass ring.</li>
+</ul>
+
+
+<h3>Prioritization heuristic</h3>
+
+<p>For raw wineserver-load reduction on Ableton-style workloads, <strong>Tier 1 (timer + paint)</strong> is the clear target.  For broadening to non-DAW apps (WebView2, COM-heavy tools, browsers embedded in apps), <strong>Tier 2 item 3 (thread messages)</strong> is the cheapest high-leverage add.  Tiers 2-3 items are best adopted opportunistically as specific apps demand them.</p>
+
+<p>Any of these extensions reuses the existing ring memory layout + cache discipline + fast-path atomics &ndash; the extension work is entirely in the &ldquo;which message types get ring-delivered and how&rdquo; layer, not in the memfd / seqlock / cross-thread plumbing.</p>
 
 <hr />
 
