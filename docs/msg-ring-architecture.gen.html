@@ -2,7 +2,7 @@
 <html lang="en"><head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Wine-NSPA -- Message Bypass Architecture</title>
+<title>Wine-NSPA — Message Ring Architecture</title>
 <style>
   :root {
     --bg: #1a1b26; --fg: #c0caf5; --accent: #7aa2f7;
@@ -57,49 +57,88 @@
   em { color: var(--muted); font-style: italic; }
 </style>
 </head><body>
-<h1>Wine-NSPA &ndash; Message Bypass Architecture</h1>
+<h1>Wine-NSPA — Message Ring Architecture</h1>
 
-<p>Wine 11.6 + NSPA RT patchset | Kernel 6.19.x-rt with NTSync PI | 2026-04-18
-Author: jordan Johnston</p>
-
-<h2>Table of Contents</h2>
-
-<ol>
-<li><a href="#1-overview">Overview</a></li>
-<li><a href="#2-design-principles">Design Principles</a></li>
-<li><a href="#3-vanilla-wine-vs-wine-nspa-message-ring">Vanilla Wine vs Wine-NSPA Message Ring</a></li>
-<li><a href="#4-ring-layout-in-shared-memory">Ring Layout in Shared Memory</a></li>
-<li><a href="#5-memfd-lifecycle">Memfd Lifecycle</a></li>
-<li><a href="#6-client-fast-path-post--send">Client Fast Path (POST + SEND)</a></li>
-<li><a href="#7-dispatch-path">Dispatch Path</a></li>
-<li><a href="#8-opt-in-gating">Opt-In Gating</a></li>
-<li><a href="#9-results--ballpark-reduction">Results &amp; Ballpark Reduction</a></li>
-<li><a href="#10-file-manifest">File Manifest</a></li>
-<li><a href="#11-phase-history">Phase History</a></li>
-<li><a href="#12-future-extensions-ranked-by-wineserver-load-reduction">Future Extensions (ranked)</a></li>
-</ol>
-
-
-<p>Footnote: <a href="#footnote-why-memfd">Why memfd and not session shmem</a></p>
+<p><strong>Date:</strong> 2026-04-28
+<strong>Author:</strong> Jordan Johnston
+<strong>Wine submodule HEAD:</strong> <code>ac823311aba</code> (Wine 11.6 + NSPA fork)
+<strong>Kernel:</strong> <code>6.19.11-rt1-1-nspa</code> with NTSync PI (<code>A250A77651C8D5DAB719FE2</code>)
+<strong>Subsystem source:</strong> <code>wine/dlls/win32u/nspa/msg_ring.c</code> (1633 LOC),
+<code>wine/server/protocol.def</code> (slot definitions, lines 1020-1214),
+<code>wine/server/nspa/redraw_ring.c</code> (87 LOC server drain),
+<code>wine/dlls/win32u/dce.c</code> (paint cache fastpath).</p>
 
 <hr />
 
-<h2>1. Overview</h2>
-
-<p>Wine&rsquo;s windowing model routes every <code>PostMessage</code> / <code>SendMessage</code> call through the wineserver: the sender writes a request, the server allocates a <code>struct message</code>, inserts it into the receiver&rsquo;s queue, the receiver polls via <code>GetMessage</code> / <code>PeekMessage</code> (another wineserver round-trip), and for synchronous sends a reply_message round-trip closes the loop. On a typical RT audio workload this costs hundreds to thousands of wineserver RTTs per second &ndash; the NSPA profiler captured <strong>6,239 <code>send_message</code> RTTs / 60 s</strong> from Ableton Live&rsquo;s <code>AudioCalc</code> thread alone during a single adversarial recording session.</p>
-
-<p>Wine-NSPA <strong>message bypass</strong> replaces that round-trip chain for same-process cross-thread window messages with a direct shared-memory ring:</p>
+<h2>Table of contents</h2>
 
 <ol>
-<li>Sender writes the message into the receiver thread&rsquo;s ring and wakes the receiver via an <code>NTSync</code> event</li>
-<li>Receiver&rsquo;s message pump reads the message out of the ring locally (no <code>get_message</code> server request)</li>
-<li>For synchronous SENDs the receiver writes the reply back into the sender&rsquo;s reply ring and signals</li>
+<li><a href="#1-abstract">Abstract</a></li>
+<li><a href="#2-architecture-overview">Architecture overview</a></li>
+<li><a href="#3-ring-layout-in-shared-memory">Ring layout in shared memory</a></li>
+<li><a href="#4-memfd-lifecycle">Memfd lifecycle</a></li>
+<li><a href="#5-post-class">POST class — <code>nspa_try_post_ring</code></a></li>
+<li><a href="#6-send-class">SEND class — <code>nspa_try_send_ring</code></a></li>
+<li><a href="#7-reply-class">REPLY class — <code>nspa_write_ring_reply</code></a></li>
+<li><a href="#8-reply-slot-generation-discriminator-mr1">Reply-slot generation discriminator (MR1)</a></li>
+<li><a href="#9-cross-process-futex-mr2">Cross-process futex (MR2)</a></li>
+<li><a href="#10-wake-loss-rollback-mr4">Wake-loss rollback (MR4)</a></li>
+<li><a href="#11-phase-a-redraw_window-push-ring">Phase A — <code>redraw_window</code> push ring</a></li>
+<li><a href="#12-phase-b10-paint-cache-fastpath">Phase B1.0 — paint cache fastpath</a></li>
+<li><a href="#13-phase-c-get_message-bypass-paused">Phase C — <code>get_message</code> bypass (paused)</a></li>
+<li><a href="#14-nspa_shm_retry_guard"><code>NSPA_SHM_RETRY_GUARD</code> — bounded retry primitive</a></li>
+<li><a href="#15-footnote-why-memfd">Footnote — why memfd, not session shmem</a></li>
+<li><a href="#16-phase-history">Phase history</a></li>
+<li><a href="#17-references">References</a></li>
 </ol>
 
 
-<p>The feature is invisible to Win32 applications &ndash; the same <code>PostMessage</code> / <code>SendMessage</code> API, the same delivery semantics, the same window procedure dispatch. It is same-process-only by design (cross-process messaging continues through the server because ring addresses like <code>HWND</code> / <code>WPARAM</code> / <code>LPARAM</code> only make sense in the sender&rsquo;s address space and handle table).</p>
+<hr />
 
-<h3>Motivating Profile</h3>
+<h2>1. Abstract</h2>
+
+<p>Wine&rsquo;s windowing model routes every <code>PostMessage</code> / <code>SendMessage</code> call
+through the wineserver: the sender writes a request, the server allocates
+a <code>struct message</code>, inserts it into the receiver&rsquo;s queue, the receiver
+polls via <code>GetMessage</code> / <code>PeekMessage</code> (another wineserver round-trip),
+and for synchronous sends a <code>reply_message</code> round-trip closes the loop.
+On a typical RT audio workload this costs hundreds to thousands of
+wineserver RTTs per second — the NSPA profiler captured <strong>6,239
+<code>send_message</code> RTTs / 60 s</strong> from Ableton Live&rsquo;s <code>AudioCalc</code> thread alone
+during a single adversarial recording session.</p>
+
+<p>Wine-NSPA&rsquo;s <strong>message ring</strong> replaces that round-trip chain for
+same-process cross-thread window messages with a direct shared-memory
+ring:</p>
+
+<ol>
+<li>Sender writes the message into the receiver thread&rsquo;s ring and wakes
+the receiver via an NTSync event.</li>
+<li>Receiver&rsquo;s message pump reads the message out of the ring locally
+(no <code>get_message</code> server request).</li>
+<li>For synchronous SENDs the receiver writes the reply back into the
+sender&rsquo;s reply ring and signals.</li>
+</ol>
+
+
+<p>The feature is invisible to Win32 applications — the same <code>PostMessage</code>
+/ <code>SendMessage</code> API, the same delivery semantics, the same window
+procedure dispatch. It is same-process-only by design (cross-process
+messaging continues through the server because ring addresses like
+<code>HWND</code> / <code>WPARAM</code> / <code>LPARAM</code> only make sense in the sender&rsquo;s address
+space and handle table).</p>
+
+<p>This document is the canonical reference for the entire ring family.
+The original POST / SEND / REPLY ring landed first (2026-04, see
+<a href="#16-phase-history">§16 Phase history</a>). Subsequent additions —
+Phase A <code>redraw_window</code> push, Phase B1.0 paint cache, Phase C
+<code>get_message</code> bypass, and the MR1 / MR2 / MR4 audit fix-pack from
+2026-04-27 — extend or harden the same substrate. They share the
+per-queue memfd, the slot state machine, the cache discipline, and the
+fast-path atomics. The doc treats them as one evolving design rather
+than versioned sub-systems.</p>
+
+<h3>1.1 Motivating profile</h3>
 
 <table>
 <thead>
@@ -110,7 +149,7 @@ Author: jordan Johnston</p>
 </thead>
 <tbody>
 <tr>
-<td> <code>AudioCalc</code> threads (send_message) </td>
+<td> <code>AudioCalc</code> threads (<code>send_message</code>) </td>
 <td> <strong>6,239</strong> </td>
 </tr>
 <tr>
@@ -119,15 +158,16 @@ Author: jordan Johnston</p>
 </tr>
 <tr>
 <td> Total busy Ableton playback traffic </td>
-<td> ~500 &ndash; 1000 / sec </td>
+<td> ~500 – 1000 / sec </td>
 </tr>
 </tbody>
 </table>
 
 
-<p>The bypass targets the AudioCalc + DWM-Sync -> MainThread hot path that dominates this profile.</p>
+<p>The bypass targets the AudioCalc + DWM-Sync → MainThread hot path that
+dominates this profile.</p>
 
-<h3>Relationship to Existing NSPA Infrastructure</h3>
+<h3>1.2 Relationship to existing NSPA infrastructure</h3>
 
 <table>
 <thead>
@@ -139,27 +179,35 @@ Author: jordan Johnston</p>
 <tbody>
 <tr>
 <td> Shmem IPC (v1.5) </td>
-<td> <strong>Orthogonal.</strong> Shmem IPC handles request/reply protocol for ntdll &lt;-> wineserver. Msg bypass is a peer-to-peer window-message path that sidesteps the server entirely. </td>
+<td> <strong>Orthogonal.</strong> Shmem IPC handles the request/reply protocol for ntdll ↔ wineserver. The ring is a peer-to-peer window-message path that sidesteps the server entirely. </td>
 </tr>
 <tr>
 <td> NTSync (<code>/dev/ntsync</code>) </td>
-<td> <strong>Direct wake.</strong> Sender calls <code>wine_server_signal_internal_sync()</code> on the receiver&rsquo;s queue sync event &ndash; a <code>ntsync ioctl</code>, no wineserver round-trip. Receiver wakes via <code>ntsync_schedule</code>. </td>
+<td> <strong>Direct wake.</strong> Sender calls <code>wine_server_signal_internal_sync()</code> on the receiver&rsquo;s queue sync event — an <code>ntsync</code> ioctl, no wineserver round-trip. Receiver wakes via <code>ntsync_schedule</code>. </td>
 </tr>
 <tr>
-<td> PI global_lock </td>
-<td> <strong>Load relief.</strong> Every bypass message is one fewer <code>send_message</code> request the server handles under <code>global_lock</code>. Reduces contention for shmem dispatchers. </td>
+<td> PI <code>global_lock</code> </td>
+<td> <strong>Load relief.</strong> Every ring message is one fewer <code>send_message</code> request the server handles under <code>global_lock</code>. Reduces contention for shmem dispatchers. </td>
 </tr>
 <tr>
-<td> CS-PI (FUTEX_LOCK_PI) </td>
-<td> <strong>No conflict.</strong> Bypass operates in client code only; no server locks are acquired on the fast path. </td>
+<td> CS-PI (<code>FUTEX_LOCK_PI</code>) </td>
+<td> <strong>No conflict.</strong> Ring operates in client code only; no server locks are acquired on the fast path. </td>
 </tr>
 <tr>
 <td> RT scheduling (SCHED_FIFO/RR) </td>
-<td> <strong>RT-safe fast path.</strong> After warm-up, a bypass POST/SEND is atomic CAS + memory reads/writes on <code>mlock()</code>-pinned memory. No syscalls, no page faults. </td>
+<td> <strong>RT-safe fast path.</strong> After warm-up, a ring POST/SEND is atomic CAS plus memory reads/writes on <code>mlock()</code>-pinned memory. No syscalls, no page faults. </td>
 </tr>
 <tr>
 <td> io_uring I/O bypass </td>
 <td> <strong>Compatible, independent.</strong> Different bottleneck, different ring. </td>
+</tr>
+<tr>
+<td> Phase A redraw push ring </td>
+<td> Shares the per-queue memfd. The ring is co-located in <code>nspa_queue_bypass_shm_t</code> so the existing fd-passing protocol carries it for free. </td>
+</tr>
+<tr>
+<td> Phase B1.0 paint cache </td>
+<td> Reads <code>queue_shm</code>, not the message ring; co-resident in the same fastpath taxonomy. </td>
 </tr>
 </tbody>
 </table>
@@ -167,36 +215,22 @@ Author: jordan Johnston</p>
 
 <hr />
 
-<h2>2. Design Principles</h2>
+<h2>2. Architecture overview</h2>
 
-<ul>
-<li><strong>Memfd-backed per-queue rings.</strong> Each thread queue owns a private <code>memfd_create()</code> region containing its bypass ring. Server allocates on demand; client receives via <code>SCM_RIGHTS</code> and <code>mmap</code>s locally. Rings never live in Wine&rsquo;s session shmem (§8 explains why that matters).</li>
-<li><strong>Same-process only.</strong> Cross-process messages cannot use ring pointers (HWND translation, WPARAM/LPARAM pointer dereferences). The server rejects cross-process <code>nspa_get_thread_queue</code> requests early.</li>
-<li><strong>Transparent fallback.</strong> Every bypass operation returns <code>FALSE</code> / <code>NULL</code> on any corner case (bypass disabled, no own ring, lookup failure, cross-process destination, DDE message, thread-message with <code>hwnd == 0</code>). Callers fall back to the legacy wineserver path. Wine apps see identical behavior whether bypass is enabled or not.</li>
-<li><strong>RT-safe fast path.</strong> Ring slots use <code>__atomic_*</code> operations only. Shared memory is <code>MAP_POPULATE</code>-prefaulted and <code>mlock</code>-pinned so no demand paging happens on hot access. Warm-up cost (memfd create + map + lock) is paid once per peer, off the RT-critical path.</li>
-<li><strong>Layered opt-in gates.</strong> Each tier (POST capture, wake-bit synthesis, SEND reply bootstrap, client-side dispatch) is an independent <code>NSPA_*</code> environment variable. Users can enable the layers they trust and fall back to stricter Phase 3 behavior by unsetting the later gates.</li>
-<li><strong>Minimal protocol surface.</strong> Two server requests: <code>nspa_get_thread_queue</code> (peer lookup) and <code>nspa_ensure_own_bypass</code> (own bootstrap). Server handlers reuse a single <code>nspa_alloc_bypass_shm()</code> helper for both.</li>
-</ul>
-
-
-<hr />
-
-<h2>3. Vanilla Wine vs Wine-NSPA Message Ring</h2>
+<h3>2.1 Vanilla Wine vs Wine-NSPA</h3>
 
 <div class="diagram-container">
 <svg width="100%" viewBox="0 0 920 580" xmlns="http://www.w3.org/2000/svg">
   <style>
-    .box-vanilla { fill: #24283b; stroke: #9aa5ce; stroke-width: 1.5; rx: 6; }
+    .box-vanilla { fill: #24283b; stroke: #8c92b3; stroke-width: 1.5; rx: 6; }
     .box-nspa { fill: #24283b; stroke: #7aa2f7; stroke-width: 2; rx: 6; }
     .box-new { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 2; rx: 6; }
     .box-server { fill: #2a1a1a; stroke: #f7768e; stroke-width: 1.5; rx: 6; }
-    .box-kernel { fill: #1a1a2a; stroke: #bb9af7; stroke-width: 1.5; rx: 6; }
     .label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
     .label-sm { fill: #c0caf5; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
     .label-accent { fill: #7aa2f7; font-size: 13px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .label-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .label-red { fill: #f7768e; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
-    .label-yellow { fill: #e0af68; font-size: 10px; font-family: 'JetBrains Mono', monospace; }
     .label-muted { fill: #8c92b3; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
     .divider { stroke: #3b4261; stroke-width: 1; stroke-dasharray: 8,4; }
   </style>
@@ -205,222 +239,211 @@ Author: jordan Johnston</p>
   <text x="700" y="24" class="label-accent" text-anchor="middle">Wine-NSPA msg-ring (memfd)</text>
   <line x1="460" y1="8" x2="460" y2="570" class="divider"/>
 
-  <!-- === LEFT: Vanilla === -->
   <rect x="40" y="45" width="340" height="28" class="box-vanilla"/>
   <text x="210" y="64" text-anchor="middle" class="label">PostMessage / SendMessage (ntuser)</text>
-
   <line x1="210" y1="73" x2="210" y2="93" stroke="#f7768e" stroke-width="1.5"/>
 
   <rect x="60" y="95" width="300" height="28" class="box-server"/>
   <text x="210" y="114" text-anchor="middle" class="label-red">SERVER: send_message request</text>
-
   <line x1="210" y1="123" x2="210" y2="143" stroke="#f7768e" stroke-width="1.5"/>
 
   <rect x="60" y="145" width="300" height="45" class="box-server"/>
   <text x="210" y="163" text-anchor="middle" class="label-red">alloc struct message + insert queue</text>
   <text x="210" y="180" text-anchor="middle" class="label-muted">global_lock held during insertion</text>
-
   <line x1="210" y1="190" x2="210" y2="210" stroke="#f7768e" stroke-width="1.5"/>
 
   <rect x="60" y="212" width="300" height="28" class="box-server"/>
   <text x="210" y="231" text-anchor="middle" class="label-red">set_queue_bits + sync wake</text>
-
-  <line x1="210" y1="240" x2="210" y2="260" stroke="#9aa5ce" stroke-width="1"/>
+  <line x1="210" y1="240" x2="210" y2="260" stroke="#8c92b3" stroke-width="1"/>
 
   <rect x="40" y="262" width="340" height="28" class="box-vanilla"/>
   <text x="210" y="281" text-anchor="middle" class="label">receiver wakes (NtWaitForMultipleObjects)</text>
-
   <line x1="210" y1="290" x2="210" y2="310" stroke="#f7768e" stroke-width="1.5"/>
 
   <rect x="60" y="312" width="300" height="28" class="box-server"/>
   <text x="210" y="331" text-anchor="middle" class="label-red">SERVER: get_message request</text>
-
   <line x1="210" y1="340" x2="210" y2="360" stroke="#f7768e" stroke-width="1.5"/>
 
   <rect x="60" y="362" width="300" height="28" class="box-server"/>
   <text x="210" y="381" text-anchor="middle" class="label-red">remove from queue, copy to reply</text>
-
-  <line x1="210" y1="390" x2="210" y2="410" stroke="#9aa5ce" stroke-width="1"/>
+  <line x1="210" y1="390" x2="210" y2="410" stroke="#8c92b3" stroke-width="1"/>
 
   <rect x="40" y="412" width="340" height="28" class="box-vanilla"/>
   <text x="210" y="431" text-anchor="middle" class="label">dispatch window proc</text>
-
   <line x1="210" y1="440" x2="210" y2="460" stroke="#f7768e" stroke-width="1.5"/>
 
   <rect x="60" y="462" width="300" height="28" class="box-server"/>
   <text x="210" y="481" text-anchor="middle" class="label-red">(SEND only) reply_message RTT</text>
 
-  <!-- cost box -->
   <rect x="50" y="500" width="320" height="60" rx="5" fill="#24283b" stroke="#3b4261"/>
   <text x="210" y="518" text-anchor="middle" class="label-red">Cost per send:</text>
   <text x="70" y="534" class="label-sm">2 wineserver RTTs (POST), 3 (SEND)</text>
   <text x="70" y="548" class="label-sm">global_lock held during every insertion</text>
 
-  <!-- === RIGHT: NSPA === -->
   <rect x="520" y="45" width="360" height="28" class="box-nspa"/>
   <text x="700" y="64" text-anchor="middle" class="label">PostMessage / SendMessage (ntuser)</text>
-
   <line x1="700" y1="73" x2="700" y2="93" stroke="#9ece6a" stroke-width="1.5"/>
 
   <rect x="530" y="95" width="340" height="28" class="box-new"/>
-  <text x="700" y="114" text-anchor="middle" class="label-green">nspa_try_post_ring() / try_send_ring()</text>
-
+  <text x="700" y="114" text-anchor="middle" class="label-green">nspa_try_post_ring() / nspa_try_send_ring()</text>
   <line x1="700" y1="123" x2="700" y2="143" stroke="#9ece6a" stroke-width="1.5"/>
 
   <rect x="530" y="145" width="340" height="60" class="box-new"/>
   <text x="700" y="163" text-anchor="middle" class="label-green">ring_reserve_slot (CAS head++)</text>
-  <text x="700" y="179" text-anchor="middle" class="label-green">write fields to slot, state -> READY</text>
+  <text x="700" y="179" text-anchor="middle" class="label-green">write fields to slot, state -&gt; READY</text>
   <text x="700" y="195" text-anchor="middle" class="label-green">(SEND) reserve reply slot in own ring</text>
-
   <line x1="700" y1="205" x2="700" y2="225" stroke="#9ece6a" stroke-width="1.5"/>
 
   <rect x="530" y="227" width="340" height="40" class="box-new"/>
   <text x="700" y="244" text-anchor="middle" class="label-green">wine_server_signal_internal_sync()</text>
-  <text x="700" y="259" text-anchor="middle" class="label-sm">ntsync ioctl -> rt_mutex wake (no RTT)</text>
-
+  <text x="700" y="259" text-anchor="middle" class="label-sm">ntsync ioctl -&gt; rt_mutex wake (no RTT)</text>
   <line x1="700" y1="267" x2="700" y2="287" stroke="#9ece6a" stroke-width="1.5"/>
 
   <rect x="520" y="289" width="360" height="28" class="box-nspa"/>
   <text x="700" y="308" text-anchor="middle" class="label">receiver wakes (ntsync_schedule)</text>
-
   <line x1="700" y1="317" x2="700" y2="337" stroke="#9ece6a" stroke-width="1.5"/>
 
   <rect x="530" y="339" width="340" height="40" class="box-new"/>
-  <text x="700" y="356" text-anchor="middle" class="label-green">nspa_try_pop_own_ring_send()</text>
-  <text x="700" y="370" text-anchor="middle" class="label-sm">CAS READY -> CONSUMED, fill info</text>
-
+  <text x="700" y="356" text-anchor="middle" class="label-green">nspa_try_pop_own_ring_send/post()</text>
+  <text x="700" y="370" text-anchor="middle" class="label-sm">CAS READY -&gt; CONSUMED, fill info</text>
   <line x1="700" y1="379" x2="700" y2="399" stroke="#9ece6a" stroke-width="1.5"/>
 
   <rect x="520" y="401" width="360" height="28" class="box-nspa"/>
   <text x="700" y="420" text-anchor="middle" class="label">dispatch window proc</text>
-
   <line x1="700" y1="429" x2="700" y2="449" stroke="#9ece6a" stroke-width="1.5"/>
 
   <rect x="530" y="451" width="340" height="40" class="box-new"/>
   <text x="700" y="468" text-anchor="middle" class="label-green">(SEND) nspa_write_ring_reply()</text>
-  <text x="700" y="483" text-anchor="middle" class="label-sm">write to sender's reply slot + wake</text>
+  <text x="700" y="483" text-anchor="middle" class="label-sm">write to sender's reply slot + futex_wake</text>
 
-  <!-- cost box -->
   <rect x="530" y="500" width="340" height="60" rx="5" fill="#24283b" stroke="#3b4261"/>
   <text x="700" y="518" text-anchor="middle" class="label-green">Cost per send (warm ring):</text>
   <text x="550" y="534" class="label-sm">0 wineserver RTTs for POST or SEND</text>
-  <text x="550" y="548" class="label-sm">1 ntsync wake ioctl (kernel fast path)</text>
+  <text x="550" y="548" class="label-sm">1 ntsync wake ioctl + 1 futex wake (kernel fast path)</text>
 </svg>
 </div>
 
 
-<p>The reduction is not just in RTT count &ndash; vanilla Wine&rsquo;s <code>send_message</code> handler acquires <code>global_lock</code> to insert the new message into the receiver&rsquo;s queue. Under heavy traffic this contended mutex becomes a serialization point. The memfd ring sidesteps <code>global_lock</code> entirely: slot reservation is a lock-free CAS in shared memory.</p>
+<p>The reduction is not just in RTT count — vanilla Wine&rsquo;s <code>send_message</code>
+handler acquires <code>global_lock</code> to insert the new message into the
+receiver&rsquo;s queue. Under heavy traffic this contended mutex becomes a
+serialization point. The memfd ring sidesteps <code>global_lock</code> entirely:
+slot reservation is a lock-free CAS in shared memory.</p>
+
+<h3>2.2 Design principles</h3>
+
+<ul>
+<li><strong>Memfd-backed per-queue rings.</strong> Each thread queue owns a private
+<code>memfd_create()</code> region containing its bypass ring. Server allocates
+on demand; client receives via <code>SCM_RIGHTS</code> and <code>mmap</code>s locally.
+Rings never live in Wine&rsquo;s session shmem (see <a href="#15-footnote-why-memfd">§15</a>
+for why that matters).</li>
+<li><strong>Same-process only.</strong> Cross-process messages cannot use ring
+pointers (HWND translation, WPARAM/LPARAM pointer dereferences).
+The server rejects cross-process <code>nspa_get_thread_queue</code> requests
+early. (MR2 from the 2026-04-27 audit broadens the underlying
+primitives to be cross-process-correct, but the same-process
+invariant on user-supplied addresses is unchanged.)</li>
+<li><strong>Transparent fallback.</strong> Every ring operation returns <code>FALSE</code> /
+<code>NULL</code> on any corner case (ring disabled, no own ring, lookup
+failure, cross-process destination, DDE message, thread-message with
+<code>hwnd == 0</code>). Callers fall back to the legacy wineserver path. Wine
+apps see identical behaviour whether the ring is enabled or not.</li>
+<li><strong>RT-safe fast path.</strong> Ring slots use <code>__atomic_*</code> operations only.
+Shared memory is <code>MAP_POPULATE</code>-prefaulted and <code>mlock</code>-pinned so no
+demand paging happens on hot access. Warm-up cost (memfd create +
+map + lock) is paid once per peer, off the RT-critical path.</li>
+<li><strong>Bounded retry loops.</strong> Every seqlock-style read in this subsystem
+uses <code>NSPA_SHM_RETRY_GUARD</code> (see <a href="#14-nspa_shm_retry_guard">§14</a>)
+to bound spin to 256 PAUSEs and fall back to RPC on exhaustion.</li>
+<li><strong>Layered opt-in / opt-out gates.</strong> Each capability is an
+independent <code>NSPA_*</code> environment variable. Production-default
+posture (default-on or default-off) is fixed per-feature and
+documented inline.</li>
+<li><strong>Minimal protocol surface.</strong> Two server requests:
+<code>nspa_get_thread_queue</code> (peer lookup + memfd send) and
+<code>nspa_ensure_own_bypass</code> (own bootstrap). Server handlers reuse a
+single <code>nspa_alloc_bypass_shm()</code> helper for both.</li>
+</ul>
+
 
 <hr />
 
-<h2>4. Ring Layout in Shared Memory</h2>
+<h2>3. Ring layout in shared memory</h2>
 
-<p>Each <code>msg_queue</code> owns a <code>nspa_queue_bypass_shm_t</code> region consisting of a 64-slot forward-message ring and a 16-slot reply ring. Sizes are compile-time constants chosen to keep the whole region around 10 KB.</p>
+<p>Each <code>msg_queue</code> owns a <code>nspa_queue_bypass_shm_t</code> region. The struct
+lives in <code>wine/server/protocol.def</code> (lines 1205-1214) and aggregates
+several class-isolated rings under one memfd:</p>
 
-<div class="diagram-container">
-<svg width="100%" viewBox="0 0 920 410" xmlns="http://www.w3.org/2000/svg">
-  <style>
-    .rl-box { fill: #24283b; stroke: #9aa5ce; stroke-width: 1.5; rx: 6; }
-    .rl-box-nspa { fill: #24283b; stroke: #7aa2f7; stroke-width: 2; rx: 6; }
-    .rl-slot { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1; rx: 3; }
-    .rl-slot-full { fill: #2a2a1a; stroke: #e0af68; stroke-width: 1; rx: 3; }
-    .rl-label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
-    .rl-label-sm { fill: #c0caf5; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
-    .rl-label-accent { fill: #7aa2f7; font-size: 12px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
-    .rl-label-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
-    .rl-label-yellow { fill: #e0af68; font-size: 10px; font-family: 'JetBrains Mono', monospace; }
-    .rl-label-cyan { fill: #7dcfff; font-size: 10px; font-family: 'JetBrains Mono', monospace; }
-    .rl-label-muted { fill: #8c92b3; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
-    .rl-arrow { stroke: #9aa5ce; stroke-width: 1.3; fill: none; }
-    .rl-arrow-green { stroke: #9ece6a; stroke-width: 1.5; fill: none; }
-  </style>
+<pre><code>typedef volatile struct {
+    nspa_msg_ring_t      nspa_msg_ring;     /* incoming msgs (senders -&gt; me) */
+    nspa_reply_ring_t    nspa_reply_ring;   /* replies to my SendMessage */
+    nspa_timer_ring_t    nspa_timer_ring;   /* WM_TIMER expiries */
+    int                  nspa_hook_walk_counts[NB_HOOKS];   /* Tier 1 hook */
+    nspa_hook_chain_t    nspa_hook_chains[NB_HOOKS];        /* Tier 2 hook */
+    unsigned char        nspa_hook_module_pool[...];        /* Tier 2 strings */
+    nspa_redraw_ring_t   nspa_redraw_ring;  /* Phase A: redraw_window push */
+} nspa_queue_bypass_shm_t;
+</code></pre>
 
-  <text x="460" y="24" class="rl-label-accent" text-anchor="middle">nspa_queue_bypass_shm_t (memfd, ~10 KB, mlock'd)</text>
+<p>Class isolation: each ring has its own producer / consumer roles
+appropriate to the message class it carries. The original message ring
+is MPSC (many producers post / send to the queue owner). The redraw
+push ring is SPSC (queue owner pushes to itself, server drains). The
+timer ring is SPSC (per-process timer dispatcher to queue owner). Each
+class avoids contending on another class&rsquo;s head CAS, even though they
+co-locate in the same memfd for protocol-passing economy.</p>
 
-  <!-- Container -->
-  <rect x="20" y="35" width="880" height="355" rx="10" fill="none" stroke="#3b4261" stroke-width="1" stroke-dasharray="5,3"/>
+<h3>3.1 <code>nspa_msg_ring_t</code> — forward ring</h3>
 
-  <!-- Forward ring -->
-  <rect x="40" y="55" width="840" height="160" class="rl-box-nspa"/>
-  <text x="460" y="74" class="rl-label-accent" text-anchor="middle">nspa_msg_ring_t (forward, 64 slots)</text>
+<p>Sized at 64 slots × 128 bytes ≈ 8 KB. Header fields (<code>protocol.def</code>
+lines 1069-1082):</p>
 
-  <!-- Ring header -->
-  <rect x="60" y="85" width="800" height="38" class="rl-box"/>
-  <text x="90" y="102" class="rl-label-cyan">head</text>
-  <text x="90" y="115" class="rl-label-sm">monotonic</text>
-  <text x="190" y="102" class="rl-label-cyan">tail</text>
-  <text x="190" y="115" class="rl-label-sm">consumer cursor</text>
-  <text x="340" y="102" class="rl-label-cyan">active</text>
-  <text x="340" y="115" class="rl-label-sm">0 = ring disabled</text>
-  <text x="500" y="102" class="rl-label-cyan">pending_count</text>
-  <text x="500" y="115" class="rl-label-sm">+ pending_send_count</text>
-  <text x="670" y="102" class="rl-label-cyan">change_seq / change_ack_seq</text>
-  <text x="670" y="115" class="rl-label-sm">wake-bit change detection</text>
+<pre><code>typedef volatile struct {
+    unsigned int head;              /* MPSC producer index */
+    unsigned int tail;              /* SPSC consumer index */
+    unsigned int overflow;          /* fall-back-to-server count */
+    unsigned int active;            /* 0 = ring disabled */
+    unsigned int pending_count;     /* total READY slots */
+    unsigned int pending_send_count;/* SEND-class subset */
+    unsigned int next_post_seq;     /* canonical post ordering */
+    unsigned int change_seq;        /* bumped on each publish */
+    unsigned int change_ack_seq;    /* owner-side ack */
+    unsigned int __pad;
+    nspa_msg_slot_t slots[NSPA_MSG_RING_SLOTS];
+} nspa_msg_ring_t;
+</code></pre>
 
-  <!-- Slots[] -->
-  <text x="70" y="143" class="rl-label-yellow">slots[0..63]</text>
-  <text x="70" y="155" class="rl-label-muted">nspa_msg_slot_t (128 B each approx)</text>
+<p>Each slot (<code>nspa_msg_slot_t</code>, 128 B, lines 1046-1067) carries the
+forwarded message plus routing metadata:</p>
 
-  <rect x="180" y="140" width="90" height="65" class="rl-slot"/>
-  <text x="225" y="157" class="rl-label-sm" text-anchor="middle">state</text>
-  <text x="225" y="169" class="rl-label-sm" text-anchor="middle">type, msg</text>
-  <text x="225" y="181" class="rl-label-sm" text-anchor="middle">win (hwnd)</text>
-  <text x="225" y="193" class="rl-label-sm" text-anchor="middle">wparam/lparam</text>
+<pre><code>typedef volatile struct {
+    unsigned int  state;        /* state enum */
+    unsigned int  type;         /* enum message_type */
+    user_handle_t win;          /* target hwnd */
+    unsigned int  msg;
+    unsigned int  post_seq;     /* canonical posted ordering */
+    lparam_t      wparam;
+    lparam_t      lparam;
+    int           x, y;         /* cursor at send time */
+    unsigned int  time;
+    unsigned int  sender_tid;   /* for reply routing */
+    unsigned int  sender_pid;
+    unsigned int  reply_slot;   /* index into sender's reply ring, ~0u = no-reply */
+    unsigned int  data_size;
+    unsigned int  reply_gen;    /* MR1 ABA guard — see §8 */
+    unsigned char data[NSPA_MSG_INLINE_MAX];
+} nspa_msg_slot_t;
+</code></pre>
 
-  <rect x="280" y="140" width="90" height="65" class="rl-slot"/>
-  <text x="325" y="157" class="rl-label-sm" text-anchor="middle">sender_tid</text>
-  <text x="325" y="169" class="rl-label-sm" text-anchor="middle">sender_pid</text>
-  <text x="325" y="181" class="rl-label-sm" text-anchor="middle">reply_slot</text>
-  <text x="325" y="193" class="rl-label-sm" text-anchor="middle">post_seq</text>
+<p>The <code>reply_gen</code> field is the MR1 ABA guard added 2026-04-27. It
+repurposes the previously-reserved <code>__pad</code> slot. Sender stamps it
+post-reserve with the value returned from atomic-fetch-add on the reply
+slot&rsquo;s generation; receiver passes it through to
+<code>nspa_write_ring_reply</code>, which writes only on generation match.
+Mechanism detailed in <a href="#8-reply-slot-generation-discriminator-mr1">§8</a>.</p>
 
-  <rect x="380" y="140" width="90" height="65" class="rl-slot"/>
-  <text x="425" y="157" class="rl-label-sm" text-anchor="middle">time</text>
-  <text x="425" y="169" class="rl-label-sm" text-anchor="middle">x / y</text>
-  <text x="425" y="181" class="rl-label-sm" text-anchor="middle">data_size</text>
-  <text x="425" y="193" class="rl-label-sm" text-anchor="middle">__pad</text>
-
-  <text x="490" y="175" class="rl-label" text-anchor="start">...</text>
-  <rect x="525" y="140" width="90" height="65" class="rl-slot"/>
-  <text x="570" y="175" class="rl-label-sm" text-anchor="middle">[63]</text>
-
-  <text x="470" y="200" class="rl-label-green" text-anchor="middle">State machine: EMPTY -> WRITING -> READY -> CONSUMED -> EMPTY</text>
-
-  <!-- Reply ring -->
-  <rect x="40" y="235" width="840" height="140" class="rl-box-nspa"/>
-  <text x="460" y="254" class="rl-label-accent" text-anchor="middle">nspa_reply_ring_t (16 slots, per-queue)</text>
-
-  <rect x="60" y="265" width="800" height="30" class="rl-box"/>
-  <text x="90" y="284" class="rl-label-cyan">next_alloc</text>
-  <text x="220" y="284" class="rl-label-sm">monotonic reservation hint (CAS FREE -> PENDING)</text>
-
-  <text x="70" y="313" class="rl-label-yellow">slots[0..15]</text>
-  <text x="70" y="325" class="rl-label-muted">nspa_reply_slot_t</text>
-
-  <rect x="180" y="305" width="100" height="60" class="rl-slot-full"/>
-  <text x="230" y="322" class="rl-label-sm" text-anchor="middle">state</text>
-  <text x="230" y="335" class="rl-label-sm" text-anchor="middle">result (LRESULT)</text>
-  <text x="230" y="348" class="rl-label-sm" text-anchor="middle">generation</text>
-  <text x="230" y="361" class="rl-label-sm" text-anchor="middle">data[inline]</text>
-
-  <rect x="290" y="305" width="100" height="60" class="rl-slot-full"/>
-  <text x="340" y="335" class="rl-label-sm" text-anchor="middle">[1]</text>
-
-  <rect x="400" y="305" width="100" height="60" class="rl-slot-full"/>
-  <text x="450" y="335" class="rl-label-sm" text-anchor="middle">[2]</text>
-
-  <text x="520" y="335" class="rl-label" text-anchor="start">...</text>
-
-  <rect x="560" y="305" width="100" height="60" class="rl-slot-full"/>
-  <text x="610" y="335" class="rl-label-sm" text-anchor="middle">[15]</text>
-
-  <text x="460" y="384" class="rl-label-yellow" text-anchor="middle">State: FREE -> PENDING (sender) -> READY (receiver writes) -> FREE (sender reads)</text>
-</svg>
-</div>
-
-
-<p>The forward ring&rsquo;s <code>state</code> transitions are CAS-claimed (multi-producer head, single-consumer tail). The reply ring&rsquo;s <code>generation</code> field discriminates against stale writebacks: a sender that times out marks its slot <code>FREE</code> and a later writer that finds <code>state != PENDING</code> drops the reply without touching user memory.</p>
-
-<h3>Forward Slot State Machine</h3>
+<h3>3.2 Forward slot state machine</h3>
 
 <table>
 <thead>
@@ -436,7 +459,7 @@ Author: jordan Johnston</p>
 <td> <code>EMPTY</code> </td>
 <td> <code>WRITING</code> </td>
 <td> sender </td>
-<td> <code>ring_reserve_slot</code> CAS on <code>head</code> allocates, then transition happens pre-fill </td>
+<td> <code>ring_reserve_slot</code> CAS on <code>head</code> allocates; transition before payload fill </td>
 </tr>
 <tr>
 <td> <code>WRITING</code> </td>
@@ -448,7 +471,7 @@ Author: jordan Johnston</p>
 <td> <code>READY</code> </td>
 <td> <code>CONSUMED</code> </td>
 <td> receiver </td>
-<td> consume via CAS in client pump OR server arbitration &ndash; whichever wins </td>
+<td> CAS-claim in client pump or server arbitration — whichever wins </td>
 </tr>
 <tr>
 <td> <code>CONSUMED</code> </td>
@@ -460,18 +483,187 @@ Author: jordan Johnston</p>
 </table>
 
 
+<p>State values (<code>protocol.def</code> lines 1036-1039):</p>
+
+<pre><code>#define NSPA_MSG_STATE_EMPTY     0
+#define NSPA_MSG_STATE_WRITING   1
+#define NSPA_MSG_STATE_READY     2
+#define NSPA_MSG_STATE_CONSUMED  3
+</code></pre>
+
+<p>The sender&rsquo;s release store on <code>state = READY</code> orders all preceding slot
+writes before the receiver&rsquo;s acquire load on <code>state == READY</code>. Pure
+<code>__atomic_*</code> operations; no memory barrier syscalls.</p>
+
+<h3>3.3 <code>nspa_reply_ring_t</code> — reply ring</h3>
+
+<p>Sized at 16 slots × 96 bytes ≈ 1.5 KB. The reply ring is per-queue
+(every queue&rsquo;s bypass shm owns one), and it is <strong>the sender&rsquo;s own
+queue</strong> that holds the reply slot for a SEND — not the receiver&rsquo;s
+queue. The flow:</p>
+
+<ol>
+<li>Sender reserves a free slot in its OWN reply ring (CAS <code>FREE</code> →
+<code>PENDING</code>).</li>
+<li>Sender stamps the slot&rsquo;s <code>generation</code> (atomic-fetch-add) and
+captures the post-bump value.</li>
+<li>Sender publishes the message into the receiver&rsquo;s forward ring with
+<code>slot.reply_slot = reply_idx</code> and <code>slot.reply_gen = generation</code>.</li>
+<li>Receiver dispatches the window proc, gets <code>LRESULT</code>.</li>
+<li>Receiver looks up the sender via the peer cache, finds the sender&rsquo;s
+own bypass shm, indexes into the reply ring at <code>reply_slot</code>.</li>
+<li>Receiver checks slot state is <code>PENDING</code> AND slot generation matches
+<code>reply_gen</code> from the message slot; on mismatch, drops the reply
+silently.</li>
+<li>On match, receiver writes <code>result</code>, <code>data</code>, sets <code>state = READY</code>,
+<code>futex_wake</code> on <code>&amp;slot-&gt;state</code>.</li>
+<li>Sender&rsquo;s <code>futex_wait</code> returns, reads <code>result</code>, sets <code>state = FREE</code>.</li>
+</ol>
+
+
+<p>Slot fields (<code>protocol.def</code> lines 1084-1092):</p>
+
+<pre><code>typedef volatile struct {
+    unsigned int state;       /* NSPA_REPLY_STATE_* */
+    unsigned int error;
+    lparam_t     result;      /* LRESULT */
+    unsigned int data_size;
+    unsigned int generation;  /* ABA guard — bumped on each reserve */
+    unsigned char data[NSPA_REPLY_INLINE_MAX];
+} nspa_reply_slot_t;
+</code></pre>
+
+<p>States:</p>
+
+<pre><code>#define NSPA_REPLY_STATE_FREE     0   /* sender may allocate */
+#define NSPA_REPLY_STATE_PENDING  1   /* awaiting receiver */
+#define NSPA_REPLY_STATE_READY    2   /* receiver wrote; sender may read */
+</code></pre>
+
+<p>The wrapping ring header has a <code>next_alloc</code> hint for the next free
+slot:</p>
+
+<pre><code>typedef volatile struct {
+    unsigned int next_alloc;
+    unsigned int __pad[3];
+    nspa_reply_slot_t slots[NSPA_REPLY_RING_SLOTS];
+} nspa_reply_ring_t;
+</code></pre>
+
+<h3>3.4 Layout diagram</h3>
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 920 410" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .rl-box { fill: #24283b; stroke: #8c92b3; stroke-width: 1.5; rx: 6; }
+    .rl-box-nspa { fill: #24283b; stroke: #7aa2f7; stroke-width: 2; rx: 6; }
+    .rl-slot { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1; rx: 3; }
+    .rl-slot-full { fill: #2a2a1a; stroke: #e0af68; stroke-width: 1; rx: 3; }
+    .rl-label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+    .rl-label-sm { fill: #c0caf5; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+    .rl-label-accent { fill: #7aa2f7; font-size: 12px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .rl-label-yellow { fill: #e0af68; font-size: 10px; font-family: 'JetBrains Mono', monospace; }
+    .rl-label-cyan { fill: #7dcfff; font-size: 10px; font-family: 'JetBrains Mono', monospace; }
+    .rl-label-muted { fill: #8c92b3; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+    .rl-label-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+  </style>
+
+  <text x="460" y="24" class="rl-label-accent" text-anchor="middle">nspa_queue_bypass_shm_t (memfd, ~10 KB + class rings, mlock'd)</text>
+
+  <rect x="20" y="35" width="880" height="355" rx="10" fill="none" stroke="#3b4261" stroke-width="1" stroke-dasharray="5,3"/>
+
+  <rect x="40" y="55" width="840" height="160" class="rl-box-nspa"/>
+  <text x="460" y="74" class="rl-label-accent" text-anchor="middle">nspa_msg_ring_t (forward MPSC, 64 slots)</text>
+
+  <rect x="60" y="85" width="800" height="38" class="rl-box"/>
+  <text x="90" y="102" class="rl-label-cyan">head</text>
+  <text x="90" y="115" class="rl-label-sm">producer (CAS)</text>
+  <text x="180" y="102" class="rl-label-cyan">tail</text>
+  <text x="180" y="115" class="rl-label-sm">consumer cursor</text>
+  <text x="280" y="102" class="rl-label-cyan">active</text>
+  <text x="280" y="115" class="rl-label-sm">0 = disabled</text>
+  <text x="370" y="102" class="rl-label-cyan">pending_count</text>
+  <text x="370" y="115" class="rl-label-sm">+ pending_send_count</text>
+  <text x="540" y="102" class="rl-label-cyan">next_post_seq</text>
+  <text x="540" y="115" class="rl-label-sm">canonical ordering</text>
+  <text x="690" y="102" class="rl-label-cyan">change_seq / ack</text>
+  <text x="690" y="115" class="rl-label-sm">wake-bit edge detect</text>
+
+  <text x="70" y="143" class="rl-label-yellow">slots[0..63]</text>
+  <text x="70" y="155" class="rl-label-muted">nspa_msg_slot_t (128 B)</text>
+
+  <rect x="180" y="140" width="90" height="65" class="rl-slot"/>
+  <text x="225" y="157" class="rl-label-sm" text-anchor="middle">state</text>
+  <text x="225" y="169" class="rl-label-sm" text-anchor="middle">type, msg</text>
+  <text x="225" y="181" class="rl-label-sm" text-anchor="middle">win, wparam</text>
+  <text x="225" y="193" class="rl-label-sm" text-anchor="middle">lparam</text>
+
+  <rect x="280" y="140" width="90" height="65" class="rl-slot"/>
+  <text x="325" y="157" class="rl-label-sm" text-anchor="middle">sender_tid</text>
+  <text x="325" y="169" class="rl-label-sm" text-anchor="middle">sender_pid</text>
+  <text x="325" y="181" class="rl-label-sm" text-anchor="middle">reply_slot</text>
+  <text x="325" y="193" class="rl-label-sm" text-anchor="middle">reply_gen (MR1)</text>
+
+  <rect x="380" y="140" width="90" height="65" class="rl-slot"/>
+  <text x="425" y="157" class="rl-label-sm" text-anchor="middle">time, x, y</text>
+  <text x="425" y="169" class="rl-label-sm" text-anchor="middle">post_seq</text>
+  <text x="425" y="181" class="rl-label-sm" text-anchor="middle">data_size</text>
+  <text x="425" y="193" class="rl-label-sm" text-anchor="middle">data[64]</text>
+
+  <text x="490" y="175" class="rl-label" text-anchor="start">...</text>
+  <rect x="525" y="140" width="90" height="65" class="rl-slot"/>
+  <text x="570" y="175" class="rl-label-sm" text-anchor="middle">[63]</text>
+
+  <text x="470" y="200" class="rl-label-green" text-anchor="middle">EMPTY -&gt; WRITING -&gt; READY -&gt; CONSUMED -&gt; EMPTY</text>
+
+  <rect x="40" y="235" width="840" height="140" class="rl-box-nspa"/>
+  <text x="460" y="254" class="rl-label-accent" text-anchor="middle">nspa_reply_ring_t (16 slots, per-queue, holds replies for sender's own SENDs)</text>
+
+  <rect x="60" y="265" width="800" height="30" class="rl-box"/>
+  <text x="90" y="284" class="rl-label-cyan">next_alloc</text>
+  <text x="220" y="284" class="rl-label-sm">monotonic reservation hint (CAS FREE -&gt; PENDING)</text>
+
+  <text x="70" y="313" class="rl-label-yellow">slots[0..15]</text>
+  <text x="70" y="325" class="rl-label-muted">nspa_reply_slot_t</text>
+
+  <rect x="180" y="305" width="100" height="60" class="rl-slot-full"/>
+  <text x="230" y="322" class="rl-label-sm" text-anchor="middle">state</text>
+  <text x="230" y="335" class="rl-label-sm" text-anchor="middle">result</text>
+  <text x="230" y="348" class="rl-label-sm" text-anchor="middle">generation</text>
+  <text x="230" y="361" class="rl-label-sm" text-anchor="middle">data[64]</text>
+
+  <rect x="290" y="305" width="100" height="60" class="rl-slot-full"/>
+  <text x="340" y="335" class="rl-label-sm" text-anchor="middle">[1]</text>
+  <rect x="400" y="305" width="100" height="60" class="rl-slot-full"/>
+  <text x="450" y="335" class="rl-label-sm" text-anchor="middle">[2]</text>
+  <text x="520" y="335" class="rl-label" text-anchor="start">...</text>
+  <rect x="560" y="305" width="100" height="60" class="rl-slot-full"/>
+  <text x="610" y="335" class="rl-label-sm" text-anchor="middle">[15]</text>
+
+  <text x="460" y="384" class="rl-label-yellow" text-anchor="middle">FREE -&gt; PENDING (sender) -&gt; READY (receiver) -&gt; FREE (sender reads)</text>
+</svg>
+</div>
+
+
+<p>The forward ring&rsquo;s <code>state</code> transitions are CAS-claimed (multi-producer
+head, single-consumer tail). The reply ring&rsquo;s <code>generation</code> field
+discriminates against stale writebacks (MR1, <a href="#8-reply-slot-generation-discriminator-mr1">§8</a>);
+the receiver writes only on <code>state == PENDING &amp;&amp; generation == reply_gen</code>.</p>
+
 <hr />
 
-<h2>5. Memfd Lifecycle</h2>
+<h2>4. Memfd lifecycle</h2>
 
-<p>Every queue&rsquo;s bypass region is backed by an anonymous <code>memfd_create()</code> file. The fd&rsquo;s lifetime follows the queue: created on first use, closed on queue destroy. Clients that need to talk to a peer receive the fd over the wineserver socket via <code>SCM_RIGHTS</code> and <code>mmap</code> it locally.</p>
+<p>Every queue&rsquo;s bypass region is backed by an anonymous <code>memfd_create()</code>
+file. The fd&rsquo;s lifetime follows the queue: created on first use,
+closed on queue destroy. Clients that need to talk to a peer receive
+the fd over the wineserver socket via <code>SCM_RIGHTS</code> and <code>mmap</code> it
+locally.</p>
 
 <div class="diagram-container">
 <svg width="100%" viewBox="0 0 920 430" xmlns="http://www.w3.org/2000/svg">
   <style>
-    .mf-box { fill: #24283b; stroke: #9aa5ce; stroke-width: 1.5; rx: 6; }
     .mf-box-nspa { fill: #24283b; stroke: #7aa2f7; stroke-width: 2; rx: 6; }
-    .mf-box-new { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 2; rx: 6; }
     .mf-box-server { fill: #2a1a1a; stroke: #f7768e; stroke-width: 1.5; rx: 6; }
     .mf-box-kernel { fill: #1a1a2a; stroke: #bb9af7; stroke-width: 1.5; rx: 6; }
     .mf-label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
@@ -480,19 +672,14 @@ Author: jordan Johnston</p>
     .mf-label-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .mf-label-red { fill: #f7768e; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .mf-label-violet { fill: #bb9af7; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
-    .mf-arrow { stroke: #9aa5ce; stroke-width: 1.3; fill: none; }
-    .mf-arrow-green { stroke: #9ece6a; stroke-width: 1.5; fill: none; }
-    .mf-arrow-red { stroke: #f7768e; stroke-width: 1.5; fill: none; }
   </style>
 
   <text x="460" y="24" class="mf-label-accent" text-anchor="middle">memfd allocation + fd passing + client mmap</text>
 
-  <!-- kernel -->
   <rect x="30" y="360" width="860" height="50" class="mf-box-kernel"/>
   <text x="460" y="378" class="mf-label-violet" text-anchor="middle">Kernel (anon shmem pages, single physical backing)</text>
   <text x="460" y="395" class="mf-label-sm" text-anchor="middle">fd reference-counted; pages unlink when last mapping released AND fd closed</text>
 
-  <!-- wineserver -->
   <rect x="30" y="50" width="300" height="170" class="mf-box-server"/>
   <text x="180" y="70" class="mf-label-red" text-anchor="middle">wineserver</text>
   <text x="50" y="90" class="mf-label">nspa_alloc_bypass_shm():</text>
@@ -505,12 +692,11 @@ Author: jordan Johnston</p>
   <text x="50" y="202" class="mf-label">nspa_get_thread_queue handler:</text>
   <text x="65" y="216" class="mf-label-sm">send_client_fd(fd, sync_handle)</text>
 
-  <!-- client thread -->
   <rect x="590" y="50" width="300" height="200" class="mf-box-nspa"/>
   <text x="740" y="70" class="mf-label-accent" text-anchor="middle">Client thread (ntdll Unix)</text>
   <text x="605" y="92" class="mf-label">SERVER_START_REQ(nspa_get_thread_queue):</text>
   <text x="620" y="106" class="mf-label-sm">wine_server_call(req)</text>
-  <text x="620" y="120" class="mf-label-sm">check reply-&gt;bypass_locator.id</text>
+  <text x="620" y="120" class="mf-label-sm">check reply-&gt;fd_sent</text>
   <text x="605" y="140" class="mf-label-green">wine_server_receive_fd(&amp;token):</text>
   <text x="620" y="154" class="mf-label-sm">recvmsg(..., SCM_RIGHTS)</text>
   <text x="620" y="168" class="mf-label-sm">match token == sync_handle</text>
@@ -519,20 +705,17 @@ Author: jordan Johnston</p>
   <text x="605" y="222" class="mf-label-green">mlock(map, size):</text>
   <text x="620" y="236" class="mf-label-sm">pin in RAM, no RT page faults</text>
 
-  <!-- SCM_RIGHTS -->
-  <line x1="335" y1="215" x2="585" y2="140" class="mf-arrow-green"/>
+  <line x1="335" y1="215" x2="585" y2="140" stroke="#9ece6a" stroke-width="1.5" fill="none"/>
   <text x="460" y="173" class="mf-label-green" text-anchor="middle">SCM_RIGHTS</text>
   <text x="460" y="186" class="mf-label-sm" text-anchor="middle">fd crosses the wineserver socket</text>
 
-  <!-- kernel edges -->
-  <line x1="180" y1="225" x2="180" y2="355" class="mf-arrow"/>
+  <line x1="180" y1="225" x2="180" y2="355" stroke="#8c92b3" stroke-width="1.3" fill="none"/>
   <text x="110" y="290" class="mf-label-sm">server-side map</text>
 
-  <line x1="740" y1="255" x2="740" y2="355" class="mf-arrow-green"/>
+  <line x1="740" y1="255" x2="740" y2="355" stroke="#9ece6a" stroke-width="1.5" fill="none"/>
   <text x="755" y="290" class="mf-label-green">client-side map</text>
   <text x="755" y="304" class="mf-label-sm">(same physical pages)</text>
 
-  <!-- Lifetime note -->
   <rect x="40" y="260" width="510" height="90" rx="5" fill="#24283b" stroke="#3b4261"/>
   <text x="55" y="280" class="mf-label-accent">Lifetime rules:</text>
   <text x="55" y="298" class="mf-label-sm">1. Server holds fd until msg_queue_destroy -&gt; nspa_free_bypass_shm</text>
@@ -543,691 +726,1403 @@ Author: jordan Johnston</p>
 </div>
 
 
-<h3>Why memfd, Not Session Shmem</h3>
+<p>The client&rsquo;s mmap lifetime is independent of the server&rsquo;s. If a peer
+queue is destroyed while a holder still has it mapped, the holder&rsquo;s
+slot reads return whatever was last written to the pages — the page
+backing remains as long as any mapping references it. The peer cache&rsquo;s
+positive entries become stale and are evicted lazily on next signal
+failure (<code>nspa_clear_cache_entry</code>); a stale send falls back to server
+RPC.</p>
 
-<p>Wine&rsquo;s session shmem is a single large mmap&rsquo;d region shared across the entire wineserver + all client processes. <code>alloc_shared_object()</code> sub-allocates from that region via a bump allocator with per-object headers containing an <code>id</code> and a seqlock <code>seq</code>. This is great for small, long-lived shared records (process/thread metadata, desktop state).</p>
+<h3>4.1 <code>nspa_cache_entry</code> per-thread peer cache</h3>
 
-<p>The original msg-bypass implementation put the ring inside session shmem too. It produced a reliable, reproducible Ableton regression: library panel would not populate whenever MainThread had a ring allocated &ndash; and <em>every</em> runtime gate tested showed the bug persisted independent of ring reads/writes. The allocation machinery itself was the trigger. See §8 for the full story.</p>
+<p>The client side caches resolved peers in TLS so subsequent sends to
+the same peer skip the <code>nspa_get_thread_queue</code> round-trip. From
+<code>msg_ring.c:82-88</code>:</p>
 
-<p>memfd gives each queue a private page-aligned region with zero interaction with session shmem&rsquo;s allocator, seqlock, or layout. The library regression vanished on the redesign.</p>
+<pre><code>struct nspa_cache_entry {
+    DWORD                   tid;            /* 0 = empty slot */
+    HANDLE                  sync_handle;    /* peer queue-&gt;sync */
+    nspa_queue_bypass_shm_t *mapped_ptr;    /* peer's bypass mmap (NULL = neg cache) */
+    size_t                  mapped_size;
+};
+</code></pre>
+
+<p>The cache is open-addressed linear probing on <code>tid</code> (Wang hash), 128
+slots per producer thread (<code>NSPA_CACHE_SLOTS</code>, 4 KB lazy-allocated per
+producing thread). Sized to comfortably cover a DAW main thread
+receiving from 14 AudioCalc workers + ~20 misc UI/timer/library
+threads + headroom for VST plugin worker pools. Stored under a
+<code>pthread_key_t</code> because PE-spawned threads (Ableton&rsquo;s DWM-Sync,
+AudioCalc, VST hosts) faulted on <code>__thread</code> access in win32u — the
+dynamic-TLS block isn&rsquo;t set up on every PE-spawned thread by the time
+it enters win32u, but pthread TLS is always live (Wine uses
+<code>pthread_create</code> to back <code>CreateThread</code>).</p>
+
+<p>Each entry caches three values: the wineserver thread id, an event
+handle for the peer queue&rsquo;s sync (used by <code>wine_server_signal_internal_sync</code>),
+and the pointer to the peer&rsquo;s mmap&rsquo;d ring. A negative-cache sentinel
+is <code>tid</code> set with <code>mapped_ptr</code> NULL, used for cross-process or
+otherwise-unreachable peers so the lookup doesn&rsquo;t re-issue an RPC for
+each subsequent send.</p>
+
+<h3>4.2 Own-bypass TLS</h3>
+
+<p>Each thread&rsquo;s own bypass shm is also cached in TLS, separately
+(<code>nspa_own_tls_key</code>). Sentinel values:</p>
+
+<pre><code>NULL          = never queried
+(void *)-1    = queried, server had no bypass (negative cache)
+valid ptr     = queried, positive (mmap'd ring)
+</code></pre>
+
+<p>The own bypass is bootstrapped on first call to
+<code>nspa_get_own_bypass_shm()</code>. It is needed for two purposes: (1) local
+wake-bit synthesis in <code>check_queue_bits()</code> reads <code>pending_count</code> from
+this region to surface ring-pending activity in <code>GetQueueStatus</code>; (2)
+SEND-class messages reserve their reply slot in this region&rsquo;s
+<code>nspa_reply_ring</code>. Bootstrap is unconditional (skips the
+<code>NSPA_DISABLE_OWN_BOOTSTRAP</code> gate) because the wake-bit synthesis path
+is required for correctness even when the SEND fast-path is disabled.</p>
 
 <hr />
 
-<h2>6. Client Fast Path (POST + SEND)</h2>
+<h2>5. POST class</h2>
 
-<div class="diagram-container">
-<svg width="100%" viewBox="0 0 920 380" xmlns="http://www.w3.org/2000/svg">
-  <style>
-    .cp-box { fill: #24283b; stroke: #9aa5ce; stroke-width: 1.5; rx: 6; }
-    .cp-box-new { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 2; rx: 6; }
-    .cp-box-tls { fill: #1a1a2a; stroke: #7aa2f7; stroke-width: 1.5; rx: 4; }
-    .cp-label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
-    .cp-label-sm { fill: #c0caf5; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
-    .cp-label-accent { fill: #7aa2f7; font-size: 12px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
-    .cp-label-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
-    .cp-label-cyan { fill: #7dcfff; font-size: 10px; font-family: 'JetBrains Mono', monospace; }
-    .cp-label-yellow { fill: #e0af68; font-size: 10px; font-family: 'JetBrains Mono', monospace; }
-    .cp-arrow { stroke: #9aa5ce; stroke-width: 1.3; fill: none; }
-    .cp-arrow-green { stroke: #9ece6a; stroke-width: 1.5; fill: none; }
-  </style>
+<p><code>nspa_try_post_ring</code> (<code>msg_ring.c:715-887</code>) handles asynchronous
+<code>PostMessage</code> deliveries. Returns <code>TRUE</code> when the message was delivered
+via the ring; the caller skips the server <code>send_message</code> request in
+that case. <code>FALSE</code> means &ldquo;ineligible / failed&rdquo; and the caller does the
+server path.</p>
 
-  <text x="460" y="22" class="cp-label-accent" text-anchor="middle">Client fast path: cache lookup + ring publish + ntsync wake</text>
+<h3>5.1 Eligibility gates</h3>
 
-  <!-- Cache block -->
-  <rect x="20" y="50" width="280" height="320" class="cp-box"/>
-  <text x="160" y="70" class="cp-label-accent" text-anchor="middle">Per-thread cache (pthread_key TLS)</text>
-
-  <rect x="35" y="85" width="250" height="175" class="cp-box-tls"/>
-  <text x="160" y="102" class="cp-label-cyan" text-anchor="middle">nspa_cache[32]</text>
-  <text x="160" y="115" class="cp-label-sm" text-anchor="middle">open-addressed hash on tid</text>
-
-  <text x="50" y="138" class="cp-label-green">entry.tid</text>
-  <text x="50" y="152" class="cp-label-sm">(0 = empty slot)</text>
-  <text x="50" y="170" class="cp-label-green">entry.sync_handle</text>
-  <text x="50" y="184" class="cp-label-sm">peer's queue sync event</text>
-  <text x="50" y="202" class="cp-label-green">entry.mapped_ptr</text>
-  <text x="50" y="216" class="cp-label-sm">peer's ring mmap (client view)</text>
-  <text x="50" y="234" class="cp-label-green">entry.mapped_size</text>
-  <text x="50" y="248" class="cp-label-sm">munmap on evict/clear</text>
-
-  <text x="160" y="275" class="cp-label-yellow" text-anchor="middle">Negative cache: tid set, ptr NULL</text>
-  <text x="160" y="287" class="cp-label-sm" text-anchor="middle">avoids RTT on every subsequent call</text>
-
-  <text x="160" y="310" class="cp-label-yellow" text-anchor="middle">Own-ring TLS slot</text>
-  <text x="160" y="323" class="cp-label-sm" text-anchor="middle">NULL / -1 / valid-ptr sentinel</text>
-  <text x="160" y="336" class="cp-label-sm" text-anchor="middle">bootstrapped via ensure_own_bypass</text>
-
-  <!-- Fast path flow -->
-  <rect x="330" y="50" width="570" height="320" class="cp-box"/>
-  <text x="615" y="70" class="cp-label-accent" text-anchor="middle">POST / SEND publish sequence (warm cache)</text>
-
-  <rect x="350" y="90" width="230" height="36" class="cp-box"/>
-  <text x="465" y="113" class="cp-label" text-anchor="middle">nspa_lookup_peer(dest_tid)</text>
-
-  <line x1="580" y1="108" x2="620" y2="108" class="cp-arrow-green"/>
-
-  <rect x="625" y="90" width="255" height="36" class="cp-box-new"/>
-  <text x="753" y="113" class="cp-label-green" text-anchor="middle">cached entry -&gt; ptr, sync_handle</text>
-
-  <line x1="753" y1="126" x2="753" y2="146" class="cp-arrow-green"/>
-
-  <rect x="350" y="148" width="530" height="36" class="cp-box-new"/>
-  <text x="615" y="171" class="cp-label-green" text-anchor="middle">ring_reserve_slot: CAS head, ring-&gt;head += 1</text>
-
-  <line x1="615" y1="184" x2="615" y2="204" class="cp-arrow-green"/>
-
-  <rect x="350" y="206" width="530" height="36" class="cp-box-new"/>
-  <text x="615" y="229" class="cp-label-green" text-anchor="middle">slot-&gt;type = type; slot-&gt;wparam = wp; slot-&gt;lparam = lp; slot-&gt;reply_slot = ...</text>
-
-  <line x1="615" y1="242" x2="615" y2="262" class="cp-arrow-green"/>
-
-  <rect x="350" y="264" width="530" height="36" class="cp-box-new"/>
-  <text x="615" y="287" class="cp-label-green" text-anchor="middle">__atomic_store_n(&amp;slot-&gt;state, READY, RELEASE)</text>
-
-  <line x1="615" y1="300" x2="615" y2="320" class="cp-arrow-green"/>
-
-  <rect x="350" y="322" width="530" height="36" class="cp-box-new"/>
-  <text x="615" y="344" class="cp-label-green" text-anchor="middle">wine_server_signal_internal_sync(peer_sync_handle)</text>
-</svg>
-</div>
-
-
-<p>Warm-cache RT cost estimate (sender side, steady state):</p>
+<p>Returned <code>FALSE</code> immediately for any of:</p>
 
 <table>
 <thead>
 <tr>
-<th> Step </th>
-<th> Cost </th>
+<th> Gate </th>
+<th> Reason </th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td> TLS cache lookup (hash + probe) </td>
-<td> ~10 ns </td>
+<td> <code>NSPA_DISABLE_MSG_BYPASS</code> env var set </td>
+<td> Manual override </td>
 </tr>
 <tr>
-<td> <code>ring_reserve_slot</code> CAS on <code>head</code> </td>
-<td> ~20 ns </td>
+<td> <code>type_enum != MSG_POSTED</code> </td>
+<td> POST handles MSG_POSTED only; SEND/notify routed elsewhere </td>
 </tr>
 <tr>
-<td> 10 aligned stores (filling the slot) </td>
-<td> ~10 ns </td>
+<td> <code>hwnd == 0</code> </td>
+<td> Thread-message; semantics need server&rsquo;s queue rules </td>
 </tr>
 <tr>
-<td> Release store on <code>state</code> </td>
-<td> ~5 ns </td>
+<td> <code>dest_tid == own_tid</code> </td>
+<td> Same-thread post; legacy queue semantics </td>
 </tr>
 <tr>
-<td> <code>wine_server_signal_internal_sync</code> (ntsync ioctl) </td>
-<td> 200 &ndash; 500 ns kernel round-trip </td>
+<td> <code>WM_DDE_FIRST &lt;= msg &lt;= WM_DDE_LAST</code> </td>
+<td> DDE has separate registered-message handling </td>
 </tr>
 <tr>
-<td> <strong>Total per message (warm)</strong> </td>
-<td> <strong>&lt; 1 &micro;s</strong> </td>
+<td> Peer cache full </td>
+<td> 128-slot table exceeded — rare with stable thread sets </td>
+</tr>
+<tr>
+<td> Peer in different process </td>
+<td> Negative-cache sentinel; falls back to server </td>
+</tr>
+<tr>
+<td> Ring not active </td>
+<td> Receiver not yet bootstrapped </td>
+</tr>
+<tr>
+<td> Ring full </td>
+<td> 64 slots all in flight; bumps <code>overflow</code> counter </td>
 </tr>
 </tbody>
 </table>
 
 
-<p>Cold-cache cost (first publish to a peer) adds one <code>SERVER_START_REQ(nspa_get_thread_queue)</code> round-trip + <code>SCM_RIGHTS</code> receive + <code>mmap</code> + <code>mlock</code> &ndash; ~50 &ndash; 200 &micro;s one-time, paid off the RT path.</p>
+<h3>5.2 Publish sequence</h3>
 
-<p>Fall-back conditions (fast path returns <code>FALSE</code> -> caller falls back to server):</p>
+<p>On the accept path:</p>
+
+<ol>
+<li><code>ring_reserve_slot</code> performs a CAS-loop on <code>head</code>. Bounded to
+<code>NSPA_RING_RESERVE_RETRY_MAX = 256</code> iterations to bound a producer&rsquo;s
+stall under SCHED_FIFO same-prio thrash; on exhaustion, returns
+<code>~0u</code> and the caller falls through to server post.</li>
+<li>State transitions to <code>WRITING</code> (relaxed store; producer-only
+visibility).</li>
+<li>All payload fields are written: <code>type</code>, <code>win</code>, <code>msg</code>, <code>wparam</code>,
+<code>lparam</code>, <code>time</code>, <code>sender_tid</code>, <code>sender_pid</code>, <code>reply_slot = ~0u</code>,
+<code>reply_gen = 0</code> (POSTs don&rsquo;t take replies, so the ABA guard is
+never engaged), <code>data_size = 0</code>.</li>
+<li><code>pending_count</code> atomically incremented (<code>ACQ_REL</code>). Visible to
+server-side wake-bit synthesis from this point.</li>
+<li><code>post_seq</code> is allocated immediately before <code>READY</code> so canonical
+ordering tracks publication time, not reserve time. Server
+arbitration uses this when interleaving ring posts with
+server-routed posts.</li>
+<li>Release-store on <code>state = READY</code>. Pairs with the consumer&rsquo;s
+acquire-load for a happens-before edge over all preceding writes.</li>
+<li><code>change_seq</code> incremented (release).</li>
+<li>Wake the receiver:
+<code>wine_server_signal_internal_sync(entry-&gt;sync_handle)</code> — an
+<code>NTSYNC_IOC_EVENT_SET_PI</code> ioctl. On failure, falls through to
+<code>NtSetEvent</code>. On dual failure, the MR4 rollback path engages
+(<a href="#10-wake-loss-rollback-mr4">§10</a>).</li>
+</ol>
+
+
+<p>Code (<code>msg_ring.c:819-887</code>):</p>
+
+<pre><code>__atomic_store_n( &amp;slot-&gt;state, NSPA_MSG_STATE_WRITING, __ATOMIC_RELAXED );
+slot-&gt;type        = MSG_POSTED;
+slot-&gt;win         = (UINT)(UINT_PTR)hwnd;
+slot-&gt;msg         = msg;
+slot-&gt;wparam      = (ULONG_PTR)wparam;
+slot-&gt;lparam      = (ULONG_PTR)lparam;
+slot-&gt;sender_tid  = HandleToULong( NtCurrentTeb()-&gt;ClientId.UniqueThread );
+slot-&gt;sender_pid  = HandleToULong( NtCurrentTeb()-&gt;ClientId.UniqueProcess );
+slot-&gt;reply_slot  = ~0u;        /* posted = no reply expected */
+slot-&gt;reply_gen   = 0;          /* MR1: no reply, no generation guard */
+slot-&gt;data_size   = 0;
+
+__atomic_fetch_add( &amp;ring-&gt;pending_count, 1, __ATOMIC_ACQ_REL );
+slot-&gt;post_seq = __atomic_add_fetch( &amp;ring-&gt;next_post_seq, 1, __ATOMIC_RELAXED );
+
+__atomic_store_n( &amp;slot-&gt;state, NSPA_MSG_STATE_READY, __ATOMIC_RELEASE );
+__atomic_add_fetch( &amp;ring-&gt;change_seq, 1, __ATOMIC_RELEASE );
+
+status = wine_server_signal_internal_sync( entry-&gt;sync_handle );
+if (status) status = NtSetEvent( entry-&gt;sync_handle, NULL );
+if (status) {
+    /* MR4 rollback path — see §10 */
+}
+</code></pre>
+
+<h3>5.3 Consumer-side pop</h3>
+
+<p>The receiver&rsquo;s <code>peek_message</code> calls <code>nspa_try_pop_own_ring_post</code>
+(<code>msg_ring.c:1196-1268</code>) before the wineserver <code>get_message</code> request.
+The pop function:</p>
+
+<ol>
+<li>Returns FALSE early if <code>NSPA_DISABLE_CLIENT_RING_DISPATCH</code> is set
+or if a specific <code>filter_hwnd</code> is requested (specific-window filter
+needs the server&rsquo;s window tree to evaluate <code>is_child_window</code>).</li>
+<li><strong>Arbitration check</strong>: reads <code>queue_shm-&gt;wake_bits</code> under a
+<code>NSPA_SHM_RETRY_GUARD</code>-bounded seqlock retry. If <code>QS_INPUT |
+QS_HOTKEY | QS_POSTMESSAGE</code> is set on the server side, the server
+has higher-priority or order-conflicting work pending and the
+client falls back to the server scan. Win32 enforces priority:
+hardware > POST > PAINT, so a blind ring pop when the server has
+older POSTs or any hardware messages would deliver out of order.</li>
+<li>Walks the ring forward from <code>tail</code>, looking for a <code>READY</code>
+MSG_POSTED slot with <code>first &lt;= msg &lt;= last</code>. CAS-claims via
+<code>READY → CONSUMED</code>.</li>
+<li>Decrements <code>pending_count</code>, advances tail over leading runs of
+<code>CONSUMED</code>, returns the message fields.</li>
+</ol>
+
+
+<p>The arbitration window (between the wake-bits read and the CAS) is
+microseconds, and the Ableton workload has near-zero server-routed
+POSTs once the eager-allocate fix is in place — race is degenerate. If
+strict ordering is ever needed, a re-read of wake-bits after CAS with
+CONSUMED → READY undo would close it.</p>
+
+<h3>5.4 Wake-bit synthesis</h3>
+
+<p><code>NtUserGetQueueStatus</code>, <code>check_queue_bits</code>, and the message pump&rsquo;s
+local shmem check all need to report ring-pending activity alongside
+legacy <code>wake_bits</code>. The wake-bit synthesis path
+(<code>dlls/win32u/input.c</code>, ~10 LOC) reads the local own-ring&rsquo;s
+<code>pending_count</code> / <code>pending_send_count</code> via <code>nspa_get_own_bypass_shm_public()</code>
+and ORs synthetic QS bits into the result:</p>
+
+<pre><code>UINT ring_total = __atomic_load_n( &amp;queue_bypass-&gt;nspa_msg_ring.pending_count, ACQUIRE );
+UINT ring_send  = __atomic_load_n( &amp;queue_bypass-&gt;nspa_msg_ring.pending_send_count, ACQUIRE );
+if (ring_total &gt; ring_send) ring_bits |= QS_POSTMESSAGE | QS_ALLPOSTMESSAGE;
+if (ring_send)              ring_bits |= QS_SENDMESSAGE;
+wake |= ring_bits;
+</code></pre>
+
+<p>Without this synthesis, <code>check_queue_bits</code> reports &ldquo;nothing to do&rdquo;
+even after the sender&rsquo;s ntsync wake — the thread sleeps through ring
+deliveries until some unrelated event prompts it to call
+<code>get_message</code>, producing the historical 5 s dispatch-latency timeout.</p>
+
+<hr />
+
+<h2>6. SEND class</h2>
+
+<p><code>nspa_try_send_ring</code> (<code>msg_ring.c:1371-1633</code>) handles synchronous
+<code>SendMessage</code> (MSG_ASCII / MSG_UNICODE) and asynchronous-with-reply-slot
+<code>SendNotifyMessage</code> (MSG_NOTIFY). Returns <code>TRUE</code> with <code>*result_out</code>
+populated on synchronous success, <code>TRUE</code> immediately for MSG_NOTIFY
+(no reply expected).</p>
+
+<h3>6.1 Eligibility gates</h3>
+
+<p>Same as POST plus:</p>
+
+<table>
+<thead>
+<tr>
+<th> Gate </th>
+<th> Reason </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> <code>type_enum</code> not in (MSG_ASCII, MSG_UNICODE, MSG_NOTIFY) </td>
+<td> Other synchronous types (callback, hooked, packed) not supported </td>
+</tr>
+<tr>
+<td> <code>NSPA_DISABLE_OWN_BOOTSTRAP</code> set </td>
+<td> Bisection / debug gate </td>
+</tr>
+<tr>
+<td> Own bypass shm not allocated </td>
+<td> Bootstrap failed; falls through to server </td>
+</tr>
+<tr>
+<td> Reply ring full </td>
+<td> 16-slot reply ring exhausted under heavy SEND fan-out </td>
+</tr>
+<tr>
+<td> Own queue sync handle unavailable </td>
+<td> TLS sentinel issue; fall through </td>
+</tr>
+</tbody>
+</table>
+
+
+<h3>6.2 Reply slot reservation</h3>
+
+<p>Before publishing the message into the receiver&rsquo;s forward ring, the
+sender reserves a slot in its own reply ring:</p>
+
+<pre><code>own_reply_ring = &amp;((nspa_queue_bypass_shm_t *)own_bypass)-&gt;nspa_reply_ring;
+reply_idx = nspa_reply_ring_reserve( own_reply_ring );
+/* ... */
+reply_slot = &amp;own_reply_ring-&gt;slots[reply_idx];
+reply_slot-&gt;result    = 0;
+reply_slot-&gt;error     = 0;
+reply_slot-&gt;data_size = 0;
+/* MR1: bump generation under release ordering and capture the
+ * post-bump value to stamp into the message slot. */
+reply_gen = __atomic_add_fetch( &amp;reply_slot-&gt;generation, 1, __ATOMIC_RELEASE );
+</code></pre>
+
+<p><code>nspa_reply_ring_reserve</code> (<code>msg_ring.c:1010-1029</code>) walks slots from
+<code>next_alloc</code> looking for <code>state == FREE</code>, CAS-claims <code>FREE → PENDING</code>,
+and returns the index. Returns <code>~0u</code> if all 16 slots are PENDING or
+READY.</p>
+
+<p>The generation increment is the MR1 ABA guard. Sender captures the
+post-increment value into <code>reply_gen</code>; this gets stamped into the
+message slot&rsquo;s <code>slot.reply_gen</code> field. Receiver passes it through to
+<code>nspa_write_ring_reply</code>, which writes only if the live slot&rsquo;s
+<code>generation</code> matches. Mechanism in <a href="#8-reply-slot-generation-discriminator-mr1">§8</a>.</p>
+
+<h3>6.3 Forward ring publish</h3>
+
+<p>The forward ring publish (<code>msg_ring.c:1519-1561</code>) is the same shape as
+POST but populates <code>reply_slot = reply_idx</code>, <code>reply_gen = reply_gen</code>,
+and increments <code>pending_send_count</code> in addition to <code>pending_count</code>:</p>
+
+<pre><code>msg_idx = ring_reserve_slot( ring );
+/* ... */
+slot-&gt;type       = type_enum;
+/* ... */
+slot-&gt;reply_slot = is_notify ? ~0u : reply_idx;
+slot-&gt;reply_gen  = is_notify ? 0    : reply_gen;   /* MR1 ABA guard */
+
+__atomic_fetch_add( &amp;ring-&gt;pending_count, 1, __ATOMIC_ACQ_REL );
+__atomic_fetch_add( &amp;ring-&gt;pending_send_count, 1, __ATOMIC_ACQ_REL );
+slot-&gt;post_seq = __atomic_add_fetch( &amp;ring-&gt;next_post_seq, 1, __ATOMIC_RELAXED );
+
+__atomic_store_n( &amp;slot-&gt;state, NSPA_MSG_STATE_READY, __ATOMIC_RELEASE );
+__atomic_add_fetch( &amp;ring-&gt;change_seq, 1, __ATOMIC_RELEASE );
+
+status = wine_server_signal_internal_sync( entry-&gt;sync_handle );
+if (status) status = NtSetEvent( entry-&gt;sync_handle, NULL );
+</code></pre>
+
+<p>For <code>is_notify</code>, the function returns <code>TRUE</code> immediately after the
+wake — the caller does not wait for a reply.</p>
+
+<h3>6.4 Reply wait loop with re-entrant drain</h3>
+
+<p>For synchronous SEND (<code>MSG_ASCII</code> / <code>MSG_UNICODE</code>) the sender enters
+the reply wait loop (<code>msg_ring.c:1587-1623</code>):</p>
+
+<pre><code>for (;;) {
+    unsigned int state = __atomic_load_n( &amp;reply_slot-&gt;state, __ATOMIC_ACQUIRE );
+    struct timespec rel;
+
+    if (state == NSPA_REPLY_STATE_READY) break;
+    if (waits &gt; 200)  /* 200 * 10 ms = 2 s */ {
+        __atomic_store_n( &amp;reply_slot-&gt;state, NSPA_REPLY_STATE_FREE, __ATOMIC_RELEASE );
+        return FALSE;
+    }
+    /* Drain inbound SEND messages before waiting so a peer that has
+     * called back into us can make forward progress. */
+    nspa_process_sent_messages();
+    state = __atomic_load_n( &amp;reply_slot-&gt;state, __ATOMIC_ACQUIRE );
+    if (state == NSPA_REPLY_STATE_READY) break;
+
+    rel.tv_sec  = 0;
+    rel.tv_nsec = 10 * 1000 * 1000;  /* 10 ms */
+    ret = syscall( SYS_futex, (void *)&amp;reply_slot-&gt;state,
+                   FUTEX_WAIT, NSPA_REPLY_STATE_PENDING,
+                   &amp;rel, NULL, 0 );
+    waits++;
+}
+</code></pre>
+
+<p>Two key shapes worth calling out:</p>
+
+<p><strong>Re-entrant drain.</strong> Before every futex wait, <code>nspa_process_sent_messages()</code>
+drains incoming SENDs to the current thread. This is the cross-send
+deadlock protection: if the peer&rsquo;s window proc happens to send
+synchronously back to us, we must handle that incoming SEND or both
+threads block waiting for each other. Each recursion reserves its own
+reply slot, so no slot collision; recursion depth is bounded by the
+same constraints as ordinary Win32 SendMessage nesting. (MR5 in the
+audit; not a bug, called out as a re-entrancy pattern audit tools
+miss.)</p>
+
+<p><strong>Targeted futex on the slot itself.</strong> The wait is on
+<code>&amp;reply_slot-&gt;state</code> rather than on the queue-wide sync handle, so it
+only wakes when the receiver writes the reply (which calls
+<code>FUTEX_WAKE</code> on the same address). No false wakes from unrelated queue
+traffic. Earlier designs used <code>NtWaitForSingleObject</code> on <code>queue-&gt;sync</code>,
+which woke on every incoming message and caused <code>waits++</code> to advance
+much faster than the nominal 10 ms tick — the &ldquo;5 s timeout&rdquo; fired in
+milliseconds under busy-queue conditions. The targeted futex fixed
+this.</p>
+
+<p><strong>FUTEX flag note.</strong> The wait uses plain <code>FUTEX_WAIT</code>, not
+<code>FUTEX_WAIT_PRIVATE</code>. The reason is the MR2 fix — see
+<a href="#9-cross-process-futex-mr2">§9</a>. The reply slot lives in a
+<code>MAP_SHARED</code> memfd, so cross-process wakes must use the global futex
+hash, not the per-mm hash that <code>_PRIVATE</code> selects.</p>
+
+<p><strong>2 s timeout.</strong> Lower than the legacy 5 s because the futex actually
+waits the full 10 ms when no real signal is pending. Under genuine
+receiver outage (peer crashed, window proc deadlocked elsewhere) the
+2 s cap is the floor for falling back to server <code>send_message</code>.</p>
+
+<h3>6.5 Consumer-side pop (SEND-class)</h3>
+
+<p>Mirrors the POST pop but matches MSG_ASCII / MSG_UNICODE / MSG_NOTIFY.
+<code>nspa_try_pop_own_ring_send</code> (<code>msg_ring.c:1093-1165</code>) is called from
+<code>peek_message</code> before the <code>SERVER_START_REQ(get_message)</code> block:</p>
+
+<pre><code>if (signal_bits &amp; QS_SENDMESSAGE &amp;&amp;
+    nspa_try_pop_own_ring_send( hwnd, first, last,
+                                &amp;pop_type, &amp;pop_msg, &amp;pop_wp, &amp;pop_lp,
+                                &amp;pop_time, &amp;pop_sender, &amp;pop_reply_slot,
+                                &amp;pop_reply_gen, &amp;pop_win )) {
+    /* Filled info struct directly; skip server RTT */
+}
+else SERVER_START_REQ(get_message) {
+    /* Legacy path */
+}
+</code></pre>
+
+<p>Critical: the pop function captures <code>slot-&gt;reply_gen</code> into the output
+parameter. This is the value the receiver passes to
+<code>nspa_write_ring_reply</code> after the window proc returns. Without this
+pass-through, MR1&rsquo;s ABA guard cannot operate.</p>
+
+<p>SEND-class pop does NOT do the wake-bits arbitration check that POST
+does — SENDs are independent (no FIFO ordering between distinct SENDs
+from different threads) so a blind client-side claim cannot misorder.</p>
+
+<hr />
+
+<h2>7. REPLY class</h2>
+
+<p><code>nspa_write_ring_reply</code> (<code>msg_ring.c:1275-1366</code>) is the receiver-side
+write that closes a SEND. Called from <code>reply_message()</code> in
+<code>dlls/win32u/message.c</code> after the window proc returns:</p>
+
+<pre><code>if (info-&gt;nspa_sender_tid &amp;&amp; remove) {
+    if (nspa_write_ring_reply( info-&gt;nspa_sender_tid,
+                               info-&gt;nspa_reply_slot,
+                               info-&gt;nspa_reply_gen,    /* MR1 */
+                               result, NULL, 0 ))
+        return;   /* direct ring write + signal — no server */
+    /* fall through to server reply_message on stale-slot */
+}
+</code></pre>
+
+<p>Returns <code>TRUE</code> if the reply was delivered via the ring; <code>FALSE</code> means
+the caller falls back to the server <code>reply_message</code> path.</p>
+
+<h3>7.1 Path</h3>
+
+<ol>
+<li><strong>Validate inputs.</strong> <code>sender_tid != 0</code>, <code>reply_slot_idx &lt;
+NSPA_REPLY_RING_SLOTS</code>, <code>data_size &lt;= NSPA_REPLY_INLINE_MAX</code>.</li>
+<li><strong>Resolve sender</strong> via <code>nspa_lookup_peer(sender_tid)</code>. If the
+sender&rsquo;s bypass shm hasn&rsquo;t been mapped by this thread yet, this
+issues an <code>nspa_get_thread_queue</code> request and <code>mmap</code>s the sender&rsquo;s
+ring. Subsequent replies hit the cache.</li>
+<li><strong>Locate reply slot:</strong>
+<code>bypass-&gt;nspa_reply_ring.slots[reply_slot_idx]</code>.</li>
+<li><strong>MR1 ABA guard</strong> — capture the slot&rsquo;s live <code>generation</code>, then
+check:
 
 <ul>
-<li><code>NSPA_ENABLE_MSG_RING</code> env var unset (default)</li>
-<li><code>dest_tid == current tid</code> (same-thread PostMessage)</li>
-<li><code>hwnd == 0</code> (thread message; semantics require server handling)</li>
-<li><code>dest</code> is in a different process</li>
-<li>Message is in <code>WM_DDE_FIRST..WM_DDE_LAST</code></li>
-<li><code>MSG_CALLBACK</code> / <code>MSG_HOOK_LL</code> types</li>
-<li>Cache full (32 slot table) &ndash; rare with typical thread counts</li>
-<li>For SEND: <code>NSPA_ENABLE_OWN_BOOTSTRAP</code> unset (opt-in gate)</li>
+<li><code>state == NSPA_REPLY_STATE_PENDING</code> (sender still waiting), AND</li>
+<li><code>generation == expected_gen</code> (no recycle since sender&rsquo;s stamp).
+On either mismatch, drop the reply silently and return FALSE (the
+caller falls back to server <code>reply_message</code>, which is the
+authoritative path for stale-slot recovery).</li>
+</ul>
+</li>
+<li><strong>Write payload:</strong> <code>result</code>, <code>error</code>, <code>data_size</code>, <code>data[...]</code>.</li>
+<li><strong>Release-store</strong> <code>state = READY</code>. This is the ordering edge that
+the sender&rsquo;s acquire-load on <code>state</code> pairs with.</li>
+<li><strong>Targeted futex_wake</strong> on <code>&amp;slot-&gt;state</code>. The sender&rsquo;s
+<code>FUTEX_WAIT(state, PENDING)</code> returns immediately.</li>
+<li><strong>Queue-wide ntsync kick.</strong> Also signal <code>entry-&gt;sync_handle</code> via
+<code>wine_server_signal_internal_sync</code> for any waiter that came in via
+the legacy queue-wide path (e.g., <code>wait_message_reply</code> on a
+server-routed send). Cheap; no-op if no waiter.</li>
+</ol>
+
+
+<h3>7.2 Code</h3>
+
+<pre><code>slot = &amp;((nspa_queue_bypass_shm_t *)bypass)-&gt;nspa_reply_ring.slots[reply_slot_idx];
+
+{
+    unsigned int slot_gen = __atomic_load_n( &amp;slot-&gt;generation, __ATOMIC_ACQUIRE );
+    unsigned int state    = __atomic_load_n( &amp;slot-&gt;state, __ATOMIC_ACQUIRE );
+    if (state != NSPA_REPLY_STATE_PENDING) {
+        /* Sender already timed out + freed slot, OR slot recycled */
+        return FALSE;
+    }
+    if (expected_gen &amp;&amp; slot_gen != expected_gen) {
+        /* MR1: ABA — sender timed out, slot recycled to a different sender */
+        return FALSE;
+    }
+}
+
+slot-&gt;result    = result;
+slot-&gt;error     = 0;
+slot-&gt;data_size = data_size;
+if (data_size) memcpy( (void *)slot-&gt;data, data, data_size );
+
+__atomic_store_n( &amp;slot-&gt;state, NSPA_REPLY_STATE_READY, __ATOMIC_RELEASE );
+
+syscall( SYS_futex, (void *)&amp;slot-&gt;state, FUTEX_WAKE, 1, NULL, NULL, 0 );
+
+status = wine_server_signal_internal_sync( entry-&gt;sync_handle );
+if (status) status = NtSetEvent( entry-&gt;sync_handle, NULL );
+</code></pre>
+
+<p>The <code>expected_gen == 0</code> case preserves backwards compatibility for any
+caller that didn&rsquo;t track generation (hypothetical pre-MR1 path); falls
+back to the state-only check. In current code, every SEND stamps
+<code>reply_gen</code> so this branch is never taken.</p>
+
+<hr />
+
+<h2>8. Reply-slot generation discriminator (MR1)</h2>
+
+<h3>8.1 The hazard</h3>
+
+<p>The MR1 audit finding (<code>wine/nspa/docs/wine-nspa-lockup-audit-20260427.md</code>
+§MR1) identified a real correctness bug in the original ring design:
+<code>nspa_reply_slot_t::generation</code> was bumped on reserve but never compared
+by the receiver. Sequence to misdeliver a reply:</p>
+
+<ol>
+<li>Sender A reserves slot N, <code>generation</code> bumped to G; publishes
+message; waits on <code>&amp;slot-&gt;state</code>.</li>
+<li>Receiver R takes >2 s in its window proc.</li>
+<li>Sender A times out (<code>waits &gt; 200</code>), CAS-stores <code>state = FREE</code>.</li>
+<li>Sender B reserves slot N (CAS finds it FREE), <code>generation</code> bumped
+to G+1; publishes a different message; waits.</li>
+<li>Receiver R completes A&rsquo;s window proc, calls
+<code>nspa_write_ring_reply(A_sender_tid, N, result_for_A)</code>.</li>
+<li>Pre-MR1: receiver checks only <code>state == PENDING</code> (true — B set it),
+writes <code>result_for_A</code> into slot N.</li>
+<li>Sender B&rsquo;s futex returns, reads <code>result_for_A</code>, returns it as if it
+were B&rsquo;s reply.</li>
+</ol>
+
+
+<p><strong>Magnitude:</strong> misdelivered <code>LRESULT</code>. Could be a value, a pointer, a
+status code. Sender B&rsquo;s window proc receives a fabricated reply value.
+<strong>Probability:</strong> requires >2 s window proc plus a slot-reuse race
+during the gap. Possible under Ableton&rsquo;s heavy UI load, especially
+when paint or hook chains stall a window proc.</p>
+
+<p>The MR1 + MR4 reframing in the audit was that this class of silent
+contract violation looks like the same family as the upstream Wine
+<code>Disallow Win32 va_list in Unix libraries</code> fix (<code>6366775e82a</code>) — the
+symptom is not a deadlock at the bug site but cascading state
+corruption that eventually hangs the process via a downstream
+state-machine that trusted the corrupted value. Both MR1 and MR4 are
+treated as lockup-class for Ableton stability purposes.</p>
+
+<h3>8.2 The fix</h3>
+
+<p>Repurpose the previously-reserved <code>__pad</code> field in <code>nspa_msg_slot_t</code>
+as <code>reply_gen</code>. Sender stamps it post-reserve; receiver passes it
+through to <code>nspa_write_ring_reply</code>; write only on generation match.</p>
+
+<h4>Wire-level changes</h4>
+
+<table>
+<thead>
+<tr>
+<th> Layer </th>
+<th> Field / argument </th>
+<th> Source </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> <code>protocol.def:1062-1065</code> </td>
+<td> <code>unsigned int reply_gen</code> (was <code>__pad</code>) </td>
+<td> Inline comment: <code>MR1 ABA guard — receiver passes through to nspa_write_ring_reply</code> </td>
+</tr>
+<tr>
+<td> <code>msg_ring.c:1516</code> </td>
+<td> <code>reply_gen = __atomic_add_fetch(&amp;reply_slot-&gt;generation, 1, RELEASE)</code> </td>
+<td> sender captures post-bump value </td>
+</tr>
+<tr>
+<td> <code>msg_ring.c:1544</code> </td>
+<td> <code>slot-&gt;reply_gen = is_notify ? 0 : reply_gen</code> </td>
+<td> sender stamps message slot </td>
+</tr>
+<tr>
+<td> <code>msg_ring.c:1154</code> </td>
+<td> <code>*reply_gen_out = slot-&gt;reply_gen</code> </td>
+<td> consumer pop function passes through </td>
+</tr>
+<tr>
+<td> <code>dlls/win32u/message.c</code> </td>
+<td> <code>info-&gt;nspa_reply_gen</code> plumbed through <code>received_message_info</code> </td>
+<td> receiver dispatch path </td>
+</tr>
+<tr>
+<td> <code>msg_ring.c:1275-1333</code> </td>
+<td> <code>expected_gen</code> parameter, generation compare against <code>slot-&gt;generation</code> </td>
+<td> reply-write check </td>
+</tr>
+<tr>
+<td> <code>dlls/win32u/win32u_private.h</code> </td>
+<td> <code>nspa_write_ring_reply</code> prototype gains <code>expected_gen</code> parameter </td>
+<td> (function signature) </td>
+</tr>
+</tbody>
+</table>
+
+
+<h4>Ordering</h4>
+
+<p>Sender side:</p>
+
+<pre><code>/* Step 1: bump generation under RELEASE so the post-bump value is
+ * visible to any concurrent receiver that has already started
+ * processing a message stamped with the OLD generation. */
+reply_gen = __atomic_add_fetch( &amp;reply_slot-&gt;generation, 1, __ATOMIC_RELEASE );
+
+/* Step 2: stamp the message slot's reply_gen.  Slot is still
+ * WRITING, no consumer can see it yet. */
+slot-&gt;reply_gen = reply_gen;
+
+/* Step 3: release-store on slot-&gt;state = READY publishes both
+ * payload and reply_gen. */
+__atomic_store_n( &amp;slot-&gt;state, NSPA_MSG_STATE_READY, __ATOMIC_RELEASE );
+</code></pre>
+
+<p>Receiver side:</p>
+
+<pre><code>/* Acquire on slot-&gt;state pairs with sender's release-store.
+ * After this load, slot-&gt;reply_gen is visible. */
+state = __atomic_load_n( &amp;slot-&gt;state, __ATOMIC_ACQUIRE );
+if (state != READY) continue;
+expected_gen = slot-&gt;reply_gen;
+/* ... CAS-claim slot ... */
+</code></pre>
+
+<p>In <code>nspa_write_ring_reply</code>:</p>
+
+<pre><code>/* Acquire on slot-&gt;generation pairs with the next sender's
+ * RELEASE on atomic_add_fetch.  If a recycle has happened
+ * since the message we're handling was stamped, this load
+ * sees the new generation. */
+slot_gen = __atomic_load_n( &amp;slot-&gt;generation, __ATOMIC_ACQUIRE );
+if (expected_gen &amp;&amp; slot_gen != expected_gen)
+    return FALSE;
+</code></pre>
+
+<p>The acquire-release pairing is sufficient because the only concurrent
+mutation of <code>generation</code> is the next sender&rsquo;s atomic-fetch-add at
+reserve time. There is no third actor.</p>
+
+<h3>8.3 What it does NOT defend against</h3>
+
+<ul>
+<li><strong>Sender process exit</strong> between publish and reply. Receiver&rsquo;s
+<code>nspa_lookup_peer(sender_tid)</code> will fail (server returns &ldquo;thread
+gone&rdquo;) and return FALSE before the slot read; caller falls back to
+server <code>reply_message</code>, which handles the stale-sender case via the
+authoritative server-side msg-tracking.</li>
+<li><strong>Same-sender duplicate reply.</strong> If a window proc somehow gets
+dispatched twice (e.g., a hook chain re-enters), the second
+<code>write_ring_reply</code> will find <code>state != PENDING</code> (sender already read
+the first reply and set FREE) and drop. Same defense as legacy.</li>
+<li><strong>Cross-process generation skew.</strong> Generations are monotonic per
+<code>nspa_reply_slot_t</code>. Cross-process is irrelevant (slot belongs to
+one process&rsquo;s queue).</li>
 </ul>
 
 
-<hr />
+<h3>8.4 P5 sweep — no other latent ABA discriminators</h3>
 
-<h2>7. Dispatch Path</h2>
-
-<p>The receiver side has two concerns: (a) learn that a ring message has arrived, and (b) pull it out and deliver it to the window proc.</p>
-
-<h3>Wake-bit Synthesis</h3>
-
-<p><code>NtUserGetQueueStatus</code>, <code>check_queue_bits</code>, and the message pump&rsquo;s local shmem check all need to report ring-pending activity alongside legacy <code>wake_bits</code> in the queue&rsquo;s shmem. Phase 4.5 (<code>1d18cb7c4e8</code>) wires this through the Phase 4 TLS-cached own-ring mmap:</p>
-
-<p><code>c
-const nspa_queue_bypass_shm_t *queue_bypass = nspa_get_own_bypass_shm_public();
-if (queue_bypass) {
-    UINT ring_total = __atomic_load_n(&amp;queue_bypass-&gt;nspa_msg_ring.pending_count, ACQUIRE);
-    UINT ring_send  = __atomic_load_n(&amp;queue_bypass-&gt;nspa_msg_ring.pending_send_count, ACQUIRE);
-    if (ring_total &gt; ring_send) ring_bits |= QS_POSTMESSAGE | QS_ALLPOSTMESSAGE;
-    if (ring_send)              ring_bits |= QS_SENDMESSAGE;
-    wake |= ring_bits;
-}
-</code></p>
-
-<p>Without this synthesis, <code>check_queue_bits</code> reports &ldquo;nothing to do&rdquo; even after the sender&rsquo;s ntsync wake &ndash; the thread sleeps through ring deliveries until some unrelated event prompts it to call <code>get_message</code>, producing the 5 s dispatch-latency timeout seen pre-4.5.</p>
-
-<h3>Client-Side Ring Pop</h3>
-
-<p>Phase 4.6 (<code>657c16691f5</code>) adds <code>nspa_try_pop_own_ring_send()</code>, called from <code>peek_message</code> <em>before</em> the <code>SERVER_START_REQ(get_message)</code> block:</p>
-
-<p><code>c
-if (signal_bits &amp; QS_SENDMESSAGE &amp;&amp;
-    nspa_try_pop_own_ring_send(hwnd, first, last, &amp;pop_type, ..., &amp;pop_win)) {
-    /* Filled info struct directly; skip server RTT entirely */
-}
-else SERVER_START_REQ(get_message) {
-    /* Legacy path: server arbitrates ring + legacy queue */
-}
-</code></p>
-
-<p>The client pop scans its own ring for a <code>READY</code> SEND-class slot, CAS-claims it (<code>READY -&gt; CONSUMED</code>), decrements <code>pending_count</code>/<code>pending_send_count</code>, advances tail over any leading run of <code>CONSUMED</code> slots, and fills the <code>received_message_info</code> for the message pump. Same-process window filter (<code>hwnd != 0</code>) falls back to server because <code>is_child_window</code> needs server&rsquo;s window tree.</p>
-
-<h3>Reply Path</h3>
-
-<p>When the window proc returns for a ring-origin SEND, <code>reply_message()</code> writes the result back:</p>
-
-<p><code>c
-if (info-&gt;nspa_sender_tid &amp;&amp; remove) {
-    if (nspa_write_ring_reply(info-&gt;nspa_sender_tid, info-&gt;nspa_reply_slot,
-                              result, NULL, 0))
-        return;   /* direct ring write + signal -- no server */
-    /* fall through to server reply_message on stale-slot */
-}
-</code></p>
-
-<p><code>nspa_write_ring_reply</code> resolves the sender via the peer cache (<code>nspa_lookup_peer(sender_tid)</code>, which mmaps the sender&rsquo;s ring on first use), writes the <code>LRESULT</code> into the sender&rsquo;s reply slot, and signals the sender&rsquo;s queue sync event. The sender&rsquo;s <code>nspa_wait_ring_reply</code> wakes, reads the result, and returns to the caller.</p>
+<p>The audit&rsquo;s P5 follow-up swept every <code>__pad</code> field in the NSPA shmem
+surface (<code>protocol.def</code>, 6 instances total) for the same shape. Result:
+all clean. Five are pure alignment, one is explicitly reserved for the
+documented future Vyukov per-slot-seq redesign on the timer ring. MR1
+was uniquely incomplete because the corresponding
+<code>nspa_reply_slot_t::generation</code> was being bumped on the other side but
+never compared by the receiver. No more MR1-shape latent discriminator
+bugs lurk in the NSPA shmem surface.</p>
 
 <hr />
 
-<h2>8. Opt-In Gating</h2>
+<h2>9. Cross-process futex (MR2)</h2>
 
-<p>Each capability layers on the previous. Stricter configs trade capture coverage for safety during validation.</p>
+<h3>9.1 The hazard</h3>
 
-<div class="diagram-container">
-<svg width="100%" viewBox="0 0 920 280" xmlns="http://www.w3.org/2000/svg">
-  <style>
-    .og-box { fill: #24283b; stroke: #9aa5ce; stroke-width: 1.5; rx: 6; }
-    .og-box-on { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 2; rx: 6; }
-    .og-label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
-    .og-label-sm { fill: #c0caf5; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
-    .og-label-accent { fill: #7aa2f7; font-size: 12px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
-    .og-label-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
-    .og-label-yellow { fill: #e0af68; font-size: 10px; font-family: 'JetBrains Mono', monospace; }
-    .og-arrow { stroke: #9ece6a; stroke-width: 2; fill: none; }
-  </style>
+<p>The original SEND code paired:</p>
 
-  <text x="460" y="22" class="og-label-accent" text-anchor="middle">Capability layering via env gates</text>
+<pre><code>/* sender */
+syscall( SYS_futex, &amp;reply_slot-&gt;state, FUTEX_WAIT_PRIVATE,
+         NSPA_REPLY_STATE_PENDING, &amp;rel, NULL, 0 );
 
-  <!-- Base -->
-  <rect x="30" y="50" width="180" height="80" class="og-box"/>
-  <text x="120" y="72" class="og-label" text-anchor="middle">Default</text>
-  <text x="120" y="92" class="og-label-sm" text-anchor="middle">msg-ring inert</text>
-  <text x="120" y="107" class="og-label-sm" text-anchor="middle">vanilla Wine behaviour</text>
-  <text x="120" y="122" class="og-label-sm" text-anchor="middle">zero-regression</text>
+/* receiver */
+syscall( SYS_futex, &amp;slot-&gt;state, FUTEX_WAKE_PRIVATE, 1, NULL, NULL, 0 );
+</code></pre>
 
-  <line x1="210" y1="90" x2="240" y2="90" class="og-arrow"/>
+<p>The reply slot lives in a <code>MAP_SHARED</code> memfd. <code>_PRIVATE</code> tells the
+kernel &ldquo;process-private&rdquo; and hashes futex keys per-mm. Same-process
+this is fine — the hash matches and the wake reaches the waiter. But
+<strong>wakes from a different process don&rsquo;t reach the waiter</strong> — different
+mm, different hash bucket. The waiter sleeps until its 2 s timeout
+expires.</p>
 
-  <!-- Layer 1 -->
-  <rect x="240" y="50" width="200" height="80" class="og-box-on"/>
-  <text x="340" y="68" class="og-label-green" text-anchor="middle">+ ENABLE_MSG_RING</text>
-  <text x="340" y="85" class="og-label-sm" text-anchor="middle">POST capture (when own ring</text>
-  <text x="340" y="100" class="og-label-sm" text-anchor="middle">exists or speculative on)</text>
-  <text x="340" y="122" class="og-label-yellow" text-anchor="middle">wake-bit fix active</text>
+<p>For Ableton today, this was latent: Ableton runs as a single Wine
+client process, SEND bypass is intra-process, and <code>_PRIVATE</code> matches.
+But the bug would surface as soon as we extend SEND bypass to
+cross-process scenarios — a daemon-style plugin host, an out-of-process
+COM server, or a Wine helper process spawned mid-session. Wakes silently
+lost; 2 s timeout becomes the only fallback; throughput collapses to
+0.5 SEND/s on the cross-process pair.</p>
 
-  <line x1="440" y1="90" x2="470" y2="90" class="og-arrow"/>
+<h3>9.2 The fix</h3>
 
-  <!-- Layer 2 -->
-  <rect x="470" y="50" width="200" height="80" class="og-box-on"/>
-  <text x="570" y="68" class="og-label-green" text-anchor="middle">+ FORCE_SPECULATIVE_ALLOC</text>
-  <text x="570" y="85" class="og-label-sm" text-anchor="middle">peer rings allocated on</text>
-  <text x="570" y="100" class="og-label-sm" text-anchor="middle">nspa_get_thread_queue call</text>
-  <text x="570" y="122" class="og-label-yellow" text-anchor="middle">aggressive peer coverage</text>
+<p>Drop <code>_PRIVATE</code>:</p>
 
-  <line x1="670" y1="90" x2="700" y2="90" class="og-arrow"/>
+<pre><code>/* sender */
+syscall( SYS_futex, &amp;reply_slot-&gt;state, FUTEX_WAIT,
+         NSPA_REPLY_STATE_PENDING, &amp;rel, NULL, 0 );
 
-  <!-- Layer 3 -->
-  <rect x="700" y="50" width="200" height="80" class="og-box-on"/>
-  <text x="800" y="68" class="og-label-green" text-anchor="middle">+ ENABLE_OWN_BOOTSTRAP</text>
-  <text x="800" y="85" class="og-label-sm" text-anchor="middle">caller's own reply ring</text>
-  <text x="800" y="100" class="og-label-sm" text-anchor="middle">via nspa_ensure_own_bypass</text>
-  <text x="800" y="122" class="og-label-yellow" text-anchor="middle">SEND path capable</text>
+/* receiver */
+syscall( SYS_futex, &amp;slot-&gt;state, FUTEX_WAKE, 1, NULL, NULL, 0 );
+</code></pre>
 
-  <!-- Layer 4 -->
-  <rect x="360" y="170" width="240" height="90" class="og-box-on"/>
-  <text x="480" y="190" class="og-label-green" text-anchor="middle">+ ENABLE_CLIENT_RING_DISPATCH</text>
-  <text x="480" y="208" class="og-label-sm" text-anchor="middle">client-side pop of SEND msgs in</text>
-  <text x="480" y="222" class="og-label-sm" text-anchor="middle">peek_message (no server RTT)</text>
-  <text x="480" y="242" class="og-label-green" text-anchor="middle">FULL msg-ring active</text>
-  <text x="480" y="255" class="og-label-sm" text-anchor="middle">library + MIDI + audio + UI all OK</text>
+<p><code>FUTEX_WAIT</code> / <code>FUTEX_WAKE</code> (without <code>_PRIVATE</code>) use the global futex
+hash, which keys on the underlying physical page rather than the
+per-mm virtual address. Cross-process matches correctly because both
+processes see the same memfd page.</p>
 
-  <line x1="800" y1="130" x2="570" y2="170" class="og-arrow"/>
+<h3>9.3 Performance trade-off</h3>
 
-  <!-- Safety gates -->
-  <rect x="20" y="165" width="300" height="95" class="og-box"/>
-  <text x="170" y="184" class="og-label-yellow" text-anchor="middle">Safety / diagnostic gates</text>
-  <text x="30" y="204" class="og-label-sm">NSPA_MSG_RING_EXCLUDE_MAIN</text>
-  <text x="30" y="218" class="og-label-sm">  block alloc for process first thread</text>
-  <text x="30" y="232" class="og-label-sm">NSPA_DISABLE_MSG_RING</text>
-  <text x="30" y="246" class="og-label-sm">  force-off override</text>
-</svg>
-</div>
+<p>Marginal. The global hash has slightly more contention than the
+per-mm hash on hot futexes, but the reply slot is exercised once per
+SEND-with-reply-wait, and the futex syscall already dominates that
+path. Measured difference: below noise floor on the Ableton workload.</p>
 
+<h3>9.4 Why this didn&rsquo;t surface earlier</h3>
 
-<p>Recommended configurations by use case:</p>
+<p>The reply-slot futex was added during the v1 SEND work as a
+replacement for <code>NtWaitForSingleObject</code> on <code>queue-&gt;sync</code>. The
+<code>_PRIVATE</code> flag was carried over reflexively — most futex code uses
+<code>_PRIVATE</code> because most futexes are process-local mutexes — without
+auditing the underlying shared-page lifetime. The MR2 audit caught it
+on a focused walk of the futex flag arguments. Lesson logged as part
+of the broader <code>wine-nspa-lockup-audit-20260427.md</code> follow-up patterns.</p>
+
+<hr />
+
+<h2>10. Wake-loss rollback (MR4)</h2>
+
+<h3>10.1 The hazard</h3>
+
+<p>The POST publish path ends with two-stage signalling:</p>
+
+<pre><code>status = wine_server_signal_internal_sync( entry-&gt;sync_handle );
+if (status) status = NtSetEvent( entry-&gt;sync_handle, NULL );
+if (status) {
+    /* both failed */
+}
+</code></pre>
+
+<p>If both signal paths fail (which would mean the sync handle has
+died — peer queue destroyed, descriptor closed, ntsync object gone),
+the slot is published <code>READY</code>, <code>change_seq</code> bumped, <code>pending_count</code>
+incremented — but <strong>no wake reached the receiver</strong>. The receiver will
+only find the message if it scans the ring on its own (via a
+<code>change_seq != change_ack_seq</code> poll in <code>peek_message</code>&rsquo;s hot path). A
+receiver blocked in <code>NtWaitForSingleObject</code> on its queue sync handle
+stays blocked until something else wakes it — which may not happen
+until the user moves the mouse or clicks a button.</p>
+
+<p>Pre-MR4: the sender just <code>WARN</code>ed and treated the post as accepted
+(returned TRUE for POST, fell through to wait-for-reply for SEND). No
+retry, no fallback to server <code>send_message</code>.</p>
+
+<p>Both-signal-fail is unlikely (would mean the sync handle died) but the
+audit treated it as lockup-class because the failure mode is a
+permanently-stuck queue with no recovery path. Same shape as MR1 — the
+bug isn&rsquo;t the deadlock at the call site; it&rsquo;s the contract violation
+that produces a deadlock downstream.</p>
+
+<h3>10.2 The fix</h3>
+
+<p>CAS-rollback the slot from <code>READY → EMPTY</code>, decrement <code>pending_count</code>,
+return FALSE. Caller falls back to authoritative server post.</p>
+
+<pre><code>if (status) {
+    unsigned int expected = NSPA_MSG_STATE_READY;
+    BOOL rolled_back = __atomic_compare_exchange_n( &amp;slot-&gt;state, &amp;expected,
+                                                    NSPA_MSG_STATE_EMPTY, 0,
+                                                    __ATOMIC_ACQ_REL,
+                                                    __ATOMIC_RELAXED );
+    nspa_clear_cache_entry( entry );
+    if (rolled_back) {
+        __atomic_fetch_sub( &amp;ring-&gt;pending_count, 1, __ATOMIC_ACQ_REL );
+        return FALSE;   /* caller falls back to server post_message */
+    }
+    /* rollback failed — consumer beat us — keep return-TRUE */
+}
+</code></pre>
+
+<p>Two subtlety paths:</p>
+
+<p><strong>Rollback succeeds.</strong> Consumer hasn&rsquo;t claimed the slot yet (its CAS
+on <code>READY → CONSUMED</code> would have advanced state past <code>READY</code>). We
+flip state back to EMPTY, undo the <code>pending_count</code> increment, return
+FALSE so the caller does the authoritative server post. The slot is
+recyclable for the next sender.</p>
+
+<p><strong>Rollback fails.</strong> Consumer beat us — the CAS found <code>state != READY</code>
+because the consumer claimed it as <code>CONSUMED</code>. The message <strong>will be
+delivered</strong> (consumer drives forward progress; it has the slot
+contents). Keep the post-acceptance shape (don&rsquo;t roll back
+<code>pending_count</code>; consumer will decrement on its own consume path).
+Return TRUE.</p>
+
+<p><code>change_seq</code> is left advanced in either case. A spurious advance just
+causes consumers to scan once and find nothing, which is benign.</p>
+
+<h3>10.3 Why not also retry signalling</h3>
+
+<p>We could retry the signal a couple of times before giving up, but the
+audit&rsquo;s reasoning was: if <code>wine_server_signal_internal_sync</code> AND
+<code>NtSetEvent</code> both fail, the sync handle is gone (the peer queue was
+destroyed, the ntsync object was freed). Retrying without
+re-establishing the handle is futile. The MR4 path correctly clears
+the cache entry (<code>nspa_clear_cache_entry</code>), so the next send to this
+peer will re-resolve via <code>nspa_get_thread_queue</code> and either get a new
+sync handle or end up in negative-cache.</p>
+
+<h3>10.4 SEND class — fall through to wait</h3>
+
+<p>For SEND (<code>msg_ring.c:1554-1560</code>), the dual-signal-fail path is similar
+but doesn&rsquo;t rollback because the SEND has already reserved a reply
+slot and the wait loop will time out at 2 s. The loop&rsquo;s drain plus
+re-check covers the case where the receiver woke for some other
+reason and processed the slot. If neither happens, the 2 s timeout
+fires, sender CAS-sets <code>reply_slot-&gt;state = FREE</code>, returns FALSE, and
+the caller falls back to server <code>send_message</code>. Slightly slower than
+the POST rollback (2 s vs immediate), but the SEND wait loop already
+handles &ldquo;no reply arrived&rdquo; as a first-class failure mode.</p>
+
+<hr />
+
+<h2>11. Phase A — <code>redraw_window</code> push ring</h2>
+
+<h3>11.1 Status</h3>
+
+<p><strong>Shipped, default-on.</strong> Phase A landed in wine commit <code>72d7a9055a8</code>
+(2026-04-25). Eliminates the synchronous <code>redraw_window</code> round-trip on
+the hot UI path.</p>
+
+<h3>11.2 Rationale</h3>
+
+<p><code>RedrawWindow</code> is one-way (no <code>@REPLY</code>): the client just tells the
+server &ldquo;this window plus this region are dirty; flush invalidation
+state appropriately&rdquo;. Pre-Phase-A, every <code>RedrawWindow</code> was a full
+RTT: client → server → handler runs <code>redraw_window()</code> → reply. Ableton
+playback hit ~10,930 redraw_window RTTs / 120 s of GUI workload.</p>
+
+<p>Phase A converts this to a one-way push ring. Client appends an entry
+to a per-queue ring slot; server drains lazily on its next request
+handler dispatch from the same queue.</p>
+
+<h3>11.3 Layout</h3>
+
+<p><code>nspa_redraw_ring_t</code> is co-located in <code>nspa_queue_bypass_shm_t</code>
+(<code>protocol.def:1196-1203</code>):</p>
+
+<pre><code>typedef volatile struct {
+    unsigned int           head;       /* producer (client) advances */
+    unsigned int           tail;       /* consumer (server) advances */
+    unsigned int           overflow;   /* dropped on ring full */
+    unsigned int           active;     /* 0 = consumer not set up */
+    nspa_redraw_slot_t     slots[NSPA_REDRAW_RING_SLOTS];
+} nspa_redraw_ring_t;
+
+typedef volatile struct {
+    unsigned int      state;        /* NSPA_REDRAW_STATE_* */
+    user_handle_t     window;       /* 0 = desktop window */
+    unsigned int      flags;        /* RDW_* */
+    unsigned int      rect_count;   /* 0..4; 0 = whole window */
+    struct rectangle  rects[NSPA_REDRAW_INLINE_RECTS];
+} nspa_redraw_slot_t;
+</code></pre>
+
+<p>32 slots × 4 inline rectangles. Rectangles beyond <code>NSPA_REDRAW_INLINE_RECTS</code>
+fall back to RPC (variable-length payloads need the side-channel
+plumbing the message ring carries via <code>nspa_msg_slot_t::data</code>, which
+the redraw ring intentionally doesn&rsquo;t replicate).</p>
+
+<h3>11.4 Producer (<code>dlls/win32u/dce.c:1510-1551</code>)</h3>
+
+<p><code>redraw_window_rects</code> first tries the push ring:</p>
+
+<pre><code>static BOOL nspa_redraw_ring_try_push( HWND hwnd, UINT flags, const RECT *rects, UINT count )
+{
+    nspa_queue_bypass_shm_t *bypass;
+    nspa_redraw_ring_t *ring;
+    nspa_redraw_slot_t *slot;
+    unsigned int head, tail, i;
+
+    if (nspa_redraw_ring_disabled()) return FALSE;
+    if (count &gt; NSPA_REDRAW_INLINE_RECTS) return FALSE;
+
+    bypass = (nspa_queue_bypass_shm_t *)nspa_get_own_bypass_shm_public();
+    if (!bypass) return FALSE;
+    ring = (nspa_redraw_ring_t *)&amp;bypass-&gt;nspa_redraw_ring;
+
+    /* SPSC: this thread is sole producer for its own queue's ring. */
+    head = ring-&gt;head;
+    tail = __atomic_load_n( &amp;ring-&gt;tail, __ATOMIC_ACQUIRE );
+    if (head - tail &gt;= NSPA_REDRAW_RING_SLOTS) {
+        __atomic_fetch_add( &amp;ring-&gt;overflow, 1, __ATOMIC_RELAXED );
+        return FALSE;
+    }
+
+    slot = (nspa_redraw_slot_t *)&amp;ring-&gt;slots[head % NSPA_REDRAW_RING_SLOTS];
+    __atomic_store_n( &amp;slot-&gt;state, NSPA_REDRAW_STATE_WRITING, __ATOMIC_RELAXED );
+    slot-&gt;window     = wine_server_user_handle( hwnd );
+    slot-&gt;flags      = flags;
+    slot-&gt;rect_count = count;
+    for (i = 0; i &lt; count; i++) slot-&gt;rects[i] = ...;
+    __atomic_store_n( &amp;slot-&gt;state, NSPA_REDRAW_STATE_READY, __ATOMIC_RELEASE );
+    __atomic_store_n( &amp;ring-&gt;head, head + 1, __ATOMIC_RELEASE );
+    return TRUE;
+}
+</code></pre>
+
+<p>SPSC, so no head-CAS — plain atomic store on <code>head</code> after the slot
+becomes <code>READY</code>. If full, increment <code>overflow</code> counter and return
+FALSE — caller does the legacy <code>redraw_window</code> RPC. No wake signal to
+the server: the server drains lazily, on the next request handler
+dispatched from this queue&rsquo;s thread.</p>
+
+<h3>11.5 Consumer (<code>server/nspa/redraw_ring.c:27-87</code>)</h3>
+
+<p><code>nspa_redraw_ring_drain</code> runs at the top of every request dispatcher
+when <code>current == thread</code>. Walks the ring forward applying entries via
+<code>nspa_redraw_apply</code> (<code>server/window.c</code>):</p>
+
+<pre><code>void nspa_redraw_ring_drain( struct thread *thread )
+{
+    nspa_queue_bypass_shm_t *shm;
+    nspa_redraw_ring_t *ring;
+    unsigned int tail, head, saved_error;
+
+    if (!thread || !(shm = nspa_queue_bypass_shm( thread ))) return;
+    ring = (nspa_redraw_ring_t *)&amp;shm-&gt;nspa_redraw_ring;
+
+    head = __atomic_load_n( &amp;ring-&gt;head, __ATOMIC_ACQUIRE );
+    tail = ring-&gt;tail;
+    if (tail == head) return;  /* fast empty path */
+
+    /* Snapshot+restore thread-&gt;error: the drain may set_error()
+     * on stale handles, and that error must NOT leak into the
+     * unrelated request that triggered the drain. */
+    saved_error = thread-&gt;error;
+
+    while (tail != head) {
+        nspa_redraw_slot_t *slot = ...;
+        unsigned int state = __atomic_load_n( &amp;slot-&gt;state, __ATOMIC_ACQUIRE );
+        if (state != NSPA_REDRAW_STATE_READY) break;  /* producer mid-write */
+
+        window     = slot-&gt;window;
+        flags      = slot-&gt;flags;
+        rect_count = slot-&gt;rect_count;
+        for (i = 0; i &lt; rect_count; i++) local_rects[i] = slot-&gt;rects[i];
+
+        nspa_redraw_apply( thread, window, flags, ... );
+
+        __atomic_store_n( &amp;slot-&gt;state, NSPA_REDRAW_STATE_EMPTY, __ATOMIC_RELEASE );
+        tail++;
+        __atomic_store_n( &amp;ring-&gt;tail, tail, __ATOMIC_RELEASE );
+    }
+
+    thread-&gt;error = saved_error;
+    if (thread == current) global_error = saved_error;
+}
+</code></pre>
+
+<p>The error snapshot/restore is load-bearing. The drain may hit a stale
+handle (window destroyed between client push and drain), a region
+validation failure, or a server alloc failure. Any of these calls
+<code>set_error()</code> on <code>current</code>. Pre-snapshot, that error then leaked into
+the otherwise-successful reply of the unrelated request that triggered
+the drain (e.g., <code>get_update_region</code>, <code>get_visible_region</code>,
+<code>get_message</code>). Symptoms: caller saw <code>STATUS_INVALID_WINDOW_HANDLE</code> /
+<code>STATUS_INVALID_PARAMETER</code> on a successful reply, treated the data as
+failed, tight-loop repainted, eventually wedged KWin/X11. Same shape
+as the gamma offset corruption fix — different mechanism. Fixed by
+snapshot/restore.</p>
+
+<h3>11.6 Empirical results (Phase A ship)</h3>
+
+<p>Ableton Live 12 Lite, gamma + Tier 1+2 hook + Phase A, ~120 s with
+demo song + menus + window-move:</p>
 
 <table>
 <thead>
 <tr>
-<th> Use case </th>
-<th> Env vars </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> Production-safe baseline </td>
-<td> none set </td>
-</tr>
-<tr>
-<td> POST capture only </td>
-<td> <code>NSPA_ENABLE_MSG_RING=1</code> + <code>NSPA_FORCE_SPECULATIVE_ALLOC=1</code> </td>
-</tr>
-<tr>
-<td> Full capture (DAW workloads) </td>
-<td> all four layers set </td>
-</tr>
-<tr>
-<td> Regression debug </td>
-<td> set <code>NSPA_MSG_RING_EXCLUDE_MAIN=1</code> alongside any other config </td>
-</tr>
-</tbody>
-</table>
-
-
-<hr />
-
-<h2>9. Results &amp; Ballpark Reduction</h2>
-
-<p>Exact A/B on a real DAW isn&rsquo;t practical without a scripted identical workload. Ballpark from measured data: <strong>bypass OFF vs msg-ring full</strong> (all four opt-in layers enabled, 90 s active Ableton playback + GUI interaction).</p>
-
-<h3>Server message-path load</h3>
-
-<table>
-<thead>
-<tr>
-<th> Metric </th>
-<th> Bypass OFF </th>
-<th> msg-ring full </th>
+<th> RPC </th>
+<th> Pre-Phase-A </th>
+<th> Post-Phase-A </th>
 <th> Delta </th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td> Wineserver message RTTs / sec </td>
-<td> 500 &ndash; 1000 </td>
-<td> 250 &ndash; 500 </td>
-<td> <strong>~halved</strong> </td>
+<td> <code>redraw_window</code> </td>
+<td> 10,930 </td>
+<td> <strong>0</strong> </td>
+<td> -100% </td>
 </tr>
 <tr>
-<td> Ring-arbitrated dispatches / sec </td>
-<td> 0 </td>
-<td> ~450 </td>
-<td> ring active </td>
-</tr>
-<tr>
-<td> Ring allocations </td>
-<td> 0 </td>
-<td> 14 thread rings </td>
-<td> on demand </td>
-</tr>
-<tr>
-<td> MainThread idle wait state </td>
-<td> <code>ntsync_schedule</code> </td>
-<td> <code>ntsync_schedule</code> </td>
-<td> same </td>
-</tr>
-<tr>
-<td> Stale-slot / timeout errors </td>
-<td> n/a </td>
-<td> 0 </td>
-<td> clean dispatch </td>
+<td> <code>get_update_region</code> </td>
+<td> 18,185 </td>
+<td> 9,633 </td>
+<td> -47% (secondary effect) </td>
 </tr>
 </tbody>
 </table>
 
 
-<p>Ballpark <strong>~200 &ndash; 500 wineserver RTTs / sec eliminated</strong> on the hot message path during busy playback. Server-side CPU spent in <code>send_message</code> + <code>get_posted_message</code> handlers roughly halves.</p>
+<p>The <code>get_update_region</code> reduction is partly secondary: fewer redraws
+mean fewer paint probe cycles. Plus workload variance.</p>
 
-<h3>Latency-bound benefits (ns vs &micro;s)</h3>
+<h3>11.7 Cross-thread caveat</h3>
 
-<p>The ring also shortens the hot path for latency-sensitive traffic:</p>
+<p>Phase A intentionally accepts cross-thread <code>RedrawWindow</code> into the
+<strong>caller&rsquo;s</strong> queue ring. When server drains,
+<code>nspa_redraw_apply(current_thread, ...)</code> is called — <code>current_thread</code>
+is the producer thread, not the window-owner. The server-side
+<code>redraw_window()</code> static function doesn&rsquo;t differentiate, so this
+works. Don&rsquo;t refactor without re-verifying this assumption under
+concurrent load.</p>
 
-<table>
-<thead>
-<tr>
-<th> Operation </th>
-<th> Bypass OFF </th>
-<th> msg-ring </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> CAS slot claim </td>
-<td> N/A (server allocates struct message) </td>
-<td> ~20 ns </td>
-</tr>
-<tr>
-<td> Message publish </td>
-<td> 2 wineserver RTTs (~10 &ndash; 100 &micro;s each) </td>
-<td> 1 ntsync wake ioctl (~200 &ndash; 500 ns) </td>
-</tr>
-<tr>
-<td> Message consume </td>
-<td> 1 wineserver RTT </td>
-<td> ~1 &micro;s CAS + local read </td>
-</tr>
-<tr>
-<td> SEND reply </td>
-<td> 1 wineserver RTT </td>
-<td> CAS + ntsync wake on sender </td>
-</tr>
-</tbody>
-</table>
+<h3>11.8 Opt-out</h3>
 
+<p><code>NSPA_DISABLE_REDRAW_RING=1</code> forces all <code>RedrawWindow</code> to the legacy
+RPC path. Default-on; flag is for bisection only.</p>
 
-<p>For RT-critical senders (AudioCalc, DWM-Sync, winejack JACK callback), removing server round-trips from the message-send path directly shortens the hot loop, not just reduces total throughput.</p>
+<hr />
 
-<h3>Qualitative wins</h3>
+<h2>12. Phase B1.0 — paint cache fastpath</h2>
+
+<h3>12.1 Status</h3>
+
+<p><strong>Default-OFF; opt-in via <code>NSPA_ENABLE_PAINT_CACHE=1</code>.</strong> The fastpath
+is shipped at <code>dlls/win32u/dce.c:1648-1685</code>. Validated in two clean
+Ableton runs on 2026-04-28 (run-3 default-off, run-4 default-on past
+the historical 5-min lockup threshold). One more validation run is
+queued before flipping default-on; see <a href="#127-current-status-toward-default-on">§12.7</a>.</p>
+
+<h3>12.2 Rationale</h3>
+
+<p><code>get_update_flags</code> always sends <code>UPDATE_NOREGION</code> on the wire and is
+the dominant <code>get_update_region</code> cost in the post-Phase-A residual:
+9.6k RPCs / 120 s of Ableton playback. The dominant call site is the
+<code>erase_now()</code> <code>for(;;)</code> loop in <code>dce.c:1862</code>, which polls until the
+queue&rsquo;s paint state goes clean.</p>
+
+<p>The server already publishes a queue-level &ldquo;anything dirty?&rdquo; answer in
+<code>queue_shm-&gt;wake_bits</code> via <code>QS_PAINT</code> — set whenever
+<code>inc_queue_paint_count</code> flips <code>paint_count</code> to >0, cleared when it
+returns to 0 (<code>server/queue.c::inc_queue_paint_count</code>). When this
+thread owns <code>hwnd</code> AND <code>QS_PAINT</code> is clear, <code>get_update_region</code> is
+guaranteed to return <code>flags = 0</code> (no window in this queue is dirty,
+so no paint can be returned for any of its hwnds), so we can skip the
+RPC entirely.</p>
+
+<h3>12.3 The fastpath</h3>
+
+<p><code>nspa_get_update_flags_try_fastpath</code> (<code>dce.c:1648-1685</code>):</p>
+
+<pre><code>static BOOL nspa_get_update_flags_try_fastpath( HWND hwnd, HWND *child, UINT *flags )
+{
+    struct object_lock lock = OBJECT_LOCK_INIT;
+    const queue_shm_t *queue_shm;
+    unsigned int wake_bits = 0;
+    unsigned int spin = 0;
+    UINT status;
+
+    if (nspa_paint_fastpath_disabled()) return FALSE;
+
+    /* No hwnd -&gt; server interprets as "any window owned by current
+     * thread"; queue-level QS_PAINT IS the answer.  Otherwise hwnd
+     * must be owned by current thread. */
+    if (hwnd &amp;&amp; !is_current_thread_window( hwnd )) return FALSE;
+
+    /* Bypass shm not mapped yet (early in process startup). */
+    if (!nspa_get_own_bypass_shm_public()) return FALSE;
+
+    while ((status = get_shared_queue( &amp;lock, &amp;queue_shm )) == STATUS_PENDING)
+    {
+        wake_bits = queue_shm-&gt;wake_bits;
+        NSPA_SHM_RETRY_GUARD( spin, return FALSE );
+    }
+    if (status) return FALSE;
+
+    /* QS_PAINT set -&gt; at least one window in this queue is dirty.
+     * Cannot tell from a single queue bit whether *this* hwnd is
+     * the dirty one; fall back to the RPC. */
+    if (wake_bits &amp; QS_PAINT) return FALSE;
+
+    /* QS_PAINT clear -&gt; no paint state in this queue -&gt;
+     * get_update_region would return flags=0.  Short-circuit. */
+    if (child) *child = hwnd;
+    *flags = 0;
+    return TRUE;
+}
+</code></pre>
+
+<p>Uses <code>NSPA_SHM_RETRY_GUARD</code> (<a href="#14-nspa_shm_retry_guard">§14</a>) inside
+the seqlock retry loop; on retry exhaustion, falls back to RPC.</p>
+
+<h3>12.4 Caller-side integration</h3>
+
+<p><code>get_update_flags</code> (<code>dce.c:1692-1709</code>):</p>
+
+<pre><code>static BOOL get_update_flags( HWND hwnd, HWND *child, UINT *flags )
+{
+    BOOL ret;
+
+    if (nspa_get_update_flags_try_fastpath( hwnd, child, flags )) {
+        if (nspa_paint_diag_enabled())
+            __atomic_fetch_add( &amp;nspa_paint_fastpath_hits, 1, __ATOMIC_RELAXED );
+        return TRUE;
+    }
+    if (nspa_paint_diag_enabled())
+        __atomic_fetch_add( &amp;nspa_paint_fastpath_misses, 1, __ATOMIC_RELAXED );
+
+    SERVER_START_REQ( get_update_region ) {
+        /* Legacy RPC */
+    }
+}
+</code></pre>
+
+<h3>12.5 Diagnostic counters</h3>
+
+<p>Hit/miss counters are gated behind <code>NSPA_PAINT_DIAG=1</code> because they ran
+unconditionally on every <code>get_update_flags</code> call across every Wine
+process — measurable cost on Ableton&rsquo;s polling UI thread (~3,227 calls
+per session even with paint-cache disabled, since the miss counter sat
+outside the disabled-check). Gated post-<code>f4a1671973b</code>.</p>
+
+<h3>12.6 Default-OFF history</h3>
+
+<p>The fastpath was originally shipped default-on (commit <code>70d55350bef</code>,
+2026-04-26) but reverted same day after Ableton reproducibly locked
+up in userspace ~5 min into a session with paint-cache enabled (kernel
+never faulted; pure userspace deadlock). The mechanism was unexplained
+at the time. Reverted in <code>4f2c29bb1b2</code> to gate behind
+<code>NSPA_ENABLE_PAINT_CACHE=1</code>.</p>
+
+<h3>12.7 Current status toward default-on</h3>
+
+<p>The 2026-04-27 audit failed to identify the F5 paint-cache deadlock
+mechanism by code review. Empirical evidence pointed at a slow-build
+state-machine corruption rather than an obvious lock cycle. The audit
+flagged the most-likely-suspects:
+- a class of message types that reach the fastpath but were never
+  tested in the validation workload,
+- a hook chain that interacts with the cache&rsquo;s notion of &ldquo;QS_PAINT
+  clear&rdquo;,
+- a server-side state machine whose seqlock is mutated mid-read.</p>
+
+<p>The MR1 + MR2 + MR4 fix-pack landed 2026-04-27. On 2026-04-28, run-4
+was performed with <code>NSPA_ENABLE_PAINT_CACHE=1</code> and the historical
+5-min lockup was cleared without incident. Multiple drum-track
+load-while-playing cycles, audio clean throughout, Ableton exited
+cleanly.</p>
+
+<p><strong>Working hypothesis:</strong> MR1 (reply-slot ABA) was driving F5. Reasoning:
+paint-cache amplifies the rate of cross-thread sync sends because it
+skips the wineserver round-trip, so any caller that follows up with
+a <code>SendMessage</code> on a related window sees a higher volume of
+fastpath-skipped + sync-send pairings. An ABA-driven misdelivered
+LRESULT under that volume would build up state-machine corruption
+faster than the off-paint-cache baseline, eventually reaching a
+deadlock state where one thread is waiting for a signal that was
+misdirected to a different correlation.</p>
+
+<p>MR4 (POST wake-loss) is a secondary candidate: paint-cache enables a
+path where queue_shm changes are observed via shmem rather than RPC,
+increasing the chance that a wake delivered via
+<code>wine_server_signal_internal_sync</code> matters for forward progress.</p>
+
+<p>Cannot be definitively confirmed without a from-scratch repro on the
+pre-fix wine binary while bpftrace-armed — and that&rsquo;s not worth the
+cost given we now have empirical &ldquo;fixed&rdquo; with a plausible mechanism
+story.</p>
+
+<p><strong>DO NOT flip paint-cache default-on yet.</strong> Per
+<code>feedback_validate_before_default_on.md</code> (NSPA project memory):
+&ldquo;redraw-ring discipline; B1.0 lockup happened because default-on flip
+skipped behavioural validation.&rdquo; One clean run is necessary but not
+sufficient. Required before flipping default-on:</p>
 
 <ul>
-<li>Library panel populates with ring on (was broken on every earlier ring-in-session-shmem attempt &ndash; see footnote at end for the redesign story)</li>
-<li>MIDI / audio / UI interaction all behave normally with all four opt-in layers enabled</li>
-<li>MainThread sleeps properly in <code>ntsync_schedule</code> between events under active GUI stress</li>
-<li>No stale-slot / timeout errors under 90 s of active playback + GUI interaction</li>
+<li>One more clean run, ideally on a different day / cold start.</li>
+<li>Long-soak run (>30 min) — the prior 5-min lockup was a &ldquo;build-up&rdquo;
+pattern; a longer run gives the system more chances to surface a
+slower variant.</li>
+<li>One additional Ableton workload (record arming, plugin scan, freeze
+track) to vary the load shape from &ldquo;demo playback + drum-load&rdquo; alone.</li>
+</ul>
+
+
+<p>Until those clear, paint-cache stays opt-in via env var.</p>
+
+<h3>12.8 Opt-in</h3>
+
+<pre><code>NSPA_ENABLE_PAINT_CACHE=1
+</code></pre>
+
+<p>Default-OFF. Disabled via <code>NSPA_DISABLE_PAINT_CACHE=1</code> if a future
+B1.x default-on flip is layered.</p>
+
+<hr />
+
+<h2>13. Phase C — <code>get_message</code> bypass (paused)</h2>
+
+<h3>13.1 Status</h3>
+
+<p><strong>Paused mid-development 2026-04-25.</strong> Design notes at
+<code>wine/nspa/docs/msg-ring-v2-phase-bc-handoff.md</code>. Diagnostic stage 1
+(<code>get_message</code> residual bucketing) was shipped in <code>6e83fa72420</code> and
+removed after the Phase C Stage 1 validation cycle (<code>79bb7c77c40</code>).
+The actual coverage extension is queued.</p>
+
+<h3>13.2 What remains uncovered</h3>
+
+<p><code>dlls/win32u/nspa/msg_ring.c</code> drains <em>cross-thread</em> <code>PostMessage</code> and
+<code>SendMessage</code> to the recipient&rsquo;s per-queue ring. Post-Phase-A there is
+still residual <code>get_message</code> traffic — about 29.7k RPCs / 120 s of
+Ableton playback. Inspection candidates (from the handoff doc):</p>
+
+<ol>
+<li><strong>Self-thread messages</strong> — messages this thread posted to itself
+(<code>PostMessage(hwnd, ..., 0)</code> where the target&rsquo;s queue == sender&rsquo;s
+queue). v1 may exclude these because the wake-bit synthesis is
+queue-local already.</li>
+<li><strong>System messages</strong> — <code>WM_TIMER</code>, <code>WM_PAINT</code>, <code>WM_QUIT</code>, hardware
+messages that the server synthesises into the queue. v1 doesn&rsquo;t
+write these; server does. (<code>WM_TIMER</code> already has its own
+class-isolated <code>nspa_timer_ring</code>; the local-WM-timer dispatcher
+covers this for in-process timers but server-generated ticks still
+route via RPC.)</li>
+<li><strong>Cross-process messages</strong> — if v1&rsquo;s ring is per-process memfd,
+cross-process traffic falls back to RPC. Confirm via peer-cache
+logic.</li>
+<li><strong>Late-binding cases</strong> — when the ring&rsquo;s bypass shm isn&rsquo;t
+bootstrapped yet (early in process startup).</li>
+</ol>
+
+
+<p>The Phase C Stage 1 bucketing diag (now removed) was instrumented to
+attribute <code>get_message</code> RPCs to one of these categories. Stage 1
+results from the validated 2026-04-26 capture: Bucket B (server-
+generated <code>WM_PAINT</code> / hardware / winevent) dominates 99.9%; A/C/D/E
+negligible on the Ableton workload. Stage 2 / 3 would carve a server-
+side ring for the dominant category — most likely a hardware-input or
+winevent push ring co-located in <code>nspa_queue_bypass_shm_t</code>.</p>
+
+<h3>13.3 Why paused</h3>
+
+<p>Phase B1.0 (paint cache) hit the 5-min lockup on its first default-on
+validation run, and the audit walked back through the entire
+ring-family critical path. MR1 / MR2 / MR4 fix-pack shipped before
+Phase C resumes. Phase C is the obvious resume target for the next
+session per <code>project_msg_ring_v2_phase_c_stage1_validated.md</code>.</p>
+
+<h3>13.4 Files queued for Phase C</h3>
+
+<ul>
+<li><code>dlls/win32u/message.c</code>: instrumentation, fast paths.</li>
+<li><code>dlls/win32u/nspa/msg_ring.c</code>: any new ring categories or coverage
+extension.</li>
+<li><code>server/queue.c</code>: server-side ring writers if a new category is
+added.</li>
+<li><code>server/protocol.def</code>: layout extension if a new ring is added.</li>
 </ul>
 
 
 <hr />
 
-<h2>10. File Manifest</h2>
+<h2>14. NSPA_SHM_RETRY_GUARD</h2>
+
+<h3>14.1 Why</h3>
+
+<p>Every seqlock-style read in this subsystem (and the broader NSPA
+shmem family) needs a bound on the retry loop. SCHED_FIFO callsites
+can spin forever if the writer stalls under priority inversion or if
+two readers chase a same-prio writer&rsquo;s odd-seq window. The audit
+section §4.1 (the original <code>nspa-bypass-audit.md</code>) documented this as
+&ldquo;the single rule&rdquo; for retry loops at SCHED_FIFO callsites.</p>
+
+<h3>14.2 The macro</h3>
+
+<p><code>dlls/win32u/win32u_private.h:46-57</code>:</p>
+
+<pre><code>/* NSPA — bound for shmem seqlock / CAS retry loops at SCHED_FIFO
+ * callsites.  256 PAUSEs ~ tens of microseconds at modern Intel
+ * pause latency, comfortably above the writer's odd-seq window
+ * for normal traffic.  On exhaustion the caller falls back to
+ * the legacy RPC, whose syscall yields the CPU and gives the
+ * kernel scheduler a chance to migrate / run any starved writer. */
+#define NSPA_SHM_RETRY_MAX 256
+
+#define NSPA_SHM_RETRY_GUARD( spin_var, exhaust_action ) do { \
+    __builtin_ia32_pause();                                   \
+    if (++(spin_var) &gt;= NSPA_SHM_RETRY_MAX) { exhaust_action; }\
+} while (0)
+</code></pre>
+
+<p>Drop in inside a <code>while (... == STATUS_PENDING)</code> loop body. Bounds the
+retry count and emits <code>__builtin_ia32_pause()</code> to relieve SMT/cache-line
+pressure. On exhaustion runs <code>exhaust_action</code> (typically
+<code>return FALSE;</code> or <code>break;</code>). Keeps the upstream call sites to a single
+line of NSPA-flavored logic per audit §4.1 plus the NSPA reorg style
+(concentrate NSPA intent, leave upstream thin).</p>
+
+<h3>14.3 Call sites</h3>
 
 <table>
 <thead>
 <tr>
-<th> File </th>
-<th> Role </th>
-<th> Additions </th>
+<th> Site </th>
+<th> Hot path </th>
+<th> Exhaust action </th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td> <code>server/queue.c</code> </td>
-<td> Memfd alloc/free, nspa_ensure_shared, nspa_get_thread_queue handler, nspa_ensure_own_bypass handler, ring arbitration </td>
-<td> ~300 LOC </td>
+<td> <code>dlls/win32u/dce.c:1670</code> </td>
+<td> paint cache fastpath (default OFF) </td>
+<td> <code>return FALSE;</code> (force RPC) </td>
 </tr>
 <tr>
-<td> <code>server/protocol.def</code> </td>
-<td> <code>nspa_get_thread_queue</code> + <code>nspa_ensure_own_bypass</code> requests, ring slot + ring struct definitions </td>
-<td> ~100 LOC </td>
+<td> <code>dlls/win32u/input.c:863</code> </td>
+<td> <code>GetQueueStatus</code> shm read </td>
+<td> <code>return FALSE;</code> (force RPC) </td>
 </tr>
 <tr>
-<td> <code>server/mapping.c</code> </td>
-<td> Alloc-side-effect probe gates (NO_POISON, ID_STRIDE) </td>
-<td> ~35 LOC </td>
+<td> <code>dlls/win32u/hook.c:77</code> </td>
+<td> <code>is_hooked</code> shm read </td>
+<td> <code>return TRUE;</code> (server is authoritative) </td>
 </tr>
 <tr>
-<td> <code>dlls/win32u/nspa_msg_ring.c</code> </td>
-<td> Client cache, try_post_ring, try_send_ring, wait_ring_reply, write_ring_reply, get_own_bypass_shm, try_pop_own_ring_send, tail advance </td>
-<td> ~900 LOC (new file) </td>
-</tr>
-<tr>
-<td> <code>dlls/win32u/win32u_private.h</code> </td>
-<td> Msg-ring public prototypes </td>
-<td> ~15 LOC </td>
-</tr>
-<tr>
-<td> <code>dlls/win32u/message.c</code> </td>
-<td> Integration in send_inter_thread_message, put_message_in_queue, peek_message, reply_message, SEH wrap </td>
-<td> ~80 LOC </td>
-</tr>
-<tr>
-<td> <code>dlls/win32u/input.c</code> </td>
-<td> Wake-bit synthesis through own ring </td>
-<td> ~10 LOC </td>
-</tr>
-<tr>
-<td> <code>dlls/win32u/winstation.c</code> </td>
-<td> get_queue_bypass_shm delegates to msg-ring public </td>
-<td> ~20 LOC </td>
-</tr>
-<tr>
-<td> <code>dlls/ntdll/unix/server.c</code>, <code>include/wine/server.h</code> </td>
-<td> Export <code>wine_server_receive_fd</code> for cross-unixlib use </td>
-<td> ~2 LOC </td>
-</tr>
-<tr>
-<td> <code>dlls/wow64/sync.c</code>, <code>dlls/ntdll/ntdll.spec</code> </td>
-<td> Wow64 thunks for Nt* condvar PI syscalls </td>
-<td> ~30 LOC </td>
-</tr>
-<tr>
-<td> <code>nspa/docs/msg-ring-memfd-redesign.md</code> </td>
-<td> Implementation plan + phase notes </td>
-<td> 400 LOC </td>
-</tr>
-<tr>
-<td> <code>nspa/docs/msg-ring-architecture.md</code> </td>
-<td> <strong>This document</strong> </td>
-<td> </td>
+<td> <code>dlls/win32u/nspa/msg_ring.c:1219</code> </td>
+<td> POST arbitration check (<code>server_pending</code> query) </td>
+<td> <code>return FALSE;</code> (server-fallback) </td>
 </tr>
 </tbody>
 </table>
 
 
-<p>Total msg-ring feature: ~1500 LOC new code, ~250 LOC edits in existing files.</p>
-
-<hr />
-
-<h2>11. Phase History</h2>
-
-<table>
-<thead>
-<tr>
-<th> Phase </th>
-<th> Commit </th>
-<th> Outcome </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> c9daf83afe9 </td>
-<td> alloc-side-effect isolation probes (NO_POISON, ID_STRIDE) </td>
-<td> Ruled out poison fill, ID sensitivity </td>
-</tr>
-<tr>
-<td> 924df6727db </td>
-<td> opt-in NSPA_MSG_RING_EXCLUDE_MAIN gate </td>
-<td> Workaround for library panel; first-thread specific </td>
-</tr>
-<tr>
-<td> 54802c6351d </td>
-<td> Memfd redesign implementation plan doc </td>
-<td> Plan captured </td>
-</tr>
-<tr>
-<td> 75de316f9ad </td>
-<td> <strong>Phase 1 + 2</strong> memfd alloc + client mmap </td>
-<td> POST capture validated (~95 RTTs/s saved) </td>
-</tr>
-<tr>
-<td> 4eaf876a118 </td>
-<td> <strong>Phase 4</strong> ensure_own_bypass protocol + client TLS </td>
-<td> SEND infrastructure in place </td>
-</tr>
-<tr>
-<td> 106735ff791 </td>
-<td> Phase 4 opt-in gate (default off) </td>
-<td> Avoided premature-default stale-slot storm </td>
-</tr>
-<tr>
-<td> 1d18cb7c4e8 </td>
-<td> <strong>Phase 4.5</strong> wake-bit synthesis via memfd </td>
-<td> Fixed client-side wake-bit blindness </td>
-</tr>
-<tr>
-<td> 657c16691f5 </td>
-<td> <strong>Phase 4.6</strong> client-side ring-SEND dispatch </td>
-<td> Full SEND bypass validated </td>
-</tr>
-<tr>
-<td> 70ea71f8c7b </td>
-<td> Design doc update with ballpark reduction </td>
-<td> Docs current </td>
-</tr>
-</tbody>
-</table>
-
-
-<h3>What&rsquo;s next</h3>
+<p>All four exit the seqlock retry loop deterministically and fall back to
+the safe path. Validated by <code>nspa_rt_test</code>&rsquo;s seqlock-bound subtests A
+and B (<code>9b13a757860</code>, <code>01efcd076c6</code>):</p>
 
 <ul>
-<li><strong>Targeted RT profile harness.</strong> A scripted workload that exercises the AudioCalc -> MainThread and DWM-Sync -> MainThread SEND paths in isolation would give tight quantified RT-latency numbers (µs-level reply delivery). Today&rsquo;s measurements are playback-scale.</li>
-<li><strong>Phase 5 cleanup.</strong> Retire the Phase-1 <code>bypass_locator.id != 0</code> sentinel in favor of a proper <code>bypass_fd_valid</code> protocol field. Pure cleanup, no functional change.</li>
-<li><strong>Default-on promotion.</strong> After broader validation on non-Ableton workloads (WebView2, MS Office, games), flip the opt-in layers to default-on.</li>
-<li><strong>Wake-bit synthesis extension.</strong> Wire ring-synthesized QS_* bits into places other than <code>check_queue_bits</code> if any remaining paths short-circuit without the ring-aware bits (audit pending).</li>
+<li>Subtest A: paint fastpath under writer thrash — paint_max 67 µs,
+hard=0.</li>
+<li>Subtest B: queue-bits via <code>GetQueueStatus</code> under writer thrash —
+queue-bits max 945 µs, hard=0.</li>
 </ul>
 
 
-<h3>Known scope limits</h3>
+<p>Subtest C (multi-FIFO painter) is queued — needs an external bash
+timeout watchdog so the host survives a regression.</p>
 
-<ul>
-<li>Cross-process messaging stays on the server path (ring pointers are intra-process).</li>
-<li><code>MSG_CALLBACK</code> / <code>MSG_CALLBACK_RESULT</code> stay on server (callback needs the server&rsquo;s sender-callback state).</li>
-<li>DDE messages stay on server (DDE has separate registered-message handling).</li>
-<li>Packed-data SEND messages (MSG_OTHER_PROCESS) stay on server &ndash; ring slots don&rsquo;t carry variable-length payload today. Expansion is possible with an extra side-channel buffer if needed.</li>
-</ul>
+<h3>14.4 Why 256</h3>
 
-
-<hr />
-
-<h2>12. Future Extensions (ranked by wineserver-load reduction)</h2>
-
-<p>Today&rsquo;s scope captures roughly 48 % of <code>get_posted_message</code> server calls on busy Ableton playback (the 43,559 / 90,681 ring-arbitrated fraction from §9).  The remaining 52 % is split across several message categories the ring doesn&rsquo;t yet handle.  Ranked by expected server-load reduction:</p>
-
-<h3>Tier 1 &ndash; highest traffic, biggest win</h3>
-
-<table>
-<thead>
-<tr>
-<th> # </th>
-<th> Extension </th>
-<th> Why it matters </th>
-<th> Complexity </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> 1 </td>
-<td> <strong><code>WM_TIMER</code> local injection</strong> </td>
-<td> DAWs + editors pump UI at 60+ Hz with timers.  Each tick = 1 wineserver RTT today to post WM_TIMER to the target thread.  Per-thread timers in a playing Ableton: hundreds of RTTs / sec.  Biggest single server-load source we still hit. </td>
-<td> High &ndash; client-side timer expiry tracking + direct ring injection; must stay consistent with server&rsquo;s <code>SetTimer</code> / <code>KillTimer</code> state. </td>
-</tr>
-<tr>
-<td> 2 </td>
-<td> <strong><code>WM_PAINT</code> / invalidation cascade</strong> </td>
-<td> DWM-Sync-driven redraw loops + <code>InvalidateRect</code> chains fire many paint-chain messages.  Common in refresh-intensive apps (DAWs, editors, video, games).  Hundreds of RTTs / sec in busy UI. </td>
-<td> High &ndash; paint message generation + coalescing currently server-side; extending ring to signal invalidation between peer threads requires careful coordination. </td>
-</tr>
-</tbody>
-</table>
-
-
-<h3>Tier 2 &ndash; broader app coverage, medium win</h3>
-
-<table>
-<thead>
-<tr>
-<th> # </th>
-<th> Extension </th>
-<th> Why it matters </th>
-<th> Complexity </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> 3 </td>
-<td> <strong>Thread messages (<code>hwnd == 0</code>)</strong> </td>
-<td> <code>PostThreadMessage</code> used heavily by WebView2, auth pumps, COM apartments, custom event loops.  Quiet in Ableton specifically but broadens coverage to browser / enterprise workloads. </td>
-<td> Low &ndash; ring slots already carry sender/dest tid; mostly a matter of removing the &ldquo;skip thread-msg&rdquo; early-return and adjusting dispatch fallback. </td>
-</tr>
-<tr>
-<td> 4 </td>
-<td> <strong>Hook dispatch (<code>WH_CALLWNDPROC</code>, <code>WH_GETMESSAGE</code>, etc.)</strong> </td>
-<td> Every message passing through a thread with an in-process hook = one server call to hook-dispatch today.  Acts as a multiplier on other captures: the more messages hook, the more the existing capture compounds into further savings. </td>
-<td> Medium &ndash; hook chain ordering + filter semantics must match exactly.  Same-process hooks are ring-eligible. </td>
-</tr>
-</tbody>
-</table>
-
-
-<h3>Tier 3 &ndash; targeted unlocks, smaller per-extension win</h3>
-
-<table>
-<thead>
-<tr>
-<th> # </th>
-<th> Extension </th>
-<th> Why it matters </th>
-<th> Complexity </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> 5 </td>
-<td> <strong>Packed-data SEND (<code>MSG_OTHER_PROCESS</code> same-process)</strong> </td>
-<td> Registered window messages with <code>lparam</code> pointing at variable-size structs.  Used for cross-AS or serialised IPC.  Rare in pure DAW workloads. </td>
-<td> Medium &ndash; add a side-channel memfd for payloads; slot holds <code>(offset, size)</code> into it. </td>
-</tr>
-<tr>
-<td> 6 </td>
-<td> <strong>Callback SEND (<code>MSG_CALLBACK</code> / <code>MSG_CALLBACK_RESULT</code>)</strong> </td>
-<td> <code>SendMessageCallbackA/W</code> async-reply pattern.  Not high-frequency in most apps. </td>
-<td> Medium &ndash; extend reply ring to invoke callback locally on reply arrival; handle callback identity + security. </td>
-</tr>
-<tr>
-<td> 7 </td>
-<td> <strong><code>SendInput</code> intra-process synthesis</strong> </td>
-<td> Rare automation use cases where apps inject input into their own threads. </td>
-<td> Low &ndash; small addition but very niche. </td>
-</tr>
-</tbody>
-</table>
-
-
-<h3>Out-of-scope (architectural mismatches)</h3>
-
-<ul>
-<li><strong>Cross-process messaging</strong> &ndash; ring pointers (HWND, WPARAM / LPARAM dereferences) are per-address-space.  Cross-process messaging must stay on the server path unless we add a full translation layer (effectively a redesign).</li>
-<li><strong>DDE</strong> &ndash; registered-message handling is separate from the normal message dispatch machinery; not a natural fit for the ring.</li>
-<li><strong>Hardware input queueing</strong> &ndash; <code>thread_input</code> is a different shared structure with server-owned state; out of scope for the per-thread bypass ring.</li>
-</ul>
-
-
-<h3>Prioritization heuristic</h3>
-
-<p>For raw wineserver-load reduction on Ableton-style workloads, <strong>Tier 1 (timer + paint)</strong> is the clear target.  For broadening to non-DAW apps (WebView2, COM-heavy tools, browsers embedded in apps), <strong>Tier 2 item 3 (thread messages)</strong> is the cheapest high-leverage add.  Tiers 2-3 items are best adopted opportunistically as specific apps demand them.</p>
-
-<p>Any of these extensions reuses the existing ring memory layout + cache discipline + fast-path atomics &ndash; the extension work is entirely in the &ldquo;which message types get ring-delivered and how&rdquo; layer, not in the memfd / seqlock / cross-thread plumbing.</p>
+<p>256 PAUSEs ≈ tens of microseconds at modern Intel PAUSE latency
+(~20 ns each on Skylake-era; lower on Haswell, higher on Skylake-X).
+The bound is comfortably above any writer&rsquo;s normal odd-seq window
+(reservation + payload write + release-store, typically &lt;1 µs).
+Anything beyond that strongly suggests a stalled or priority-inverted
+writer; the retry doesn&rsquo;t help, and the syscall fallback (which yields
+the CPU to the scheduler) is the right answer.</p>
 
 <hr />
 
-<h2><a name="footnote-why-memfd"></a>Footnote: why memfd and not session shmem</h2>
+<h2>15. Footnote — why memfd, not session shmem</h2>
 
-<p>The memfd design was not the initial plan. The first msg-ring implementation put the per-queue ring inside Wine&rsquo;s session shmem via <code>alloc_shared_object()</code> &ndash; natural given the existing machinery. That produced a reliable Ableton Live regression: the library panel would not populate whenever the ring allocation happened for the process&rsquo;s first thread (MainThread).</p>
+<p>The memfd design was not the initial plan. The first msg-ring
+implementation put the per-queue ring inside Wine&rsquo;s session shmem via
+<code>alloc_shared_object()</code> — natural given the existing machinery. That
+produced a reliable Ableton Live regression: the library panel would
+not populate whenever the ring allocation happened for the process&rsquo;s
+first thread (MainThread).</p>
 
-<p>A systematic A/B matrix ruled out every runtime code path that reads or writes the ring. Gates tested (each with bypass on, each in isolation):</p>
+<p>A systematic A/B matrix ruled out every runtime code path that reads
+or writes the ring. Gates tested (each with bypass on, each in
+isolation):</p>
 
 <table>
 <thead>
@@ -1240,7 +2135,7 @@ if (info-&gt;nspa_sender_tid &amp;&amp; remove) {
 <tbody>
 <tr>
 <td> <code>NSPA_MSG_RING_SERVER_NO_RING_ARB</code> </td>
-<td> ring arbitration in get_posted / get_message </td>
+<td> ring arbitration in get_posted/get_message </td>
 <td> broken </td>
 </tr>
 <tr>
@@ -1287,14 +2182,392 @@ if (info-&gt;nspa_sender_tid &amp;&amp; remove) {
 </table>
 
 
-<p>Every identifiable runtime side-effect (poison fill, ID bump, locator publish, seqlock ops) was proven innocent. The bug sat in the mere presence of a <code>session_object_t</code> entry + its <code>shared_object_t</code> header inside the shared session for the process&rsquo;s first thread. The specific mechanism was never isolated further &ndash; all named side-effects were ruled out, leaving only a memory-layout / seqlock-interaction class of cause.</p>
+<p>Every identifiable runtime side-effect (poison fill, ID bump, locator
+publish, seqlock ops) was proven innocent. The bug sat in the mere
+presence of a <code>session_object_t</code> entry plus its <code>shared_object_t</code>
+header inside the shared session for the process&rsquo;s first thread. The
+specific mechanism was never isolated further — all named side-effects
+were ruled out, leaving only a memory-layout / seqlock-interaction
+class of cause.</p>
 
-<p>Moving the ring to a per-queue memfd eliminates all of it: no session_object_t entry, no shared_object_t header bump, no queue_shm_t locator publish, no interaction with session shmem&rsquo;s bump allocator. The ring protocol itself (slot layout, state machine, cache discipline, fast paths) was unchanged &ndash; only the allocation + discovery layer swapped. Library regression resolved end-to-end.</p>
+<p>Moving the ring to a per-queue memfd eliminates all of it: no
+<code>session_object_t</code> entry, no <code>shared_object_t</code> header bump, no
+<code>queue_shm_t</code> locator publish, no interaction with session shmem&rsquo;s
+bump allocator. The ring protocol itself (slot layout, state machine,
+cache discipline, fast paths) was unchanged — only the allocation +
+discovery layer swapped. Library regression resolved end-to-end.</p>
+
+<p>The memfd redesign is the only NSPA bypass that uses memfd rather
+than session shmem; it is a documented exception to the
+&ldquo;alloc_shared_object for everything&rdquo; rule and the rationale lives in
+this footnote.</p>
 
 <hr />
 
-<p><em>See also:</em>
-- <code>nspa/docs/architecture.md</code> &ndash; full Wine-NSPA architecture reference
-- <code>nspa/docs/msg-ring-memfd-redesign.md</code> &ndash; implementation plan + phase notes
-- <code>nspa/docs/io_uring-architecture.md</code> &ndash; orthogonal I/O bypass layer</p>
+<h2>16. Phase history</h2>
+
+<h3>16.1 Original POST/SEND/REPLY ring</h3>
+
+<table>
+<thead>
+<tr>
+<th> Phase </th>
+<th> Wine commit </th>
+<th> Outcome </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> <code>c9daf83afe9</code> </td>
+<td> alloc-side-effect isolation probes </td>
+<td> Ruled out poison fill, ID sensitivity </td>
+</tr>
+<tr>
+<td> <code>924df6727db</code> </td>
+<td> opt-in <code>NSPA_MSG_RING_EXCLUDE_MAIN</code> gate </td>
+<td> Workaround for library panel; first-thread specific </td>
+</tr>
+<tr>
+<td> <code>54802c6351d</code> </td>
+<td> Memfd redesign implementation plan doc </td>
+<td> Plan captured </td>
+</tr>
+<tr>
+<td> <code>75de316f9ad</code> </td>
+<td> Phase 1+2 memfd alloc + client mmap </td>
+<td> POST capture validated (~95 RTTs/s saved) </td>
+</tr>
+<tr>
+<td> <code>4eaf876a118</code> </td>
+<td> Phase 4 <code>ensure_own_bypass</code> protocol + client TLS </td>
+<td> SEND infrastructure in place </td>
+</tr>
+<tr>
+<td> <code>106735ff791</code> </td>
+<td> Phase 4 opt-in gate (default off) </td>
+<td> Avoided premature-default stale-slot storm </td>
+</tr>
+<tr>
+<td> <code>1d18cb7c4e8</code> </td>
+<td> Phase 4.5 wake-bit synthesis via memfd </td>
+<td> Fixed client-side wake-bit blindness </td>
+</tr>
+<tr>
+<td> <code>657c16691f5</code> </td>
+<td> Phase 4.6 client-side ring-SEND dispatch </td>
+<td> Full SEND bypass validated </td>
+</tr>
+<tr>
+<td> <code>70ea71f8c7b</code> </td>
+<td> Design doc update with ballpark reduction </td>
+<td> Docs current </td>
+</tr>
+</tbody>
+</table>
+
+
+<h3>16.2 Phase A — <code>redraw_window</code> push ring</h3>
+
+<table>
+<thead>
+<tr>
+<th> Phase </th>
+<th> Wine commit </th>
+<th> Outcome </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> <code>72d7a9055a8</code> </td>
+<td> Phase A — redraw_window push ring </td>
+<td> 10,930 -> 0 RPCs / 120 s; default-on </td>
+</tr>
+</tbody>
+</table>
+
+
+<h3>16.3 Phase B1.0 — paint cache fastpath</h3>
+
+<table>
+<thead>
+<tr>
+<th> Phase </th>
+<th> Wine commit </th>
+<th> Outcome </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> <code>c763761b928</code> </td>
+<td> B1.0 paint-cache implementation + diag </td>
+<td> Default-OFF; opt-in </td>
+</tr>
+<tr>
+<td> <code>70d55350bef</code> </td>
+<td> B1.0 default-on flip post-1006 </td>
+<td> Locked Ableton at ~5 min; reverted same day </td>
+</tr>
+<tr>
+<td> <code>4f2c29bb1b2</code> </td>
+<td> B1.0 revert paint-cache default to OFF </td>
+<td> Stays opt-in via <code>NSPA_ENABLE_PAINT_CACHE=1</code> </td>
+</tr>
+<tr>
+<td> <code>f4a1671973b</code> </td>
+<td> Gate hit/miss counters behind <code>NSPA_PAINT_DIAG=1</code> </td>
+<td> Removed always-on counter cost </td>
+</tr>
+<tr>
+<td> (validation) </td>
+<td> run-4 2026-04-28 with paint-cache on </td>
+<td> PASS past historical 5-min lockup; F5 likely fixed by MR1/MR4 </td>
+</tr>
+</tbody>
+</table>
+
+
+<h3>16.4 Phase C — <code>get_message</code> bypass</h3>
+
+<table>
+<thead>
+<tr>
+<th> Phase </th>
+<th> Wine commit </th>
+<th> Outcome </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> <code>6e83fa72420</code> </td>
+<td> Phase C Stage 1 — <code>get_message</code> residual bucketing diag </td>
+<td> Bucket B dominant 99.9% </td>
+</tr>
+<tr>
+<td> <code>79bb7c77c40</code> </td>
+<td> Phase C Stage 1 — remove diag </td>
+<td> Diag source removed; coverage extension queued </td>
+</tr>
+</tbody>
+</table>
+
+
+<h3>16.5 MR1/MR2/MR4 audit fix-pack</h3>
+
+<table>
+<thead>
+<tr>
+<th> Phase </th>
+<th> Wine commit </th>
+<th> Outcome </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> <code>9b4172e2bbc</code> </td>
+<td> MR1 ABA + MR2 cross-process futex + MR4 POST wake-loss </td>
+<td> Three bugs shipped, validated by run-3 + run-4 </td>
+</tr>
+<tr>
+<td> <code>ac823311aba</code> </td>
+<td> Audit doc </td>
+<td> <code>wine/nspa/docs/wine-nspa-lockup-audit-20260427.md</code> </td>
+</tr>
+</tbody>
+</table>
+
+
+<h3>16.6 NSPA_SHM_RETRY_GUARD audit §4.1</h3>
+
+<table>
+<thead>
+<tr>
+<th> Phase </th>
+<th> Wine commit </th>
+<th> Outcome </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> <code>9e51ed5f907</code> </td>
+<td> Harden retry loops at SCHED_FIFO callsites (audit §4.1) </td>
+<td> 7 sites + the macro </td>
+</tr>
+<tr>
+<td> <code>01efcd076c6</code> </td>
+<td> <code>nspa_rt_test</code> seqlock-bound subtest A </td>
+<td> Paint max 67 µs, hard=0 </td>
+</tr>
+<tr>
+<td> <code>9b13a757860</code> </td>
+<td> <code>nspa_rt_test</code> seqlock-bound subtest B </td>
+<td> Queue-bits max 945 µs, hard=0 </td>
+</tr>
+</tbody>
+</table>
+
+
+<h3>16.7 Bugs left as-is per audit</h3>
+
+<table>
+<thead>
+<tr>
+<th> ID </th>
+<th> Class </th>
+<th> Disposition </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> MR3 </td>
+<td> Peer-cache slot leak for departed peer threads </td>
+<td> Perf cliff under thread churn; Ableton&rsquo;s stable thread set unlikely to hit; ~30 LOC GC pass deferred </td>
+</tr>
+<tr>
+<td> MR5 </td>
+<td> Recursive <code>nspa_process_sent_messages</code> inside futex wait </td>
+<td> By design (cross-send deadlock protection); same re-entrancy contract as ordinary Win32 SendMessage nesting </td>
+</tr>
+<tr>
+<td> MR6 </td>
+<td> <code>pending_count++</code> ordered before <code>state = READY</code> </td>
+<td> Sub-µs benign window; consumer falls through </td>
+</tr>
+<tr>
+<td> MR7 </td>
+<td> <code>mlock</code> silent failure </td>
+<td> Config-dependent (RLIMIT_MEMLOCK) </td>
+</tr>
+<tr>
+<td> MR8 </td>
+<td> Bucket-lock cross </td>
+<td> Not present in this file; client bucket-lock + RPC pattern still queued for <code>dlls/ntdll/unix/nspa/local_file.c</code> audit (separate pass) </td>
+</tr>
+</tbody>
+</table>
+
+
+<h3>16.8 Out-of-scope (architectural mismatches)</h3>
+
+<ul>
+<li><strong>Cross-process messaging</strong> — ring pointers (HWND, WPARAM/LPARAM
+dereferences) are per-address-space. Cross-process messaging must
+stay on the server path unless we add a full translation layer
+(effectively a redesign).</li>
+<li><strong>DDE</strong> — registered-message handling is separate from the normal
+message dispatch machinery; not a natural fit for the ring.</li>
+<li><strong>Hardware input queueing</strong> — <code>thread_input</code> is a different shared
+structure with server-owned state; out of scope for the per-thread
+bypass ring.</li>
+</ul>
+
+
+<hr />
+
+<h2>17. References</h2>
+
+<h3>17.1 Source files (absolute paths)</h3>
+
+<table>
+<thead>
+<tr>
+<th> Path </th>
+<th> Role </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> <code>/home/ninez/pkgbuilds/Wine-NSPA/wine-rt-claude/wine/dlls/win32u/nspa/msg_ring.c</code> </td>
+<td> Client-side POST/SEND/REPLY ring + caches (1633 LOC) </td>
+</tr>
+<tr>
+<td> <code>/home/ninez/pkgbuilds/Wine-NSPA/wine-rt-claude/wine/server/protocol.def</code> </td>
+<td> Slot struct definitions, lines 1020-1214 </td>
+</tr>
+<tr>
+<td> <code>/home/ninez/pkgbuilds/Wine-NSPA/wine-rt-claude/wine/server/queue.c</code> </td>
+<td> Server-side memfd alloc, ring arbitration, signal paths </td>
+</tr>
+<tr>
+<td> <code>/home/ninez/pkgbuilds/Wine-NSPA/wine-rt-claude/wine/server/nspa/redraw_ring.c</code> </td>
+<td> Phase A server drain (87 LOC) </td>
+</tr>
+<tr>
+<td> <code>/home/ninez/pkgbuilds/Wine-NSPA/wine-rt-claude/wine/dlls/win32u/dce.c</code> </td>
+<td> Phase A producer + Phase B1.0 paint cache fastpath </td>
+</tr>
+<tr>
+<td> <code>/home/ninez/pkgbuilds/Wine-NSPA/wine-rt-claude/wine/dlls/win32u/message.c</code> </td>
+<td> Integration in <code>send_inter_thread_message</code>, <code>peek_message</code>, <code>reply_message</code> </td>
+</tr>
+<tr>
+<td> <code>/home/ninez/pkgbuilds/Wine-NSPA/wine-rt-claude/wine/dlls/win32u/input.c</code> </td>
+<td> Wake-bit synthesis through own ring </td>
+</tr>
+<tr>
+<td> <code>/home/ninez/pkgbuilds/Wine-NSPA/wine-rt-claude/wine/dlls/win32u/win32u_private.h</code> </td>
+<td> <code>NSPA_SHM_RETRY_GUARD</code> macro, ring prototypes </td>
+</tr>
+</tbody>
+</table>
+
+
+<h3>17.2 Audit + design docs</h3>
+
+<table>
+<thead>
+<tr>
+<th> Path </th>
+<th> Role </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> <code>/home/ninez/pkgbuilds/Wine-NSPA/wine-rt-claude/wine/nspa/docs/wine-nspa-lockup-audit-20260427.md</code> </td>
+<td> MR1-MR8 + F1-F9 + P2/P3/P5 audit findings (612 LOC) </td>
+</tr>
+<tr>
+<td> <code>/home/ninez/pkgbuilds/Wine-NSPA/wine-rt-claude/wine/nspa/docs/msg-ring-v2-phase-bc-handoff.md</code> </td>
+<td> Phase B + C handoff (paused state, prerequisites for resume) </td>
+</tr>
+<tr>
+<td> <code>/home/ninez/pkgbuilds/Wine-NSPA/wine-rt-claude/wine/nspa/docs/msg-ring-v2-design-idea.md</code> </td>
+<td> Original v2 thesis (Vyukov MPMC; superseded — see handoff §7) </td>
+</tr>
+<tr>
+<td> <code>/home/ninez/pkgbuilds/Wine-NSPA/wine-rt-claude/wine/nspa/docs/nspa-bypass-audit.md</code> </td>
+<td> Whole-surface bypass audit (gates Q3+Q4+R6.4 for resuming Phase B/C) </td>
+</tr>
+<tr>
+<td> <code>/home/ninez/pkgbuilds/Wine-NSPA/wine-rt-claude/wine/nspa/docs/msg-ring-memfd-redesign.md</code> </td>
+<td> Memfd redesign implementation plan (historical) </td>
+</tr>
+</tbody>
+</table>
+
+
+<h3>17.3 Memory entries (<code>~/.claude/projects/.../memory/</code>)</h3>
+
+<ul>
+<li><code>project_msg_ring_v2_mr1_mr2_mr4_shipped_20260427.md</code> — Audit fix-pack ship report.</li>
+<li><code>project_ableton_run4_paintcache_pass_20260428.md</code> — Run-4 with paint-cache enabled, F5 likely fixed by MR1/MR4.</li>
+<li><code>project_msg_ring_v2_b10_shipped.md</code> — B1.0 ship + same-day rollback.</li>
+<li><code>project_msg_ring_v2_phase_c_stage1_validated.md</code> — Phase C Stage 1 results (Bucket B 99.9% dominant).</li>
+<li><code>project_msg_ring_v2_paused.md</code> — Pause memo (superseded post-fix-pack).</li>
+<li><code>project_audit_4_1_retry_hardening_shipped.md</code> — <code>NSPA_SHM_RETRY_GUARD</code> ship + Subtest A/B results.</li>
+<li><code>feedback_validate_before_default_on.md</code> — Discipline rule: ship default-off, validate, then flip.</li>
+<li><code>feedback_dont_shotgun_audit_into_unfound_bug.md</code> — Discipline rule: KASAN/trace first, audit second.</li>
+</ul>
+
+
+<h3>17.4 Related architecture docs in this site</h3>
+
+<ul>
+<li><a href="bypass-overview.md">bypass-overview.md</a> — Whole-surface NSPA bypass map.</li>
+<li><a href="current-state.md">current-state.md</a> — Wine-NSPA state of the art (2026-04-28).</li>
+<li><a href="gamma-channel-dispatcher.md">gamma-channel-dispatcher.md</a> — gamma backbone for in-process wineserver dispatch.</li>
+<li><a href="shmem-ipc.gen.html">shmem-ipc.gen.html</a> — Shmem v1.5 (orthogonal to the message ring; both share NTSync).</li>
+<li><a href="io_uring-architecture.gen.html">io_uring-architecture.gen.html</a> — Orthogonal I/O bypass layer.</li>
+<li><a href="nspa-local-file-architecture.md">nspa-local-file-architecture.md</a> — Local-file bypass; bucket-lock context for the F8 / MR8 audit thread.</li>
+</ul>
+
 </body></html>

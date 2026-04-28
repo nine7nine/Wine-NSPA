@@ -2,7 +2,7 @@
 <html lang="en"><head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Wine Window Decoration Feedback Loop — Investigation Report</title>
+<title>Wine Window Decoration Feedback Loop -- Investigation Report</title>
 <style>
   :root {
     --bg: #1a1b26; --fg: #c0caf5; --accent: #7aa2f7;
@@ -56,21 +56,28 @@
   strong { color: var(--fg); }
   em { color: var(--muted); font-style: italic; }
 </style>
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/tokyo-night-dark.min.css">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
 </head><body>
-<h1>Wine Window Decoration Feedback Loop — Investigation Report</h1>
+<h1>Wine Window Decoration Feedback Loop &ndash; Investigation Report</h1>
 
-<p><strong>Bug:</strong> WineHQ bug 57955 — maximized/resized window decorations oscillate<br/>
-<strong>Affects:</strong> All compositors (KDE/KWin, GNOME/Mutter), both X11 and Wayland drivers, also Wine desktop mode<br/>
-<strong>Regression range:</strong> Wine 8.21 → late 9.0-rc (likely commit <code>cb1c03b926c</code>, Wine 9.16)<br/>
+<blockquote><p><strong>Status: INVESTIGATION COMPLETE &ndash; 2026-04-13.</strong></p>
+
+<p>X11 path: fixed (removed <code>WS_EX_LAYERED</code> MWM exclusion).
+Wayland path: <code>GetWindowStyleMasks</code> added but untested.</p>
+
+<p>Retained as historical record of the analysis.</p></blockquote>
+
+<hr />
+
+<p><strong>Bug:</strong> WineHQ bug 57955 &ndash; maximized/resized window decorations oscillate
+<strong>Affects:</strong> All compositors (KDE/KWin, GNOME/Mutter), both X11 and Wayland drivers, also Wine desktop mode
+<strong>Regression range:</strong> Wine 8.21 -> late 9.0-rc (likely commit <code>cb1c03b926c</code>, Wine 9.16)
 <strong>Date:</strong> 2026-04-14</p>
 
 <hr />
 
 <h2>The Bug</h2>
 
-<p>When a decorated window is maximized, resized, or moved, the window rect oscillates — causing menu bar flicker, content gaps, self-resizing on drag, and bottom content cutoff. The loop is continuous and never converges.</p>
+<p>When a decorated window is maximized, resized, or moved, the window rect oscillates &ndash; causing menu bar flicker, content gaps, self-resizing on drag, and bottom content cutoff. The loop is continuous and never converges.</p>
 
 <p>Tested with Ableton Live 12 on KDE/KWin (XWayland), but the bug reproduces:
 - On both <code>winex11.drv</code> and <code>winewayland.drv</code>
@@ -83,16 +90,15 @@
 
 <p>The feedback loop is in <strong>win32u&rsquo;s <code>set_window_pos</code> chain</strong>, not in the display drivers. The cycle:</p>
 
-<p><code>
-ConfigureNotify (from WM or Wine desktop)
-  → WM_WINE_WINDOW_STATE_CHANGED
-  → NtUserSetWindowPos (with WM's constrained rect)
-  → calc_ncsize → sends WM_NCCALCSIZE → computes client rect with NC area
-  → get_window_surface → get_visible_rect → computes visible = window - NC offsets
-  → apply_window_pos → stores rects, calls pWindowPosChanged
-  → driver reconfigures window → ConfigureNotify with different rect
-  → LOOP
-</code></p>
+<pre><code>ConfigureNotify (from WM or Wine desktop)
+  -&gt; WM_WINE_WINDOW_STATE_CHANGED
+  -&gt; NtUserSetWindowPos (with WM's constrained rect)
+  -&gt; calc_ncsize -&gt; sends WM_NCCALCSIZE -&gt; computes client rect with NC area
+  -&gt; get_window_surface -&gt; get_visible_rect -&gt; computes visible = window - NC offsets
+  -&gt; apply_window_pos -&gt; stores rects, calls pWindowPosChanged
+  -&gt; driver reconfigures window -&gt; ConfigureNotify with different rect
+  -&gt; LOOP
+</code></pre>
 
 <h3>Why the rects never converge</h3>
 
@@ -138,10 +144,9 @@ ConfigureNotify (from WM or Wine desktop)
 
 <p>Each cycle, <code>window_rect_from_visible</code> converts the WM&rsquo;s ConfigureNotify rect back to a window rect using Wine&rsquo;s stored offsets. The mismatch produces a different window rect every time. Specifically, a constant <strong>-48px height delta</strong> per cycle (observed in traces):</p>
 
-<p><code>
-NSPA_CFG 0x1009a config_vis (389,59)-(2430,1818) stored_vis (389,59)-(2430,1899) stored_win (389,59)-(2430,1899)
-  → new_win (389,59)-(2430,1818) old_win (389,59)-(2430,1899) delta(0,0,0,-81) flags 0x16
-</code></p>
+<pre><code>NSPA_CFG 0x1009a config_vis (389,59)-(2430,1818) stored_vis (389,59)-(2430,1899) stored_win (389,59)-(2430,1899)
+  -&gt; new_win (389,59)-(2430,1818) old_win (389,59)-(2430,1899) delta(0,0,0,-81) flags 0x16
+</code></pre>
 
 <h3>Three observable failure modes</h3>
 
@@ -157,7 +162,7 @@ NSPA_CFG 0x1009a config_vis (389,59)-(2430,1818) stored_vis (389,59)-(2430,1899)
 <tr>
 <td> Left drift (-1px/frame) </td>
 <td> Window move </td>
-<td> Visible rect offset mismatch → position conversion error </td>
+<td> Visible rect offset mismatch -> position conversion error </td>
 </tr>
 <tr>
 <td> Height growth (+4px/frame) </td>
@@ -180,15 +185,18 @@ NSPA_CFG 0x1009a config_vis (389,59)-(2430,1818) stored_vis (389,59)-(2430,1899)
 
 <h3>The SWP_FRAMECHANGED amplifier</h3>
 
-<p>In <code>apply_window_pos</code> (dlls/win32u/window.c:2277):
-<pre><code class="language-c">if (old_surface != new_surface) swp_flags |= SWP_FRAMECHANGED;</code></pre>
-Any visible rect change that triggers a new surface forces <code>SWP_FRAMECHANGED</code>, which triggers <code>WM_NCCALCSIZE</code>, which recalculates the NC area, which changes the visible rect — amplifying the loop.</p>
+<p>In <code>apply_window_pos</code> (dlls/win32u/window.c:2277):</p>
+
+<pre><code>if (old_surface != new_surface) swp_flags |= SWP_FRAMECHANGED;
+</code></pre>
+
+<p>Any visible rect change that triggers a new surface forces <code>SWP_FRAMECHANGED</code>, which triggers <code>WM_NCCALCSIZE</code>, which recalculates the NC area, which changes the visible rect &ndash; amplifying the loop.</p>
 
 <hr />
 
 <h2>The Likely Regression Commit</h2>
 
-<p><strong><code>cb1c03b926c</code></strong> (Wine 9.16) — &ldquo;Move visible rect computation out of the drivers&rdquo;</p>
+<p><strong><code>cb1c03b926c</code></strong> (Wine 9.16) &ndash; &ldquo;Move visible rect computation out of the drivers&rdquo;</p>
 
 <p>This commit:
 1. Created <code>get_mwm_decorations_for_style()</code> split from <code>get_mwm_decorations()</code>
@@ -196,7 +204,7 @@ Any visible rect change that triggers a new surface forces <code>SWP_FRAMECHANGE
 3. <strong>Moved <code>get_visible_rect()</code> from the X11 driver to win32u</strong>
 4. Changed the EqualRect check: old code checked <code>window == client</code>, new code checks <code>window == visible</code></p>
 
-<p>Before this commit, the X11 driver computed the visible rect directly using its own knowledge of the WM&rsquo;s frame. After this commit, win32u computes it using <code>NtUserAdjustWindowRect</code> — which returns Wine&rsquo;s built-in metrics, not the WM&rsquo;s actual metrics.</p>
+<p>Before this commit, the X11 driver computed the visible rect directly using its own knowledge of the WM&rsquo;s frame. After this commit, win32u computes it using <code>NtUserAdjustWindowRect</code> &ndash; which returns Wine&rsquo;s built-in metrics, not the WM&rsquo;s actual metrics.</p>
 
 <hr />
 
@@ -208,17 +216,17 @@ Any visible rect change that triggers a new surface forces <code>SWP_FRAMECHANGE
 
 <p><strong>Result:</strong> Callback works correctly (verified: 5834 calls with correct extents <code>(-6,-27,6,6)</code>). But the loop continues because the app re-inflates to its preferred size via <code>WM_WINDOWPOSCHANGED</code> response. The WM constrains back, Wine re-inflates, loop.</p>
 
-<p><strong>Code is in place:</strong> Atom, PropertyNotify handler, pGetFrameExtents callback, X11DRV_GetFrameExtents — all implemented and working. May be useful once the win32u fix is in place.</p>
+<p><strong>Code is in place:</strong> Atom, PropertyNotify handler, pGetFrameExtents callback, X11DRV_GetFrameExtents &ndash; all implemented and working. May be useful once the win32u fix is in place.</p>
 
 <h3>2. MWM decoration suppression for custom-chrome windows</h3>
 
-<p><strong>Tried:</strong> <code>EqualRect(window, visible) → no decorations</code> (upstream check) and <code>EqualRect(window, client) → no decorations</code>.</p>
+<p><strong>Tried:</strong> <code>EqualRect(window, visible) -&gt; no decorations</code> (upstream check) and <code>EqualRect(window, client) -&gt; no decorations</code>.</p>
 
-<p><strong>Result:</strong> Both created chicken-and-egg loops — no decorations → no frame → check re-triggers → decorations oscillate between present and absent. The <code>window == visible</code> check is self-fulfilling (no decorations → vis==win → check says no decorations).</p>
+<p><strong>Result:</strong> Both created chicken-and-egg loops &ndash; no decorations -> no frame -> check re-triggers -> decorations oscillate between present and absent. The <code>window == visible</code> check is self-fulfilling (no decorations -> vis==win -> check says no decorations).</p>
 
 <h3>3. NSPA win32u patch (bypass EqualRect for decorated windows)</h3>
 
-<p><strong>Implementation:</strong> Changed <code>get_visible_rect</code> line 2084 to <code>if (EqualRect(window, client) &amp;&amp; !style_mask &amp;&amp; !ex_style_mask)</code> — applied decoration offset even when client==window.</p>
+<p><strong>Implementation:</strong> Changed <code>get_visible_rect</code> line 2084 to <code>if (EqualRect(window, client) &amp;&amp; !style_mask &amp;&amp; !ex_style_mask)</code> &ndash; applied decoration offset even when client==window.</p>
 
 <p><strong>Result:</strong> Caused <strong>4px/frame unbounded height growth</strong> for all windows. Traced via diagnostic ERR: 3378 NCCALCSIZE calls in one session, height increasing by 4px each cycle.</p>
 
@@ -260,7 +268,7 @@ Any visible rect change that triggers a new surface forces <code>SWP_FRAMECHANGE
 <tr>
 <td> <code>dlls/win32u/window.c:3935</code> </td>
 <td> <code>set_window_pos</code> </td>
-<td> Main SWP entry: calc_winpos → calc_ncsize → get_window_surface → apply_window_pos </td>
+<td> Main SWP entry: calc_winpos -> calc_ncsize -> get_window_surface -> apply_window_pos </td>
 </tr>
 <tr>
 <td> <code>dlls/win32u/window.c:4778</code> </td>
@@ -270,17 +278,17 @@ Any visible rect change that triggers a new surface forces <code>SWP_FRAMECHANGE
 <tr>
 <td> <code>dlls/win32u/message.c:2224</code> </td>
 <td> <code>WM_WINE_WINDOW_STATE_CHANGED</code> </td>
-<td> Entry from driver ConfigureNotify → NtUserSetWindowPos </td>
+<td> Entry from driver ConfigureNotify -> NtUserSetWindowPos </td>
 </tr>
 <tr>
 <td> <code>include/wine/gdi_driver.h:63</code> </td>
 <td> <code>window_rect_from_visible</code> </td>
-<td> Converts visible → window using stored offsets </td>
+<td> Converts visible -> window using stored offsets </td>
 </tr>
 <tr>
 <td> <code>dlls/winex11.drv/window.c:1812</code> </td>
 <td> <code>window_update_client_config</code> </td>
-<td> Converts ConfigureNotify → SWP flags + rect </td>
+<td> Converts ConfigureNotify -> SWP flags + rect </td>
 </tr>
 </tbody>
 </table>
@@ -288,18 +296,21 @@ Any visible rect change that triggers a new surface forces <code>SWP_FRAMECHANGE
 
 <h3>The visible rect model</h3>
 
-<pre><code class="language-c">struct window_rects {
+<pre><code>struct window_rects {
     RECT window;   // Full Win32 window area (including NC frame)
     RECT client;   // Client area (from WM_NCCALCSIZE)
     RECT visible;  // X11/Wayland surface area (from get_visible_rect)
-};</code></pre>
+};
+</code></pre>
 
 <p><code>visible = window - decoration_offsets</code> where offsets come from <code>NtUserAdjustWindowRect</code> (Wine&rsquo;s NC metrics). The problem: these offsets don&rsquo;t match the actual WM frame.</p>
 
 <h3>How to reproduce</h3>
 
-<p>Any decorated window on any Linux WM. Simple test:
-<pre><code class="language-bash">wine notepad  # then maximize, resize, move — watch for drift/flicker</code></pre></p>
+<p>Any decorated window on any Linux WM. Simple test:</p>
+
+<pre><code>wine notepad  # then maximize, resize, move -- watch for drift/flicker
+</code></pre>
 
 <p>Ableton Live is a good test case because it&rsquo;s large and the artifacts are very visible.</p>
 
@@ -322,15 +333,18 @@ Any visible rect change that triggers a new surface forces <code>SWP_FRAMECHANGE
 
 <h3>2. Suppress the re-inflation in set_window_pos</h3>
 
-<p>Something in the SWP chain (possibly <code>WM_WINDOWPOSCHANGED</code> → app response, or <code>WM_GETMINMAXINFO</code>, or <code>SWP_FRAMECHANGED</code> amplifier) re-inflates the window after the WM constrains it. Find what and suppress it for WM-initiated position changes.</p>
+<p>Something in the SWP chain (possibly <code>WM_WINDOWPOSCHANGED</code> -> app response, or <code>WM_GETMINMAXINFO</code>, or <code>SWP_FRAMECHANGED</code> amplifier) re-inflates the window after the WM constrains it. Find what and suppress it for WM-initiated position changes.</p>
 
 <p>The <code>SWP_NOSENDCHANGING</code> flag (set for maximized/fullscreen in <code>window_update_client_config</code>) partially addresses this but doesn&rsquo;t fully prevent the loop.</p>
 
-<h3>3. Break the surface-change → FRAMECHANGED → NCCALCSIZE loop</h3>
+<h3>3. Break the surface-change -> FRAMECHANGED -> NCCALCSIZE loop</h3>
 
-<p>In <code>apply_window_pos</code>:
-<pre><code class="language-c">if (old_surface != new_surface) swp_flags |= SWP_FRAMECHANGED;</code></pre>
-This forces NC recalculation whenever the surface changes. If the visible rect changes by even 1px (due to the offset mismatch), a new surface is created, FRAMECHANGED fires, NCCALCSIZE runs, and the cycle amplifies.</p>
+<p>In <code>apply_window_pos</code>:</p>
+
+<pre><code>if (old_surface != new_surface) swp_flags |= SWP_FRAMECHANGED;
+</code></pre>
+
+<p>This forces NC recalculation whenever the surface changes. If the visible rect changes by even 1px (due to the offset mismatch), a new surface is created, FRAMECHANGED fires, NCCALCSIZE runs, and the cycle amplifies.</p>
 
 <p>Consider: only set FRAMECHANGED when the surface size actually changes, not just the surface pointer.</p>
 
@@ -347,7 +361,7 @@ This forces NC recalculation whenever the surface changes. If the visible rect c
 
 <h3>6. Compare with how Windows handles this</h3>
 
-<p>On Windows, there&rsquo;s no WM frame mismatch — the visible rect IS the window rect. The NC area is drawn by USER32, not a window manager. Wine&rsquo;s model of &ldquo;visible rect = window minus WM frame&rdquo; is an abstraction that doesn&rsquo;t exist on Windows. The fix may need to rethink this abstraction entirely.</p>
+<p>On Windows, there&rsquo;s no WM frame mismatch &ndash; the visible rect IS the window rect. The NC area is drawn by USER32, not a window manager. Wine&rsquo;s model of &ldquo;visible rect = window minus WM frame&rdquo; is an abstraction that doesn&rsquo;t exist on Windows. The fix may need to rethink this abstraction entirely.</p>
 
 <hr />
 
@@ -365,31 +379,31 @@ This forces NC recalculation whenever the surface changes. If the visible rect c
 <tbody>
 <tr>
 <td> <code>ableton_diag.log</code> </td>
-<td> NSPA_VIS + NSPA_NC diagnostic traces — shows 4px/frame growth with old NSPA patch, 3378 NCCALCSIZE calls proving the loop. <strong>The file that proved the NSPA patch was wrong.</strong> </td>
+<td> NSPA_VIS + NSPA_NC diagnostic traces &ndash; shows 4px/frame growth with old NSPA patch, 3378 NCCALCSIZE calls proving the loop. <strong>The file that proved the NSPA patch was wrong.</strong> </td>
 </tr>
 <tr>
 <td> <code>ableton_win.log</code> </td>
-<td> Full <code>+win</code> WINEDEBUG trace — shows calc_winpos/get_visible_rect/apply_window_pos flow for every SWP. <strong>The file that shows the 1px left drift and height growth patterns.</strong> </td>
+<td> Full <code>+win</code> WINEDEBUG trace &ndash; shows calc_winpos/get_visible_rect/apply_window_pos flow for every SWP. <strong>The file that shows the 1px left drift and height growth patterns.</strong> </td>
 </tr>
 <tr>
 <td> <code>ableton_frame.log</code> </td>
-<td> pGetFrameExtents callback trace — shows 5834 successful calls with correct extents <code>(-6,-27)-(6,6)</code>, proving the callback works but doesn&rsquo;t fix the loop. </td>
+<td> pGetFrameExtents callback trace &ndash; shows 5834 successful calls with correct extents <code>(-6,-27)-(6,6)</code>, proving the callback works but doesn&rsquo;t fix the loop. </td>
 </tr>
 <tr>
 <td> <code>ableton_cfg.log</code> </td>
-<td> NSPA_CFG trace (first run) — shows ConfigureNotify→window_rect_from_visible conversion with zero offsets (vis==win), proving the offset mismatch is the proximate cause. </td>
+<td> NSPA_CFG trace (first run) &ndash; shows ConfigureNotify->window_rect_from_visible conversion with zero offsets (vis==win), proving the offset mismatch is the proximate cause. </td>
 </tr>
 <tr>
 <td> <code>ableton_cfg2.log</code> </td>
-<td> NSPA_CFG trace with frame extents bypass — shows correct offsets but -48px delta per cycle as app re-inflates via WM_WINDOWPOSCHANGED. </td>
+<td> NSPA_CFG trace with frame extents bypass &ndash; shows correct offsets but -48px delta per cycle as app re-inflates via WM_WINDOWPOSCHANGED. </td>
 </tr>
 <tr>
 <td> <code>ableton_client.log</code> </td>
-<td> client==window MWM check — shows decoration oscillation (frame extents flipping 6,6,27,6 ↔ 0,0,0,0). </td>
+<td> client==window MWM check &ndash; shows decoration oscillation (frame extents flipping 6,6,27,6 &lt;-> 0,0,0,0). </td>
 </tr>
 <tr>
 <td> <code>ableton_mwm.log</code> </td>
-<td> Restored upstream window==visible MWM check — shows self-fulfilling no-decoration loop (frame extents permanently 0,0,0,0). </td>
+<td> Restored upstream window==visible MWM check &ndash; shows self-fulfilling no-decoration loop (frame extents permanently 0,0,0,0). </td>
 </tr>
 </tbody>
 </table>
@@ -397,31 +411,34 @@ This forces NC recalculation whenever the surface changes. If the visible rect c
 
 <h3>How to read the traces</h3>
 
-<p><strong>NSPA_DBG in get_visible_rect:</strong>
-<code>
-NSPA_DBG hwnd 0x1009a using WM frame extents (-6,-27)-(6,6)
-NSPA_DBG hwnd 0x1009a using AdjustWindowRect (-4,-30)-(4,4) (no frame extents yet)
-</code></p>
+<p><strong>NSPA_DBG in get_visible_rect:</strong></p>
 
-<p><strong>NSPA_CFG in window_update_client_config:</strong>
-<code>
-NSPA_CFG 0x1009a config_vis (389,59)-(2430,1818) stored_vis (389,59)-(2430,1899) stored_win (389,59)-(2430,1899) → new_win (389,59)-(2430,1818) old_win (389,59)-(2430,1899) delta(0,0,0,-81) flags 0x16
-</code>
-- <code>config_vis</code>: what KWin reported in ConfigureNotify (the actual X11 window position)
-- <code>stored_vis</code>/<code>stored_win</code>: what Wine has stored from last SWP cycle
-- <code>new_win</code>: what window_rect_from_visible computed (will become the new SetWindowPos input)
-- <code>delta</code>: difference between new_win and old_win (position_x, position_y, width_change, height_change)
-- <code>flags</code>: SWP flags (0x16 = SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOSENDCHANGING)</p>
+<pre><code>NSPA_DBG hwnd 0x1009a using WM frame extents (-6,-27)-(6,6)
+NSPA_DBG hwnd 0x1009a using AdjustWindowRect (-4,-30)-(4,4) (no frame extents yet)
+</code></pre>
+
+<p><strong>NSPA_CFG in window_update_client_config:</strong></p>
+
+<pre><code>NSPA_CFG 0x1009a config_vis (389,59)-(2430,1818) stored_vis (389,59)-(2430,1899) stored_win (389,59)-(2430,1899) -&gt; new_win (389,59)-(2430,1818) old_win (389,59)-(2430,1899) delta(0,0,0,-81) flags 0x16
+</code></pre>
+
+<ul>
+<li><code>config_vis</code>: what KWin reported in ConfigureNotify (the actual X11 window position)</li>
+<li><code>stored_vis</code>/<code>stored_win</code>: what Wine has stored from last SWP cycle</li>
+<li><code>new_win</code>: what window_rect_from_visible computed (will become the new SetWindowPos input)</li>
+<li><code>delta</code>: difference between new_win and old_win (position_x, position_y, width_change, height_change)</li>
+<li><code>flags</code>: SWP flags (0x16 = SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOSENDCHANGING)</li>
+</ul>
+
 
 <hr />
 
 <h2>Current Code State</h2>
 
 <p>The working tree has these NSPA changes vs upstream:
-1. <code>_NET_FRAME_EXTENTS</code> infrastructure (atom, PropertyNotify, pGetFrameExtents callback) — in place, working
+1. <code>_NET_FRAME_EXTENTS</code> infrastructure (atom, PropertyNotify, pGetFrameExtents callback) &ndash; in place, working
 2. <code>get_mwm_decorations</code>: always requests decorations for managed windows based on style (stable, no chicken-and-egg)
 3. <code>get_visible_rect</code>: upstream behavior restored (EqualRect + NtUserAdjustWindowRect)
-4. Diagnostic ERR traces (NSPA_DBG, NSPA_CFG) — should be removed before shipping
+4. Diagnostic ERR traces (NSPA_DBG, NSPA_CFG) &ndash; should be removed before shipping
 5. WS_EX_LAYERED MWM exclusion removed (from earlier session, still correct)</p>
-<script>hljs.highlightAll();</script>
 </body></html>

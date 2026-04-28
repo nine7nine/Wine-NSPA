@@ -2,7 +2,7 @@
 <html lang="en"><head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Wine-NSPA -- Architecture & Design Reference</title>
+<title>Wine-NSPA -- Architecture Overview</title>
 <style>
   :root {
     --bg: #1a1b26; --fg: #c0caf5; --accent: #7aa2f7;
@@ -56,836 +56,420 @@
   strong { color: var(--fg); }
   em { color: var(--muted); font-style: italic; }
 </style>
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/tokyo-night-dark.min.css">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
 </head><body>
-<h1>Wine-NSPA &ndash; Architecture &amp; Design Reference</h1>
+<h1>Wine-NSPA &ndash; Architecture Overview</h1>
 
-<p>Wine 11.6 + NSPA RT patchset | Kernel 6.19.x-rt with NTSync PI | 2026-04-15
-Author: jordan Johnston</p>
+<p>Wine 11.6 + NSPA RT patchset | Kernel 6.19.x-rt with NTSync PI | 2026-04-28
+Author: Jordan Johnston</p>
 
 <h2>Table of Contents</h2>
 
 <ol>
-<li><a href="#1-overview">Overview</a></li>
-<li><a href="#2-vanilla-wine-vs-wine-nspa">Vanilla Wine vs Wine-NSPA</a></li>
-<li><a href="#3-wine-process-model">Wine Process Model</a></li>
-<li><a href="#4-rt-priority-architecture">RT Priority Architecture</a></li>
-<li><a href="#5-synchronization-architecture">Synchronization Architecture</a></li>
-<li><a href="#6-ntsync-kernel-patches">NTSync Kernel Patches</a></li>
-<li><a href="#7-io_uring-io-architecture">io_uring I/O Architecture</a></li>
-<li><a href="#8-audio-stack-architecture">Audio Stack Architecture</a></li>
-<li><a href="#9-qpc--timing">QPC &amp; Timing</a></li>
-<li><a href="#10-memory--large-pages">Memory &amp; Large Pages</a></li>
-<li><a href="#11-msvcrt-simd-optimizations">msvcrt SIMD Optimizations</a></li>
-<li><a href="#12-version-history">Version History</a></li>
+<li><a href="#1-what-wine-nspa-is">What Wine-NSPA is</a></li>
+<li><a href="#2-the-architecture-in-one-diagram">The architecture in one diagram</a></li>
+<li><a href="#3-subsystem-map">Subsystem map</a>
+
+<ul>
+<li>3.1 <a href="#31-synchronization-and-priority-inheritance">Synchronization and priority inheritance</a></li>
+<li>3.2 <a href="#32-wineserver-ipc">Wineserver IPC</a></li>
+<li>3.3 <a href="#33-nt-local-stubs">NT-local stubs</a></li>
+<li>3.4 <a href="#34-message-dispatch">Message dispatch</a></li>
+<li>3.5 <a href="#35-hook-chains">Hook chains</a></li>
+<li>3.6 <a href="#36-file-io">File I/O</a></li>
+<li>3.7 <a href="#37-audio">Audio</a></li>
+</ul>
+</li>
+<li><a href="#4-the-bypass-trajectory">The bypass trajectory</a></li>
+<li><a href="#5-where-this-is-heading">Where this is heading</a></li>
+<li><a href="#6-rt-priority-mapping">RT priority mapping</a></li>
+<li><a href="#7-live-state">Live state</a></li>
+<li><a href="#8-doc-index">Doc index</a></li>
 </ol>
 
 
 <hr />
 
-<h2>1. Overview</h2>
+<h2>1. What Wine-NSPA is</h2>
 
-<p><strong>Wine-NSPA</strong> is a real-time optimized fork of Wine designed to run on <code>PREEMPT_RT</code> Linux kernels. It bridges the gap between Wine&rsquo;s SCHED_OTHER threading model and the deterministic scheduling guarantees that RT workloads require &ndash; priority inheritance, bounded lock hold times, priority-ordered wakeups, and correct NT-to-Linux priority mapping.</p>
+<p>Wine-NSPA is a PREEMPT_RT-tuned fork of Wine 11.x. It targets <code>PREEMPT_RT_FULL</code> Linux kernels, grafts kernel-level priority inheritance onto every Win32 sync primitive, replaces Wine&rsquo;s single-threaded wineserver event loop in the hot path with kernel-mediated channels and bounded shmem rings, and ships a custom <code>ntsync</code> kernel module that gives <code>/dev/ntsync</code> Windows-faithful priority semantics with PI boost.</p>
 
-<p>While professional audio (DAWs, VST plugins, ASIO applications) is the primary motivation, Wine-NSPA&rsquo;s RT infrastructure benefits any latency-sensitive Win32 application: real-time simulation, industrial control, low-latency trading, or any scenario where a Windows application must coexist with Linux&rsquo;s RT scheduler without priority inversion or unbounded blocking.</p>
+<p>The scope is broad: Wine on PREEMPT_RT and all that implies. UI responsiveness, application startup latency, COM service-chain correctness, installer behaviour, GUI determinism, and audio-callback latency are all weighted equally. Audio is one serious consideration &ndash; the user runs Ableton Live and a stack of VST instruments &ndash; but it is not the framing motivation. A patch that helps installer hangs or context-menu RPC freezes counts. The bar is &ldquo;does this latency, hang, inversion, or single-point-of-failure affect anything the user runs under Wine on PREEMPT_RT?&rdquo; If yes, it&rsquo;s in scope.</p>
 
-<h3>Design Philosophy</h3>
+<p>NSPA is not an acronym. It does not expand. The project sits in the <code>Wine-NSPA</code> lineage, which descends from earlier RT work the user was doing on Wine 8.x and 10.x; the current 11.x line is a from-scratch reimplementation that leverages NTSync (introduced upstream in Wine 9.x and the kernel in 6.10) instead of the messy Gen-2 shmem dispatcher pile that the older lines depended on.</p>
 
-<ul>
-<li><strong>Full Win32 API fidelity.</strong> Every NSPA optimization exercises the full Wine call graph &ndash; PE ntdll &ndash;> Unix ntdll &ndash;> kernel. We never bypass Wine&rsquo;s architecture; we make it faster.</li>
-<li><strong>Opt-in, zero-regression.</strong> When <code>NSPA_RT_PRIO</code> is unset, Wine behaves identically to upstream. Every RT code path is gated on environment variables.</li>
-<li><strong>PREEMPT_RT native.</strong> NSPA assumes a fully preemptible kernel. Kernel patches use <code>raw_spinlock_t</code>, <code>rt_mutex</code>, and <code>sched_setattr_nocheck()</code> &ndash; primitives that only exist (or behave differently) under <code>PREEMPT_RT</code>.</li>
-<li><strong>Layered patches, independent commits.</strong> Each capability (v1 RT mapping, v1.1 wineserver promotion, v1.5 shmem, v2.3 CS-PI, etc.) ships as an independent commit that can be evaluated, reverted, or forward-ported on its own.</li>
-<li><strong>Linux-only, kernel-integrated.</strong> NSPA ships custom kernel patches alongside Wine patches. The user manages both trees. macOS/BSD code paths are untouched.</li>
-</ul>
+<p>The whole project is a small Linux kernel module (~3 kLOC of <code>ntsync.{c,h}</code> deltas on top of upstream) plus a Wine fork that increasingly bypasses wineserver through bounded shmem rings, all gated behind a single env var (<code>NSPA_RT_PRIO</code>). When <code>NSPA_RT_PRIO</code> is unset, every NSPA code path short-circuits to upstream Wine and behaviour is byte-identical. There is no zero-config tax for users who don&rsquo;t opt in.</p>
+
+<hr />
+
+<h2>2. The architecture in one diagram</h2>
+
+<p>The architecture has three layers: a kernel layer (NTSync, io_uring, librtpi-style PI futexes, RT scheduler), a wineserver layer (gamma channel dispatcher + main loop + handler tables), and a client layer (ntdll, win32u, NT-local stubs, audio drivers, application/PE code). Most NSPA bypasses route around the wineserver layer entirely on the common case, falling back only when the bypass envelope is exceeded.</p>
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 980 620" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .bg       { fill: #1a1b26; }
+    .layer    { fill: #1f2535; stroke: #3b4261; stroke-width: 1; }
+    .layer-k  { fill: #1a2235; stroke: #7aa2f7; stroke-width: 1.5; }
+    .layer-s  { fill: #2a1f35; stroke: #bb9af7; stroke-width: 1.5; }
+    .layer-c  { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.5; }
+    .box      { fill: #24283b; stroke: #3b4261; stroke-width: 1; }
+    .box-hot  { fill: #2a2438; stroke: #e0af68; stroke-width: 1.5; }
+    .box-cold { fill: #1f2535; stroke: #565f89; stroke-width: 1; stroke-dasharray: 4,3; }
+    .lbl      { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+    .lbl-sm   { fill: #c0caf5; font-size: 10px; font-family: 'JetBrains Mono', monospace; }
+    .lbl-mut  { fill: #8c92b3; font-size: 9px;  font-family: 'JetBrains Mono', monospace; }
+    .lbl-blu  { fill: #7aa2f7; font-size: 12px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .lbl-pur  { fill: #bb9af7; font-size: 12px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .lbl-grn  { fill: #9ece6a; font-size: 12px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .lbl-yel  { fill: #e0af68; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .lbl-cy   { fill: #7dcfff; font-size: 10px; font-family: 'JetBrains Mono', monospace; }
+    .ln       { stroke: #7dcfff; stroke-width: 1.5; fill: none; }
+    .ln-by    { stroke: #e0af68; stroke-width: 1.5; stroke-dasharray: 5,3; fill: none; }
+    .title    { fill: #7aa2f7; font-size: 14px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+  </style>
+
+  <rect x="0" y="0" width="980" height="620" class="bg"/>
+  <text x="490" y="26" text-anchor="middle" class="title">Wine-NSPA layered architecture (with bypass routes)</text>
+
+  <!-- Client layer -->
+  <rect x="20" y="60" width="940" height="140" class="layer-c"/>
+  <text x="40" y="80" class="lbl-grn">CLIENT (PE process)</text>
+  <text x="40" y="94" class="lbl-mut">application code, ntdll, win32u, drivers</text>
+
+  <rect x="40"  y="105" width="120" height="40" class="box"/>
+  <text x="100" y="123" text-anchor="middle" class="lbl-sm">application code</text>
+  <text x="100" y="137" text-anchor="middle" class="lbl-mut">PE side</text>
+
+  <rect x="170" y="105" width="120" height="40" class="box"/>
+  <text x="230" y="123" text-anchor="middle" class="lbl-sm">ntdll</text>
+  <text x="230" y="137" text-anchor="middle" class="lbl-mut">PE + unix</text>
+
+  <rect x="300" y="105" width="120" height="40" class="box"/>
+  <text x="360" y="123" text-anchor="middle" class="lbl-sm">win32u + nspa</text>
+  <text x="360" y="137" text-anchor="middle" class="lbl-mut">message ring v1+v2</text>
+
+  <rect x="430" y="105" width="180" height="40" class="box-hot"/>
+  <text x="520" y="123" text-anchor="middle" class="lbl-yel">NT-local stubs</text>
+  <text x="520" y="137" text-anchor="middle" class="lbl-mut">file / timer / wm_timer / sync</text>
+
+  <rect x="620" y="105" width="120" height="40" class="box"/>
+  <text x="680" y="123" text-anchor="middle" class="lbl-sm">winejack.drv</text>
+  <text x="680" y="137" text-anchor="middle" class="lbl-mut">audio + MIDI</text>
+
+  <rect x="750" y="105" width="120" height="40" class="box"/>
+  <text x="810" y="123" text-anchor="middle" class="lbl-sm">nspaASIO</text>
+  <text x="810" y="137" text-anchor="middle" class="lbl-mut">Phase F bridge</text>
+
+  <rect x="40"  y="155" width="240" height="35" class="box"/>
+  <text x="160" y="172" text-anchor="middle" class="lbl-sm">CS-PI v2.3 (RTL_CRITICAL_SECTION)</text>
+  <text x="160" y="184" text-anchor="middle" class="lbl-mut">FUTEX_LOCK_PI on LockSemaphore</text>
+
+  <rect x="290" y="155" width="240" height="35" class="box"/>
+  <text x="410" y="172" text-anchor="middle" class="lbl-sm">condvar PI requeue (SleepCondVarCS)</text>
+  <text x="410" y="184" text-anchor="middle" class="lbl-mut">FUTEX_WAIT_REQUEUE_PI</text>
+
+  <rect x="540" y="155" width="200" height="35" class="box"/>
+  <text x="640" y="172" text-anchor="middle" class="lbl-sm">hook tier 1+2 cache</text>
+  <text x="640" y="184" text-anchor="middle" class="lbl-mut">shmem, server publishes invalidations</text>
+
+  <rect x="750" y="155" width="120" height="35" class="box"/>
+  <text x="810" y="172" text-anchor="middle" class="lbl-sm">vDSO preloader</text>
+  <text x="810" y="184" text-anchor="middle" class="lbl-mut">Jinoh Kang port</text>
+
+  <!-- Wineserver layer -->
+  <rect x="20" y="220" width="940" height="130" class="layer-s"/>
+  <text x="40" y="240" class="lbl-pur">WINESERVER (single-threaded supervisor)</text>
+  <text x="40" y="254" class="lbl-mut">handle table, cross-process naming, lifecycle, NT path resolution</text>
+
+  <rect x="40"  y="265" width="180" height="70" class="box-hot"/>
+  <text x="130" y="283" text-anchor="middle" class="lbl-yel">gamma channel dispatcher</text>
+  <text x="130" y="297" text-anchor="middle" class="lbl-mut">per-process kernel-mediated</text>
+  <text x="130" y="311" text-anchor="middle" class="lbl-mut">request/reply via ntsync 1004</text>
+  <text x="130" y="325" text-anchor="middle" class="lbl-cy">replaces legacy shmem dispatcher</text>
+
+  <rect x="240" y="265" width="180" height="70" class="box"/>
+  <text x="330" y="283" text-anchor="middle" class="lbl-sm">main_loop / poll() / epoll</text>
+  <text x="330" y="297" text-anchor="middle" class="lbl-mut">global_lock (PI-aware)</text>
+  <text x="330" y="311" text-anchor="middle" class="lbl-mut">FIFO at NSPA_RT_PRIO-16</text>
+  <text x="330" y="325" text-anchor="middle" class="lbl-mut">openat lock-drop (Phase B)</text>
+
+  <rect x="440" y="265" width="180" height="70" class="box"/>
+  <text x="530" y="283" text-anchor="middle" class="lbl-sm">handler tables</text>
+  <text x="530" y="297" text-anchor="middle" class="lbl-mut">req_handlers[]</text>
+  <text x="530" y="311" text-anchor="middle" class="lbl-mut">file / proc / thread /</text>
+  <text x="530" y="325" text-anchor="middle" class="lbl-mut">sync / hooks / queue</text>
+
+  <rect x="640" y="265" width="180" height="70" class="box"/>
+  <text x="730" y="283" text-anchor="middle" class="lbl-sm">cross-process state</text>
+  <text x="730" y="297" text-anchor="middle" class="lbl-mut">handle table</text>
+  <text x="730" y="311" text-anchor="middle" class="lbl-mut">named-object registry</text>
+  <text x="730" y="325" text-anchor="middle" class="lbl-mut">lifecycle / fork tracking</text>
+
+  <rect x="840" y="265" width="100" height="70" class="box-cold"/>
+  <text x="890" y="290" text-anchor="middle" class="lbl-mut">decomposition</text>
+  <text x="890" y="304" text-anchor="middle" class="lbl-mut">Phase 1-4</text>
+  <text x="890" y="318" text-anchor="middle" class="lbl-mut">future</text>
+
+  <!-- Kernel layer -->
+  <rect x="20" y="370" width="940" height="190" class="layer-k"/>
+  <text x="40" y="390" class="lbl-blu">KERNEL (PREEMPT_RT_FULL)</text>
+  <text x="40" y="404" class="lbl-mut">6.19.11-rt1-1-nspa</text>
+
+  <rect x="40"  y="415" width="200" height="120" class="box-hot"/>
+  <text x="140" y="434" text-anchor="middle" class="lbl-yel">ntsync.ko</text>
+  <text x="140" y="450" text-anchor="middle" class="lbl-mut">NT sync object driver</text>
+  <text x="140" y="464" text-anchor="middle" class="lbl-cy">1003 priority inheritance</text>
+  <text x="140" y="478" text-anchor="middle" class="lbl-cy">1004 channels (gamma)</text>
+  <text x="140" y="492" text-anchor="middle" class="lbl-cy">1005 thread-token</text>
+  <text x="140" y="506" text-anchor="middle" class="lbl-cy">1006 RT alloc-hoist</text>
+  <text x="140" y="520" text-anchor="middle" class="lbl-cy">1007 channel exclusive recv</text>
+
+  <rect x="260" y="415" width="200" height="120" class="box"/>
+  <text x="360" y="434" text-anchor="middle" class="lbl-sm">PI futex layer</text>
+  <text x="360" y="452" text-anchor="middle" class="lbl-mut">FUTEX_LOCK_PI</text>
+  <text x="360" y="468" text-anchor="middle" class="lbl-mut">FUTEX_WAIT_REQUEUE_PI</text>
+  <text x="360" y="484" text-anchor="middle" class="lbl-mut">FUTEX_CMP_REQUEUE_PI</text>
+  <text x="360" y="502" text-anchor="middle" class="lbl-mut">rt_mutex chain (transitive)</text>
+  <text x="360" y="518" text-anchor="middle" class="lbl-mut">vendored librtpi userspace</text>
+
+  <rect x="480" y="415" width="200" height="120" class="box"/>
+  <text x="580" y="434" text-anchor="middle" class="lbl-sm">io_uring</text>
+  <text x="580" y="452" text-anchor="middle" class="lbl-mut">Phase 1: regular file I/O</text>
+  <text x="580" y="468" text-anchor="middle" class="lbl-mut">SINGLE_ISSUER + COOP_TASKRUN</text>
+  <text x="580" y="484" text-anchor="middle" class="lbl-mut">ALERTED-state interception</text>
+  <text x="580" y="500" text-anchor="middle" class="lbl-mut">ntsync uring_fd extension</text>
+  <text x="580" y="518" text-anchor="middle" class="lbl-cy">Phase 2/3 pending</text>
+
+  <rect x="700" y="415" width="240" height="120" class="box"/>
+  <text x="820" y="434" text-anchor="middle" class="lbl-sm">RT scheduler (PREEMPT_RT_FULL)</text>
+  <text x="820" y="452" text-anchor="middle" class="lbl-mut">SCHED_FIFO 1..98</text>
+  <text x="820" y="468" text-anchor="middle" class="lbl-mut">priority-ordered wakeup</text>
+  <text x="820" y="484" text-anchor="middle" class="lbl-mut">rt_mutex PI propagation</text>
+  <text x="820" y="500" text-anchor="middle" class="lbl-mut">raw_spinlock_t hardening</text>
+  <text x="820" y="518" text-anchor="middle" class="lbl-mut">no kfree under raw spinlock</text>
+
+  <text x="490" y="555" text-anchor="middle" class="lbl-mut">--- bypass routes (dashed orange) skip the wineserver layer entirely ---</text>
+
+  <!-- Bypass routes: client -> kernel directly -->
+  <line x1="520" y1="145" x2="140" y2="415" class="ln-by"/>
+  <line x1="520" y1="145" x2="580" y2="415" class="ln-by"/>
+  <line x1="160" y1="190" x2="360" y2="415" class="ln-by"/>
+  <line x1="410" y1="190" x2="360" y2="415" class="ln-by"/>
+
+  <!-- Wineserver routes: client -> server -->
+  <line x1="360" y1="145" x2="130" y2="265" class="ln"/>
+  <line x1="640" y1="190" x2="530" y2="265" class="ln"/>
+
+  <!-- Server -> kernel -->
+  <line x1="130" y1="335" x2="140" y2="415" class="ln"/>
+  <line x1="330" y1="335" x2="360" y2="415" class="ln"/>
+
+  <!-- Legend -->
+  <line x1="40"  y1="585" x2="80"  y2="585" class="ln"/>
+  <text x="90"  y="589" class="lbl-mut">canonical wineserver path</text>
+  <line x1="280" y1="585" x2="320" y2="585" class="ln-by"/>
+  <text x="330" y="589" class="lbl-mut">NSPA bypass route (skips wineserver)</text>
+  <rect x="600" y="578" width="20" height="14" class="box-hot"/>
+  <text x="630" y="589" class="lbl-mut">hot path / NSPA-introduced</text>
+  <rect x="800" y="578" width="20" height="14" class="box-cold"/>
+  <text x="830" y="589" class="lbl-mut">future / pending</text>
+</svg>
+</div>
 
 
-<h3>What PREEMPT_RT Changes</h3>
+<p>The diagram tells the story in one picture. Vanilla Wine routes everything through the wineserver layer; that layer is single-threaded and holds <code>global_lock</code> around almost every handler, which serializes every Win32 process on the system. NSPA grafts a kernel-side <code>ntsync.ko</code> and adds direct ioctl paths from clients to the kernel, plus a per-process gamma dispatcher that replaces the legacy per-thread pthread shmem dispatcher. The dashed orange lines are the bypasses that avoid the wineserver layer entirely on the common case. The wineserver layer is still there &ndash; it has to be, for cross-process naming and lifecycle &ndash; but it stops being on the hot path of any normal application&rsquo;s main loop.</p>
 
-<p>On a standard kernel, <code>spinlock_t</code> disables preemption and <code>mutex</code> is a sleeping lock. Under <code>PREEMPT_RT</code>, <code>spinlock_t</code> becomes a sleeping <code>rt_mutex</code> (fully preemptible), and only <code>raw_spinlock_t</code> disables preemption. This means:</p>
+<hr />
 
-<ul>
-<li>All kernel code paths are preemptible (except <code>raw_spinlock</code> critical sections)</li>
-<li>SCHED_FIFO threads truly preempt everything &ndash; including kernel threads, interrupt handlers, and timer softirqs</li>
-<li>Priority inversion in kernel locks is resolved via <code>rt_mutex</code> PI chains</li>
-<li>Wine&rsquo;s synchronization primitives (NTSync mutexes, futexes, wineserver locks) must all be RT-safe or they become latency hazards</li>
-</ul>
+<h2>3. Subsystem map</h2>
 
+<p>Each subsection here is a one-paragraph (sometimes two) sketch of the subsystem; the deep design is in a dedicated page linked at the end of each section.</p>
 
-<h3>Component Summary</h3>
+<h3>3.1 Synchronization and priority inheritance</h3>
+
+<p>NSPA implements priority inheritance along four independent paths so that no Win32 sync surface is left as a priority-inversion source. CS-PI (Path A) repurposes <code>RTL_CRITICAL_SECTION::LockSemaphore</code> as a <code>FUTEX_LOCK_PI</code> futex word, giving every critical section the kernel&rsquo;s transitive PI chain semantics. NTSync direct (Path B) routes <code>NtWaitForSingleObject</code> and friends through <code>/dev/ntsync</code> ioctls, where the kernel module&rsquo;s 1003 patch implements priority-ordered waiter queues and per-task PI boost across mutex chains. Vendored librtpi (Path C) provides <code>pi_cond_wait</code> for unix-side condition variables built on <code>FUTEX_WAIT_REQUEUE_PI</code>. Win32 condvar PI (Path D) extends Path C up into the Win32 surface so <code>SleepConditionVariableCS</code> is also PI-clean.</p>
+
+<p>The kernel side is where the heavy lifting happens. The <code>ntsync.ko</code> module sits at <code>/dev/ntsync</code> and implements NT sync object semantics natively in the kernel, with PI-aware mutexes, priority-ordered waiter queues, and a channel object (1004 patch) that serves as the gamma dispatcher&rsquo;s transport. The patch stack runs from 1003 (priority inheritance) through 1009 (channel_entry refcount UAF fix); the 2026-04-27 cycle hardened the driver against four discovered RT-correctness bugs and validated cleanly against ~370M ops with zero KASAN splats.</p>
+
+<p>All four paths are gated on <code>NSPA_RT_PRIO</code>. When unset, every PI code path short-circuits and Wine behaves byte-for-byte like upstream. <strong>Detail: see <a href="ntsync-driver.gen.html">ntsync-driver</a>, <a href="cs-pi.gen.html">cs-pi</a>, <a href="condvar-pi-requeue.gen.html">condvar-pi-requeue</a>.</strong></p>
+
+<h3>3.2 Wineserver IPC</h3>
+
+<p>The classical Wine IPC architecture has every client thread <code>read()</code>/<code>write()</code> over a unix socket pair to the wineserver process, which dispatches under <code>global_lock</code>. The earlier NSPA work (Torge Matthies&rsquo;s 2022 patch, forward-ported as the v1.5 line) replaced the socket round-trip with a per-thread shmem region and a futex signal, served by a pool of pthread dispatchers inside the server. That worked but had its own pile of correctness rough edges; it has been superseded by the <strong>gamma channel dispatcher</strong>.</p>
+
+<p>The gamma dispatcher uses the ntsync 1004 channel object to deliver a per-process kernel-mediated request/reply queue. The client thread <code>ioctl(NTSYNC_CHANNEL_SEND, request)</code>; the wineserver dispatcher thread <code>ioctl(NTSYNC_CHANNEL_RECV)</code>s the request, runs the handler, and <code>ioctl(NTSYNC_CHANNEL_REPLY)</code>s the result. The channel object carries a 1005 thread-token so the kernel knows which client thread sent the request (used to drive 2026-era PI boost decisions on the dispatcher). T1+T2+T3 thread-token consumption is shipped default-on. The legacy shmem-IPC path (<code>shmem-ipc.gen.html</code>) is <strong>historical and superseded</strong>; it is documented for archaeology rather than as the current path.</p>
+
+<p><strong>Detail: see <a href="gamma-channel-dispatcher.gen.html">gamma-channel-dispatcher</a>. Historical: <a href="shmem-ipc.gen.html">shmem-ipc</a> (superseded).</strong></p>
+
+<h3>3.3 NT-local stubs</h3>
+
+<p>The NT-local stubs pattern moves NT-API state from wineserver-resident storage into client-resident storage. The pattern: the client maintains its own state for a class of NT objects (timers, regular-file handles, WM_TIMER tuples), processes operations locally, and lazily promotes the state back to a server-visible handle only when an API genuinely needs server-side handle semantics (<code>DuplicateHandle</code>, <code>CreateProcess</code> inheritance, <code>NtCreateSection</code> from a file handle). The stub answers the common case in shmem; the server stays the authority for the long tail.</p>
+
+<p>Three stubs are shipped: <code>nspa_local_file</code> (NT-local file for read-only regular files; eliminates ~28,500 server round-trips on Ableton 12 Lite startup), <code>nspa_local_timer</code> (NT timer object resolution at the client, removes timer wakeups from the wineserver <code>get_next_timeout</code> path), and <code>nspa_local_wm_timer</code> (<code>SetTimer</code>/<code>WM_TIMER</code> userspace path with <code>(window, id, msg)</code> tuple as built-in ABA discriminator).</p>
+
+<p><strong>Detail: see <a href="nt-local-stubs.gen.html">nt-local-stubs</a>, <a href="nspa-local-file-architecture.gen.html">nspa-local-file-architecture</a>.</strong></p>
+
+<h3>3.4 Message dispatch</h3>
+
+<p>The Win32 message pump is the second-hottest source of wineserver round-trips (after <code>NtCreateFile</code>, which <code>nspa_local_file</code> already drains). A typical Win32 application calls <code>GetMessage</code> / <code>PeekMessage</code> on every UI tick; cross-thread <code>PostMessage</code> and <code>SendMessage</code> go through the server even when sender and receiver are in the same process; <code>RedrawWindow</code> and <code>InvalidateRect</code> push paint flags into the server.</p>
+
+<p>NSPA&rsquo;s msg-ring v1 ships a per-thread bounded MPMC shmem ring for cross-thread same-process <code>PostMessage</code>/<code>SendMessage</code>/reply, signalled via NTSync events. Msg-ring v2 extends this with three further pieces: <strong>Phase A</strong> (a redraw-window push ring drained lazily by the server), <strong>B1.0 paint cache</strong> (a per-window shmem flag for <code>nspa_get_update_flags_try_fastpath</code>, gated default-off behind <code>NSPA_ENABLE_PAINT_CACHE=1</code> pending a second long-soak validation run), and <strong>Phase C</strong> (a <code>GetMessage</code> bypass that pulls directly from the per-thread ring; paused mid-development and is the obvious resume target for the next session).</p>
+
+<p>Three pre-existing wine-userspace bugs in <code>dlls/win32u/nspa/msg_ring.c</code> were found and fixed in the 2026-04-27 audit (MR1 reply-slot ABA, MR2 <code>FUTEX_PRIVATE</code> on <code>MAP_SHARED</code> memfd, MR4 POST wake-loss on dual-signal-fail rollback), all of the silent-contract-violation class.</p>
+
+<p><strong>Detail: see <a href="msg-ring-architecture.gen.html">msg-ring-architecture</a>.</strong></p>
+
+<h3>3.5 Hook chains</h3>
+
+<p>Win32 hook chains (<code>WH_KEYBOARD</code>, <code>WH_MOUSE</code>, <code>WH_GETMESSAGE</code>, <code>WH_CALLWNDPROC</code>, etc.) get queried on every dispatch in vanilla Wine, even when the chain is empty. On a busy UI tick that is one server round-trip per hook type per <code>GetMessage</code> iteration, which adds up: an Ableton 165s capture showed 26,700 hook lookups across the run.</p>
+
+<p>NSPA caches the hook chain in a per-process shmem region (Tier 1 = &ldquo;is there any hook of type X at all?&rdquo;; Tier 2 = &ldquo;here&rsquo;s the full list&rdquo;). The wineserver publishes invalidations on chain mutation. Hot-path lookups become an O(1) shmem read. Steady-state validation: 26,700 / 26,700 cache hits, server-side <code>get_hook_info</code> dropped to 0.</p>
+
+<p><strong>Detail: see <a href="hook-cache.gen.html">hook-cache</a>.</strong></p>
+
+<h3>3.6 File I/O</h3>
+
+<p>File I/O is two related stories. The <strong>open path</strong> is owned by <code>nspa_local_file</code> (see §3.3): regular-file <code>NtCreateFile</code> calls are serviced client-side via <code>stat() + open()</code>, with sharing arbitration preserved through a server-published <code>(dev, inode) -&gt; sharing-state</code> shmem region. Only API surfaces that genuinely need a server-visible handle trigger lazy promotion.</p>
+
+<p>The <strong>data-plane path</strong> is owned by io_uring Phase 1: <code>NtReadFile</code>, <code>NtWriteFile</code>, <code>NtFlushBuffersFile</code>, and the rest of the regular-file data ops submit directly to a per-thread <code>io_uring</code> instance (<code>IORING_SETUP_SINGLE_ISSUER | COOP_TASKRUN</code>), with completion reaped locally and the wineserver never visited. Phase 1 composes with <code>nspa_local_file</code>: the unix fd held by the local-file table is the same fd the io_uring path operates on. Phase 2 (sockets, pipes) and Phase 3 (IOCP integration) are queued multi-session pieces.</p>
+
+<p>The wineserver <code>read_request_shm</code> path &ndash; the canonical Wine I/O machinery &ndash; shrinks to setup-time only after Phase 2/3 ship.</p>
+
+<p><strong>Detail: see <a href="io_uring-architecture.gen.html">io_uring-architecture</a>, <a href="nspa-local-file-architecture.gen.html">nspa-local-file-architecture</a>.</strong></p>
+
+<h3>3.7 Audio</h3>
+
+<p>Audio is delivered via a unified <code>winejack.drv</code> driver (replacing <code>winealsa</code>, <code>winepulse</code>, <code>wineoss</code> for users who opt in &ndash; those are slated for drop once <code>winejack</code> is fully stable). <code>winejack.drv</code> ships Phase 1 MIDI and Phase 2 WASAPI audio, both routed through JACK. On top of that sits <code>nspaASIO</code>, a custom ASIO driver that delivers Phase F: zero-latency <code>bufferSwitch</code> invoked <strong>inside</strong> the JACK RT callback so the ASIO host process and the JACK callback share the same period &ndash; no double-buffering hop, no extra latency.</p>
+
+<p>The audio thread typically runs at NT band 31 / <code>TIME_CRITICAL</code>, which under <code>NSPA_RT_PRIO=80</code> maps to SCHED_FIFO 80. JACK&rsquo;s own callback runs at FIFO 88-89 (above NSPA&rsquo;s ceiling but below the <code>99 (reserved)</code> kernel-thread band). Wineserver runs at FIFO 64 (auto-derived <code>NSPA_RT_PRIO - 16</code>) &ndash; below the entire RT band, so dispatcher contention can never preempt the audio path.</p>
+
+<p><strong>Detail: see <a href="audio-stack.gen.html">audio-stack</a>.</strong></p>
+
+<hr />
+
+<h2>4. The bypass trajectory</h2>
+
+<p>Every NSPA bypass is a step along one trajectory: progressively moving NT-API state OUT of wineserver, until what remains is small enough to decompose with surgery instead of with a rewrite. This is a strangler-fig migration applied to a userspace IPC architecture rather than a web service. Each bypass starts behind a default-off env var, validates against a real workload (Ableton, plugin scans, drum-track-load-while-playing, message storms), and flips default-on after passing.</p>
+
+<p>The trajectory map covers eleven concrete bypasses plus the architectural floor (process/thread lifecycle, cross-process naming &ndash; which cannot be moved out and stays in wineserver permanently). Roughly seven bypasses are shipped default-on as of 2026-04-28 (file I/O, sync primitives, hooks, NtCreateFile, timers, msg-ring v1 send, redraw-window push). Paint-cache (B1.0) is shipped and validating. Phase C (<code>GetMessage</code>) is paused mid-development. Sechost device-IRP poll and io_uring 2/3 are queued.</p>
+
+<p>The key property is that each bypass is independently revertible (env-var gate flips off, server path takes over) and independently valuable (the bypasses already shipped are concrete wins &ndash; 28k file opens off Ableton&rsquo;s startup path, hook lookups dropped to zero on the wire, all four PI paths working end-to-end). Compare that to the cost-shape of a unified rewrite: ships when it ships, no intermediate value, regression risk concentrated in one mega-change. The bypass-first sequencing isn&rsquo;t an alternative to decomposition &ndash; it&rsquo;s the precondition that makes decomposition cheap.</p>
+
+<p><strong>Detail: see <a href="bypass-overview.gen.html">bypass-overview</a>.</strong></p>
+
+<hr />
+
+<h2>5. Where this is heading</h2>
+
+<p>The long-arc plan is a phased decomposition of the wineserver process itself. The plan covers Phase 1 (audit and partition the lock surface), Phase 2 (introduce a small set of NTSync extensions that let the dispatcher delegate work safely), Phase 3 (split the wineserver process into separate threads &ndash; timer thread, FD poll thread, aggregate-wait thread &ndash; now that each subsystem has been pruned to its minimum viable footprint), and Phase 4 (router/handler split, lock partitioning, ultimately turning off the wineserver supervisor process for normal apps).</p>
+
+<p>Phase 3 only becomes feasible <em>after</em> enough state has migrated client-side via bypasses. Splitting the timer thread is trivial when most timer state has already moved to <code>nspa_local_timer</code>. Splitting the FD poll thread is trivial when most file I/O has migrated via io_uring 1+2+3. Lock partitioning is feasible only after the remaining lock-holders are auditable as a small set. The user previously stalled on the decomposition because trying to land it directly was premature &ndash; every bypass shipped is one less handler the decomposition has to re-implement.</p>
+
+<p>The endgame wineserver is not &ldquo;no wineserver.&rdquo; Process and thread lifecycle, cross-process named-object registration, NT path resolution (<code>\??\</code>, NT object directory, 8.3 names, case-insensitive on case-sensitive FS), and handle-inheritance coordination at <code>CreateProcess</code> time &ndash; those genuinely need a single source of truth and stay in the supervisor. But after the trajectory map fills in, what remains is a thin metadata service rather than an application server.</p>
+
+<p><strong>Detail: see <a href="wineserver-decomposition.gen.html">wineserver-decomposition</a>.</strong></p>
+
+<hr />
+
+<h2>6. RT priority mapping</h2>
+
+<p>Win32 thread priorities map to Linux <code>SCHED_FIFO</code> priorities through a single formula:</p>
+
+<pre><code>fifo_prio = nspa_rt_prio_base - (31 - nt_band)
+clamped to [1..98]
+</code></pre>
+
+<p><code>NSPA_RT_PRIO</code> (default 80) is the <strong>ceiling</strong>, not a midpoint. NT band 31 (<code>TIME_CRITICAL</code> in the REALTIME priority class) maps to exactly the ceiling; lower NT bands scale linearly below it. The wineserver <code>main_loop</code> auto-derives its own priority at <code>NSPA_RT_PRIO - 16</code> (=64 by default), placing it below the entire RT band so dispatcher contention can never preempt an RT audio thread.</p>
 
 <table>
 <thead>
 <tr>
-<th> Component </th>
-<th> Layer </th>
-<th> Status </th>
+<th> Win32 label </th>
+<th> Win32 value </th>
+<th> NT band </th>
+<th> FIFO priority (with <code>NSPA_RT_PRIO=80</code>) </th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td> RT priority mapping (v1/v1.2) </td>
-<td> Wine ntdll + wineserver </td>
-<td> SHIPPED </td>
+<td> <strong>TIME_CRITICAL</strong> (REALTIME class)  </td>
+<td> +15 </td>
+<td> 31 </td>
+<td> <strong>80</strong> (ceiling) </td>
 </tr>
 <tr>
-<td> Wineserver self-promotion (v1.1) </td>
-<td> Wine wineserver </td>
-<td> SHIPPED </td>
+<td> (band 30) </td>
+<td> +6  </td>
+<td> 30 </td>
+<td> 79 </td>
 </tr>
 <tr>
-<td> Shmem wineserver IPC (v1.5) </td>
-<td> Wine ntdll + wineserver </td>
-<td> SHIPPED </td>
+<td> HIGHEST   </td>
+<td> +2  </td>
+<td> 26 </td>
+<td> 75 </td>
 </tr>
 <tr>
-<td> Wineserver global_lock PI </td>
-<td> Wine wineserver </td>
-<td> SHIPPED </td>
+<td> ABOVE_NORMAL </td>
+<td> +1 </td>
+<td> 25 </td>
+<td> 74 </td>
 </tr>
 <tr>
-<td> CS-PI / FUTEX_LOCK_PI (v2.3) </td>
-<td> Wine ntdll (PE + Unix) </td>
-<td> SHIPPED </td>
+<td> NORMAL (REALTIME class)  </td>
+<td> 0  </td>
+<td> 24 </td>
+<td> 73 </td>
 </tr>
 <tr>
-<td> librtpi vendoring (v2.0) </td>
-<td> Wine libs/ </td>
-<td> SHIPPED </td>
+<td> BELOW_NORMAL </td>
+<td> -1 </td>
+<td> 23 </td>
+<td> 72 </td>
 </tr>
 <tr>
-<td> NTSync PI kernel patches </td>
-<td> Linux kernel driver </td>
-<td> SHIPPED </td>
+<td> LOWEST    </td>
+<td> -2  </td>
+<td> 22 </td>
+<td> 71 </td>
 </tr>
 <tr>
-<td> Client-side NTSync creation </td>
-<td> Wine ntdll Unix </td>
-<td> SHIPPED </td>
+<td> IDLE (REALTIME class)    </td>
+<td> -15 </td>
+<td> 16 </td>
+<td> 65 </td>
 </tr>
 <tr>
-<td> winejack.drv (MIDI + audio) </td>
-<td> Wine driver </td>
-<td> SHIPPED </td>
+<td> &mdash; </td>
+<td> &mdash; </td>
+<td> &mdash; </td>
+<td> &mdash; </td>
 </tr>
 <tr>
-<td> nspaASIO bridge </td>
-<td> Wine DLL </td>
-<td> SHIPPED </td>
+<td> <code>wineserver</code> main loop </td>
+<td> &ndash; </td>
+<td> &ndash; </td>
+<td> <strong>64</strong> (<code>NSPA_RT_PRIO - 16</code>) </td>
 </tr>
 <tr>
-<td> io_uring I/O bypass (Phase 1-3) </td>
-<td> Wine ntdll Unix + server </td>
-<td> SHIPPED </td>
-</tr>
-<tr>
-<td> ntsync uring_fd kernel extension </td>
-<td> Linux kernel driver </td>
-<td> SHIPPED </td>
-</tr>
-<tr>
-<td> msvcrt SIMD (AVX/SSE2) </td>
-<td> Wine msvcrt </td>
-<td> SHIPPED </td>
-</tr>
-<tr>
-<td> SRW lock spin phase </td>
-<td> Wine ntdll </td>
-<td> SHIPPED </td>
-</tr>
-<tr>
-<td> pi_cond requeue-PI </td>
-<td> Wine libs/librtpi </td>
-<td> SHIPPED </td>
-</tr>
-<tr>
-<td> Win32 condvar PI (requeue-PI) </td>
-<td> Wine ntdll PE + Unix </td>
-<td> SHIPPED </td>
-</tr>
-<tr>
-<td> CoWaitForMultipleHandles rewrite </td>
-<td> Wine combase </td>
-<td> SHIPPED </td>
-</tr>
-<tr>
-<td> QPC rdTSC bypass </td>
-<td> Wine ntdll Unix </td>
-<td> SHIPPED </td>
-</tr>
-<tr>
-<td> Large/huge pages </td>
-<td> Wine ntdll Unix </td>
-<td> SHIPPED </td>
+<td> (unused) </td>
+<td> &ndash; </td>
+<td> &ndash; </td>
+<td> 1..63 </td>
 </tr>
 </tbody>
 </table>
 
 
-<hr />
+<p>The <code>99 (reserved)</code> band is kernel-thread only and intentionally unreachable from userspace. JACK / PipeWire RT callbacks typically run at FIFO 88-89, <strong>above</strong> the NSPA Win32 ceiling &ndash; this is correct, because the audio backend has tighter latency requirements than any single client&rsquo;s audio thread.</p>
 
-<h2>2. Vanilla Wine vs Wine-NSPA</h2>
-
-<p>Side-by-side comparison of how vanilla Wine and Wine-NSPA handle the same architectural components. Every NSPA change is additive &ndash; the vanilla behavior is preserved when <code>NSPA_RT_PRIO</code> is unset.</p>
-
-<div class="diagram-container">
-<svg width="100%" viewBox="0 0 920 685" xmlns="http://www.w3.org/2000/svg">
-  <style>
-    .box-vanilla { fill: #24283b; stroke: #9aa5ce; stroke-width: 1.5; rx: 6; }
-    .box-nspa { fill: #24283b; stroke: #7aa2f7; stroke-width: 2; rx: 6; }
-    .box-nspa-new { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 2; rx: 6; }
-    .box-kernel { fill: #2a1a1a; stroke: #f7768e; stroke-width: 1.5; rx: 6; }
-    .box-kernel-nspa { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 2; rx: 6; }
-    .label { fill: #c0caf5; font-size: 12px; font-family: 'JetBrains Mono', monospace; }
-    .label-sm { fill: #c0caf5; font-size: 10px; font-family: 'JetBrains Mono', monospace; }
-    .label-muted { fill: #e2e8f8; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
-    .label-accent { fill: #7aa2f7; font-size: 13px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
-    .label-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
-    .label-yellow { fill: #e0af68; font-size: 10px; font-family: 'JetBrains Mono', monospace; }
-    .arrow { stroke: #9aa5ce; stroke-width: 1; fill: none; }
-    .arrow-nspa { stroke: #9ece6a; stroke-width: 1.5; fill: none; stroke-dasharray: 5,3; }
-    .divider { stroke: #3b4261; stroke-width: 1; stroke-dasharray: 8,4; }
-  </style>
-  <defs>
-    <marker id="arrowhead-muted" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#c8d0e8"/></marker>
-    <marker id="arrowhead-green" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#9ece6a"/></marker>
-  </defs>
-
-  <!-- Column headers -->
-  <text x="210" y="30" class="label-accent" text-anchor="middle">Vanilla Wine</text>
-  <text x="630" y="30" class="label-accent" text-anchor="middle">Wine-NSPA</text>
-  <line x1="455" y1="15" x2="455" y2="665" class="divider"/>
-
-  <!-- === LEFT COLUMN: Vanilla Wine === -->
-
-  <!-- wineserver -->
-  <rect x="60" y="50" width="300" height="60" class="box-vanilla"/>
-  <text x="210" y="72" class="label" text-anchor="middle">wineserver</text>
-  <text x="210" y="88" class="label-muted" text-anchor="middle">SCHED_OTHER (nice 0)</text>
-  <text x="210" y="102" class="label-muted" text-anchor="middle">single-threaded, handles all IPC</text>
-
-  <!-- Thread scheduling -->
-  <rect x="60" y="130" width="300" height="80" class="box-vanilla"/>
-  <text x="210" y="152" class="label" text-anchor="middle">Thread Scheduling</text>
-  <text x="210" y="170" class="label-muted" text-anchor="middle">all threads SCHED_OTHER</text>
-  <text x="210" y="185" class="label-muted" text-anchor="middle">TIME_CRITICAL = nice -11</text>
-  <text x="210" y="200" class="label-muted" text-anchor="middle">no RT, no priority inheritance</text>
-
-  <!-- Sync primitives -->
-  <rect x="60" y="230" width="300" height="80" class="box-vanilla"/>
-  <text x="210" y="252" class="label" text-anchor="middle">Synchronization</text>
-  <text x="210" y="270" class="label-muted" text-anchor="middle">CS → futex (no PI)</text>
-  <text x="210" y="285" class="label-muted" text-anchor="middle">Mutex → wineserver round-trip</text>
-  <text x="210" y="300" class="label-muted" text-anchor="middle">FIFO wakeup order</text>
-
-  <!-- NTSync -->
-  <rect x="60" y="330" width="300" height="60" class="box-vanilla"/>
-  <text x="210" y="352" class="label" text-anchor="middle">NTSync (upstream)</text>
-  <text x="210" y="370" class="label-muted" text-anchor="middle">spinlock_t, FIFO waiters, no PI</text>
-
-  <!-- QPC -->
-  <rect x="60" y="410" width="300" height="50" class="box-vanilla"/>
-  <text x="210" y="432" class="label" text-anchor="middle">QPC Timing</text>
-  <text x="210" y="448" class="label-muted" text-anchor="middle">clock_gettime (~1μs)</text>
-
-  <!-- Memory -->
-  <rect x="60" y="480" width="300" height="50" class="box-vanilla"/>
-  <text x="210" y="502" class="label" text-anchor="middle">Memory</text>
-  <text x="210" y="518" class="label-muted" text-anchor="middle">4KB pages only</text>
-
-  <!-- Kernel -->
-  <rect x="60" y="570" width="300" height="50" class="box-kernel"/>
-  <text x="210" y="592" class="label" text-anchor="middle">Linux Kernel</text>
-  <text x="210" y="608" class="label-muted" text-anchor="middle">PREEMPT_VOLUNTARY / PREEMPT</text>
-
-  <!-- === RIGHT COLUMN: Wine-NSPA === -->
-
-  <!-- wineserver -->
-  <rect x="480" y="50" width="380" height="60" class="box-nspa"/>
-  <text x="670" y="72" class="label" text-anchor="middle">wineserver</text>
-  <text x="670" y="88" class="label-green" text-anchor="middle">SCHED_FIFO 64 (self-promoted, below all client RT)</text>
-
-  <!-- Thread scheduling -->
-  <rect x="480" y="130" width="380" height="80" class="box-nspa"/>
-  <text x="670" y="152" class="label" text-anchor="middle">RT Priority Mapping (v1/v1.2)</text>
-  <text x="670" y="170" class="label-green" text-anchor="middle">REALTIME class → SCHED_FIFO 65-80</text>
-  <text x="670" y="185" class="label-green" text-anchor="middle">TC ceiling clamp: NT 31 = NSPA_RT_PRIO</text>
-  <text x="670" y="200" class="label-green" text-anchor="middle">cross-thread map + lenient tier 1 path</text>
-
-  <!-- Sync primitives -->
-  <rect x="480" y="230" width="380" height="100" class="box-nspa"/>
-  <text x="670" y="250" class="label" text-anchor="middle">Synchronization (4 PI paths)</text>
-  <text x="670" y="268" class="label-green" text-anchor="middle">CS &rarr; FUTEX_LOCK_PI (priority inheritance)</text>
-  <text x="670" y="284" class="label-green" text-anchor="middle">Mutex &rarr; NTSync PI (5 kernel patches)</text>
-  <text x="670" y="300" class="label-green" text-anchor="middle">Condvar &rarr; requeue-PI (unix + Win32)</text>
-  <text x="670" y="316" class="label-green" text-anchor="middle">SRW spin (256 iters, RT skip)</text>
-
-  <!-- NTSync -->
-  <rect x="480" y="350" width="380" height="55" class="box-nspa-new"/>
-  <text x="670" y="372" class="label" text-anchor="middle">NTSync + 5 NSPA kernel patches</text>
-  <text x="670" y="390" class="label-green" text-anchor="middle">raw_spinlock, prio-ordered, PI boost v2, uring_fd, kmalloc</text>
-
-  <!-- QPC -->
-  <rect x="480" y="425" width="380" height="50" class="box-nspa"/>
-  <text x="670" y="447" class="label" text-anchor="middle">QPC rdTSC Bypass</text>
-  <text x="670" y="463" class="label-green" text-anchor="middle">rdtsc direct read (~10ns, 100x faster)</text>
-
-  <!-- Memory -->
-  <rect x="480" y="495" width="380" height="50" class="box-nspa"/>
-  <text x="670" y="517" class="label" text-anchor="middle">Large + Huge Pages</text>
-  <text x="670" y="533" class="label-green" text-anchor="middle">2MB large pages, 1GB hugepages, TLB reduction</text>
-
-  <!-- Kernel -->
-  <rect x="480" y="570" width="380" height="50" class="box-kernel-nspa"/>
-  <text x="670" y="592" class="label" text-anchor="middle">PREEMPT_RT Kernel</text>
-  <text x="670" y="608" class="label-green" text-anchor="middle">fully preemptible, rt_mutex PI chains, NTSync PI</text>
-
-  <!-- Legend -->
-  <rect x="60" y="645" width="16" height="16" class="box-vanilla"/>
-  <text x="85" y="658" class="label-muted">vanilla (unchanged)</text>
-  <rect x="250" y="645" width="16" height="16" class="box-nspa"/>
-  <text x="275" y="658" class="label-muted">NSPA modified</text>
-  <rect x="430" y="645" width="16" height="16" class="box-nspa-new"/>
-  <text x="455" y="658" class="label-muted">NSPA new component</text>
-  <rect x="630" y="645" width="16" height="16" class="box-kernel-nspa"/>
-  <text x="655" y="658" class="label-muted">NSPA kernel patches</text>
-</svg>
-</div>
-
-
-<blockquote><p><strong>Key differences:</strong> Vanilla Wine runs entirely under <code>SCHED_OTHER</code> &ndash; wineserver, all threads, all sync primitives. There is no priority mapping, no PI, no RT scheduling. Wine-NSPA adds 6 layers of RT infrastructure: wineserver self-promotion, NT&ndash;>FIFO priority mapping, CS-PI via <code>FUTEX_LOCK_PI</code>, client-side NTSync with PI kernel patches, rdTSC QPC bypass, and large page support. All layers are opt-in via <code>NSPA_RT_PRIO</code>.</p></blockquote>
-
-<hr />
-
-<h2>3. Wine Process Model</h2>
-
-<p>Wine implements the Windows NT process model on top of Linux. Understanding this architecture is essential for knowing where NSPA hooks in and why certain design choices were made.</p>
-
-<h3>Architecture Diagram</h3>
-
-<div class="diagram-container">
-<svg width="100%" viewBox="0 0 900 680" xmlns="http://www.w3.org/2000/svg">
-  <!-- Background -->
-  <rect width="900" height="680" fill="transparent"/>
-
-  <!-- Arrow markers -->
-  <defs>
-    <marker id="arrowGreen" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
-      <polygon points="0 0, 8 3, 0 6" fill="#9ece6a"/>
-    </marker>
-    <marker id="arrowBlue" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
-      <polygon points="0 0, 8 3, 0 6" fill="#7aa2f7"/>
-    </marker>
-    <marker id="arrowYellow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
-      <polygon points="0 0, 8 3, 0 6" fill="#e0af68"/>
-    </marker>
-    <marker id="arrowCyan" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
-      <polygon points="0 0, 8 3, 0 6" fill="#7dcfff"/>
-    </marker>
-    <marker id="arrowOrange" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
-      <polygon points="0 0, 8 3, 0 6" fill="#ff9e64"/>
-    </marker>
-    <marker id="arrowLime" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
-      <polygon points="0 0, 8 3, 0 6" fill="#73daca"/>
-    </marker>
-  </defs>
-
-  <!-- Wineserver box -->
-  <rect x="320" y="20" width="260" height="120" rx="6" fill="#24283b" stroke="#7aa2f7" stroke-width="2"/>
-  <text x="450" y="50" text-anchor="middle" fill="#7aa2f7" font-size="14" font-weight="bold">wineserver</text>
-  <text x="450" y="72" text-anchor="middle" fill="#c0caf5" font-size="10">Single process, event-driven</text>
-  <text x="450" y="88" text-anchor="middle" fill="#c0caf5" font-size="10">Handle table + sync objects</text>
-  <text x="450" y="104" text-anchor="middle" fill="#c0caf5" font-size="10">Process/thread state mgmt</text>
-  <text x="450" y="120" text-anchor="middle" fill="#e0af68" font-size="9">v1.1: SCHED_FIFO @ NSPA_RT_PRIO-16</text>
-
-  <!-- Wine Process -->
-  <rect x="40" y="220" width="380" height="370" rx="6" fill="none" stroke="#3b4261" stroke-width="1.5" stroke-dasharray="6,3"/>
-  <text x="230" y="245" text-anchor="middle" fill="#c8d0e8" font-size="11">Wine Process (e.g. DAW, plugin host)</text>
-
-  <!-- PE side -->
-  <rect x="60" y="260" width="150" height="165" rx="6" fill="#24283b" stroke="#bb9af7" stroke-width="1.5"/>
-  <text x="135" y="283" text-anchor="middle" fill="#bb9af7" font-size="12" font-weight="bold">PE Side</text>
-  <text x="135" y="302" text-anchor="middle" fill="#c0caf5" font-size="9">Win32 app code</text>
-  <text x="135" y="318" text-anchor="middle" fill="#c0caf5" font-size="9">ntdll.dll (PE)</text>
-  <text x="135" y="334" text-anchor="middle" fill="#c0caf5" font-size="9">kernelbase.dll</text>
-  <text x="135" y="350" text-anchor="middle" fill="#c0caf5" font-size="9">kernel32.dll</text>
-  <text x="135" y="370" text-anchor="middle" fill="#e0af68" font-size="8">CS-PI fast path (TID CAS)</text>
-  <text x="135" y="386" text-anchor="middle" fill="#e0af68" font-size="8">SRW spin (256 iters)</text>
-  <text x="135" y="402" text-anchor="middle" fill="#9ece6a" font-size="8">Condvar PI mapping table</text>
-  <text x="135" y="414" text-anchor="middle" fill="#9ece6a" font-size="8">+ requeue-PI syscalls</text>
-
-  <!-- Unix side -->
-  <rect x="230" y="260" width="170" height="200" rx="6" fill="#24283b" stroke="#9ece6a" stroke-width="1.5"/>
-  <text x="315" y="283" text-anchor="middle" fill="#9ece6a" font-size="12" font-weight="bold">Unix Side</text>
-  <text x="315" y="302" text-anchor="middle" fill="#c0caf5" font-size="9">ntdll.so (Unixlib)</text>
-  <text x="315" y="318" text-anchor="middle" fill="#c0caf5" font-size="9">sched_setscheduler()</text>
-  <text x="315" y="334" text-anchor="middle" fill="#c0caf5" font-size="9">futex() syscalls</text>
-  <text x="315" y="350" text-anchor="middle" fill="#c0caf5" font-size="9">ioctl(/dev/ntsync)</text>
-  <text x="315" y="370" text-anchor="middle" fill="#e0af68" font-size="8">FUTEX_LOCK_PI slow path</text>
-  <text x="315" y="386" text-anchor="middle" fill="#e0af68" font-size="8">RT prio self-promotion</text>
-
-  <!-- io_uring box inside Unix Side -->
-  <rect x="242" y="395" width="146" height="55" rx="6" fill="#1a2a1a" stroke="#73daca" stroke-width="2"/>
-  <text x="315" y="413" text-anchor="middle" fill="#73daca" font-size="10" font-weight="bold">io_uring (per-thread)</text>
-  <text x="315" y="428" text-anchor="middle" fill="#c0caf5" font-size="8">file + socket I/O bypass</text>
-  <text x="315" y="441" text-anchor="middle" fill="#c0caf5" font-size="8">E2 bitmap + POLL_ADD</text>
-
-  <!-- Arrow PE -> Unix -->
-  <line x1="210" y1="330" x2="230" y2="330" stroke="#9ece6a" stroke-width="1.5"/>
-
-  <!-- Shared address space label -->
-  <text x="230" y="475" text-anchor="middle" fill="#c8d0e8" font-size="9">Same address space (same process)</text>
-
-  <!-- Socket to wineserver -->
-  <line x1="315" y1="260" x2="400" y2="140" stroke="#7aa2f7" stroke-width="1.5" stroke-dasharray="4,3"/>
-  <text x="370" y="185" fill="#7aa2f7" font-size="9" transform="rotate(-40, 370, 185)">Unix socket IPC</text>
-
-  <!-- Shmem path -->
-  <line x1="350" y1="260" x2="500" y2="140" stroke="#e0af68" stroke-width="1.5"/>
-  <text x="445" y="195" fill="#e0af68" font-size="9" transform="rotate(-35, 445, 195)">v1.5 shmem path</text>
-
-  <!-- Kernel box -->
-  <rect x="460" y="260" width="400" height="340" rx="6" fill="none" stroke="#3b4261" stroke-width="1.5"/>
-  <text x="660" y="283" text-anchor="middle" fill="#c8d0e8" font-size="11">Linux Kernel</text>
-
-  <!-- NTSync device -->
-  <rect x="480" y="300" width="170" height="110" rx="6" fill="#24283b" stroke="#e0af68" stroke-width="1.5"/>
-  <text x="565" y="323" text-anchor="middle" fill="#e0af68" font-size="12" font-weight="bold">/dev/ntsync</text>
-  <text x="565" y="342" text-anchor="middle" fill="#c0caf5" font-size="9">Sem / Mutex / Event</text>
-  <text x="565" y="358" text-anchor="middle" fill="#c0caf5" font-size="9">Priority-ordered queues</text>
-  <text x="565" y="374" text-anchor="middle" fill="#9ece6a" font-size="9">PI boost (sched_setattr)</text>
-  <text x="565" y="390" text-anchor="middle" fill="#c0caf5" font-size="9">raw_spinlock (PREEMPT_RT)</text>
-  <text x="565" y="402" text-anchor="middle" fill="#73daca" font-size="8">uring_fd CQE wakeup</text>
-
-  <!-- Futex subsystem -->
-  <rect x="670" y="300" width="170" height="115" rx="6" fill="#24283b" stroke="#7dcfff" stroke-width="1.5"/>
-  <text x="755" y="323" text-anchor="middle" fill="#7dcfff" font-size="12" font-weight="bold">futex subsystem</text>
-  <text x="755" y="342" text-anchor="middle" fill="#c0caf5" font-size="9">FUTEX_WAIT/WAKE</text>
-  <text x="755" y="358" text-anchor="middle" fill="#c0caf5" font-size="9">FUTEX_LOCK_PI</text>
-  <text x="755" y="374" text-anchor="middle" fill="#9ece6a" font-size="9">FUTEX_WAIT_REQUEUE_PI</text>
-  <text x="755" y="390" text-anchor="middle" fill="#9ece6a" font-size="9">FUTEX_CMP_REQUEUE_PI</text>
-  <text x="755" y="406" text-anchor="middle" fill="#9ece6a" font-size="9">rt_mutex PI chain</text>
-
-  <!-- io_uring kernel subsystem -->
-  <rect x="670" y="420" width="170" height="75" rx="6" fill="#1a2a1a" stroke="#73daca" stroke-width="1.5"/>
-  <text x="755" y="443" text-anchor="middle" fill="#73daca" font-size="12" font-weight="bold">io_uring</text>
-  <text x="755" y="460" text-anchor="middle" fill="#c0caf5" font-size="9">POLL_ADD / READ / WRITE</text>
-  <text x="755" y="476" text-anchor="middle" fill="#c0caf5" font-size="9">COOP_TASKRUN (RT-safe)</text>
-  <text x="755" y="489" text-anchor="middle" fill="#73daca" font-size="8">no wineserver involvement</text>
-
-  <!-- Scheduler -->
-  <rect x="500" y="520" width="240" height="60" rx="6" fill="#24283b" stroke="#ff9e64" stroke-width="1.5"/>
-  <text x="620" y="543" text-anchor="middle" fill="#ff9e64" font-size="12" font-weight="bold">PREEMPT_RT Scheduler</text>
-  <text x="620" y="560" text-anchor="middle" fill="#c0caf5" font-size="9">SCHED_FIFO / SCHED_RR</text>
-  <text x="620" y="573" text-anchor="middle" fill="#c0caf5" font-size="9">sched_setscheduler() from Wine</text>
-
-  <!-- Arrow from Unix side to NTSync -->
-  <line x1="400" y1="340" x2="480" y2="340" stroke="#e0af68" stroke-width="1.5"/>
-  <text x="440" y="335" text-anchor="middle" fill="#e0af68" font-size="8">ioctl</text>
-
-  <!-- Arrow from Unix side to futex -->
-  <line x1="400" y1="365" x2="670" y2="365" stroke="#7dcfff" stroke-width="1.5"/>
-  <text x="530" y="360" text-anchor="middle" fill="#7dcfff" font-size="8">syscall</text>
-
-  <!-- Arrow from io_uring client to io_uring kernel (direct, bypasses wineserver) -->
-  <line x1="388" y1="425" x2="670" y2="450" stroke="#73daca" stroke-width="2"/>
-  <text x="530" y="430" text-anchor="middle" fill="#73daca" font-size="8">io_uring_enter (bypasses server)</text>
-
-  <!-- Arrow from Unix side to scheduler -->
-  <line x1="350" y1="460" x2="350" y2="550" stroke="#ff9e64" stroke-width="1" stroke-dasharray="4,3"/>
-  <line x1="350" y1="550" x2="500" y2="550" stroke="#ff9e64" stroke-width="1.5"/>
-  <text x="420" y="545" text-anchor="middle" fill="#ff9e64" font-size="8">sched_setscheduler</text>
-
-  <!-- Handle table detail -->
-  <rect x="60" y="500" width="320" height="90" rx="6" fill="#24283b" stroke="#3b4261" stroke-width="1"/>
-  <text x="220" y="520" text-anchor="middle" fill="#7aa2f7" font-size="11" font-weight="bold">Handle Table (fd cache)</text>
-  <text x="220" y="536" text-anchor="middle" fill="#c0caf5" font-size="9">Server handles: index 0 upward (wineserver-assigned)</text>
-  <text x="220" y="552" text-anchor="middle" fill="#9ece6a" font-size="9">Client handles: index ~524K downward (NSPA client-side)</text>
-  <text x="220" y="568" text-anchor="middle" fill="#c0caf5" font-size="9">Each entry: fd + type + access + refcount</text>
-  <text x="220" y="582" text-anchor="middle" fill="#c8d0e8" font-size="8">Client handles bypass wineserver entirely for anon objects</text>
-
-  <!-- Legend -->
-  <rect x="40" y="620" width="820" height="40" rx="6" fill="none" stroke="#3b4261" stroke-width="1"/>
-  <circle cx="70" cy="640" r="5" fill="#bb9af7"/>
-  <text x="80" y="644" fill="#c0caf5" font-size="9">PE (Win32)</text>
-  <circle cx="155" cy="640" r="5" fill="#9ece6a"/>
-  <text x="165" y="644" fill="#c0caf5" font-size="9">Unix (native)</text>
-  <circle cx="250" cy="640" r="5" fill="#e0af68"/>
-  <text x="260" y="644" fill="#c0caf5" font-size="9">NTSync</text>
-  <circle cx="320" cy="640" r="5" fill="#7dcfff"/>
-  <text x="330" y="644" fill="#c0caf5" font-size="9">futex PI</text>
-  <circle cx="395" cy="640" r="5" fill="#73daca"/>
-  <text x="405" y="644" fill="#c0caf5" font-size="9">io_uring</text>
-  <circle cx="470" cy="640" r="5" fill="#ff9e64"/>
-  <text x="480" y="644" fill="#c0caf5" font-size="9">scheduler</text>
-  <circle cx="555" cy="640" r="5" fill="#7aa2f7"/>
-  <text x="565" y="644" fill="#c0caf5" font-size="9">wineserver IPC</text>
-  <line x1="660" y1="640" x2="690" y2="640" stroke="#9aa5ce" stroke-width="1.5" stroke-dasharray="4,3"/>
-  <text x="630" y="644" fill="#c0caf5" font-size="9">optional/fallback</text>
-</svg>
-</div>
-
-
-<h3>Key Concepts</h3>
-
-<h4>Wineserver</h4>
-
-<p>A single long-lived process per Wine prefix that acts as the NT kernel analog. It owns the handle table, manages process/thread lifetime, and arbitrates named synchronization objects. All cross-process operations (handle inheritance, named mutexes, process creation) go through wineserver via Unix domain sockets.</p>
-
-<blockquote><p><strong>Bottleneck:</strong> Wineserver is single-threaded and event-driven. An RT thread that makes a wineserver round-trip blocks behind the server&rsquo;s serialization. v1.5&rsquo;s shmem path and client-side NTSync creation reduce the number of operations that require this round-trip. The v1.5 shmem dispatchers serialize on a <code>global_lock</code> (now PI-aware via <code>pi_mutex_t</code> / FUTEX_LOCK_PI) so that high-priority dispatcher contention propagates priority through the kernel&rsquo;s rt_mutex PI chain.</p></blockquote>
-
-<h4>PE / Unix Split</h4>
-
-<p>Every Wine process has two halves sharing the same address space. The <strong>PE side</strong> runs Win32 code (app binaries, PE DLLs like ntdll.dll, kernelbase.dll). The <strong>Unix side</strong> runs native Linux code (ntdll.so, driver Unixlibs). The PE side cannot make raw Linux syscalls &ndash; it must cross into the Unix side via the Unixlib dispatcher. This split is architecturally important for NSPA: CS-PI&rsquo;s fast path (CAS on LockSemaphore) lives on the PE side, while the FUTEX_LOCK_PI slow path lives on the Unix side.</p>
-
-<h4>NTSync</h4>
-
-<p>Wine 11.x&rsquo;s primary synchronization backend. The <code>/dev/ntsync</code> kernel device (Elizabeth Figura, mainlined) implements Win32 semaphores, mutexes, and events with correct NT semantics (abandoned mutexes, WaitForMultipleObjects atomicity, etc.) directly in the kernel. NSPA adds five patches to this driver for PI support, io_uring integration, and PREEMPT_RT safety.</p>
-
-<h4>Client-Side Object Creation</h4>
-
-<p>NSPA adds a client-side fast path for creating <strong>anonymous</strong> sync objects (unnamed mutexes and semaphores). Instead of a wineserver round-trip, the client calls <code>ioctl(NTSYNC_IOC_CREATE_*)</code> directly and allocates a handle from the client range (index ~524K downward). Named objects still go through wineserver for namespace resolution. This eliminates a round-trip per object creation &ndash; significant for apps that create thousands of mutexes at startup.</p>
-
-<p><strong>Events are excluded from client-side creation</strong> (a7b00453978). Client-created event handles destabilized Ableton Live, causing crashes in the handle lifecycle. Anonymous events remain on wineserver, where the server-side lifecycle management is proven stable. Mutexes and semaphores are stable client-side.</p>
-
-<div class="diagram-container">
-<svg width="100%" viewBox="0 0 780 280" xmlns="http://www.w3.org/2000/svg">
-  <style>
-    .cs-box { fill: #24283b; stroke: #9aa5ce; stroke-width: 1.5; rx: 6; }
-    .cs-box-green { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 2; rx: 6; }
-    .cs-box-red { fill: #2a1a1a; stroke: #f7768e; stroke-width: 2; rx: 6; }
-    .cs-box-yellow { fill: #2a2a1a; stroke: #e0af68; stroke-width: 2; rx: 6; }
-    .cs-label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
-    .cs-label-sm { fill: #c0caf5; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
-    .cs-label-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
-    .cs-label-red { fill: #f7768e; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
-    .cs-label-yellow { fill: #e0af68; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
-    .cs-arrow { stroke: #9aa5ce; stroke-width: 1.5; fill: none; }
-    .cs-arrow-green { stroke: #9ece6a; stroke-width: 2; fill: none; }
-    .cs-arrow-red { stroke: #f7768e; stroke-width: 1.5; fill: none; stroke-dasharray: 5,3; }
-  </style>
-  <defs>
-    <marker id="cs-arr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#c0caf5"/></marker>
-    <marker id="cs-arr-g" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#9ece6a"/></marker>
-    <marker id="cs-arr-r" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#f7768e"/></marker>
-  </defs>
-
-  <text x="390" y="20" class="cs-label-yellow" text-anchor="middle">Client-Side NTSync Object Creation Split</text>
-
-  <!-- App calls CreateMutex / CreateSemaphore / CreateEvent -->
-  <rect x="20" y="40" width="160" height="50" class="cs-box"/>
-  <text x="100" y="60" class="cs-label" text-anchor="middle">NtCreateMutant</text>
-  <text x="100" y="76" class="cs-label-sm" text-anchor="middle">NtCreateSemaphore</text>
-
-  <rect x="20" y="130" width="160" height="50" class="cs-box"/>
-  <text x="100" y="150" class="cs-label" text-anchor="middle">NtCreateEvent</text>
-  <text x="100" y="166" class="cs-label-sm" text-anchor="middle">(anonymous only)</text>
-
-  <!-- Decision -->
-  <line x1="180" y1="65" x2="250" y2="65" class="cs-arrow-green"/>
-  <text x="215" y="56" class="cs-label-green" text-anchor="middle">client</text>
-
-  <line x1="180" y1="155" x2="250" y2="155" class="cs-arrow-red"/>
-  <text x="215" y="146" class="cs-label-red" text-anchor="middle">server</text>
-
-  <!-- Client path: ioctl direct -->
-  <rect x="255" y="35" width="200" height="60" class="cs-box-green"/>
-  <text x="355" y="55" class="cs-label-green" text-anchor="middle">ioctl(NTSYNC_IOC_CREATE_*)</text>
-  <text x="355" y="70" class="cs-label-sm" text-anchor="middle">direct to /dev/ntsync</text>
-  <text x="355" y="84" class="cs-label-sm" text-anchor="middle">0 server round-trips</text>
-
-  <!-- Server path: wineserver -->
-  <rect x="255" y="125" width="200" height="60" class="cs-box-red"/>
-  <text x="355" y="145" class="cs-label-red" text-anchor="middle">wine_server_call()</text>
-  <text x="355" y="160" class="cs-label-sm" text-anchor="middle">server creates on /dev/ntsync</text>
-  <text x="355" y="174" class="cs-label-sm" text-anchor="middle">sends fd back to client</text>
-
-  <!-- Both paths lead to handle -->
-  <line x1="455" y1="65" x2="530" y2="100" class="cs-arrow"/>
-  <line x1="455" y1="155" x2="530" y2="120" class="cs-arrow"/>
-
-  <rect x="535" y="85" width="210" height="55" class="cs-box"/>
-  <text x="640" y="105" class="cs-label" text-anchor="middle">inproc_wait() / linux_wait_objs()</text>
-  <text x="640" y="120" class="cs-label-sm" text-anchor="middle">ioctl(NTSYNC_IOC_WAIT_ANY)</text>
-  <text x="640" y="132" class="cs-label-green" text-anchor="middle">same wait path for both</text>
-
-  <!-- Why events excluded -->
-  <rect x="180" y="210" width="560" height="50" class="cs-box-yellow"/>
-  <text x="460" y="230" class="cs-label-yellow" text-anchor="middle">Events excluded: client-created event handles crashed Ableton Live (a7b00453978)</text>
-  <text x="460" y="248" class="cs-label-sm" text-anchor="middle">Server-side lifecycle management is stable for events; mutexes + semaphores are stable client-side</text>
-</svg>
-</div>
-
-
-<h4>Shared Memory Wineserver IPC (v1.5)</h4>
-
-<p>Forward-port of Torge Matthies&rsquo;s 2022 shmem wineserver IPC patch. Replaces socket-based request/reply with per-thread shared memory + futex signaling for small requests. The server side spawns a pthread per client thread that sits in <code>FUTEX_WAIT</code> and dispatches via the existing <code>req_handlers[]</code> array, serialized by a PI-aware <code>global_lock</code> around the main poll loop. v2.4 client-side boost raises the dispatcher&rsquo;s priority to match the client&rsquo;s RT priority for the duration of each request; the PI lock ensures this boost propagates through contention with other dispatchers or the main thread.</p>
-
-<div class="diagram-container">
-<svg width="100%" viewBox="0 0 780 300" xmlns="http://www.w3.org/2000/svg">
-  <style>
-    .shmem-box { fill: #24283b; stroke: #9aa5ce; stroke-width: 1.5; rx: 6; }
-    .shmem-box-new { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 2; rx: 6; }
-    .shmem-label { fill: #c0caf5; font-size: 12px; font-family: 'JetBrains Mono', monospace; }
-    .shmem-label-sm { fill: #c0caf5; font-size: 10px; font-family: 'JetBrains Mono', monospace; }
-    .shmem-label-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
-    .shmem-label-muted { fill: #e2e8f8; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
-    .shmem-label-yellow { fill: #e0af68; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
-    .shmem-arrow { stroke: #9aa5ce; stroke-width: 1.5; fill: none; }
-    .shmem-arrow-new { stroke: #9ece6a; stroke-width: 2; fill: none; }
-    .shmem-strike { stroke: #f7768e; stroke-width: 2; }
-  </style>
-  <defs>
-    <marker id="sh-arr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#c8d0e8"/></marker>
-    <marker id="sh-arr-g" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#9ece6a"/></marker>
-  </defs>
-
-  <!-- Title -->
-  <text x="390" y="22" class="shmem-label-yellow" text-anchor="middle">Vanilla IPC (top) vs Shmem IPC (bottom)</text>
-
-  <!-- === Top row: vanilla socket path === -->
-  <rect x="30" y="40" width="160" height="50" class="shmem-box"/>
-  <text x="110" y="62" class="shmem-label" text-anchor="middle">ntdll (client)</text>
-  <text x="110" y="78" class="shmem-label-muted" text-anchor="middle">send_request()</text>
-
-  <line x1="190" y1="65" x2="280" y2="65" class="shmem-arrow"/>
-  <text x="235" y="58" class="shmem-label-muted" text-anchor="middle">socket</text>
-
-  <rect x="280" y="40" width="200" height="50" class="shmem-box"/>
-  <text x="380" y="62" class="shmem-label" text-anchor="middle">wineserver main loop</text>
-  <text x="380" y="78" class="shmem-label-muted" text-anchor="middle">epoll → read → dispatch</text>
-
-  <line x1="480" y1="65" x2="560" y2="65" class="shmem-arrow"/>
-  <text x="520" y="58" class="shmem-label-muted" text-anchor="middle">socket</text>
-
-  <rect x="560" y="40" width="180" height="50" class="shmem-box"/>
-  <text x="650" y="62" class="shmem-label" text-anchor="middle">ntdll (client)</text>
-  <text x="650" y="78" class="shmem-label-muted" text-anchor="middle">wait_reply()</text>
-
-  <!-- Cost annotation -->
-  <text x="390" y="108" class="shmem-label-muted" text-anchor="middle">~10-50μs round-trip (2 context switches + 2 socket ops + epoll wake)</text>
-
-  <!-- === Divider === -->
-  <line x1="30" y1="130" x2="750" y2="130" stroke="#3b4261" stroke-dasharray="4,4"/>
-
-  <!-- === Bottom row: shmem fast path === -->
-  <rect x="30" y="150" width="160" height="70" class="shmem-box-new"/>
-  <text x="110" y="172" class="shmem-label" text-anchor="middle">ntdll (client)</text>
-  <text x="110" y="190" class="shmem-label-green" text-anchor="middle">write to shmem</text>
-  <text x="110" y="205" class="shmem-label-green" text-anchor="middle">FUTEX_WAKE</text>
-
-  <line x1="190" y1="185" x2="280" y2="185" class="shmem-arrow-new"/>
-  <text x="235" y="178" class="shmem-label-green" text-anchor="middle">shmem+futex</text>
-
-  <rect x="280" y="150" width="200" height="70" class="shmem-box-new"/>
-  <text x="380" y="172" class="shmem-label" text-anchor="middle">shmem dispatcher</text>
-  <text x="380" y="190" class="shmem-label-green" text-anchor="middle">FUTEX_WAIT → dispatch</text>
-  <text x="380" y="205" class="shmem-label-green" text-anchor="middle">global_lock serialized</text>
-
-  <line x1="480" y1="185" x2="560" y2="185" class="shmem-arrow-new"/>
-  <text x="520" y="178" class="shmem-label-green" text-anchor="middle">shmem+futex</text>
-
-  <rect x="560" y="150" width="180" height="70" class="shmem-box-new"/>
-  <text x="650" y="172" class="shmem-label" text-anchor="middle">ntdll (client)</text>
-  <text x="650" y="190" class="shmem-label-green" text-anchor="middle">read from shmem</text>
-  <text x="650" y="205" class="shmem-label-green" text-anchor="middle">FUTEX_WAIT return</text>
-
-  <!-- Cost annotation -->
-  <text x="390" y="240" class="shmem-label-green" text-anchor="middle">~2-5μs round-trip (futex wake/wait, no socket, no epoll)</text>
-
-  <!-- Fallback note -->
-  <text x="390" y="270" class="shmem-label-muted" text-anchor="middle">Oversized requests (&gt;1MB) and shmem init failure fall back to socket path transparently</text>
-  <text x="390" y="286" class="shmem-label-muted" text-anchor="middle">Per-thread 1MB shmem region, pthread dispatcher per client thread, global_lock serialization</text>
-</svg>
-</div>
-
-
-<blockquote><p><strong>Why shmem matters for RT:</strong> NTSync captures the sync-wait hot path, but non-sync wineserver traffic (handle operations, registry, file metadata, loader calls) still uses IPC. During VST plugin loading, the loader holds Wine&rsquo;s loader lock while dispatching dozens of wineserver calls. Shorter round-trips = shorter lock-hold times = less contention bleeding into RT threads sharing those locks.</p>
-
-<p><strong>Limitations:</strong> The <code>global_lock</code> serializes all shmem dispatchers, so this is latency improvement, not throughput. Dispatcher threads run at SCHED_OTHER by default (v1.1&rsquo;s wineserver RT promotion handles the scheduling side independently).</p></blockquote>
-
-<h4>Shmem PI v2.5: Cached Scheduling State</h4>
-
-<p>v2.4&rsquo;s manual PI boost called <code>sched_getscheduler()</code> + <code>sched_getparam()</code> + <code>sched_setscheduler()</code> on every request (6 syscalls per RT request including unboost). v2.5 caches the RT thread&rsquo;s scheduling policy and priority in TLS (<code>nspa_rt_cached_policy</code>, <code>nspa_rt_cached_prio</code>), eliminating the read syscalls. Only <code>sched_setscheduler()</code> fires — 2 syscalls per request (boost + unboost). Committed as <code>17621ba494c</code>.</p>
-
-<div class="diagram-container">
-<svg width="100%" viewBox="0 0 780 200" xmlns="http://www.w3.org/2000/svg">
-  <style>
-    .sp-box { fill: #24283b; stroke: #9aa5ce; stroke-width: 1.5; rx: 6; }
-    .sp-box-new { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 2; rx: 6; }
-    .sp-box-old { fill: #2a1a1a; stroke: #f7768e; stroke-width: 1.5; rx: 6; }
-    .sp-label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
-    .sp-label-sm { fill: #c0caf5; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
-    .sp-label-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
-    .sp-label-red { fill: #f7768e; font-size: 10px; font-family: 'JetBrains Mono', monospace; }
-    .sp-label-yellow { fill: #e0af68; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
-    .sp-arrow { stroke: #9aa5ce; stroke-width: 1.5; fill: none; }
-  </style>
-  <defs>
-    <marker id="sp-arr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#c0caf5"/></marker>
-  </defs>
-
-  <text x="390" y="20" class="sp-label-yellow" text-anchor="middle">Shmem PI: v2.4 (6 syscalls) vs v2.5 (2 syscalls, cached)</text>
-
-  <!-- v2.4 row -->
-  <text x="30" y="55" class="sp-label-red">v2.4:</text>
-  <rect x="80" y="40" width="120" height="30" class="sp-box-old"/>
-  <text x="140" y="60" class="sp-label-sm" text-anchor="middle">getscheduler()</text>
-  <line x1="200" y1="55" x2="215" y2="55" class="sp-arrow"/>
-  <rect x="220" y="40" width="100" height="30" class="sp-box-old"/>
-  <text x="270" y="60" class="sp-label-sm" text-anchor="middle">getparam()</text>
-  <line x1="320" y1="55" x2="335" y2="55" class="sp-arrow"/>
-  <rect x="340" y="40" width="130" height="30" class="sp-box-old"/>
-  <text x="405" y="60" class="sp-label-sm" text-anchor="middle">setscheduler(boost)</text>
-  <line x1="470" y1="55" x2="485" y2="55" class="sp-arrow"/>
-  <rect x="490" y="40" width="80" height="30" class="sp-box"/>
-  <text x="530" y="60" class="sp-label-sm" text-anchor="middle">dispatch</text>
-  <line x1="570" y1="55" x2="585" y2="55" class="sp-arrow"/>
-  <rect x="590" y="40" width="140" height="30" class="sp-box-old"/>
-  <text x="660" y="60" class="sp-label-sm" text-anchor="middle">setscheduler(restore)</text>
-  <text x="745" y="60" class="sp-label-red">6 sys</text>
-
-  <!-- Strikethrough -->
-
-  <!-- v2.5 row -->
-  <text x="30" y="115" class="sp-label-green">v2.5:</text>
-  <rect x="80" y="100" width="180" height="30" class="sp-box-new"/>
-  <text x="170" y="120" class="sp-label-green" text-anchor="middle">setscheduler(boost)</text>
-  <line x1="260" y1="115" x2="290" y2="115" class="sp-arrow"/>
-  <rect x="295" y="100" width="160" height="30" class="sp-box"/>
-  <text x="375" y="120" class="sp-label-sm" text-anchor="middle">dispatch (unchanged)</text>
-  <line x1="455" y1="115" x2="485" y2="115" class="sp-arrow"/>
-  <rect x="490" y="100" width="180" height="30" class="sp-box-new"/>
-  <text x="580" y="120" class="sp-label-green" text-anchor="middle">setscheduler(restore)</text>
-  <text x="690" y="120" class="sp-label-green">2 sys</text>
-
-  <!-- Cached state note -->
-  <rect x="80" y="150" width="590" height="35" class="sp-box-new"/>
-  <text x="375" y="168" class="sp-label-green" text-anchor="middle">TLS: nspa_rt_cached_policy + nspa_rt_cached_prio (set once at thread RT init, read on every boost)</text>
-  <text x="375" y="180" class="sp-label-sm" text-anchor="middle">Eliminates sched_getscheduler + sched_getparam — policy/prio don't change between requests</text>
-</svg>
-</div>
-
-
-<hr />
-
-<h2>4. RT Priority Architecture</h2>
-
-<p>NSPA maps Win32 thread priorities to Linux SCHED_FIFO priorities, giving audio threads deterministic scheduling. The mapping is controlled by two environment variables and implemented in a two-tier architecture.</p>
-
-<h3>Priority Mapping Diagram</h3>
-
-<div class="diagram-container">
-<svg width="100%" viewBox="0 0 780 580" xmlns="http://www.w3.org/2000/svg">
-  <!-- Column headers -->
-  <text x="80" y="30" text-anchor="middle" fill="#7aa2f7" font-size="12" font-weight="bold">Win32</text>
-  <text x="240" y="30" text-anchor="middle" fill="#bb9af7" font-size="12" font-weight="bold">NT Band</text>
-  <text x="440" y="30" text-anchor="middle" fill="#9ece6a" font-size="12" font-weight="bold">Linux SCHED_FIFO</text>
-  <text x="630" y="30" text-anchor="middle" fill="#e0af68" font-size="12" font-weight="bold">Role</text>
-
-  <!-- Separator -->
-  <line x1="20" y1="40" x2="760" y2="40" stroke="#3b4261" stroke-width="1"/>
-
-  <!-- Reserved kernel zone -->
-  <rect x="370" y="50" width="140" height="30" rx="6" fill="#3a1a1a" stroke="#f7768e" stroke-width="1"/>
-  <text x="440" y="70" text-anchor="middle" fill="#f7768e" font-size="10">99 (reserved)</text>
-  <text x="630" y="70" text-anchor="middle" fill="#c8d0e8" font-size="9">Kernel threads only</text>
-
-  <!-- JACK zone -->
-  <rect x="370" y="90" width="140" height="35" rx="6" fill="#1a2a1a" stroke="#9ece6a" stroke-width="1" stroke-dasharray="4,2"/>
-  <text x="440" y="110" text-anchor="middle" fill="#9ece6a" font-size="10">88-89</text>
-  <text x="630" y="110" text-anchor="middle" fill="#9ece6a" font-size="9">JACK / PipeWire callbacks</text>
-
-  <!-- TIME_CRITICAL -->
-  <rect x="20" y="135" width="120" height="30" rx="6" fill="#24283b" stroke="#7aa2f7" stroke-width="1.5"/>
-  <text x="80" y="155" text-anchor="middle" fill="#7aa2f7" font-size="10">TIME_CRITICAL</text>
-  <rect x="180" y="135" width="120" height="30" rx="6" fill="#24283b" stroke="#bb9af7" stroke-width="1.5"/>
-  <text x="240" y="155" text-anchor="middle" fill="#bb9af7" font-size="10">31</text>
-  <rect x="370" y="135" width="140" height="30" rx="6" fill="#24283b" stroke="#e0af68" stroke-width="2"/>
-  <text x="440" y="155" text-anchor="middle" fill="#e0af68" font-size="11" font-weight="bold">80 = NSPA_RT_PRIO</text>
-  <text x="630" y="155" text-anchor="middle" fill="#e0af68" font-size="9">Audio callback ceiling</text>
-  <text x="630" y="168" text-anchor="middle" fill="#c8d0e8" font-size="8">Always SCHED_FIFO</text>
-
-  <!-- Arrow showing ceiling -->
-
-  <!-- NT 30 -->
-  <text x="80" y="195" text-anchor="middle" fill="#c0caf5" font-size="9">(realtime +6)</text>
-  <text x="240" y="195" text-anchor="middle" fill="#c0caf5" font-size="9">30</text>
-  <text x="440" y="195" text-anchor="middle" fill="#c0caf5" font-size="10">79</text>
-
-  <!-- NT 26 = HIGHEST -->
-  <text x="80" y="220" text-anchor="middle" fill="#c0caf5" font-size="9">HIGHEST (RT)</text>
-  <text x="240" y="220" text-anchor="middle" fill="#c0caf5" font-size="9">26</text>
-  <text x="440" y="220" text-anchor="middle" fill="#c0caf5" font-size="10">75</text>
-
-  <!-- NT 24 = NORMAL (realtime class) -->
-  <rect x="20" y="235" width="120" height="30" rx="6" fill="#24283b" stroke="#7aa2f7" stroke-width="1"/>
-  <text x="80" y="255" text-anchor="middle" fill="#7aa2f7" font-size="10">NORMAL (RT cls)</text>
-  <rect x="180" y="235" width="120" height="30" rx="6" fill="#24283b" stroke="#bb9af7" stroke-width="1"/>
-  <text x="240" y="255" text-anchor="middle" fill="#bb9af7" font-size="10">24</text>
-  <rect x="370" y="235" width="140" height="30" rx="6" fill="#24283b" stroke="#9ece6a" stroke-width="1"/>
-  <text x="440" y="255" text-anchor="middle" fill="#9ece6a" font-size="10">73</text>
-  <text x="630" y="255" text-anchor="middle" fill="#c8d0e8" font-size="9">Policy from NSPA_RT_POLICY</text>
-
-  <!-- Dotted line: RT band boundary -->
-  <line x1="20" y1="283" x2="560" y2="283" stroke="#e0af68" stroke-width="1" stroke-dasharray="6,3"/>
-  <text x="570" y="287" fill="#e0af68" font-size="9">RT band boundary (NT 16)</text>
-
-  <!-- NT 16 = IDLE (realtime) -->
-  <text x="80" y="308" text-anchor="middle" fill="#c0caf5" font-size="9">IDLE (RT cls)</text>
-  <text x="240" y="308" text-anchor="middle" fill="#c0caf5" font-size="9">16</text>
-  <text x="440" y="308" text-anchor="middle" fill="#c0caf5" font-size="10">65</text>
-
-  <!-- Wineserver gap -->
-  <rect x="370" y="325" width="140" height="30" rx="6" fill="#2a1a3a" stroke="#bb9af7" stroke-width="1.5"/>
-  <text x="440" y="345" text-anchor="middle" fill="#bb9af7" font-size="10">64 (wineserver)</text>
-  <text x="630" y="345" text-anchor="middle" fill="#bb9af7" font-size="9">v1.1: NSPA_RT_PRIO - 16</text>
-  <text x="630" y="358" text-anchor="middle" fill="#c8d0e8" font-size="8">Just below entire RT band</text>
-
-  <!-- Below RT -->
-  <line x1="20" y1="370" x2="560" y2="370" stroke="#3b4261" stroke-width="1"/>
-  <text x="440" y="395" text-anchor="middle" fill="#c8d0e8" font-size="10">1 .. 63 (unused)</text>
-
-  <!-- SCHED_OTHER zone -->
-  <rect x="370" y="410" width="140" height="40" rx="6" fill="#24283b" stroke="#9aa5ce" stroke-width="1"/>
-  <text x="440" y="435" text-anchor="middle" fill="#c8d0e8" font-size="10">SCHED_OTHER</text>
-  <text x="630" y="435" text-anchor="middle" fill="#c8d0e8" font-size="9">NT 1..15, nice-based</text>
-
-  <!-- Lenient path explanation -->
-  <rect x="20" y="470" width="740" height="90" rx="6" fill="#24283b" stroke="#3b4261" stroke-width="1"/>
-  <text x="40" y="495" fill="#e0af68" font-size="11" font-weight="bold">Ceiling Mapping</text>
-  <text x="40" y="515" fill="#c0caf5" font-size="10">fifo = NSPA_RT_PRIO - (31 - nt_band)</text>
-  <text x="40" y="535" fill="#c8d0e8" font-size="9">NSPA_RT_PRIO is the ceiling. NT 31 maps here; lower RT bands scale linearly below it.</text>
-  <text x="40" y="550" fill="#c8d0e8" font-size="9">Example: NSPA_RT_PRIO=80, NT 31 = 80, NT 24 = 73, NT 16 = 65</text>
-
-</svg>
-</div>
-
-
-<h3>Two-Tier Promotion</h3>
-
-<h4>Tier 1: Client-side self-promotion (zero round-trip)</h4>
-
-<p>When a thread calls <code>SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL)</code>, ntdll&rsquo;s Unix side detects this in <code>NtSetInformationThread(ThreadBasePriority)</code> and calls <code>sched_setscheduler(0, SCHED_FIFO | SCHED_RESET_ON_FORK, ...)</code> directly. No wineserver round-trip needed. The priority change still forwards to wineserver for bookkeeping so that <code>GetThreadPriority</code> from other processes returns the correct value.</p>
-
-<p>Implementation: <code>dlls/ntdll/unix/thread.c</code>, function <code>nspa_rt_apply_tid()</code>.</p>
-
-<h4>Tier 2: Server-side cross-process promotion</h4>
-
-<p>When a thread calls <code>SetThreadPriority(hOtherThread, ...)</code> targeting a thread in another process, the request goes through wineserver. The server&rsquo;s <code>apply_thread_priority()</code> in <code>server/thread.c</code> calls <code>sched_setscheduler(thread-&gt;unix_tid, ...)</code> on the target thread. This covers bulk updates from <code>SetPriorityClass</code> and any cross-process priority manipulation.</p>
-
-<h4>v1.2: Cross-thread map</h4>
-
-<p>Tier 1 extended with a HANDLE-to-unix_tid map (256-slot open-addressing hash table protected by a PI mutex). When a thread calls <code>SetThreadPriority(hThread, ...)</code> where <code>hThread</code> is another thread in the same process, the client looks up the target&rsquo;s unix_tid in the map and applies the scheduling change locally, avoiding a wineserver round-trip. The map is populated at <code>NtCreateThreadEx</code> time.</p>
-
-<h3>Environment Variables</h3>
+<p>The mapping is governed by these env vars:</p>
 
 <table>
 <thead>
 <tr>
-<th> Variable </th>
-<th> Values </th>
+<th> Var </th>
 <th> Default </th>
 <th> Effect </th>
 </tr>
@@ -893,1142 +477,133 @@ Author: jordan Johnston</p>
 <tbody>
 <tr>
 <td> <code>NSPA_RT_PRIO</code> </td>
-<td> Integer in [min..max-1] </td>
-<td> unset = RT dormant </td>
-<td> Master switch + ceiling FIFO priority. NT 31 maps here. </td>
+<td> unset (RT dormant) </td>
+<td> Master gate. Sets the FIFO ceiling and activates all four PI paths. When unset, NSPA is byte-identical to upstream Wine. </td>
 </tr>
 <tr>
 <td> <code>NSPA_RT_POLICY</code> </td>
-<td> FF, RR, TS </td>
-<td> FF </td>
-<td> Scheduler policy for NT [16..30]. TC (NT 31) always FIFO. </td>
+<td> <code>FF</code> </td>
+<td> <code>SCHED_FIFO</code> vs <code>RR</code> for NT bands [16..30]. Same-prio RR quantum-slices the audio thread; FIFO eliminates. TIME_CRITICAL (NT 31) is always FIFO. </td>
 </tr>
 <tr>
 <td> <code>NSPA_SRV_RT_PRIO</code> </td>
-<td> Integer </td>
-<td> NSPA_RT_PRIO - 16 </td>
-<td> Override wineserver&rsquo;s FIFO priority. </td>
+<td> <code>NSPA_RT_PRIO - 16</code> </td>
+<td> Override wineserver&rsquo;s FIFO priority. Auto-derive is correct &ndash; do not set manually. </td>
 </tr>
 <tr>
 <td> <code>NSPA_SRV_RT_POLICY</code> </td>
-<td> FF, RR </td>
-<td> FF </td>
+<td> <code>FF</code> </td>
 <td> Wineserver scheduler policy. </td>
 </tr>
 </tbody>
 </table>
 
 
-<blockquote><p><strong>Lenient path (v1 feature):</strong> For client-side self/same-process promotion, <code>THREAD_PRIORITY_TIME_CRITICAL</code> is treated as a special-case ceiling promotion even when the process is not in REALTIME priority class. This covers the common audio pattern where apps call <code>SetThreadPriority(..., 15)</code> without first calling <code>SetPriorityClass(REALTIME)</code>. The lower realtime band still follows the normal process-class rules; the lenient exception is specifically for <code>TIME_CRITICAL</code>.</p></blockquote>
+<p><code>THREAD_PRIORITY_TIME_CRITICAL</code> is special-cased at the client side: even if a process didn&rsquo;t first call <code>SetPriorityClass(REALTIME)</code>, a <code>SetThreadPriority(thread, TIME_CRITICAL)</code> call is treated as a ceiling promotion. This covers the common audio pattern where apps set TIME_CRITICAL without first lifting the process class &ndash; a Win32-API quirk that NSPA accommodates leniently for the ceiling band only.</p>
+
+<p><strong>Detail: see <a href="current-state.gen.html">current-state</a> for the live mapping; per-path PI mechanism in <a href="cs-pi.gen.html">cs-pi</a> and <a href="ntsync-driver.gen.html">ntsync-driver</a>.</strong></p>
 
 <hr />
 
-<h2>5. Synchronization Architecture</h2>
+<h2>7. Live state</h2>
 
-<p>Priority inversion is the primary failure mode for RT audio under Wine. An RT thread blocked on a lock held by a normal-priority thread can be delayed indefinitely while CFS time-slices the holder against dozens of other threads. NSPA addresses this with PI (priority inheritance) on two independent sync paths.</p>
+<p>The state of the art &ndash; what&rsquo;s shipped, what&rsquo;s gated, what&rsquo;s pending, what the next session resumes &ndash; lives at <strong><a href="current-state.gen.html">current-state</a></strong>. That document is the canonical &ldquo;what does NSPA look like today&rdquo; board. It includes the full ntsync patch stack (1003-1009), the validation totals against the production kernel (~370M ops, zero errors, zero KASAN splats, two clean Ableton runs on 2026-04-28), the active-features matrix with default polarity and gating env vars per subsystem, the recent investigation arc (2026-04-26 to 2026-04-28), and the open-work priority order.</p>
 
-<h3>4-Path Synchronization Diagram</h3>
-
-<div class="diagram-container">
-<svg width="100%" viewBox="0 0 880 680" xmlns="http://www.w3.org/2000/svg">
-  <!-- ═══ COLUMN HEADERS ═══ -->
-  <rect x="15" y="8" width="210" height="30" rx="6" fill="#24283b" stroke="#7dcfff" stroke-width="1.5"/>
-  <text x="120" y="28" text-anchor="middle" fill="#7dcfff" font-size="12" font-weight="bold">Path A: CS-PI</text>
-  <rect x="235" y="8" width="210" height="30" rx="6" fill="#24283b" stroke="#e0af68" stroke-width="1.5"/>
-  <text x="340" y="28" text-anchor="middle" fill="#e0af68" font-size="12" font-weight="bold">Path B: NTSync PI</text>
-  <rect x="455" y="8" width="210" height="30" rx="6" fill="#24283b" stroke="#9ece6a" stroke-width="1.5"/>
-  <text x="560" y="28" text-anchor="middle" fill="#9ece6a" font-size="12" font-weight="bold">Path C: pi_cond PI</text>
-  <rect x="675" y="8" width="195" height="30" rx="6" fill="#24283b" stroke="#bb9af7" stroke-width="1.5"/>
-  <text x="772" y="28" text-anchor="middle" fill="#bb9af7" font-size="12" font-weight="bold">Path D: Condvar PI</text>
-
-  <!-- ═══ ROW 1: Win32 API ═══ -->
-  <text x="440" y="62" text-anchor="middle" fill="#e0af68" font-size="10" font-weight="bold">Win32 API / Entry Point</text>
-  <rect x="15" y="72" width="210" height="32" rx="6" fill="#24283b" stroke="#bb9af7" stroke-width="1"/>
-  <text x="120" y="93" text-anchor="middle" fill="#bb9af7" font-size="10">EnterCriticalSection</text>
-  <rect x="235" y="72" width="210" height="32" rx="6" fill="#24283b" stroke="#bb9af7" stroke-width="1"/>
-  <text x="340" y="93" text-anchor="middle" fill="#bb9af7" font-size="10">WaitForSingleObject</text>
-  <rect x="455" y="72" width="210" height="32" rx="6" fill="#24283b" stroke="#9ece6a" stroke-width="1"/>
-  <text x="560" y="93" text-anchor="middle" fill="#9ece6a" font-size="10">pi_cond_wait() (unix)</text>
-  <rect x="675" y="72" width="195" height="32" rx="6" fill="#24283b" stroke="#bb9af7" stroke-width="1"/>
-  <text x="772" y="93" text-anchor="middle" fill="#bb9af7" font-size="10">SleepConditionVariableCS</text>
-
-  <line x1="120" y1="104" x2="120" y2="155" stroke="#7dcfff" stroke-width="1.5"/>
-  <line x1="340" y1="104" x2="340" y2="155" stroke="#7dcfff" stroke-width="1.5"/>
-  <line x1="560" y1="104" x2="560" y2="155" stroke="#9ece6a" stroke-width="1.5"/>
-  <line x1="772" y1="104" x2="772" y2="155" stroke="#7dcfff" stroke-width="1.5"/>
-
-  <!-- ═══ ROW 2: Wine ntdll layer ═══ -->
-  <text x="440" y="145" text-anchor="middle" fill="#e0af68" font-size="10" font-weight="bold">Wine ntdll (PE + Unix)</text>
-  <rect x="15" y="155" width="210" height="48" rx="6" fill="#24283b" stroke="#9ece6a" stroke-width="1"/>
-  <text x="120" y="175" text-anchor="middle" fill="#9ece6a" font-size="9">RtlEnterCriticalSection</text>
-  <text x="120" y="193" text-anchor="middle" fill="#c0caf5" font-size="8">TID CAS fast path / LOCK_PI slow</text>
-  <rect x="235" y="155" width="210" height="48" rx="6" fill="#24283b" stroke="#9ece6a" stroke-width="1"/>
-  <text x="340" y="175" text-anchor="middle" fill="#9ece6a" font-size="9">NtWaitForSingleObject</text>
-  <text x="340" y="193" text-anchor="middle" fill="#c0caf5" font-size="8">inproc_wait &rarr; ioctl(/dev/ntsync)</text>
-  <rect x="455" y="155" width="210" height="48" rx="6" fill="#24283b" stroke="#9ece6a" stroke-width="1"/>
-  <text x="560" y="175" text-anchor="middle" fill="#9ece6a" font-size="9">librtpi (header-only)</text>
-  <text x="560" y="193" text-anchor="middle" fill="#c0caf5" font-size="8">unlock mutex &rarr; sleep on condvar</text>
-  <rect x="675" y="155" width="195" height="48" rx="6" fill="#24283b" stroke="#9ece6a" stroke-width="1"/>
-  <text x="772" y="175" text-anchor="middle" fill="#9ece6a" font-size="9">NtNspaCondWaitPI</text>
-  <text x="772" y="193" text-anchor="middle" fill="#c0caf5" font-size="8">condvar&rarr;mutex map + 3 syscalls</text>
-
-  <line x1="120" y1="203" x2="120" y2="255" stroke="#7dcfff" stroke-width="1.5"/>
-  <line x1="340" y1="203" x2="340" y2="255" stroke="#7dcfff" stroke-width="1.5"/>
-  <line x1="560" y1="203" x2="560" y2="255" stroke="#9ece6a" stroke-width="1.5"/>
-  <line x1="772" y1="203" x2="772" y2="255" stroke="#7dcfff" stroke-width="1.5"/>
-
-  <!-- ═══ ROW 3: Kernel mechanism ═══ -->
-  <text x="440" y="245" text-anchor="middle" fill="#e0af68" font-size="10" font-weight="bold">Linux Kernel Mechanism</text>
-  <rect x="15" y="255" width="210" height="48" rx="6" fill="#24283b" stroke="#7dcfff" stroke-width="1.5"/>
-  <text x="120" y="275" text-anchor="middle" fill="#7dcfff" font-size="10">FUTEX_LOCK_PI</text>
-  <text x="120" y="293" text-anchor="middle" fill="#c0caf5" font-size="8">kernel rt_mutex, transitive PI</text>
-  <rect x="235" y="255" width="210" height="48" rx="6" fill="#24283b" stroke="#e0af68" stroke-width="1.5"/>
-  <text x="340" y="275" text-anchor="middle" fill="#e0af68" font-size="10">/dev/ntsync (5 patches)</text>
-  <text x="340" y="293" text-anchor="middle" fill="#c0caf5" font-size="8">prio-ordered queues, sched_setattr</text>
-  <rect x="455" y="255" width="210" height="48" rx="6" fill="#24283b" stroke="#9ece6a" stroke-width="1.5"/>
-  <text x="560" y="275" text-anchor="middle" fill="#9ece6a" font-size="10">FUTEX_WAIT_REQUEUE_PI</text>
-  <text x="560" y="293" text-anchor="middle" fill="#c0caf5" font-size="8">atomic requeue onto PI mutex</text>
-  <rect x="675" y="255" width="195" height="48" rx="6" fill="#24283b" stroke="#9ece6a" stroke-width="1.5"/>
-  <text x="772" y="275" text-anchor="middle" fill="#9ece6a" font-size="10">FUTEX_WAIT_REQUEUE_PI</text>
-  <text x="772" y="293" text-anchor="middle" fill="#c0caf5" font-size="8">atomic requeue onto CS PI mutex</text>
-
-  <line x1="120" y1="303" x2="120" y2="355" stroke="#7dcfff" stroke-width="1.5"/>
-  <line x1="340" y1="303" x2="340" y2="355" stroke="#e0af68" stroke-width="1.5"/>
-  <line x1="560" y1="303" x2="560" y2="355" stroke="#9ece6a" stroke-width="1.5"/>
-  <line x1="772" y1="303" x2="772" y2="355" stroke="#9ece6a" stroke-width="1.5"/>
-
-  <!-- ═══ ROW 4: PI effect ═══ -->
-  <text x="440" y="345" text-anchor="middle" fill="#e0af68" font-size="10" font-weight="bold">PI Effect</text>
-  <rect x="15" y="355" width="210" height="48" rx="6" fill="#1a3a1a" stroke="#9ece6a" stroke-width="1.5"/>
-  <text x="120" y="375" text-anchor="middle" fill="#9ece6a" font-size="9">Holder boosted to waiter prio</text>
-  <text x="120" y="393" text-anchor="middle" fill="#c0caf5" font-size="8">deadlock detection, +1 CAS (~5ns)</text>
-  <rect x="235" y="355" width="210" height="48" rx="6" fill="#1a3a1a" stroke="#9ece6a" stroke-width="1.5"/>
-  <text x="340" y="375" text-anchor="middle" fill="#9ece6a" font-size="9">Owner boosted via sched_setattr</text>
-  <text x="340" y="393" text-anchor="middle" fill="#c0caf5" font-size="8">prio-ordered wakeup, boost_count</text>
-  <rect x="455" y="355" width="210" height="48" rx="6" fill="#1a3a1a" stroke="#9ece6a" stroke-width="1.5"/>
-  <text x="560" y="375" text-anchor="middle" fill="#9ece6a" font-size="9">Zero-gap: wake &rarr; own mutex</text>
-  <text x="560" y="393" text-anchor="middle" fill="#c0caf5" font-size="8">kernel requeues atomically</text>
-  <rect x="675" y="355" width="195" height="48" rx="6" fill="#1a3a1a" stroke="#9ece6a" stroke-width="1.5"/>
-  <text x="772" y="375" text-anchor="middle" fill="#9ece6a" font-size="9">Zero-gap: wake &rarr; own CS</text>
-  <text x="772" y="393" text-anchor="middle" fill="#c0caf5" font-size="8">kernel requeues atomically</text>
-
-  <line x1="120" y1="403" x2="120" y2="455" stroke="#7dcfff" stroke-width="1.5"/>
-  <line x1="340" y1="403" x2="340" y2="455" stroke="#e0af68" stroke-width="1.5"/>
-  <line x1="560" y1="403" x2="560" y2="455" stroke="#9ece6a" stroke-width="1.5"/>
-  <line x1="772" y1="403" x2="772" y2="455" stroke="#9ece6a" stroke-width="1.5"/>
-
-  <!-- ═══ ROW 5: Release / Signal ═══ -->
-  <text x="440" y="445" text-anchor="middle" fill="#e0af68" font-size="10" font-weight="bold">Release / Signal Path</text>
-  <rect x="15" y="455" width="210" height="48" rx="6" fill="#24283b" stroke="#7dcfff" stroke-width="1"/>
-  <text x="120" y="475" text-anchor="middle" fill="#7dcfff" font-size="9">LeaveCriticalSection</text>
-  <text x="120" y="493" text-anchor="middle" fill="#c0caf5" font-size="8">CAS(tid,0) or FUTEX_UNLOCK_PI</text>
-  <rect x="235" y="455" width="210" height="48" rx="6" fill="#24283b" stroke="#e0af68" stroke-width="1"/>
-  <text x="340" y="475" text-anchor="middle" fill="#e0af68" font-size="9">ReleaseMutex</text>
-  <text x="340" y="493" text-anchor="middle" fill="#c0caf5" font-size="8">ntsync_pi_drop, restore sched</text>
-  <rect x="455" y="455" width="210" height="48" rx="6" fill="#24283b" stroke="#9ece6a" stroke-width="1"/>
-  <text x="560" y="475" text-anchor="middle" fill="#9ece6a" font-size="9">pi_cond_signal</text>
-  <text x="560" y="493" text-anchor="middle" fill="#c0caf5" font-size="8">CMP_REQUEUE_PI (wake 1)</text>
-  <rect x="675" y="455" width="195" height="48" rx="6" fill="#24283b" stroke="#bb9af7" stroke-width="1"/>
-  <text x="772" y="475" text-anchor="middle" fill="#bb9af7" font-size="9">WakeConditionVariable</text>
-  <text x="772" y="493" text-anchor="middle" fill="#c0caf5" font-size="8">NtNspaCondSignalPI (map lookup)</text>
-
-  <!-- ═══ SCOPE ROW ═══ -->
-  <rect x="15" y="520" width="210" height="28" rx="6" fill="#24283b" stroke="#3b4261" stroke-width="1"/>
-  <text x="120" y="539" text-anchor="middle" fill="#c0caf5" font-size="8">Scope: all Win32 CriticalSections</text>
-  <rect x="235" y="520" width="210" height="28" rx="6" fill="#24283b" stroke="#3b4261" stroke-width="1"/>
-  <text x="340" y="539" text-anchor="middle" fill="#c0caf5" font-size="8">Scope: Win32 Mutex/Sem/Event</text>
-  <rect x="455" y="520" width="210" height="28" rx="6" fill="#24283b" stroke="#3b4261" stroke-width="1"/>
-  <text x="560" y="539" text-anchor="middle" fill="#c0caf5" font-size="8">Scope: audio, gstreamer, winebus</text>
-  <rect x="675" y="520" width="195" height="28" rx="6" fill="#24283b" stroke="#3b4261" stroke-width="1"/>
-  <text x="772" y="539" text-anchor="middle" fill="#c0caf5" font-size="8">Scope: Win32 CondVar + CS</text>
-
-  <!-- ═══ NOT COVERED ═══ -->
-  <rect x="15" y="565" width="855" height="32" rx="6" fill="#24283b" stroke="#f7768e" stroke-width="1" stroke-dasharray="4,3"/>
-  <text x="440" y="586" text-anchor="middle" fill="#f7768e" font-size="9">Not covered: SleepConditionVariableSRW &mdash; SRW locks have no ownership, no PI target (unsolved in Linux kernel)</text>
-
-  <!-- ═══ GATING ═══ -->
-  <rect x="15" y="612" width="855" height="32" rx="6" fill="#24283b" stroke="#e0af68" stroke-width="1"/>
-  <text x="440" y="633" text-anchor="middle" fill="#e0af68" font-size="9">All 4 paths gated on NSPA_RT_PRIO &mdash; when unset, every code path is byte-identical to upstream Wine</text>
-
-</svg>
-</div>
-
-
-
-<h3>Path A: CRITICAL_SECTION PI (CS-PI)</h3>
-
-<p>Win32 <code>CRITICAL_SECTION</code> is the most contended lock in typical Wine workloads &ndash; used by heap operations, loader, DllMain serialization, GDI, and most app/plugin code. NSPA&rsquo;s CS-PI repurposes the <code>LockSemaphore</code> field of <code>RTL_CRITICAL_SECTION</code> as a FUTEX_LOCK_PI word.</p>
-
-<h4>Protocol</h4>
-
-<ol>
-<li><strong>Acquire (uncontended):</strong> PE side does <code>InterlockedIncrement(&amp;LockCount)</code>. If we won (-1 &ndash;> 0), CAS our Linux TID into <code>LockSemaphore</code>. Done &ndash; never leaves user space.</li>
-<li><strong>Acquire (contended):</strong> PE side calls <code>NtNspaLockCriticalSectionPI(address)</code>, crossing to Unix side. Unix side calls <code>futex(&amp;LockSemaphore, FUTEX_LOCK_PI_PRIVATE, ...)</code>. The kernel sees the owner TID in the futex word, boosts the owner to the waiter&rsquo;s scheduling priority, and blocks the waiter on an rt_mutex.</li>
-<li><strong>Release (no waiters):</strong> PE side does <code>CAS(LockSemaphore, my_tid, 0)</code>. Pure user-space.</li>
-<li><strong>Release (waiters present):</strong> If FUTEX_WAITERS bit is set, PE side calls <code>NtNspaUnlockCriticalSectionPI(address)</code>. Kernel transfers ownership to the highest-priority waiter and drops the boost.</li>
-</ol>
-
-
-<blockquote><p><strong>TID source:</strong> PE code cannot call <code>syscall(SYS_gettid)</code> directly. NSPA adds <code>NtNspaGetUnixTid()</code> which returns the Linux kernel TID from <code>ntdll_thread_data-&gt;nspa_unix_tid</code>. PE caches this in a <code>__thread</code> variable &ndash; the syscall fires at most once per thread.</p></blockquote>
-
-<h3>Path B: NTSync Mutex PI</h3>
-
-<p>Win32 <code>CreateMutex</code> + <code>WaitForSingleObject</code> goes through the <code>/dev/ntsync</code> kernel driver. NSPA&rsquo;s five kernel patches add PI, uring_fd, and PREEMPT_RT fixes to this path (see Section 6). The flow:</p>
-
-<ol>
-<li><code>NtWaitForSingleObject</code> &ndash;> <code>inproc_wait()</code> resolves the mutex&rsquo;s fd from the handle cache.</li>
-<li><code>linux_wait_objs()</code> calls <code>ioctl(device, NTSYNC_IOC_WAIT_ANY, &amp;args)</code>.</li>
-<li>Inside the kernel, <code>ntsync_insert_waiter()</code> inserts the waiter into a priority-ordered queue (patch 2).</li>
-<li><code>ntsync_pi_recalc()</code> scans both <code>any_waiters</code> and <code>all_waiters</code> for the highest-priority waiter. Compares against the owner&rsquo;s <strong>saved original priority</strong> (not <code>normal_prio</code>, which changes after boost). If boost needed, looks up or creates a per-task <code>ntsync_pi_owner</code> tracking entry, increments <code>boost_count</code>, and boosts via <code>sched_setattr_nocheck()</code> (patch 3 v2).</li>
-<li>On release, <code>try_wake_any_mutex()</code> wakes the highest-priority waiter. <code>ntsync_pi_drop()</code> decrements <code>boost_count</code>; only restores original scheduling when the last boost on that task is removed (multi-object safe).</li>
-</ol>
-
-
-<h3>Fallback Behavior</h3>
-
-<p>Both PI paths degrade gracefully. CS-PI falls back to the legacy keyed-event wait if <code>FUTEX_LOCK_PI</code> returns <code>ENOSYS</code>. NTSync PI requires the patched kernel driver &ndash; without it, waiters are FIFO-ordered (upstream default) with no owner boost.</p>
-
-<h3>SRW Lock Spin Phase</h3>
-
-<p>Windows SRW locks (Slim Reader/Writer) spin briefly before entering the kernel wait path. NSPA implements this behavior:</p>
-
-<ul>
-<li><strong>256 spin iterations</strong> before transitioning to <code>FUTEX_WAIT</code> / <code>FUTEX_LOCK_PI</code></li>
-<li><strong>RT threads skip the spin phase entirely</strong> &ndash; a SCHED_FIFO thread spinning wastes its quantum and creates priority inversion when the lock holder is a lower-priority thread that cannot run while the spinner holds the CPU</li>
-<li><strong>Spin detection:</strong> <code>nspa_is_rt_thread()</code> checks cached scheduling policy (set during RT promotion)</li>
-</ul>
-
-<p>This matches Windows NT behavior where <code>SRWLock</code> uses a brief spin phase before blocking. The 256-iteration count is empirically chosen to cover the common case of short critical sections (sub-microsecond) without burning excessive cycles on longer holds.</p>
-
-<p><strong>Impact:</strong> Reduces kernel transitions for uncontended or briefly-contended SRW locks. The v5 NTSync d4 rapid throughput improved from 232K to 259K ops/s (+11.6%), consistent with fewer futex syscalls in the lock path.</p>
-
-<p>Implementation: <code>dlls/ntdll/sync.c</code> (SRW acquire path).</p>
-
-<h3>pi_cond Requeue-PI (Unix-Side Condvars)</h3>
-
-<p>Wine-NSPA&rsquo;s <code>pi_cond_t</code> (condition variable with PI support, from librtpi) uses <code>FUTEX_WAIT_REQUEUE_PI</code> and <code>FUTEX_CMP_REQUEUE_PI</code> to close the PI gap in condition variable wakeup. The waiter transitions directly from &ldquo;blocked on condvar&rdquo; to &ldquo;blocked on PI mutex with priority inheritance&rdquo; &ndash; no gap.</p>
-
-<p>Implementation: <code>libs/librtpi/rtpi.h</code> (header-only inline, <code>pi_cond_wait</code>, <code>pi_cond_signal</code>, <code>pi_cond_broadcast</code>).</p>
-
-<h3>Win32 Condvar PI (RtlSleepConditionVariableCS)</h3>
-
-<p>The same requeue-PI mechanism applied to PE-side Win32 condvars. When CS-PI is active and the CS is held non-recursively, <code>RtlSleepConditionVariableCS</code> takes the PI path: capture value, register condvar&rarr;mutex mapping, <code>NtNspaCondWaitPI</code> (unix: <code>FUTEX_UNLOCK_PI</code> + <code>FUTEX_WAIT_REQUEUE_PI</code>). On signal, kernel atomically requeues waiter onto PI mutex &ndash; zero gap.</p>
-
-<p><strong>Scope:</strong> CS-backed condvars only. SRW-backed condvars remain without PI (unsolved problem even in the Linux kernel).</p>
-
-<table>
-<thead>
-<tr>
-<th> PI Coverage Path </th>
-<th> Mechanism </th>
-<th> Scope </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> CS-PI </td>
-<td> <code>FUTEX_LOCK_PI</code> on LockSemaphore </td>
-<td> Win32 CriticalSection enter/leave </td>
-</tr>
-<tr>
-<td> NTSync PI </td>
-<td> Kernel ntsync driver (priority-ordered wakeup) </td>
-<td> Win32 Mutex/Semaphore/Event </td>
-</tr>
-<tr>
-<td> pi_cond requeue-PI </td>
-<td> <code>FUTEX_WAIT_REQUEUE_PI</code> in librtpi </td>
-<td> Unix-side condvars (audio, gstreamer) </td>
-</tr>
-<tr>
-<td> <strong>Win32 condvar PI</strong> </td>
-<td> <strong><code>FUTEX_WAIT_REQUEUE_PI</code> for <code>RtlSleepConditionVariableCS</code></strong> </td>
-<td> <strong>Win32 SleepConditionVariableCS</strong> </td>
-</tr>
-</tbody>
-</table>
-
-<h3>Condvar Requeue-PI Diagram</h3>
-
-<p>Both pi_cond (unix-side) and Win32 condvar PI (PE-side) use <code>FUTEX_WAIT_REQUEUE_PI</code> / <code>FUTEX_CMP_REQUEUE_PI</code> to atomically move waiters from the condvar futex onto the PI mutex chain &mdash; eliminating the priority inversion gap between wake and mutex reacquire.</p>
-
-<div class="diagram-container">
-<svg width="100%" viewBox="0 0 860 420" xmlns="http://www.w3.org/2000/svg">
-  <rect x="20" y="10" width="390" height="28" rx="6" fill="#24283b" stroke="#f7768e" stroke-width="1.5"/>
-  <text x="215" y="29" text-anchor="middle" fill="#f7768e" font-size="12" font-weight="bold">Old: plain FUTEX_WAIT (PI gap)</text>
-  <rect x="450" y="10" width="390" height="28" rx="6" fill="#24283b" stroke="#9ece6a" stroke-width="1.5"/>
-  <text x="645" y="29" text-anchor="middle" fill="#9ece6a" font-size="12" font-weight="bold">New: FUTEX_WAIT_REQUEUE_PI (no gap)</text>
-  <rect x="40" y="55" width="350" height="24" rx="6" fill="#24283b" stroke="#bb9af7" stroke-width="1"/>
-  <text x="215" y="72" text-anchor="middle" fill="#bb9af7" font-size="10">RT thread: pi_cond_wait(cond, mutex)</text>
-  <line x1="215" y1="79" x2="215" y2="95" stroke="#7dcfff" stroke-width="1.5"/>
-  <rect x="40" y="95" width="350" height="24" rx="6" fill="#24283b" stroke="#7dcfff" stroke-width="1"/>
-  <text x="215" y="112" text-anchor="middle" fill="#7dcfff" font-size="10">pi_mutex_unlock(mutex) &mdash; drop PI boost</text>
-  <line x1="215" y1="119" x2="215" y2="135" stroke="#7dcfff" stroke-width="1.5"/>
-  <rect x="40" y="135" width="350" height="24" rx="6" fill="#24283b" stroke="#7dcfff" stroke-width="1"/>
-  <text x="215" y="152" text-anchor="middle" fill="#7dcfff" font-size="10">FUTEX_WAIT(&amp;cond, seq) &mdash; sleep on condvar</text>
-  <line x1="215" y1="159" x2="215" y2="175" stroke="#e0af68" stroke-width="1.5"/>
-  <rect x="40" y="175" width="350" height="24" rx="6" fill="#24283b" stroke="#e0af68" stroke-width="1"/>
-  <text x="215" y="192" text-anchor="middle" fill="#e0af68" font-size="10">FUTEX_WAKE &mdash; signaler wakes us</text>
-  <line x1="215" y1="199" x2="215" y2="215" stroke="#f7768e" stroke-width="2"/>
-  <rect x="30" y="215" width="370" height="50" rx="6" fill="#24283b" stroke="#f7768e" stroke-width="2.5"/>
-  <text x="215" y="235" text-anchor="middle" fill="#f7768e" font-size="11" font-weight="bold">PI GAP &mdash; thread runnable, no boost</text>
-  <text x="215" y="252" text-anchor="middle" fill="#c0caf5" font-size="9">Can be preempted by lower-priority threads</text>
-  <line x1="215" y1="265" x2="215" y2="285" stroke="#f7768e" stroke-width="2"/>
-  <rect x="40" y="285" width="350" height="24" rx="6" fill="#24283b" stroke="#7dcfff" stroke-width="1"/>
-  <text x="215" y="302" text-anchor="middle" fill="#7dcfff" font-size="10">pi_mutex_lock(mutex) &mdash; manual reacquire</text>
-  <line x1="215" y1="309" x2="215" y2="325" stroke="#7dcfff" stroke-width="1.5"/>
-  <rect x="40" y="325" width="350" height="24" rx="6" fill="#24283b" stroke="#9ece6a" stroke-width="1"/>
-  <text x="215" y="342" text-anchor="middle" fill="#9ece6a" font-size="10">PI restored (kernel rt_mutex)</text>
-  <rect x="60" y="365" width="310" height="30" rx="6" fill="#24283b" stroke="#f7768e" stroke-width="1"/>
-  <text x="215" y="385" text-anchor="middle" fill="#f7768e" font-size="9">worst-case max: 53.8us (measured under RT load)</text>
-  <rect x="470" y="55" width="350" height="24" rx="6" fill="#24283b" stroke="#bb9af7" stroke-width="1"/>
-  <text x="645" y="72" text-anchor="middle" fill="#bb9af7" font-size="10">RT thread: pi_cond_wait(cond, mutex)</text>
-  <line x1="645" y1="79" x2="645" y2="95" stroke="#7dcfff" stroke-width="1.5"/>
-  <rect x="470" y="95" width="350" height="24" rx="6" fill="#24283b" stroke="#7dcfff" stroke-width="1"/>
-  <text x="645" y="112" text-anchor="middle" fill="#7dcfff" font-size="10">pi_mutex_unlock(mutex) &mdash; drop PI boost</text>
-  <line x1="645" y1="119" x2="645" y2="135" stroke="#7dcfff" stroke-width="1.5"/>
-  <rect x="470" y="135" width="350" height="24" rx="6" fill="#24283b" stroke="#9ece6a" stroke-width="1.5"/>
-  <text x="645" y="152" text-anchor="middle" fill="#9ece6a" font-size="10">FUTEX_WAIT_REQUEUE_PI(&amp;cond, &amp;mutex)</text>
-  <line x1="645" y1="159" x2="645" y2="175" stroke="#e0af68" stroke-width="1.5"/>
-  <rect x="470" y="175" width="350" height="24" rx="6" fill="#24283b" stroke="#e0af68" stroke-width="1"/>
-  <text x="645" y="192" text-anchor="middle" fill="#e0af68" font-size="10">FUTEX_CMP_REQUEUE_PI &mdash; signaler requeues</text>
-  <line x1="645" y1="199" x2="645" y2="215" stroke="#9ece6a" stroke-width="2"/>
-  <rect x="460" y="215" width="370" height="50" rx="6" fill="#1a3a1a" stroke="#9ece6a" stroke-width="2.5"/>
-  <text x="645" y="235" text-anchor="middle" fill="#9ece6a" font-size="11" font-weight="bold">ATOMIC &mdash; requeued onto PI mutex chain</text>
-  <text x="645" y="252" text-anchor="middle" fill="#c0caf5" font-size="9">Kernel transfers waiter directly, no userspace gap</text>
-  <line x1="645" y1="265" x2="645" y2="285" stroke="#9ece6a" stroke-width="2"/>
-  <rect x="470" y="285" width="350" height="24" rx="6" fill="#24283b" stroke="#9ece6a" stroke-width="1.5"/>
-  <text x="645" y="302" text-anchor="middle" fill="#9ece6a" font-size="10">Mutex acquired &mdash; PI already in effect</text>
-  <line x1="645" y1="309" x2="645" y2="325" stroke="#9ece6a" stroke-width="1.5"/>
-  <rect x="470" y="325" width="350" height="24" rx="6" fill="#24283b" stroke="#9ece6a" stroke-width="1"/>
-  <text x="645" y="342" text-anchor="middle" fill="#9ece6a" font-size="10">Unbroken PI through entire path</text>
-  <rect x="490" y="365" width="310" height="30" rx="6" fill="#24283b" stroke="#9ece6a" stroke-width="1"/>
-  <text x="645" y="385" text-anchor="middle" fill="#9ece6a" font-size="9">worst-case max: 31.6us (-41% vs old, under RT load)</text>
-</svg>
-</div>
-
-<p>Full details: <a href="condvar-pi-requeue.gen.html">Win32 Condvar PI documentation</a> (architecture, syscall interface, mapping table design, 2 SVG diagrams).</p>
+<p>This architecture overview describes the <strong>shape</strong> of the system. <code>current-state.md</code> describes its <strong>status</strong>. Both should be read together when getting up to speed on the project.</p>
 
 <hr />
 
-<h2>6. NTSync Kernel Patches</h2>
+<h2>8. Doc index</h2>
 
-<p>Five patches applied to <code>drivers/misc/ntsync.c</code> in the NSPA kernel tree. Patches 1-3 make the NTSync driver safe on PREEMPT_RT and add Windows-faithful priority semantics with PI boost. Patches 4-5 integrate ntsync with io_uring for CQE wakeup and fix a PREEMPT_RT allocation bug.</p>
+<p>Master overview (this doc) plus dedicated subsystem pages.</p>
 
-<h3>Patch 1: raw_spinlock + rt_mutex hardening</h3>
-
-<blockquote><p><strong>Problem:</strong> Upstream ntsync uses <code>spinlock_t</code>, which on PREEMPT_RT becomes a sleeping <code>rt_mutex</code>. This is correct for general use but changes the timing characteristics and makes some code paths that assume non-preemptibility incorrect.</p>
-
-<p><strong>Fix:</strong> Convert <code>obj-&gt;lock</code> to <code>raw_spinlock_t</code> with <code>raw_spin_lock()</code> / <code>raw_spin_unlock()</code>. This preserves true spin semantics even on PREEMPT_RT kernels, matching the driver&rsquo;s design assumption of short critical sections around object state updates.</p></blockquote>
-
-<h3>Patch 2: Priority-ordered waiter queues</h3>
-
-<blockquote><p><strong>Problem:</strong> Upstream ntsync uses <code>list_add_tail()</code> for all waiters &ndash; FIFO order. Windows NT uses strict priority ordering: the highest-priority waiter is always woken first on object release.</p>
-
-<p><strong>Fix:</strong> Replace <code>list_add_tail()</code> with <code>ntsync_insert_waiter()</code>, which walks the waiter list and inserts the new entry before the first entry with lower scheduling priority (<code>task-&gt;prio</code>). Same-priority waiters are FIFO within their level. This matches Windows NT scheduling semantics exactly.</p></blockquote>
-
-<pre><code class="language-c">static void ntsync_insert_waiter(struct ntsync_q_entry *new_entry,
-                                 struct list_head *head)
-{
-    struct ntsync_q_entry *entry;
-    list_for_each_entry(entry, head, node) {
-        if (new_entry-&gt;q-&gt;task-&gt;prio &lt; entry-&gt;q-&gt;task-&gt;prio) {
-            list_add_tail(&amp;new_entry-&gt;node, &amp;entry-&gt;node);
-            return;
-        }
-    }
-    list_add_tail(&amp;new_entry-&gt;node, head);
-}</code></pre>
-
-<h3>Patch 3: Mutex owner PI boost (v2, 2026-04-15)</h3>
-
-<blockquote><p><strong>Problem:</strong> When a SCHED_FIFO thread waits on a mutex held by a SCHED_OTHER thread, the holder may not get CPU time promptly (CFS time-sharing), causing unbounded priority inversion.</p>
-
-<p><strong>Fix (v2):</strong> <code>ntsync_pi_recalc()</code> scans <strong>both</strong> <code>any_waiters</code> and <code>all_waiters</code> for the highest-priority waiter. Compares against the owner&rsquo;s <strong>saved original priority</strong> (via per-device <code>ntsync_pi_owner</code> tracking), not <code>normal_prio</code> (which changes after boost). Per-task <code>boost_count</code> ensures original scheduling is saved once and restored only when ALL mutexes stop boosting that task. Conservative over-boosting between first and last removal is safe (never under-boosts).</p>
-
-<p><strong>v2 fixes three bugs from v1:</strong> (a) multi-object PI corruption when a task held multiple boosted mutexes, (b) zero PI for <code>WaitForMultipleObjects(bWaitAll=TRUE)</code>, &copy; stale <code>normal_prio</code> comparison causing boost/unboost thrashing. Test results: philosophers RT max wait 1620→865us (-46.6%), ntsync d8 PI contention 479→239ms (-50.1%).</p></blockquote>
-
-<pre><code class="language-c">/* Per-task tracking — saves orig_attr once, restores when boost_count reaches 0 */
-po = find_pi_owner(dev, owner);
-base_prio = po ? po-&gt;orig_normal_prio : owner-&gt;normal_prio;
-
-if (highest_prio &lt; base_prio &amp;&amp; !was_boosted) {
-    if (!po) {
-        po = kzalloc(sizeof(*po), GFP_ATOMIC);
-        po-&gt;orig_attr = capture_sched(owner);
-        po-&gt;orig_normal_prio = owner-&gt;normal_prio;
-        list_add(&amp;po-&gt;node, &amp;dev-&gt;boosted_owners);
-    }
-    po-&gt;boost_count++;
-    obj-&gt;u.mutex.pi_boosted = true;
-}
-if (needs_boost &amp;&amp; highest_prio &lt; owner-&gt;prio)
-    sched_setattr_nocheck(owner, &amp;boost);</code></pre>
-
-<div class="diagram-container">
-<svg width="100%" viewBox="0 0 780 340" xmlns="http://www.w3.org/2000/svg">
-  <style>
-    .pi-box { fill: #24283b; stroke: #9aa5ce; stroke-width: 1.5; rx: 6; }
-    .pi-box-new { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 2; rx: 6; }
-    .pi-box-data { fill: #1a1a2a; stroke: #7aa2f7; stroke-width: 1.5; rx: 6; }
-    .pi-label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
-    .pi-label-sm { fill: #c0caf5; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
-    .pi-label-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
-    .pi-label-yellow { fill: #e0af68; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
-    .pi-label-cyan { fill: #7dcfff; font-size: 10px; font-family: 'JetBrains Mono', monospace; }
-    .pi-arrow { stroke: #9aa5ce; stroke-width: 1.5; fill: none; }
-    .pi-arrow-green { stroke: #9ece6a; stroke-width: 2; fill: none; }
-  </style>
-  <defs>
-    <marker id="pi-arr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#c0caf5"/></marker>
-    <marker id="pi-arr-g" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#9ece6a"/></marker>
-  </defs>
-
-  <text x="390" y="20" class="pi-label-yellow" text-anchor="middle">NTSync PI v2: Per-Task Boost Tracking</text>
-
-  <!-- ntsync_device -->
-  <rect x="20" y="35" width="220" height="100" class="pi-box-new"/>
-  <text x="130" y="55" class="pi-label-green" text-anchor="middle">ntsync_device</text>
-  <text x="130" y="72" class="pi-label-sm" text-anchor="middle">wait_all_lock (rt_mutex)</text>
-  <text x="130" y="86" class="pi-label-sm" text-anchor="middle">boost_lock (raw_spinlock)</text>
-  <text x="130" y="100" class="pi-label-green" text-anchor="middle">boosted_owners (list)</text>
-  <text x="130" y="126" class="pi-label-sm" text-anchor="middle">one per /dev/ntsync fd</text>
-
-  <!-- Arrow to pi_owner -->
-  <line x1="240" y1="95" x2="300" y2="95" class="pi-arrow-green"/>
-
-  <!-- ntsync_pi_owner -->
-  <rect x="305" y="40" width="220" height="110" class="pi-box-data"/>
-  <text x="415" y="60" class="pi-label-cyan" text-anchor="middle">ntsync_pi_owner</text>
-  <text x="415" y="78" class="pi-label-sm" text-anchor="middle">task: owner task_struct*</text>
-  <text x="415" y="92" class="pi-label-sm" text-anchor="middle">orig_attr: saved SCHED_OTHER</text>
-  <text x="415" y="106" class="pi-label-sm" text-anchor="middle">orig_normal_prio: 120 (CFS)</text>
-  <text x="415" y="120" class="pi-label-green" text-anchor="middle">boost_count: 2 (M1 + M2)</text>
-  <text x="415" y="142" class="pi-label-sm" text-anchor="middle">one per boosted task</text>
-
-  <!-- Mutex objects -->
-  <rect x="570" y="35" width="190" height="55" class="pi-box"/>
-  <text x="665" y="55" class="pi-label" text-anchor="middle">Mutex M1</text>
-  <text x="665" y="70" class="pi-label-sm" text-anchor="middle">pi_boosted = true</text>
-  <text x="665" y="82" class="pi-label-sm" text-anchor="middle">any_waiters: [RT prio 15]</text>
-
-  <rect x="570" y="100" width="190" height="55" class="pi-box"/>
-  <text x="665" y="120" class="pi-label" text-anchor="middle">Mutex M2</text>
-  <text x="665" y="135" class="pi-label-sm" text-anchor="middle">pi_boosted = true</text>
-  <text x="665" y="147" class="pi-label-sm" text-anchor="middle">all_waiters: [RT prio 20]</text>
-
-  <line x1="525" y1="80" x2="565" y2="62" class="pi-arrow"/>
-  <line x1="525" y1="100" x2="565" y2="127" class="pi-arrow"/>
-
-  <!-- Flow: recalc -->
-  <rect x="40" y="180" width="700" height="145" rx="6" fill="none" stroke="#3b4261" stroke-width="1" stroke-dasharray="5,3"/>
-  <text x="390" y="200" class="pi-label-yellow" text-anchor="middle">ntsync_pi_recalc() flow</text>
-
-  <rect x="60" y="215" width="145" height="40" class="pi-box"/>
-  <text x="132" y="232" class="pi-label-sm" text-anchor="middle">scan any_waiters</text>
-  <text x="132" y="246" class="pi-label-sm" text-anchor="middle">scan all_waiters</text>
-
-  <line x1="205" y1="235" x2="230" y2="235" class="pi-arrow"/>
-
-  <rect x="235" y="215" width="130" height="40" class="pi-box"/>
-  <text x="300" y="232" class="pi-label-sm" text-anchor="middle">compare vs</text>
-  <text x="300" y="246" class="pi-label-cyan" text-anchor="middle">orig_normal_prio</text>
-
-  <line x1="365" y1="235" x2="395" y2="235" class="pi-arrow"/>
-
-  <rect x="400" y="215" width="155" height="40" class="pi-box-new"/>
-  <text x="477" y="232" class="pi-label-green" text-anchor="middle">find/create pi_owner</text>
-  <text x="477" y="246" class="pi-label-sm" text-anchor="middle">boost_count++ or --</text>
-
-  <line x1="555" y1="235" x2="585" y2="235" class="pi-arrow-green"/>
-
-  <rect x="590" y="210" width="130" height="50" class="pi-box-new"/>
-  <text x="655" y="228" class="pi-label-green" text-anchor="middle">boost: setattr</text>
-  <text x="655" y="242" class="pi-label-sm" text-anchor="middle">unboost: only if</text>
-  <text x="655" y="254" class="pi-label-sm" text-anchor="middle">boost_count == 0</text>
-
-  <text x="390" y="310" class="pi-label-sm" text-anchor="middle">Multi-object safe: owner stays boosted until ALL mutexes stop contributing (conservative over-boost)</text>
-</svg>
-</div>
+<table>
+<thead>
+<tr>
+<th> Doc </th>
+<th> Subject </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> <code>architecture.gen.html</code> (this doc) </td>
+<td> Master overview &ndash; shape and structure </td>
+</tr>
+<tr>
+<td> <code>current-state.gen.html</code> </td>
+<td> Live state board &ndash; what&rsquo;s shipped, what&rsquo;s pending, validation totals, recent arc </td>
+</tr>
+<tr>
+<td> <code>bypass-overview.gen.html</code> </td>
+<td> The strangler trajectory &ndash; every bypass, status, composition </td>
+</tr>
+<tr>
+<td> <code>wineserver-decomposition.gen.html</code> </td>
+<td> Long-horizon plan &ndash; Phase 1-4 wineserver process decomposition </td>
+</tr>
+<tr>
+<td> <code>gamma-channel-dispatcher.gen.html</code> </td>
+<td> Per-process kernel-mediated wineserver IPC (gamma dispatcher) </td>
+</tr>
+<tr>
+<td> <code>nt-local-stubs.gen.html</code> </td>
+<td> NT-local stubs architectural pattern </td>
+</tr>
+<tr>
+<td> <code>nspa-local-file-architecture.gen.html</code> </td>
+<td> NT-local file (read-only regular-file <code>NtCreateFile</code> bypass) </td>
+</tr>
+<tr>
+<td> <code>msg-ring-architecture.gen.html</code> </td>
+<td> msg-ring v1 + v2 design (POST/SEND/REPLY, Phase A, B1.0, Phase C, MR1/MR2/MR4) </td>
+</tr>
+<tr>
+<td> <code>hook-cache.gen.html</code> </td>
+<td> Tier 1+2 Win32 hook-chain cache </td>
+</tr>
+<tr>
+<td> <code>ntsync-driver.gen.html</code> </td>
+<td> NTSync kernel driver, patch stack 1003-1009 </td>
+</tr>
+<tr>
+<td> <code>cs-pi.gen.html</code> </td>
+<td> Critical Section Priority Inheritance (Path A; v2.3) </td>
+</tr>
+<tr>
+<td> <code>condvar-pi-requeue.gen.html</code> </td>
+<td> <code>RtlSleepConditionVariableCS</code> with <code>FUTEX_WAIT_REQUEUE_PI</code> (Path D) </td>
+</tr>
+<tr>
+<td> <code>io_uring-architecture.gen.html</code> </td>
+<td> io_uring Phase 1 (regular-file I/O) + ALERTED-state interception </td>
+</tr>
+<tr>
+<td> <code>audio-stack.gen.html</code> </td>
+<td> winejack.drv + nspaASIO Phase F </td>
+</tr>
+<tr>
+<td> <code>nspa-rt-test.gen.html</code> </td>
+<td> nspa_rt_test PE harness reference </td>
+</tr>
+<tr>
+<td> <code>decoration-loop-investigation.gen.html</code> </td>
+<td> Wine 11.6 X11 decoration-loop bug 57955 case study </td>
+</tr>
+<tr>
+<td> <code>sync-primitives-research.gen.html</code> </td>
+<td> Background research on sync-primitive selection </td>
+</tr>
+<tr>
+<td> <code>shmem-ipc.gen.html</code> </td>
+<td> Historical &ndash; legacy shmem dispatcher (superseded by gamma) </td>
+</tr>
+</tbody>
+</table>
 
 
-<h3>Scaling Characteristics</h3>
-
-<p>Tested with transitive PI chains up to depth 12. RT wait time does not increase with chain depth beyond the tail holder&rsquo;s work time (~235ms for a 100M-iter CPU loop). The per-hop increment (~50ms) is visible in individual holder elapsed times but does not accumulate in the RT thread&rsquo;s total wait. <code>ntsync_pi_recalc()</code> scales to at least depth 12 without degradation.</p>
-
-<h3>Patch 4: uring_fd extension (io_uring CQE wakeup)</h3>
-
-<blockquote><p><strong>Problem:</strong> When a thread is blocked in <code>NTSYNC_IOC_WAIT_ANY/ALL</code> and an io_uring CQE arrives (e.g. socket data ready), there&rsquo;s no mechanism to wake the thread — the CQE sits in the ring until the ntsync wait times out or another object is signaled.</p>
-
-<p><strong>Fix:</strong> Repurpose the <code>pad</code> field in <code>ntsync_wait_args</code> as <code>uring_fd</code>. When set to a valid eventfd (registered with <code>IORING_REGISTER_EVENTFD</code>), the ntsync wait ioctl monitors it via <code>poll_initwait</code>/<code>vfs_poll</code> alongside the ntsync objects. When the eventfd fires (io_uring posted a CQE), the ioctl returns <code>NTSYNC_INDEX_URING_READY</code> (0xFFFFFFFE). The client-side retry loop in <code>sync.c</code> drains CQEs and re-enters the wait.</p></blockquote>
-
-<h3>Patch 5: PI kmalloc pre-allocation fix</h3>
-
-<blockquote><p><strong>Problem:</strong> <code>ntsync_pi_recalc()</code> called <code>kzalloc(GFP_ATOMIC)</code> while holding a <code>raw_spinlock</code>. On PREEMPT_RT, the slab allocator&rsquo;s internal <code>rt_spin_lock</code> can sleep, triggering <code>__schedule_bug</code> (BUG: scheduling while atomic).</p>
-
-<p><strong>Fix:</strong> Pre-allocate the <code>ntsync_pi_owner</code> struct before acquiring the raw spinlock. Pass the pre-allocated pointer into <code>ntsync_pi_recalc()</code> and consume it only if a new owner entry is needed; otherwise free it after releasing the lock.</p></blockquote>
+<p>For commit-level history, the wine submodule is at <code>wine-rt-claude/wine</code> (HEAD <code>ac823311aba</code> as of this writing); the kernel <code>ntsync</code> source is at <code>linux-nspa/src/linux-6.19.11/drivers/misc/ntsync.{c,h}</code>.</p>
 
 <hr />
 
-<h2>7. io_uring I/O Architecture</h2>
-
-<p>Per-thread io_uring rings in ntdll&rsquo;s Unix layer bypass the wineserver for file and socket I/O. See <code>io_uring-architecture.html</code> for the full design document with diagrams.</p>
-
-<h3>What It Replaces</h3>
-
-<table>
-<thead>
-<tr>
-<th> Operation </th>
-<th> Before (server-mediated) </th>
-<th> After (io_uring) </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> Sync file poll </td>
-<td> <code>poll()</code> syscall in NtReadFile </td>
-<td> <code>io_uring_prep_poll_add</code> → 1 kernel transition </td>
-</tr>
-<tr>
-<td> Async file read/write </td>
-<td> 2 server round-trips + epoll monitoring </td>
-<td> <code>io_uring_prep_read/write</code> → 0 server involvement </td>
-</tr>
-<tr>
-<td> Socket recv/send (EAGAIN) </td>
-<td> Server epoll monitors fd, alerts client </td>
-<td> io_uring <code>POLL_ADD</code> → CQE → <code>try_recv/try_send</code> </td>
-</tr>
-</tbody>
-</table>
-
-
-<h3>Key Design Decisions</h3>
-
-<ul>
-<li><strong>Per-thread rings</strong> (<code>IORING_SETUP_SINGLE_ISSUER | COOP_TASKRUN</code>) — no cross-thread submission, RT priority preserved</li>
-<li><strong>ALERTED-state interception</strong> for socket I/O — intercept before <code>set_async_direct_result</code> so the server async stays frozen (no epoll re-queue)</li>
-<li><strong>E2 shared bitmap</strong> — client sets a bit per unix_fd, server&rsquo;s <code>sock_get_poll_events</code> returns -1 → no epoll monitoring</li>
-<li><strong>ntsync uring_fd</strong> — threads blocked in ntsync waits wake on CQE arrival (Patch 4 above)</li>
-<li><strong>TLS pool allocator</strong> — 32 pre-allocated <code>uring_async_op</code> structs, O(1) freelist alloc/free, zero malloc in submit path</li>
-</ul>
-
-
-<h3>Test Results</h3>
-
-<table>
-<thead>
-<tr>
-<th> Phase </th>
-<th> Test </th>
-<th> Result </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> Phase 1 </td>
-<td> Sync poll replacement </td>
-<td> All tests PASS </td>
-</tr>
-<tr>
-<td> Phase 2 </td>
-<td> Async file I/O bypass </td>
-<td> All tests PASS </td>
-</tr>
-<tr>
-<td> Phase 3 </td>
-<td> Socket I/O (sync + overlapped) </td>
-<td> 4000/4000, avg 95-113us </td>
-</tr>
-</tbody>
-</table>
-
-
-<h3>Files</h3>
-
-<table>
-<thead>
-<tr>
-<th> File </th>
-<th> Purpose </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> <code>dlls/ntdll/unix/io_uring.c</code> (~760 LOC) </td>
-<td> Ring management, pool allocator, Phase 1-3 submit/complete </td>
-</tr>
-<tr>
-<td> <code>dlls/ntdll/unix/socket.c</code> </td>
-<td> ALERTED interception, CQE handler, bitmap set/clear </td>
-</tr>
-<tr>
-<td> <code>dlls/ntdll/unix/sync.c</code> </td>
-<td> ntsync uring_fd retry loop </td>
-</tr>
-<tr>
-<td> <code>server/sock.c</code> </td>
-<td> E2 bitmap check in <code>sock_get_poll_events</code> </td>
-</tr>
-</tbody>
-</table>
-
-
-<hr />
-
-<h2>8. Audio Stack Architecture</h2>
-
-<p>Wine&rsquo;s Linux audio stack has two layers: Windows-facing APIs such as WASAPI / WinMM / ASIO on top, and a Unix-side driver backend underneath. In upstream Wine, normal application audio typically flows through <code>mmdevapi</code> into <code>winealsa.drv</code>, then out through ALSA or PipeWire. In Wine-NSPA, <code>winejack.drv</code> replaces that backend with a direct JACK path for standard shared/exclusive audio, while <code>nspaASIO</code> is a separate bridge for hosts that specifically need ASIO semantics.</p>
-
-<h3>Audio Path Diagram</h3>
-
-<div class="diagram-container">
-<svg width="100%" viewBox="0 0 880 530" xmlns="http://www.w3.org/2000/svg">
-  <!-- winealsa comparison (top) -->
-  <text x="440" y="25" text-anchor="middle" fill="#f7768e" font-size="12" font-weight="bold">winealsa.drv (Vanilla Wine)</text>
-
-  <rect x="30" y="45" width="130" height="45" rx="6" fill="#24283b" stroke="#bb9af7" stroke-width="1.5"/>
-  <text x="95" y="65" text-anchor="middle" fill="#bb9af7" font-size="10" font-weight="bold">Windows App</text>
-  <text x="95" y="80" text-anchor="middle" fill="#c0caf5" font-size="8">(game / DAW / media)</text>
-
-  <line x1="160" y1="67" x2="195" y2="67" stroke="#565f89" stroke-width="1.5"/>
-
-  <rect x="195" y="45" width="130" height="45" rx="6" fill="#24283b" stroke="#7aa2f7" stroke-width="1.5"/>
-  <text x="260" y="65" text-anchor="middle" fill="#7aa2f7" font-size="10" font-weight="bold">WASAPI</text>
-  <text x="260" y="80" text-anchor="middle" fill="#c0caf5" font-size="8">mmdevapi</text>
-
-  <line x1="325" y1="67" x2="360" y2="67" stroke="#565f89" stroke-width="1.5"/>
-
-  <rect x="360" y="45" width="160" height="45" rx="6" fill="#24283b" stroke="#f7768e" stroke-width="1.5"/>
-  <text x="440" y="65" text-anchor="middle" fill="#f7768e" font-size="10" font-weight="bold">winealsa.drv</text>
-  <text x="440" y="80" text-anchor="middle" fill="#f7768e" font-size="8">NtDelayExecution timer loop</text>
-
-  <line x1="520" y1="67" x2="555" y2="67" stroke="#565f89" stroke-width="1.5"/>
-
-  <rect x="555" y="45" width="100" height="45" rx="6" fill="#24283b" stroke="#565f89" stroke-width="1.5"/>
-  <text x="605" y="65" text-anchor="middle" fill="#c0caf5" font-size="10">ALSA</text>
-  <text x="605" y="80" text-anchor="middle" fill="#c0caf5" font-size="8">PCM device</text>
-
-  <line x1="655" y1="67" x2="690" y2="67" stroke="#565f89" stroke-width="1.5"/>
-
-  <rect x="690" y="45" width="130" height="45" rx="6" fill="#24283b" stroke="#565f89" stroke-width="1.5"/>
-  <text x="755" y="65" text-anchor="middle" fill="#c0caf5" font-size="10">PipeWire</text>
-  <text x="755" y="80" text-anchor="middle" fill="#c0caf5" font-size="8">extra hop to JACK</text>
-
-  <text x="440" y="108" text-anchor="middle" fill="#f7768e" font-size="9">pthread_mutex in timer | no exclusive mode | no ASIO | scalar loops | drift-prone timer</text>
-
-  <!-- Separator -->
-  <line x1="20" y1="125" x2="860" y2="125" stroke="#3b4261" stroke-width="1" stroke-dasharray="6,3"/>
-
-  <!-- winejack WASAPI path -->
-  <text x="440" y="150" text-anchor="middle" fill="#9ece6a" font-size="12" font-weight="bold">winejack.drv WASAPI Path (Wine-NSPA)</text>
-
-  <rect x="30" y="170" width="130" height="45" rx="6" fill="#24283b" stroke="#bb9af7" stroke-width="1.5"/>
-  <text x="95" y="190" text-anchor="middle" fill="#bb9af7" font-size="10" font-weight="bold">Windows App</text>
-  <text x="95" y="205" text-anchor="middle" fill="#c0caf5" font-size="8">(game / media)</text>
-
-  <line x1="160" y1="192" x2="195" y2="192" stroke="#9ece6a" stroke-width="1.5"/>
-
-  <rect x="195" y="170" width="130" height="45" rx="6" fill="#24283b" stroke="#7aa2f7" stroke-width="1.5"/>
-  <text x="260" y="190" text-anchor="middle" fill="#7aa2f7" font-size="10" font-weight="bold">WASAPI</text>
-  <text x="260" y="205" text-anchor="middle" fill="#c0caf5" font-size="8">mmdevapi</text>
-
-  <line x1="325" y1="192" x2="360" y2="192" stroke="#9ece6a" stroke-width="1.5"/>
-
-  <rect x="360" y="170" width="200" height="45" rx="6" fill="#24283b" stroke="#9ece6a" stroke-width="2"/>
-  <text x="460" y="190" text-anchor="middle" fill="#9ece6a" font-size="10" font-weight="bold">winejack.drv</text>
-  <text x="460" y="205" text-anchor="middle" fill="#9ece6a" font-size="8">lock-free RT | SSE2 | PI mutex</text>
-
-  <line x1="560" y1="192" x2="595" y2="192" stroke="#9ece6a" stroke-width="1.5"/>
-
-  <rect x="595" y="170" width="130" height="45" rx="6" fill="#24283b" stroke="#ff9e64" stroke-width="1.5"/>
-  <text x="660" y="190" text-anchor="middle" fill="#ff9e64" font-size="10" font-weight="bold">JACK</text>
-  <text x="660" y="205" text-anchor="middle" fill="#c0caf5" font-size="8">direct, no ALSA hop</text>
-
-  <text x="460" y="230" text-anchor="middle" fill="#9ece6a" font-size="9">hardware-synced callback | exclusive mode | per-channel fast path</text>
-
-  <!-- Separator -->
-  <line x1="20" y1="245" x2="860" y2="245" stroke="#3b4261" stroke-width="1" stroke-dasharray="6,3"/>
-
-  <!-- ASIO zero-latency path -->
-  <text x="440" y="270" text-anchor="middle" fill="#e0af68" font-size="12" font-weight="bold">winejack.drv ASIO Path -- Zero-Latency (Wine-NSPA)</text>
-
-  <!-- JACK callback box -->
-  <rect x="80" y="285" width="720" height="190" rx="6" fill="#24283b" stroke="#ff9e64" stroke-width="2"/>
-  <text x="440" y="305" text-anchor="middle" fill="#ff9e64" font-size="11" font-weight="bold">JACK process_callback (RT thread, SCHED_FIFO)</text>
-
-  <!-- Steps inside callback -->
-  <rect x="100" y="315" width="200" height="28" rx="6" fill="none" stroke="#7dcfff" stroke-width="1"/>
-  <text x="200" y="334" text-anchor="middle" fill="#7dcfff" font-size="9">1. MIDI I/O (lock-free ringbuffer)</text>
-
-  <rect x="100" y="350" width="200" height="28" rx="6" fill="none" stroke="#9ece6a" stroke-width="1"/>
-  <text x="200" y="369" text-anchor="middle" fill="#9ece6a" font-size="9">2. JACK capture &#x2192; ASIO input (memcpy)</text>
-
-  <rect x="310" y="315" width="200" height="63" rx="6" fill="none" stroke="#e0af68" stroke-width="2"/>
-  <text x="410" y="335" text-anchor="middle" fill="#e0af68" font-size="10" font-weight="bold">3. bufferSwitch()</text>
-  <text x="410" y="353" text-anchor="middle" fill="#c0caf5" font-size="8">Host fills output via futex</text>
-  <text x="410" y="368" text-anchor="middle" fill="#c0caf5" font-size="8">same-period round-trip</text>
-
-  <rect x="520" y="315" width="260" height="28" rx="6" fill="none" stroke="#9ece6a" stroke-width="1"/>
-  <text x="650" y="334" text-anchor="middle" fill="#9ece6a" font-size="9">4. ASIO output &#x2192; JACK ports (memcpy)</text>
-
-  <rect x="520" y="350" width="260" height="28" rx="6" fill="none" stroke="#9aa5ce" stroke-width="1"/>
-  <text x="650" y="369" text-anchor="middle" fill="#c8d0e8" font-size="9">5. WASAPI streams (games, media)</text>
-
-  <!-- Latency result -->
-  <rect x="100" y="390" width="680" height="35" rx="6" fill="#1a3a1a" stroke="#9ece6a" stroke-width="1"/>
-  <text x="440" y="405" text-anchor="middle" fill="#9ece6a" font-size="10" font-weight="bold">Output latency = exactly 1 JACK period (theoretical minimum)</text>
-  <text x="440" y="420" text-anchor="middle" fill="#c0caf5" font-size="9">Data written in bufferSwitch is output in the SAME period. MIDI is synchronized.</text>
-
-  <!-- Latency comparison -->
-  <rect x="80" y="485" width="720" height="35" rx="6" fill="#24283b" stroke="#3b4261" stroke-width="1"/>
-  <text x="260" y="507" text-anchor="middle" fill="#f7768e" font-size="9">winealsa: drift-prone timer, no ASIO, extra ALSA&#x2192;PipeWire hop</text>
-  <text x="640" y="507" text-anchor="middle" fill="#9ece6a" font-size="9">winejack: hardware-synced, ASIO+WASAPI+MIDI unified, 1 period</text>
-</svg>
-</div>
-
-
-<h3>winejack.drv</h3>
-
-<p>A unified Wine audio/MIDI driver that connects directly to JACK, replacing <code>winealsa.drv</code> + <code>winepulse.drv</code> for systems using JACK or PipeWire.</p>
-
-<ul>
-<li><strong>WASAPI audio:</strong> Full shared + exclusive mode over JACK. Lock-free RT callback, SSE2 mono/stereo render+capture, per-channel double-buffer fast path for exclusive float32, event-driven and timer-driven modes.</li>
-<li><strong>ASIO (zero-latency):</strong> nspaASIO registers directly with winejack via futex. JACK RT callback does synchronous round-trip with the play_thread for same-period output = one JACK period of latency (theoretical minimum).</li>
-<li><strong>MIDI:</strong> Full WinMM MIDI In/Out through JACK MIDI. Lock-free ringbuffers, sub-period input timestamps via JACK frame offsets, CC 120+123 on reset, MIM_ERROR on overflow, DRVM_EXIT cleanup.</li>
-</ul>
-
-
-<p>Implementation: <code>dlls/winejack.drv/jack.c</code> (~2700 lines, Unix side) + <code>dlls/winejack.drv/jackmidi.c</code> (~700 lines, MIDI).</p>
-
-<h3>nspaASIO</h3>
-
-<p>A Wine PE DLL implementing the ASIO COM interface. Windows ASIO apps see a standard ASIO driver named &ldquo;nspaASIO.&rdquo; When JACK is active and float32 format is available, nspaASIO registers directly with winejack &ndash; bypassing WASAPI entirely. The play_thread uses futex synchronization with the JACK RT callback for same-period output.</p>
-
-<p>Falls back to WASAPI exclusive mode when direct registration is unavailable (non-float32 format, JACK not running).</p>
-
-<h3>Comparison: winejack.drv vs winealsa.drv (vanilla Wine)</h3>
-
-<table>
-<thead>
-<tr>
-<th> Feature </th>
-<th> winealsa.drv (vanilla) </th>
-<th> winejack.drv (NSPA) </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> Backend </td>
-<td> ALSA PCM </td>
-<td> JACK (via PipeWire or native jackd) </td>
-</tr>
-<tr>
-<td> RT callback </td>
-<td> <code>NtDelayExecution</code> timer loop (drift-prone) </td>
-<td> JACK process callback (hardware-synced) </td>
-</tr>
-<tr>
-<td> Exclusive mode </td>
-<td> Accepts flag, no real exclusive access </td>
-<td> Dedicated JACK ports, proper period contract </td>
-</tr>
-<tr>
-<td> ASIO support </td>
-<td> None (needs separate wineasio) </td>
-<td> Built-in via nspaASIO Phase F </td>
-</tr>
-<tr>
-<td> ASIO latency </td>
-<td> N/A (wineasio: 1 period, separate driver) </td>
-<td> 1 period (same driver, same callback) </td>
-</tr>
-<tr>
-<td> MIDI </td>
-<td> ALSA sequencer </td>
-<td> JACK MIDI (sub-period timestamps) </td>
-</tr>
-<tr>
-<td> Format conversion </td>
-<td> Scalar loops </td>
-<td> SSE2 mono/stereo fast paths </td>
-</tr>
-<tr>
-<td> Locking </td>
-<td> pthread_mutex in timer loop </td>
-<td> PI mutex (app side), lock-free (RT side) </td>
-</tr>
-<tr>
-<td> Fast path </td>
-<td> None </td>
-<td> Per-channel double buffers (exclusive float32) </td>
-</tr>
-<tr>
-<td> WASAPI+ASIO coexistence </td>
-<td> Separate drivers, no coordination </td>
-<td> Same JACK callback, same period </td>
-</tr>
-</tbody>
-</table>
-
-
-<hr />
-
-<h2>9. QPC &amp; Timing</h2>
-
-<p>Low-latency audio requires precise, low-overhead timing. NSPA makes several changes to Wine&rsquo;s timing subsystem to reduce jitter and overhead.</p>
-
-<h3>NtQueryPerformanceCounter</h3>
-
-<p>Wine&rsquo;s QPC calls <code>monotonic_counter()</code> which uses <code>clock_gettime(CLOCK_BOOTTIME)</code> (falling back to <code>CLOCK_MONOTONIC</code>). This is a vDSO-accelerated call on modern kernels (~26ns). Without vDSO it becomes a real syscall (~328ns, 12.5x slower). The preloader&rsquo;s vDSO preservation port (Jinoh Kang series) ensures the vDSO is never deleted &ndash; if ASLR places it in a reserved address range, the preloader relocates it via <code>mremap</code> instead of removing it from the auxiliary vector. The TSC frequency is calibrated at init via <code>/sys/devices/system/cpu/cpu*/cpufreq/base_frequency</code> for accurate jiffies-to-TSC conversion.</p>
-
-<pre><code class="language-c">static inline ULONGLONG monotonic_counter(void)
-{
-    struct timespec ts;
-    if (!clock_gettime( CLOCK_BOOTTIME, &amp;ts ))
-        return ts.tv_sec * (ULONGLONG)TICKSPERSEC + ts.tv_nsec / 100;
-    ...
-}</code></pre>
-
-<h3>PR_SET_TIMERSLACK</h3>
-
-<p>When an application calls <code>NtSetTimerResolution</code> (the backend for <code>timeBeginPeriod</code>), NSPA translates the requested resolution to a Linux timer slack value via <code>prctl(PR_SET_TIMERSLACK, slack_ns)</code>. The default Linux timer slack is 50us; setting it to 1ns gives sub-millisecond timer precision for <code>Sleep()</code>, <code>poll()</code>, <code>nanosleep()</code>, and futex waits.</p>
-
-<pre><code class="language-c">if (set)
-{
-    unsigned long slack_ns = (unsigned long)res * 100;  /* 100ns units -&gt; ns */
-    if (slack_ns &lt; 1) slack_ns = 1;
-    prctl( PR_SET_TIMERSLACK, slack_ns );
-}
-else
-    prctl( PR_SET_TIMERSLACK, 0 );  /* reset to default */</code></pre>
-
-<blockquote><p><strong>Why this matters:</strong> Many audio apps call <code>timeBeginPeriod(1)</code> expecting 1ms timer precision. Without timer slack adjustment, Linux&rsquo;s default 50us slack on top of CFS scheduling jitter can turn a <code>Sleep(1)</code> into a 2-3ms delay. With <code>PR_SET_TIMERSLACK</code> set to match the requested resolution, timer expirations fire at their requested time.</p></blockquote>
-
-<h3>NtDelayExecution</h3>
-
-<p>Wine&rsquo;s <code>Sleep()</code> implementation uses <code>clock_nanosleep(CLOCK_MONOTONIC, ...)</code> for high-precision delays, which benefits from the PREEMPT_RT kernel&rsquo;s deterministic scheduling and the per-thread timer slack set above.</p>
-
-<h3>ExSetTimerResolution Forwarding</h3>
-
-<p>The kernel-mode <code>ExSetTimerResolution</code> API is forwarded from <code>ntoskrnl.exe</code> to the same <code>NtSetTimerResolution</code> path, ensuring that drivers setting timer resolution also benefit from the timer slack adjustment.</p>
-
-<hr />
-
-<h2>10. Memory &amp; Large Pages</h2>
-
-<p>NSPA implements Windows <code>VirtualAlloc(MEM_LARGE_PAGES)</code> using Linux hugetlbfs, reducing TLB misses for large allocations common in audio sample buffers and plugin memory pools.</p>
-
-<h3>Implementation</h3>
-
-<table>
-<thead>
-<tr>
-<th> Windows API </th>
-<th> Linux Implementation </th>
-<th> Page Size </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> <code>VirtualAlloc(MEM_LARGE_PAGES)</code> </td>
-<td> <code>mmap(MAP_HUGETLB | MAP_LOCKED, ...)</code> </td>
-<td> 2 MB (default hugepage) </td>
-</tr>
-<tr>
-<td> <code>VirtualAlloc(MEM_LARGE_PAGES)</code> with 1GB hint </td>
-<td> <code>mmap(MAP_HUGETLB | MAP_HUGE_1GB | MAP_LOCKED, ...)</code> </td>
-<td> 1 GB </td>
-</tr>
-<tr>
-<td> <code>QueryWorkingSetEx</code> </td>
-<td> <code>PAGEMAP_SCAN</code> ioctl / <code>/proc/pid/pagemap</code> </td>
-<td> Reports <code>LargePage</code> flag </td>
-</tr>
-</tbody>
-</table>
-
-
-<blockquote><p><strong>Audio benefit:</strong> A typical VST plugin loads 50-500 MB of sample data. With 4KB pages, this requires 12,800-128,000 TLB entries. With 2MB pages, only 25-250 entries are needed &ndash; an order-of-magnitude reduction in TLB pressure. For systems with 1GB hugepages pre-allocated, a single TLB entry covers the entire sample bank.</p></blockquote>
-
-<h3>Key Implementation Details</h3>
-
-<ul>
-<li><strong>MAP_LOCKED:</strong> Windows MEM_LARGE_PAGES allocations are locked in physical memory. NSPA mirrors this by OR-ing <code>MAP_LOCKED</code> into the mmap flags.</li>
-<li><strong>Alignment:</strong> hugetlbfs requires large-page-aligned addresses. The virtual memory allocator ensures proper alignment before mapping.</li>
-<li><strong>Graceful fallback:</strong> If hugepage allocation fails (insufficient free hugepages, alignment failure, permission denied), the allocation falls back to standard 4KB pages. Applications that request large pages get them when available and fall back transparently.</li>
-<li><strong>No executable mapping:</strong> Windows MEM_LARGE_PAGES allocations are never executable. NSPA enforces this constraint.</li>
-</ul>
-
-
-<p>Implementation: <code>dlls/ntdll/unix/virtual.c</code>, <code>anon_mmap_alloc()</code> / <code>NtAllocateVirtualMemory()</code>.</p>
-
-<hr />
-
-<h2>11. msvcrt SIMD Optimizations</h2>
-
-<h3>SIMD Memory/String Operations</h3>
-
-<p>Wine&rsquo;s msvcrt provides the C runtime for Win32 applications, including <code>memcpy</code>, <code>memmove</code>, <code>memchr</code>, <code>strlen</code>, and <code>memcmp</code>. Upstream Wine uses scalar C implementations or minimal hand-written assembly. NSPA replaces these with SIMD-optimized implementations:</p>
-
-<table>
-<thead>
-<tr>
-<th> Function </th>
-<th> Implementation </th>
-<th> Width </th>
-<th> Fallback </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> <code>memcpy</code> </td>
-<td> AVX <code>_mm256_loadu_si256</code> / <code>_mm256_storeu_si256</code> </td>
-<td> 256-bit </td>
-<td> SSE2 128-bit </td>
-</tr>
-<tr>
-<td> <code>memmove</code> </td>
-<td> AVX with overlap detection + reverse copy </td>
-<td> 256-bit </td>
-<td> SSE2 128-bit </td>
-</tr>
-<tr>
-<td> <code>memchr</code> </td>
-<td> SSE2 <code>_mm_cmpeq_epi8</code> + <code>_mm_movemask_epi8</code> </td>
-<td> 128-bit </td>
-<td> scalar </td>
-</tr>
-<tr>
-<td> <code>strlen</code> </td>
-<td> SSE2 <code>_mm_cmpeq_epi8</code> null scan </td>
-<td> 128-bit </td>
-<td> scalar </td>
-</tr>
-<tr>
-<td> <code>memcmp</code> </td>
-<td> SSE2 <code>_mm_cmpeq_epi8</code> + early exit </td>
-<td> 128-bit </td>
-<td> scalar </td>
-</tr>
-</tbody>
-</table>
-
-
-<p><strong>Runtime CPU dispatch:</strong> At DLL init, <code>memcpy</code>/<code>memmove</code> check CPUID for AVX support and select the AVX path when available. SSE2 is the minimum baseline (guaranteed on x86_64). The dispatch cost is a single branch on a cached function pointer &ndash; zero overhead after init.</p>
-
-<p><strong>Why it matters for RT:</strong> These functions are called thousands of times per audio buffer cycle &ndash; buffer copies in WASAPI/ASIO, socket I/O data movement, string parsing in API calls. The v5 test results show measurable impact: +4.7% CS throughput, +27% baseline socket-io throughput, -7% process startup time.</p>
-
-<p>Implementation: <code>dlls/msvcrt/string.c</code> (all five functions), <code>dlls/msvcrt/math.c</code> (AVX detection), <code>dlls/msvcrt/msvcrt.h</code> (avx_supported declaration).</p>
-
-<hr />
-
-<h2>12. Version History</h2>
-
-<table>
-<thead>
-<tr>
-<th> Version </th>
-<th> Scope </th>
-<th> Key Files </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> v1 </td>
-<td> RT priority mapping: two-tier promotion with <code>NSPA_RT_PRIO</code> as the client RT ceiling and linear scaling below it </td>
-<td> <code>dlls/ntdll/unix/thread.c</code>, <code>server/thread.c</code> </td>
-</tr>
-<tr>
-<td> v1.1 </td>
-<td> Wineserver self-promotion to SCHED_FIFO at NSPA_RT_PRIO-16 (below entire RT band) </td>
-<td> <code>server/thread.c</code> </td>
-</tr>
-<tr>
-<td> v1.2 </td>
-<td> Cross-thread promotion via HANDLE-to-unix_tid map; NSPA_RT_POLICY=TS conservative mode </td>
-<td> <code>dlls/ntdll/unix/thread.c</code> </td>
-</tr>
-<tr>
-<td> v1.5 </td>
-<td> Shmem wineserver IPC (Torge Matthies forward-port); reduces wineserver round-trip latency </td>
-<td> <code>dlls/ntdll/unix/server.c</code>, <code>server/thread.c</code> </td>
-</tr>
-<tr>
-<td> v2.0 </td>
-<td> librtpi vendoring into <code>libs/librtpi/</code>; PI-aware mutexes/condvars for Unix-side Wine internals </td>
-<td> <code>libs/librtpi/*</code>, <code>include/rtpi.h</code> </td>
-</tr>
-<tr>
-<td> v2.3 </td>
-<td> CS-PI: FUTEX_LOCK_PI on CRITICAL_SECTION via repurposed LockSemaphore field </td>
-<td> <code>dlls/ntdll/sync.c</code>, <code>dlls/ntdll/unix/sync.c</code> </td>
-</tr>
-<tr>
-<td> kernel </td>
-<td> NTSync PI: 5 patches (raw_spinlock, priority-ordered queues, PI boost v2, uring_fd, kmalloc fix) </td>
-<td> <code>drivers/misc/ntsync.c</code> </td>
-</tr>
-<tr>
-<td> kernel </td>
-<td> Client-side NTSync: anonymous sync object creation without wineserver round-trip </td>
-<td> <code>dlls/ntdll/unix/sync.c</code> </td>
-</tr>
-<tr>
-<td> io_uring </td>
-<td> Phase 1+2: sync poll replacement + async file I/O server bypass + TLS pool allocator </td>
-<td> <code>dlls/ntdll/unix/io_uring.c</code>, <code>dlls/ntdll/unix/file.c</code> </td>
-</tr>
-<tr>
-<td> io_uring </td>
-<td> Phase 3: socket I/O bypass via E2 bitmap + ALERTED-state interception (sync+overlapped) </td>
-<td> <code>dlls/ntdll/unix/socket.c</code>, <code>server/sock.c</code> </td>
-</tr>
-<tr>
-<td> kernel </td>
-<td> ntsync uring_fd extension: CQE wakeup in ntsync waits + PI kmalloc pre-alloc fix </td>
-<td> <code>drivers/misc/ntsync.c</code> </td>
-</tr>
-<tr>
-<td> msvcrt </td>
-<td> AVX memcpy/memmove, SSE2 memchr/strlen/memcmp with runtime CPU dispatch </td>
-<td> <code>dlls/msvcrt/string.c</code>, <code>dlls/msvcrt/math.c</code> </td>
-</tr>
-<tr>
-<td> sync </td>
-<td> SRW lock spin phase (256 iters, skipped for RT threads matching Windows behavior) </td>
-<td> <code>dlls/ntdll/sync.c</code> </td>
-</tr>
-<tr>
-<td> sync </td>
-<td> pi_cond requeue-PI upgrade (FUTEX_WAIT_REQUEUE_PI / FUTEX_CMP_REQUEUE_PI) </td>
-<td> <code>libs/librtpi/rtpi.h</code> </td>
-</tr>
-<tr>
-<td> sync </td>
-<td> Win32 condvar PI: FUTEX_WAIT_REQUEUE_PI for RtlSleepConditionVariableCS (condvar&rarr;mutex mapping table + 3 new syscalls) </td>
-<td> <code>dlls/ntdll/sync.c</code>, <code>dlls/ntdll/unix/sync.c</code>, <code>dlls/ntdll/ntsyscalls.h</code> </td>
-</tr>
-</tbody>
-</table>
-
-
-<h3>Environment Variable Quick Reference</h3>
-
-<table>
-<thead>
-<tr>
-<th> Variable </th>
-<th> Default </th>
-<th> Description </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> <code>NSPA_RT_PRIO</code> </td>
-<td> unset (dormant) </td>
-<td> Master RT switch + ceiling FIFO priority </td>
-</tr>
-<tr>
-<td> <code>NSPA_RT_POLICY</code> </td>
-<td> FF </td>
-<td> FF/RR/TS for lower RT band [16..30] </td>
-</tr>
-<tr>
-<td> <code>NSPA_SRV_RT_PRIO</code> </td>
-<td> NSPA_RT_PRIO-16 </td>
-<td> Wineserver FIFO priority override </td>
-</tr>
-<tr>
-<td> <code>NSPA_SRV_RT_POLICY</code> </td>
-<td> FF </td>
-<td> Wineserver scheduler policy </td>
-</tr>
-</tbody>
-</table>
-
-
-<h3>File Map</h3>
-
-<table>
-<thead>
-<tr>
-<th> File </th>
-<th> Role </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> <code>dlls/ntdll/unix/thread.c</code> </td>
-<td> Tier 1 RT promotion, v1.2 cross-thread map, priority mapping </td>
-</tr>
-<tr>
-<td> <code>server/thread.c</code> </td>
-<td> Tier 2 RT promotion, wineserver self-promotion, env var parsing </td>
-</tr>
-<tr>
-<td> <code>dlls/ntdll/sync.c</code> </td>
-<td> CS-PI fast path (PE side): TID CAS, recursion handling </td>
-</tr>
-<tr>
-<td> <code>dlls/ntdll/unix/sync.c</code> </td>
-<td> CS-PI slow path, NTSync wait/create, client-side handles, QPC, timer slack </td>
-</tr>
-<tr>
-<td> <code>dlls/ntdll/unix/virtual.c</code> </td>
-<td> Large/huge pages, MAP_HUGETLB allocation </td>
-</tr>
-<tr>
-<td> <code>dlls/ntdll/unix/server.c</code> </td>
-<td> Shmem wineserver IPC (v1.5) </td>
-</tr>
-<tr>
-<td> <code>dlls/winejack.drv/jack.c</code> </td>
-<td> JACK audio driver (WASAPI backend) </td>
-</tr>
-<tr>
-<td> <code>dlls/winejack.drv/jackmidi.c</code> </td>
-<td> JACK MIDI driver </td>
-</tr>
-<tr>
-<td> <code>libs/librtpi/</code> </td>
-<td> Vendored PI-aware mutex/condvar library </td>
-</tr>
-<tr>
-<td> <code>dlls/ntdll/unix/io_uring.c</code> </td>
-<td> io_uring per-thread ring, pool allocator, Phase 1-3 submit/complete </td>
-</tr>
-<tr>
-<td> <code>dlls/msvcrt/string.c</code> </td>
-<td> SSE2 memchr, strlen, memcmp </td>
-</tr>
-<tr>
-<td> <code>dlls/msvcrt/mem.c</code> </td>
-<td> AVX/SSE2 memcpy, memmove with runtime CPU dispatch </td>
-</tr>
-<tr>
-<td> <code>libs/librtpi/pi_cond.c</code> </td>
-<td> Requeue-PI condition variable for unix-side consumers (FUTEX_WAIT_REQUEUE_PI) </td>
-</tr>
-<tr>
-<td> <code>dlls/ntdll/sync.c</code> + <code>unix/sync.c</code> </td>
-<td> Win32 condvar PI: requeue-PI for RtlSleepConditionVariableCS (3 new syscalls + mapping table) </td>
-</tr>
-<tr>
-<td> <code>dlls/combase/apartment.c</code> </td>
-<td> CoWaitForMultipleHandles correctness rewrite </td>
-</tr>
-<tr>
-<td> <code>drivers/misc/ntsync.c</code> </td>
-<td> NTSync kernel driver (in kernel tree) </td>
-</tr>
-</tbody>
-</table>
-
-
-<hr />
-
-<p>Wine-NSPA Architecture Reference | Generated 2026-04-16 | Wine 11.6 + NSPA RT patchset</p>
-<script>hljs.highlightAll();</script>
+<p><em>Master overview generated 2026-04-28. Wine submodule <code>ac823311aba</code>, ntsync <code>srcversion A250A77651C8D5DAB719FE2</code>, kernel <code>6.19.11-rt1-1-nspa</code>. Per-subsystem detail in the dedicated pages linked above; live state in <code>current-state.gen.html</code>.</em></p>
 </body></html>

@@ -59,6 +59,13 @@
 </head><body>
 <h1>Sync Primitives Research: SRW Spin, Adaptive CS, Condvar PI</h1>
 
+<blockquote><p><strong>Status: RESEARCH ARCHIVE &ndash; 2026-04-15.</strong></p>
+
+<p>Background research informing CS-PI / condvar-PI / SRW-spin design choices.
+Retained as a record of the design space exploration.</p></blockquote>
+
+<hr />
+
 <p><strong>Date:</strong> 2026-04-15
 <strong>Status:</strong> B (SRW spin) and C1 (pi_cond requeue-PI) IMPLEMENTED. A (CS DYNAMIC_SPIN) planned. C2 (SRW PI) deferred.</p>
 
@@ -85,7 +92,7 @@
 <li><strong>Default SpinCount:</strong> 0 (unless caller sets it)</li>
 <li><strong>RTL_CRITICAL_SECTION_FLAG_DYNAMIC_SPIN:</strong> System substitutes ~2000-4000, ignores caller&rsquo;s value</li>
 <li><strong>Heap lock SpinCount:</strong> 4000</li>
-<li><strong>Spin loop:</strong> test LockCount → YieldProcessor() → decrement counter → repeat</li>
+<li><strong>Spin loop:</strong> test LockCount -> YieldProcessor() -> decrement counter -> repeat</li>
 <li><strong>Early bailout:</strong> if LockCount > 0 (multiple waiters), stop spinning</li>
 <li><strong>PI support:</strong> NONE on Windows. Our NSPA CS-PI via FUTEX_LOCK_PI is novel.</li>
 </ul>
@@ -114,7 +121,7 @@
 
 <ul>
 <li><strong>Spin count:</strong> 100 iterations (fixed, <code>MAX_ADAPTIVE_COUNT</code>)</li>
-<li><strong>Algorithm:</strong> Simple loop — <code>atomic_load_relaxed</code> + <code>_mm_pause()</code>, decrement counter</li>
+<li><strong>Algorithm:</strong> Simple loop &ndash; <code>atomic_load_relaxed</code> + <code>_mm_pause()</code>, decrement counter</li>
 <li><strong>No exponential backoff, no contention adaptation, no owner-on-CPU check</strong></li>
 <li><strong>After 100 spins:</strong> Falls through to <code>futex(FUTEX_WAIT)</code></li>
 <li><strong>Key weakness vs kernel:</strong> Spins blindly without knowing if owner is running</li>
@@ -124,7 +131,7 @@
 <h3>glibc pthread_rwlock</h3>
 
 <ul>
-<li><strong>Spin count:</strong> ZERO. No spinning at all — direct <code>futex(FUTEX_WAIT)</code> on contention</li>
+<li><strong>Spin count:</strong> ZERO. No spinning at all &ndash; direct <code>futex(FUTEX_WAIT)</code> on contention</li>
 <li><strong>Writer preference (NONRECURSIVE_NP):</strong> When writer waiting, new readers block</li>
 <li><strong>Uses two futex addresses</strong> (readers/writers) for selective waking</li>
 <li><strong>Note:</strong> PTHREAD_RWLOCK_PREFER_WRITER_NP is a no-op (identical to PREFER_READER)</li>
@@ -135,24 +142,24 @@
 
 <ul>
 <li><strong>The gold standard for rwlock spinning.</strong> Three-layer approach:</li>
-<li><strong>Layer 1 — Entry gate</strong> (<code>rwsem_can_spin_on_owner</code>):
+<li><strong>Layer 1 &ndash; Entry gate</strong> (<code>rwsem_can_spin_on_owner</code>):
 
 <ul>
 <li>Skip if <code>need_resched()</code>, NONSPINNABLE bit set, or owner NOT on CPU</li>
 <li>Key insight: <strong>only spin if owner is actively running on a CPU core</strong></li>
 </ul>
 </li>
-<li><strong>Layer 2 — OSQ (Optimistic Spin Queue):</strong>
+<li><strong>Layer 2 &ndash; OSQ (Optimistic Spin Queue):</strong>
 
 <ul>
-<li>MCS-style queue lock serializes spinners — only ONE thread spins on the rwsem at a time</li>
+<li>MCS-style queue lock serializes spinners &ndash; only ONE thread spins on the rwsem at a time</li>
 <li>Others queue behind the OSQ head, spinning on their own local variable (cache-friendly)</li>
 </ul>
 </li>
-<li><strong>Layer 3 — Owner-spin loop</strong> (<code>rwsem_spin_on_owner</code>):
+<li><strong>Layer 3 &ndash; Owner-spin loop</strong> (<code>rwsem_spin_on_owner</code>):
 
 <ul>
-<li><strong>No fixed iteration count</strong> — spins as long as same owner is on-CPU</li>
+<li><strong>No fixed iteration count</strong> &ndash; spins as long as same owner is on-CPU</li>
 <li>After 1000 iterations without owner change, adds <code>cpu_relax()</code></li>
 <li>RT tasks get only ONE extra retry when owner is NULL</li>
 </ul>
@@ -182,7 +189,7 @@
 </ul>
 
 
-<h3>PI for Read-Write Locks — State of the Art</h3>
+<h3>PI for Read-Write Locks &ndash; State of the Art</h3>
 
 <ul>
 <li><strong>Linux kernel:</strong> PI for rwlocks is <strong>explicitly unsupported</strong>
@@ -203,7 +210,7 @@
 </ul>
 </li>
 <li><strong>No FUTEX_RDLOCK_PI or equivalent</strong> exists in Linux</li>
-<li><strong>Academic:</strong> RWPIP (Reader-Writer Priority Inheritance Protocol) requires O(N) boosts per writer block — never productively deployed</li>
+<li><strong>Academic:</strong> RWPIP (Reader-Writer Priority Inheritance Protocol) requires O(N) boosts per writer block &ndash; never productively deployed</li>
 <li><strong>Practical answer for RT:</strong> Avoid rwlocks in RT-critical paths. Use PI mutexes, RCU, or seqlocks.</li>
 </ul>
 
@@ -225,7 +232,7 @@
 <tbody>
 <tr>
 <td> Spin count </td>
-<td> 0 — straight to RtlWaitOnAddress </td>
+<td> 0 &ndash; straight to RtlWaitOnAddress </td>
 <td> <strong>256 iterations</strong> (commit <code>005b55b4d8d</code>) </td>
 </tr>
 <tr>
@@ -235,21 +242,21 @@
 </tr>
 <tr>
 <td> Wait path </td>
-<td> RtlWaitOnAddress → FIFO queue → futex_wait </td>
+<td> RtlWaitOnAddress -> FIFO queue -> futex_wait </td>
 <td> Same (spin is before this path) </td>
 </tr>
 <tr>
 <td> PI support </td>
 <td> None </td>
-<td> None (SRW PI deferred — unsolved problem) </td>
+<td> None (SRW PI deferred &ndash; unsolved problem) </td>
 </tr>
 </tbody>
 </table>
 
 
 <p><strong>Bit layout (both):</strong> <code>struct srw_lock { short exclusive_waiters; unsigned short owners; }</code> = 4 bytes.
-Wait is via RtlWaitOnAddress → user-space FIFO queue → NtWaitForAlertByThreadId → futex_wait.
-No spin in RtlWaitOnAddress itself — the spin phase is in the acquire functions.</p>
+Wait is via RtlWaitOnAddress -> user-space FIFO queue -> NtWaitForAlertByThreadId -> futex_wait.
+No spin in RtlWaitOnAddress itself &ndash; the spin phase is in the acquire functions.</p>
 
 <h3>Critical Sections (dlls/ntdll/sync.c)</h3>
 
@@ -300,7 +307,7 @@ No spin in RtlWaitOnAddress itself — the spin phase is in the acquire function
 <tr>
 <td> Win32 condvar (RtlSleepConditionVariableCS) </td>
 <td> RtlWaitOnAddress, no PI </td>
-<td> Same (no PI — uses RtlWaitOnAddress, not pi_cond) </td>
+<td> Same (no PI &ndash; uses RtlWaitOnAddress, not pi_cond) </td>
 </tr>
 <tr>
 <td> Unix-side condvar (pi_cond_t) </td>
@@ -315,7 +322,7 @@ No spin in RtlWaitOnAddress itself — the spin phase is in the acquire function
 <tr>
 <td> PI gap on wake </td>
 <td> N/A </td>
-<td> <strong>Closed</strong> — kernel atomically requeues waiter onto PI mutex </td>
+<td> <strong>Closed</strong> &ndash; kernel atomically requeues waiter onto PI mutex </td>
 </tr>
 </tbody>
 </table>
@@ -324,9 +331,9 @@ No spin in RtlWaitOnAddress itself — the spin phase is in the acquire function
 <h3>RtlWaitOnAddress (dlls/ntdll/sync.c)</h3>
 
 <ul>
-<li><strong>Same in both upstream and NSPA:</strong> No spin phase. Compare-under-spinlock → FIFO queue → NtWaitForAlertByThreadId → futex_wait.</li>
+<li><strong>Same in both upstream and NSPA:</strong> No spin phase. Compare-under-spinlock -> FIFO queue -> NtWaitForAlertByThreadId -> futex_wait.</li>
 <li>256-entry hash table of futex_queues indexed by addr >> 4.</li>
-<li>Indirect futex: does NOT futex on the lock word — futexes on per-thread alert entry.</li>
+<li>Indirect futex: does NOT futex on the lock word &ndash; futexes on per-thread alert entry.</li>
 </ul>
 
 
@@ -346,7 +353,7 @@ No spin in RtlWaitOnAddress itself — the spin phase is in the acquire function
 <h3>Wine-NSPA integration</h3>
 
 <ul>
-<li>Tree-wide <code>pthread_mutex</code> → <code>pi_mutex</code> replacement (ntdll unix, audio drivers, gstreamer, winebus)</li>
+<li>Tree-wide <code>pthread_mutex</code> -> <code>pi_mutex</code> replacement (ntdll unix, audio drivers, gstreamer, winebus)</li>
 <li>CS-PI via raw FUTEX_LOCK_PI in sync.c (PE-side critical sections)</li>
 <li>pi_cond with requeue-PI in all condvar consumers</li>
 <li>Recursive pi_mutex extension (<code>NSPA_RTPI_MUTEX_RECURSIVE</code>) for virtual_mutex</li>
@@ -454,19 +461,19 @@ No spin in RtlWaitOnAddress itself — the spin phase is in the acquire function
 
 <h2>6. Remaining Design Work</h2>
 
-<h3>A — CS DYNAMIC_SPIN (Planned)</h3>
+<h3>A &ndash; CS DYNAMIC_SPIN (Planned)</h3>
 
 <p>Implement <code>RTL_CRITICAL_SECTION_FLAG_DYNAMIC_SPIN</code> properly:
 - Substitute system default spincount (~4000, matching Windows)
-- Gate behind <code>!nspa_cs_pi_active()</code> — when PI is active, the kernel handles contention better than userspace spinning
+- Gate behind <code>!nspa_cs_pi_active()</code> &ndash; when PI is active, the kernel handles contention better than userspace spinning
 - Low priority since the PI path is the primary contention mechanism</p>
 
-<h3>C2 — SRW PI (Deferred Indefinitely)</h3>
+<h3>C2 &ndash; SRW PI (Deferred Indefinitely)</h3>
 
 <p>SRW locks have no owner by design. PI requires an owner. This is unsolved even in the Linux kernel:
 - No <code>FUTEX_RDLOCK_PI</code> or equivalent exists
 - PREEMPT_RT&rsquo;s rwsem approach (serialize writers through rt_mutex) has known reader-starvation issues
-- Windows itself has no SRW PI — apps don&rsquo;t expect it</p>
+- Windows itself has no SRW PI &ndash; apps don&rsquo;t expect it</p>
 
 <p><strong>Decision:</strong> Don&rsquo;t pursue. Focus PI effort on CS (done) and condvar (done). For RT paths that need PI, apps should use CriticalSection not SRW.</p>
 
@@ -475,7 +482,7 @@ No spin in RtlWaitOnAddress itself — the spin phase is in the acquire function
 <h2>7. Implementation Status</h2>
 
 <ol>
-<li><p><strong>B — SRW spin phase</strong> &ndash; <strong>IMPLEMENTED</strong> (commit <code>005b55b4d8d</code>)</p>
+<li><p><strong>B &ndash; SRW spin phase</strong> &ndash; <strong>IMPLEMENTED</strong> (commit <code>005b55b4d8d</code>)</p>
 
 <ul>
 <li>256-iteration spin in <code>RtlAcquireSRWLockExclusive</code> and <code>RtlAcquireSRWLockShared</code></li>
@@ -484,7 +491,7 @@ No spin in RtlWaitOnAddress itself — the spin phase is in the acquire function
 <li>Validated: 429 ntdll sync tests, 0 failures. RT suite 20/20 PASS.</li>
 </ul>
 </li>
-<li><p><strong>C1 — pi_cond requeue-PI</strong> &ndash; <strong>IMPLEMENTED</strong> (commit <code>43862d8b591</code>)</p>
+<li><p><strong>C1 &ndash; pi_cond requeue-PI</strong> &ndash; <strong>IMPLEMENTED</strong> (commit <code>43862d8b591</code>)</p>
 
 <ul>
 <li><code>FUTEX_WAIT_REQUEUE_PI</code> / <code>FUTEX_CMP_REQUEUE_PI</code> in <code>libs/librtpi/rtpi.h</code></li>
@@ -493,7 +500,7 @@ No spin in RtlWaitOnAddress itself — the spin phase is in the acquire function
 <li>RT suite 20/20 PASS.</li>
 </ul>
 </li>
-<li><p><strong>A — CS DYNAMIC_SPIN</strong> &ndash; <strong>Planned</strong></p>
+<li><p><strong>A &ndash; CS DYNAMIC_SPIN</strong> &ndash; <strong>Planned</strong></p>
 
 <ul>
 <li>Implement <code>RTL_CRITICAL_SECTION_FLAG_DYNAMIC_SPIN</code> (~4000 spincount)</li>
@@ -501,7 +508,7 @@ No spin in RtlWaitOnAddress itself — the spin phase is in the acquire function
 <li>Low priority (PI path handles most contention)</li>
 </ul>
 </li>
-<li><p><strong>C2 — SRW PI</strong> &ndash; <strong>Deferred indefinitely</strong></p>
+<li><p><strong>C2 &ndash; SRW PI</strong> &ndash; <strong>Deferred indefinitely</strong></p>
 
 <ul>
 <li>Unsolved problem, even Linux kernel doesn&rsquo;t have rwlock PI</li>
@@ -516,8 +523,8 @@ No spin in RtlWaitOnAddress itself — the spin phase is in the acquire function
 <h2>8. Open Questions</h2>
 
 <ul>
-<li class="github_checkbox"><input disabled="" type="checkbox" checked="checked"/> <del>Benchmark: SRW zero-spin cost</del> — Implemented srw-bench subcommand</li>
-<li class="github_checkbox"><input disabled="" type="checkbox" checked="checked"/> <del>FUTEX_WAIT_REQUEUE_PI compatibility</del> — Works, kernel 2.6.31+ (2009)</li>
+<li class="github_checkbox"><input disabled="" type="checkbox" checked="checked"/> <del>Benchmark: SRW zero-spin cost</del> &ndash; Implemented srw-bench subcommand</li>
+<li class="github_checkbox"><input disabled="" type="checkbox" checked="checked"/> <del>FUTEX_WAIT_REQUEUE_PI compatibility</del> &ndash; Works, kernel 2.6.31+ (2009)</li>
 <li class="github_checkbox"><input disabled="" type="checkbox"/> Should SRW spin count be tunable via env var for benchmarking?</li>
 <li class="github_checkbox"><input disabled="" type="checkbox"/> CS DYNAMIC_SPIN: what spincount do Windows apps actually request?</li>
 </ul>

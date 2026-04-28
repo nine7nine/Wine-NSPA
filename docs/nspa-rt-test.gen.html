@@ -56,25 +56,27 @@
   strong { color: var(--fg); }
   em { color: var(--muted); font-style: italic; }
 </style>
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/tokyo-night-dark.min.css">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
 </head><body>
 <h1>Wine-NSPA RT Test Harness</h1>
 
-<p>Wine 11.6 + NSPA RT patchset | Kernel 6.19.x-rt with NTSync PI | 2026-04-15
-Author: Jordan Johnston</p>
+<p><strong>Date:</strong> 2026-04-28
+<strong>Author:</strong> Jordan Johnston
+<strong>Kernel:</strong> <code>6.19.11-rt1-1-nspa</code> (PREEMPT_RT_FULL)
+<strong>ntsync module:</strong> <code>srcversion A250A77651C8D5DAB719FE2</code>
+<strong>Wine:</strong> 11.6 + NSPA RT patchset</p>
 
 <h2>Table of Contents</h2>
 
 <ol>
 <li><a href="#1-overview">Overview</a></li>
 <li><a href="#2-architecture">Architecture</a></li>
-<li><a href="#3-subcommands">Subcommands</a></li>
-<li><a href="#4-test-runner">Test Runner</a></li>
-<li><a href="#5-watchdog-and-safety">Watchdog and Safety</a></li>
-<li><a href="#6-native-benchmarks">Native Benchmarks</a></li>
-<li><a href="#7-adding-new-tests">Adding New Tests</a></li>
-<li><a href="#8-environment-variables">Environment Variables</a></li>
+<li><a href="#3-pe-subcommands-layer-2">PE Subcommands (Layer 2)</a></li>
+<li><a href="#4-layer-1-native-ntsync-stress-suite">Layer 1: native ntsync stress suite</a></li>
+<li><a href="#5-test-runner">Test Runner</a></li>
+<li><a href="#6-watchdog-and-safety">Watchdog and Safety</a></li>
+<li><a href="#7-native-benchmarks">Native Benchmarks</a></li>
+<li><a href="#8-adding-new-tests">Adding New Tests</a></li>
+<li><a href="#9-environment-variables">Environment Variables</a></li>
 </ol>
 
 
@@ -82,42 +84,81 @@ Author: Jordan Johnston</p>
 
 <h2>1. Overview</h2>
 
-<p><code>nspa_rt_test.exe</code> is a multi-subcommand PE binary that validates the Wine-NSPA real-time scheduling, priority inheritance, synchronization primitives, io_uring integration, memory management, and process creation paths. It is built with mingw as a static PE console application and runs under Wine.</p>
-
-<p>The binary contains 13 subcommands, each targeting a specific NSPA component or kernel interaction. Tests are designed to run in two modes:</p>
+<p>The Wine-NSPA test surface is split into two layers:</p>
 
 <ul>
-<li><strong>Baseline mode</strong> (<code>WINEDEBUG=-all</code> only) &ndash; no RT promotion, all threads SCHED_OTHER. Establishes reference behavior.</li>
-<li><strong>RT mode</strong> (<code>NSPA_RT_PRIO=80 NSPA_RT_POLICY=FF WINEPRELOADREMAPVDSO=force</code>) &ndash; full NSPA RT promotion active. TIME_CRITICAL threads become SCHED_FIFO, PI boost is active, the vDSO is remapped for RT-safe clock access.</li>
+<li><strong>Layer 1 &ndash; native ntsync stress suite.</strong> A small set of plain C
+programs at <code>wine/nspa/tests/test-*.c</code> that talk directly to
+<code>/dev/ntsync</code> ioctls. These exercise kernel-level invariants the
+Win32 surface can&rsquo;t reach (channels, EVENT_SET_PI, raw sched attrs,
+channel REPLY/cleanup races). Added during the 2026-04-26 -> 2026-04-28
+audit cycle.</li>
+<li><strong>Layer 2 &ndash; <code>nspa_rt_test.exe</code>.</strong> A multi-subcommand PE binary that
+validates the full Wine -> ntsync stack via Win32 APIs (RT scheduling,
+PI, sync primitives, io_uring, memory, process creation).</li>
 </ul>
 
 
-<p>The companion script <code>nspa/run_rt_tests.sh</code> orchestrates both modes, captures per-run logs, and produces a summary matrix comparing baseline vs RT results.</p>
+<p>The combined runner <code>wine/nspa/tests/run-rt-suite.sh</code> drives both layers
+and reports per-layer pass/fail. The Layer 2 PE matrix continues to be
+driven by the existing <code>nspa/run_rt_tests.sh</code> runner.</p>
+
+<p>The PE binary runs in two modes:</p>
+
+<ul>
+<li><strong>Baseline mode</strong> (<code>WINEDEBUG=-all</code> only) &ndash; no RT promotion, all
+threads SCHED_OTHER. Establishes reference behavior.</li>
+<li><strong>RT mode</strong> (<code>NSPA_RT_PRIO=80 NSPA_RT_POLICY=FF
+WINEPRELOADREMAPVDSO=force</code>) &ndash; full NSPA RT promotion active.
+TIME_CRITICAL threads become SCHED_FIFO, PI boost is active, the
+vDSO is remapped for RT-safe clock access.</li>
+</ul>
+
+
+<h3>Validation Totals (2026-04-28)</h3>
+
+<ul>
+<li><strong>Layer 1 native suite:</strong> ~370M ops on prod kernel against module
+<code>A250A77651C8D5DAB719FE2</code>, zero syscall errors, zero KASAN/dmesg
+splats. Includes ~30M ops from a focused KASAN-armed debug-kernel
+session that fixed four ntsync bugs and a ~10M-op 5-min mixed-load
+soak across all driver paths.</li>
+<li><strong>Layer 2 PE matrix:</strong> 22/22 PASS (11 tests x baseline + RT) against
+current build.</li>
+</ul>
+
 
 <h3>Build</h3>
 
-<p><code>
-i686-w64-mingw32-gcc -O2 -static programs/nspa_rt_test/main.c -o nspa_rt_test.exe -lws2_32
-</code></p>
+<pre><code>i686-w64-mingw32-gcc -O2 -static programs/nspa_rt_test/main.c -o nspa_rt_test.exe -lws2_32
+</code></pre>
+
+<p>Native ntsync tests are built by <code>run-rt-suite.sh</code> on first invocation:</p>
+
+<pre><code>cc -O2 -Wall -Wextra -o test-foo wine/nspa/tests/test-foo.c -lpthread
+</code></pre>
 
 <h3>Quick Run</h3>
 
-<pre><code class="language-bash"><h1>Single subcommand, RT mode:</h1>
+<pre><code># Full two-layer suite (native + PE matrix):
+wine/nspa/tests/run-rt-suite.sh
 
-<p>NSPA_RT_PRIO=80 NSPA_RT_POLICY=FF ./wine nspa_rt_test.exe cs-contention</p>
+# Layer 1 only:
+wine/nspa/tests/run-rt-suite.sh native
 
-<h1>Full matrix (baseline + RT):</h1>
+# Layer 2 only:
+wine/nspa/tests/run-rt-suite.sh wine
 
-<p>nspa/run_rt_tests.sh
+# Single PE subcommand, RT mode:
+NSPA_RT_PRIO=80 NSPA_RT_POLICY=FF /usr/bin/wine nspa_rt_test.exe cs-contention
 </code></pre>
 
 <hr />
 
 <h2>2. Architecture</h2>
 
-<h3>Test Architecture Diagram</h3>
-
-<p>The following diagram shows how <code>nspa_rt_test.exe</code> exercises each layer of the Wine-NSPA stack, from the PE binary through Wine&rsquo;s ntdll Unix layer down to the Linux kernel. Each test subcommand targets specific components.</p>
+<p>The following diagram shows how <code>nspa_rt_test.exe</code> exercises each layer
+of the Wine-NSPA stack. Each PE subcommand targets specific components.</p>
 
 <div class="diagram-container">
 <svg width="100%" viewBox="0 0 880 620" xmlns="http://www.w3.org/2000/svg">
@@ -130,39 +171,28 @@ i686-w64-mingw32-gcc -O2 -static programs/nspa_rt_test/main.c -o nspa_rt_test.ex
     .rt-box-srv  { fill: #24283b; stroke: #e0af68; stroke-width: 1.5; rx: 6; }
     .rt-label    { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
     .rt-label-sm { fill: #c0caf5; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
-    .rt-label-hd { fill: #c0caf5; font-size: 13px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .rt-label-grn{ fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .rt-label-blu{ fill: #7aa2f7; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .rt-label-red{ fill: #f7768e; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .rt-label-ylw{ fill: #e0af68; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
     .rt-label-pur{ fill: #bb9af7; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .rt-label-cyn{ fill: #7dcfff; font-size: 10px; font-family: 'JetBrains Mono', monospace; }
-    .rt-arrow    { stroke: #565f89; stroke-width: 1.5; fill: none; }
+    .rt-arrow    { stroke: #9aa5ce; stroke-width: 1.5; fill: none; }
     .rt-arrow-grn{ stroke: #9ece6a; stroke-width: 1.5; fill: none; }
     .rt-arrow-blu{ stroke: #7aa2f7; stroke-width: 1.5; fill: none; }
-    .rt-arrow-red{ stroke: #f7768e; stroke-width: 1.5; fill: none; }
-    .rt-region   { fill: none; stroke: #3b4261; stroke-width: 1; stroke-dasharray: 5,3; rx: 6; }
+    .rt-region   { fill: none; stroke: #3b4261; stroke-width: 1; stroke-dasharray: 5,3; rx: 8; }
   </style>
-  <defs>
-    <marker id="rt-arr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#c0caf5"/></marker>
-    <marker id="rt-arr-g" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#9ece6a"/></marker>
-    <marker id="rt-arr-b" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#7aa2f7"/></marker>
-    <marker id="rt-arr-r" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#f7768e"/></marker>
-  </defs>
 
-  <!-- Title -->
   <text x="440" y="22" class="rt-label-ylw" text-anchor="middle">nspa_rt_test.exe -- Test Architecture (PE binary to kernel)</text>
 
-  <!-- ═══ Layer 1: PE Binary (user-space Win32) ═══ -->
-  <rect x="30" y="38" width="820" height="100" rx="6" class="rt-region"/>
+  <rect x="30" y="38" width="820" height="100" class="rt-region"/>
   <text x="50" y="56" class="rt-label-grn">PE Binary (Win32 user-space)</text>
 
   <rect x="50" y="62" width="150" height="62" rx="6" class="rt-box-pe"/>
   <text x="125" y="80" class="rt-label-grn" text-anchor="middle">nspa_rt_test.exe</text>
-  <text x="125" y="94" class="rt-label-sm" text-anchor="middle">13 subcommands</text>
+  <text x="125" y="94" class="rt-label-sm" text-anchor="middle">12 subcommands</text>
   <text x="125" y="107" class="rt-label-sm" text-anchor="middle">mingw PE static</text>
 
-  <!-- Test groups -->
   <rect x="230" y="62" width="120" height="62" rx="6" class="rt-box"/>
   <text x="290" y="78" class="rt-label-cyn" text-anchor="middle">RT scheduling</text>
   <text x="290" y="92" class="rt-label-sm" text-anchor="middle">priority</text>
@@ -171,10 +201,9 @@ i686-w64-mingw32-gcc -O2 -static programs/nspa_rt_test/main.c -o nspa_rt_test.ex
 
   <rect x="370" y="62" width="120" height="62" rx="6" class="rt-box"/>
   <text x="430" y="78" class="rt-label-cyn" text-anchor="middle">PI chains</text>
-  <text x="430" y="90" class="rt-label-sm" text-anchor="middle">philosophers</text>
-  <text x="430" y="102" class="rt-label-sm" text-anchor="middle">ntsync (5 sub)</text>
-  <text x="430" y="114" class="rt-label-sm" text-anchor="middle">srw-bench</text>
-  <text x="430" y="126" class="rt-label-grn" text-anchor="middle">condvar-pi</text>
+  <text x="430" y="92" class="rt-label-sm" text-anchor="middle">philosophers</text>
+  <text x="430" y="104" class="rt-label-sm" text-anchor="middle">ntsync (5 sub)</text>
+  <text x="430" y="116" class="rt-label-sm" text-anchor="middle">srw-bench</text>
 
   <rect x="510" y="62" width="120" height="62" rx="6" class="rt-box"/>
   <text x="570" y="78" class="rt-label-cyn" text-anchor="middle">memory + proc</text>
@@ -188,8 +217,7 @@ i686-w64-mingw32-gcc -O2 -static programs/nspa_rt_test/main.c -o nspa_rt_test.ex
   <text x="710" y="104" class="rt-label-sm" text-anchor="middle">Phase A: immediate</text>
   <text x="710" y="116" class="rt-label-sm" text-anchor="middle">Phase B: deferred</text>
 
-  <!-- ═══ Layer 2: Wine (ntdll unix layer) ═══ -->
-  <rect x="30" y="160" width="820" height="130" rx="6" class="rt-region"/>
+  <rect x="30" y="160" width="820" height="130" class="rt-region"/>
   <text x="50" y="178" class="rt-label-blu">Wine ntdll Unix layer</text>
 
   <rect x="50" y="185" width="145" height="90" rx="6" class="rt-box-ntdll"/>
@@ -218,7 +246,7 @@ i686-w64-mingw32-gcc -O2 -static programs/nspa_rt_test/main.c -o nspa_rt_test.ex
   <text x="617" y="214" class="rt-label-sm" text-anchor="middle">per-thread rings</text>
   <text x="617" y="226" class="rt-label-sm" text-anchor="middle">TLS pool allocator</text>
   <text x="617" y="238" class="rt-label-sm" text-anchor="middle">COOP_TASKRUN</text>
-  <text x="617" y="250" class="rt-label-sm" text-anchor="middle">socket async bypass</text>
+  <text x="617" y="250" class="rt-label-sm" text-anchor="middle">Phase 1 file I/O bypass</text>
 
   <rect x="710" y="185" width="120" height="90" rx="6" class="rt-box-ntdll"/>
   <text x="770" y="200" class="rt-label-blu" text-anchor="middle">process.c</text>
@@ -227,16 +255,14 @@ i686-w64-mingw32-gcc -O2 -static programs/nspa_rt_test/main.c -o nspa_rt_test.ex
   <text x="770" y="238" class="rt-label-sm" text-anchor="middle">librtpi sweep</text>
   <text x="770" y="250" class="rt-label-sm" text-anchor="middle">opt-out (EXCLUDE)</text>
 
-  <!-- ═══ Layer 3: wineserver ═══ -->
-  <rect x="30" y="310" width="280" height="80" rx="6" class="rt-region"/>
+  <rect x="30" y="310" width="280" height="80" class="rt-region"/>
   <text x="50" y="328" class="rt-label-pur">wineserver</text>
 
   <rect x="50" y="335" width="240" height="45" rx="6" class="rt-box-wine"/>
   <text x="170" y="352" class="rt-label-pur" text-anchor="middle">wineserver (global_lock PI)</text>
   <text x="170" y="366" class="rt-label-sm" text-anchor="middle">epoll dispatch | process registration | mapping</text>
 
-  <!-- ═══ Layer 3 continued: kernel ═══ -->
-  <rect x="330" y="310" width="520" height="80" rx="6" class="rt-region"/>
+  <rect x="330" y="310" width="520" height="80" class="rt-region"/>
   <text x="350" y="328" class="rt-label-red">Linux kernel (6.19.x-rt)</text>
 
   <rect x="350" y="335" width="120" height="45" rx="6" class="rt-box-kern"/>
@@ -255,47 +281,32 @@ i686-w64-mingw32-gcc -O2 -static programs/nspa_rt_test/main.c -o nspa_rt_test.ex
   <text x="790" y="352" class="rt-label-red" text-anchor="middle">hugetlbfs</text>
   <text x="790" y="366" class="rt-label-sm" text-anchor="middle">2MB/1GB</text>
 
-  <!-- ═══ Arrows: test groups to ntdll components ═══ -->
-  <!-- RT scheduling -> sync.c + thread.c -->
   <line x1="290" y1="124" x2="122" y2="185" class="rt-arrow-grn"/>
   <line x1="290" y1="124" x2="287" y2="185" class="rt-arrow-grn"/>
-
-  <!-- PI chains -> sync.c + thread.c -->
   <line x1="430" y1="124" x2="122" y2="185" class="rt-arrow-grn"/>
   <line x1="430" y1="124" x2="287" y2="185" class="rt-arrow-grn"/>
-
-  <!-- memory + proc -> virtual.c + process.c -->
   <line x1="570" y1="124" x2="452" y2="185" class="rt-arrow-grn"/>
   <line x1="570" y1="124" x2="770" y2="185" class="rt-arrow-grn"/>
-
-  <!-- io_uring -> io_uring.c -->
   <line x1="710" y1="124" x2="617" y2="185" class="rt-arrow-grn"/>
 
-  <!-- ═══ Arrows: ntdll to kernel ═══ -->
-  <!-- sync.c -> futex_lock_pi -->
   <line x1="122" y1="275" x2="550" y2="335" class="rt-arrow-blu"/>
-  <!-- sync.c -> ntsync -->
   <line x1="122" y1="275" x2="410" y2="335" class="rt-arrow-blu"/>
-  <!-- io_uring.c -> io_uring kernel -->
   <line x1="617" y1="275" x2="680" y2="335" class="rt-arrow-blu"/>
-  <!-- virtual.c -> hugetlbfs -->
   <line x1="452" y1="275" x2="790" y2="335" class="rt-arrow-blu"/>
-  <!-- process.c -> wineserver -->
   <line x1="770" y1="275" x2="170" y2="335" class="rt-arrow-blu"/>
 
-  <!-- ═══ Runner script (bottom) ═══ -->
-  <rect x="30" y="420" width="820" height="80" rx="6" class="rt-region"/>
-  <text x="50" y="438" class="rt-label-ylw">run_rt_tests.sh -- orchestration</text>
+  <rect x="30" y="420" width="820" height="80" class="rt-region"/>
+  <text x="50" y="438" class="rt-label-ylw">run-rt-suite.sh + run_rt_tests.sh -- two-layer orchestration</text>
 
   <rect x="50" y="445" width="180" height="45" rx="6" class="rt-box-srv"/>
-  <text x="140" y="462" class="rt-label-ylw" text-anchor="middle">baseline pass</text>
-  <text x="140" y="476" class="rt-label-sm" text-anchor="middle">WINEDEBUG=-all only</text>
+  <text x="140" y="462" class="rt-label-ylw" text-anchor="middle">Layer 1 native</text>
+  <text x="140" y="476" class="rt-label-sm" text-anchor="middle">/dev/ntsync ioctl tests</text>
 
   <line x1="230" y1="467" x2="280" y2="467" class="rt-arrow"/>
 
   <rect x="280" y="445" width="180" height="45" rx="6" class="rt-box-srv"/>
-  <text x="370" y="462" class="rt-label-ylw" text-anchor="middle">RT pass</text>
-  <text x="370" y="476" class="rt-label-sm" text-anchor="middle">RT_PRIO=80 + FF + vDSO</text>
+  <text x="370" y="462" class="rt-label-ylw" text-anchor="middle">Layer 2 PE matrix</text>
+  <text x="370" y="476" class="rt-label-sm" text-anchor="middle">baseline + RT modes</text>
 
   <line x1="460" y1="467" x2="510" y2="467" class="rt-arrow"/>
 
@@ -303,18 +314,17 @@ i686-w64-mingw32-gcc -O2 -static programs/nspa_rt_test/main.c -o nspa_rt_test.ex
   <text x="600" y="462" class="rt-label-ylw" text-anchor="middle">summary matrix</text>
   <text x="600" y="476" class="rt-label-sm" text-anchor="middle">per-test PASS/FAIL/TIMEOUT</text>
 
-  <!-- Legend -->
-  <rect x="30" y="520" width="820" height="90" rx="6" class="rt-region"/>
+  <rect x="30" y="520" width="820" height="90" class="rt-region"/>
   <text x="50" y="540" class="rt-label" font-weight="bold">Legend</text>
-  <rect x="50" y="550" width="14" height="14" fill="#1a2a1a" stroke="#9ece6a" stroke-width="2" rx="6"/>
+  <rect x="50" y="550" width="14" height="14" fill="#1a2a1a" stroke="#9ece6a" stroke-width="2" rx="3"/>
   <text x="72" y="562" class="rt-label-sm">PE test binary</text>
-  <rect x="180" y="550" width="14" height="14" fill="#1a1a2a" stroke="#7aa2f7" stroke-width="2" rx="6"/>
+  <rect x="180" y="550" width="14" height="14" fill="#1a1a2a" stroke="#7aa2f7" stroke-width="2" rx="3"/>
   <text x="202" y="562" class="rt-label-sm">ntdll Unix layer</text>
-  <rect x="320" y="550" width="14" height="14" fill="#2a1a1a" stroke="#f7768e" stroke-width="2" rx="6"/>
+  <rect x="320" y="550" width="14" height="14" fill="#2a1a1a" stroke="#f7768e" stroke-width="2" rx="3"/>
   <text x="342" y="562" class="rt-label-sm">Linux kernel</text>
-  <rect x="450" y="550" width="14" height="14" fill="#24283b" stroke="#bb9af7" stroke-width="1.5" rx="6"/>
+  <rect x="450" y="550" width="14" height="14" fill="#24283b" stroke="#bb9af7" stroke-width="1.5" rx="3"/>
   <text x="472" y="562" class="rt-label-sm">wineserver</text>
-  <rect x="570" y="550" width="14" height="14" fill="#24283b" stroke="#e0af68" stroke-width="1.5" rx="6"/>
+  <rect x="570" y="550" width="14" height="14" fill="#24283b" stroke="#e0af68" stroke-width="1.5" rx="3"/>
   <text x="592" y="562" class="rt-label-sm">runner / orchestration</text>
   <line x1="50" y1="582" x2="80" y2="582" class="rt-arrow-grn"/>
   <text x="88" y="586" class="rt-label-sm">test -> ntdll</text>
@@ -326,7 +336,7 @@ i686-w64-mingw32-gcc -O2 -static programs/nspa_rt_test/main.c -o nspa_rt_test.ex
 
 <h3>Layered Validation</h3>
 
-<p>Each subcommand targets a specific cross-section of the stack:</p>
+<p>Each PE subcommand targets a specific cross-section of the stack:</p>
 
 <table>
 <thead>
@@ -404,7 +414,7 @@ i686-w64-mingw32-gcc -O2 -static programs/nspa_rt_test/main.c -o nspa_rt_test.ex
 
 <hr />
 
-<h2>3. Subcommands</h2>
+<h2>3. PE Subcommands (Layer 2)</h2>
 
 <h3>Summary Table</h3>
 
@@ -480,7 +490,7 @@ i686-w64-mingw32-gcc -O2 -static programs/nspa_rt_test/main.c -o nspa_rt_test.ex
 <td> <code>socket-io</code> </td>
 <td> TCP loopback: immediate + deferred recv </td>
 <td> latency (us) p50/p95/p99/max, msgs/sec </td>
-<td> io_uring Phase 3 </td>
+<td> io_uring (Phase 2 surface) </td>
 </tr>
 <tr>
 <td> 10 </td>
@@ -507,340 +517,278 @@ i686-w64-mingw32-gcc -O2 -static programs/nspa_rt_test/main.c -o nspa_rt_test.ex
 </table>
 
 
-<hr />
-
 <h3>3.1 <code>priority</code> &ndash; RT Priority Mapping</h3>
 
-<p><strong>What it tests:</strong> The NSPA v1/v2 priority mapping that converts Win32 thread priorities to Linux scheduling classes. Spawns 11 worker threads across two phases, each sleeping long enough for external inspection via <code>ps</code> and <code>chrt</code>.
-<strong>Phase 1 (3 threads, default process class &ndash; Tier 1 lenient path):</strong>
-- <code>P1-TC</code> &ndash; TIME_CRITICAL, expected FF 80
-- <code>P1-MCSS</code> &ndash; via avrt AvSetMmThreadCharacteristicsW hint, expected FF 80
-- <code>P1-NORM</code> &ndash; NORMAL, expected TS (or FF 73 under RT class)
-<strong>Phase 2 (8 threads, after <code>SetPriorityClass(REALTIME_PRIORITY_CLASS)</code>):</strong>
-- IDLE (FF 65), LOWEST (FF 71), BELOW_NORMAL (FF 72), NORMAL (FF 73), ABOVE_NORMAL (FF 74), HIGHEST (FF 75), TIME_CRITICAL (FF 80)
-<strong>Expected output (with NSPA_RT_PRIO=80):</strong>
-<code>
-[P1-TC]      -&gt; FF 80   [P1-MCSS]    -&gt; FF 80   [P1-NORM] -&gt; TS / FF 73
-[P2-IDLE]    -&gt; FF 65   [P2-LOWEST]  -&gt; FF 71   [P2-BELOW] -&gt; FF 72
-[P2-NORMAL]  -&gt; FF 73   [P2-ABOVE]   -&gt; FF 74   [P2-HIGHEST] -&gt; FF 75
-[P2-TC]      -&gt; FF 80
-</code>
-<strong>PASS criteria:</strong> All threads spawned successfully and <code>SetPriorityClass(REALTIME)</code> succeeded. Priority values are informational &ndash; verified by external <code>ps -eLo pid,tid,class,rtprio</code> inspection.
-<strong>Note:</strong> Skipped by the runner script by default (<code>INCLUDE_PRIORITY=0</code>) because it sleeps 10 seconds for the external observation window.</p>
+<p>Spawns 11 worker threads across two phases, each sleeping long enough
+for external inspection via <code>ps</code> and <code>chrt</code>.</p>
 
-<hr />
+<ul>
+<li>Phase 1 (3 threads, default process class): <code>P1-TC</code> TIME_CRITICAL
+expected FF 80, <code>P1-MCSS</code> via avrt expected FF 80, <code>P1-NORM</code> NORMAL
+expected TS or FF 73 under RT class.</li>
+<li>Phase 2 (8 threads, after <code>SetPriorityClass(REALTIME_PRIORITY_CLASS)</code>):
+IDLE FF 65, LOWEST FF 71, BELOW_NORMAL FF 72, NORMAL FF 73,
+ABOVE_NORMAL FF 74, HIGHEST FF 75, TIME_CRITICAL FF 80.</li>
+</ul>
+
+
+<p>PASS criteria: all threads spawned and <code>SetPriorityClass(REALTIME)</code>
+succeeded. Skipped by the runner by default (sleeps 10s for
+observation).</p>
 
 <h3>3.2 <code>cs-contention</code> &ndash; CS-PI Validation</h3>
 
-<p><strong>What it tests:</strong> Whether the CRITICAL_SECTION priority inheritance path is working. An RT (SCHED_FIFO) thread blocks on a CS held by a SCHED_OTHER thread while background SCHED_OTHER load threads compete for CPU. With PI, the kernel boosts the holder to FIFO for the duration of the hold, so the RT thread&rsquo;s wait time approximates the holder&rsquo;s uncontended work time. Without PI, the holder is preempted by load threads and the RT thread waits much longer.
-<strong>Thread model:</strong>
-- <strong>Load threads</strong> (default 8): SCHED_OTHER infinite busyloops, spawned <em>before</em> <code>SetPriorityClass(REALTIME)</code> so they stay OTHER.
-- <strong>Holder thread</strong>: SCHED_OTHER, acquires CS, does ~1 second of CPU-bound work inside, releases. Repeats for CS_ITERATIONS (default 5).
-- <strong>Waiter thread</strong>: SCHED_FIFO (TIME_CRITICAL), waits for the holder to enter the CS, then calls <code>EnterCriticalSection</code>. Measures wall-clock wait time.
-<strong>Key metrics:</strong> min/max/avg wait time in ms.
-<strong>Expected behavior:</strong>
-- With PI: avg wait close to ~1 second (uncontended work time)
-- Without PI: avg wait materially larger, scaling with load thread count
-<strong>PASS criteria:</strong> All CS_ITERATIONS samples captured (no deadlock, no lost wakeup).</p>
+<p>RT thread (TIME_CRITICAL) blocks on a CS held by a SCHED_OTHER thread
+while background SCHED_OTHER load threads compete. With PI, the holder
+is boosted for the duration of the hold, so the RT thread&rsquo;s wait time
+approximates the holder&rsquo;s uncontended work time. Without PI, the
+holder is preempted by load and the RT thread waits much longer.</p>
 
-<hr />
+<p>Key metrics: min/max/avg wait time. PASS criteria: all CS_ITERATIONS
+samples captured (no deadlock, no lost wakeup).</p>
 
 <h3>3.3 <code>rapidmutex</code> &ndash; CS Throughput Stress</h3>
 
-<p><strong>What it tests:</strong> CRITICAL_SECTION throughput under high contention. N threads (default 4) hammer a shared CS in a tight EnterCS/LeaveCS loop. Thread 0 is TIME_CRITICAL (SCHED_FIFO under RT mode); other threads are NORMAL.
-<strong>Usage:</strong> <code>rapidmutex [n_threads] [iters_per_thread]</code> &ndash; default 4 threads, 500,000 iters each.
-<strong>Key metrics:</strong>
-- <code>shared_counter</code> integrity (must equal N * iters)
-- Per-thread: <code>max_wait_us</code>, <code>avg_wait_us</code>, <code>iters_done</code>, <code>elapsed_ms</code>
-- Aggregate: <code>ops/sec</code> throughput
-<strong>Expected behavior:</strong>
-- Without NSPA_RT_PRIO: all threads see comparable max-wait
-- With NSPA_RT_PRIO + CS-PI: thread 0&rsquo;s max-wait is bounded by CS body time, not by load-thread scheduling
-<strong>PASS criteria:</strong> <code>shared_counter == N * iters</code> (CS atomicity holds) and no errors.</p>
-
-<hr />
+<p>N threads (default 4) hammer a shared CS in a tight EnterCS/LeaveCS
+loop. Thread 0 is TIME_CRITICAL; others are NORMAL. PASS criteria:
+<code>shared_counter == N * iters</code> and no errors.</p>
 
 <h3>3.4 <code>philosophers</code> &ndash; Dining Philosophers / Transitive PI</h3>
 
-<p><strong>What it tests:</strong> Transitive priority inheritance through a chain of CriticalSections. 5 philosophers share 5 chopsticks (CS objects). Phil 0 is TIME_CRITICAL; phils 1-4 are load (NORMAL). Background busyloop threads starve the OTHER phils for CPU.
-<strong>Usage:</strong> <code>philosophers [meals_per_phil] [n_load_threads]</code> &ndash; default 50 meals, 4 load threads.
-<strong>Transitive PI chain:</strong> Phil 0 (RT) waits on chopstick[0] held by phil 1, who holds chopstick[1] and waits on chopstick[2] held by phil 2, etc. The PI boost must propagate transitively: RT -> phil 1 -> phil 2 -> &hellip; until the tail holder finishes eating and releases.
-<strong>Key metrics:</strong>
-- <code>meals_done</code> per philosopher (starvation check)
-- <code>RT max_wait</code> (us) &ndash; phil 0&rsquo;s worst-case chopstick acquire time
-- <code>spread</code> &ndash; max_meals - min_meals (fairness measure)
-- Per-philosopher: max_wait, avg_wait, eat_total, elapsed
-<strong>PASS criteria:</strong> All philosophers complete their target meal count within the timeout (default 60 seconds). Timeout implies deadlock.</p>
-
-<hr />
+<p>5 philosophers share 5 chopsticks. Phil 0 is TIME_CRITICAL; phils 1-4
+are load. Background SCHED_OTHER busyloops starve the OTHER phils.
+Transitive PI must propagate from RT through phils 1..N to the tail
+holder. PASS criteria: all philosophers complete the target meal
+count within timeout (60s).</p>
 
 <h3>3.5 <code>fork-mutex</code> &ndash; CreateProcess Stress</h3>
 
-<p><strong>What it tests:</strong> Wine&rsquo;s process spawn path and the librtpi sweep&rsquo;s <code>process.c</code> opt-out. Spawns N copies of itself (default 100) via CreateProcess, each running the internal <code>child-quickexit</code> subcommand, waits for each, and verifies the exit code.
-<strong>Usage:</strong> <code>fork-mutex [count]</code> &ndash; default 100, max 10,000.
-<strong>What bugs it catches:</strong>
-1. <code>process.c</code> accidentally converted by the librtpi sweep &ndash; child inherits corrupted pi_mutex with parent TID
-2. <code>pthread_atfork</code> handler regression &ndash; spawn hangs in parent or child
-3. Wine CreateProcess race or handle leak &ndash; later spawns fail
-4. Wineserver process-table overflow &ndash; off-by-one or leak under load
-5. <code>ntdll/unix/loader.c</code> posix_spawn regression under RT scheduling
-<strong>Key metrics:</strong> spawn time (min/max/avg us), child total time, success/failure counts.
-<strong>PASS criteria:</strong> All N children spawned, waited, and returned exit code 42.</p>
+<p>Spawns N copies of itself (default 100) via <code>CreateProcess</code> running
+the internal <code>child-quickexit</code> subcommand, waits, and verifies exit
+code 42.</p>
 
-<hr />
+<p>Catches: librtpi-sweep regression on <code>process.c</code>,
+<code>pthread_atfork</code> regression, CreateProcess race / handle leak,
+wineserver process-table overflow, posix_spawn regression under RT.</p>
 
 <h3>3.6 <code>signal-recursion</code> &ndash; Guard-Page Fault Stress</h3>
 
-<p><strong>What it tests:</strong> Wine&rsquo;s virtual_mutex recursive locking and the signal dispatch path. N worker threads (default 4) repeatedly: allocate a 2-page region, set PAGE_GUARD on the first page, touch the guard page (triggering STATUS_GUARD_PAGE_VIOLATION -> SIGSEGV -> segv_handler -> virtual_handle_fault), catch the exception via VEH, verify the page is accessible, and free the region.
-<strong>Usage:</strong> <code>signal-recursion [n_threads] [iters_per_thread]</code> &ndash; default 4 threads, 1,000 iters.
-<strong>What bugs it catches:</strong>
-1. <code>virtual_mutex</code> converted to pi_mutex without <code>NSPA_RTPI_MUTEX_RECURSIVE</code> flag &ndash; deadlock on self-re-entry
-2. PAGE_GUARD clear-on-first-access broken &ndash; infinite fault loop
-3. VirtualAlloc/VirtualFree race with fault handler
-4. Signal delivery to wrong thread
-<strong>Key metrics:</strong> iters completed, faults caught (VEH), per-thread elapsed time.
-<strong>PASS criteria:</strong> All iterations completed within timeout (60 seconds). Fault count is informational only &ndash; Wine may handle PAGE_GUARD internally.</p>
+<p>N threads (default 4) repeatedly: alloc 2-page region, set PAGE_GUARD
+on first page, touch (triggers STATUS_GUARD_PAGE_VIOLATION ->
+SIGSEGV -> segv_handler -> virtual_handle_fault), catch via VEH,
+verify accessible, free.</p>
 
-<hr />
+<p>Catches: <code>virtual_mutex</code> self-re-entry deadlock, broken PAGE_GUARD
+clear-on-first-access, alloc/free race with fault handler, wrong-thread
+signal delivery.</p>
 
 <h3>3.7 <code>large-pages</code> &ndash; VirtualAlloc(MEM_LARGE_PAGES)</h3>
 
-<p><strong>What it tests:</strong> End-to-end large page allocation using the NSPA RT v2.5 port. Exercises: <code>RtlAdjustPrivilege(SE_LOCK_MEMORY_PRIVILEGE)</code>, <code>VirtualAlloc(MEM_LARGE_PAGES)</code>, <code>/proc/meminfo</code> cross-check, page touch round-trip, and <code>QueryWorkingSetEx</code> PAGEMAP_SCAN validation.
-<strong>Skip conditions (produce PASS):</strong>
-- <code>/proc/meminfo</code> not readable
-- <code>HugePages_Total == 0</code>
-- <code>GetLargePageMinimum</code> returns 0
-- <code>RtlAdjustPrivilege</code> fails
-<strong>Validation sequence:</strong>
-1. Read <code>HugePages_Free</code> from <code>/proc/meminfo</code> (before)
-2. Enable SeLockMemoryPrivilege via RtlAdjustPrivilege
-3. <code>VirtualAlloc(NULL, 4 * page_size, MEM_LARGE_PAGES, PAGE_READWRITE)</code>
-4. Read <code>HugePages_Free</code> again &ndash; must have decremented by at least 4
-5. Touch every page: write unique byte, read it back
-6. <code>K32QueryWorkingSetEx</code> &ndash; verify <code>LargePage</code> flag is set (PAGEMAP_SCAN)
-7. <code>VirtualFree</code> &ndash; verify <code>HugePages_Free</code> is restored
-<strong>PASS criteria:</strong> Allocation succeeds, hugepages consumed in <code>/proc/meminfo</code>, pages accessible, LargePage flag set.</p>
+<p><code>RtlAdjustPrivilege(SE_LOCK_MEMORY_PRIVILEGE)</code> ->
+<code>VirtualAlloc(MEM_LARGE_PAGES)</code> -> <code>/proc/meminfo</code> cross-check ->
+page touch round-trip -> <code>K32QueryWorkingSetEx</code> PAGEMAP_SCAN
+LargePage-flag check -> <code>VirtualFree</code> -> verify <code>HugePages_Free</code>
+restored.</p>
 
-<hr />
+<p>Skip conditions (PASS): meminfo not readable, <code>HugePages_Total == 0</code>,
+<code>GetLargePageMinimum == 0</code>, RtlAdjustPrivilege fails.</p>
 
 <h3>3.8 <code>ntsync</code> &ndash; NTSync Kernel Driver Validation</h3>
 
-<p><strong>What it tests:</strong> 5 sub-tests targeting the NTSync kernel driver&rsquo;s PI boost, priority-ordered waiter queues, transitive PI chain walk, and mixed WaitForMultipleObjects dispatch.
-<strong>Usage:</strong> <code>ntsync [chain_depth] [rapid_threads] [rapid_iters] [pi_iters] [prio_waiters]</code>
-<strong>NTSync detection:</strong> Probes CreateMutex handle range. Handles >= 2,080,000 indicate ntsync is active (client-side). Lower handles mean wineserver futex fallback.</p>
+<p>5 sub-tests: mutex PI contention, rapid kernel mutex throughput,
+priority-ordered wakeup, transitive PI chain, mixed WFMO (WAIT_ANY +
+WAIT_ALL with heterogeneous object types). Probes CreateMutex handle
+range to confirm ntsync client path is active (handles >= 2,080,000).</p>
 
-<h4>Sub-test 1/5: Mutex PI Contention</h4>
+<p>Runner configurations:</p>
 
-<p>An RT waiter (TIME_CRITICAL) blocks on a kernel CreateMutex held by a SCHED_OTHER holder while background load threads compete. Measures wait time per iteration. With ntsync PI, wait times stay near uncontended work time. Without PI, they scale with load count.</p>
+<ul>
+<li><code>ntsync-d4</code>: depth 4, 4 rapid threads, 100K iters, 8 PI iters, 5 prio waiters</li>
+<li><code>ntsync-d8</code>: depth 8, 4 rapid threads, 100K iters, 3 PI iters, 10 prio waiters</li>
+<li><code>ntsync-d12</code>: depth 12, 8 rapid threads, 50K iters, 3 PI iters, 16 prio waiters</li>
+</ul>
 
-<h4>Sub-test 2/5: Rapid Kernel Mutex</h4>
 
-<p>N threads (1 RT + N-1 load) hammer a CreateMutex in a tight acquire/release loop. Measures throughput (ops/sec), RT max_wait, and counter integrity. Catches excessive overhead from the ntsync <code>raw_spinlock</code> conversion or priority-ordered insertion.</p>
-
-<h4>Sub-test 3/5: Priority-Ordered Wakeup</h4>
-
-<p>Main thread holds a mutex. N waiter threads at different Win32 priorities (TIME_CRITICAL through IDLE) all block. Main releases. Verifies that TIME_CRITICAL wakes first and IDLE wakes last (timestamp ordering). Waiters are launched lowest-priority-first to ensure FIFO ordering would be wrong.
-<strong>Standard priority levels tested:</strong> TC (FF 80), HIGH (FF 75), ABOVE (FF 74), NORMAL (FF 73), BELOW (FF 72), LOW (FF 71), IDLE (FF 65).</p>
-
-<h4>Sub-test 4/5: Transitive PI Chain</h4>
-
-<p>Chain of N mutexes. Holder[0] holds mutex[0] and blocks on mutex[1]. Holder[1] holds mutex[1] and blocks on mutex[2]. &hellip; Holder[N-1] holds mutex[N-1] and does CPU work. RT thread waits on mutex[0]. PI boost must propagate from RT all the way to holder[N-1] through the entire chain. Background load threads ensure that without transitive PI, the tail holder is starved.
-<strong>Runner configurations:</strong>
-- <code>ntsync-d4</code>: depth 4, 4 rapid threads, 100K iters, 8 PI iters, 5 prio waiters
-- <code>ntsync-d8</code>: depth 8, 4 rapid threads, 100K iters, 3 PI iters, 10 prio waiters
-- <code>ntsync-d12</code>: depth 12, 8 rapid threads, 50K iters, 3 PI iters, 16 prio waiters</p>
-
-<h4>Sub-test 5/5: Mixed WaitForMultipleObjects</h4>
-
-<p>Tests ntsync WAIT_ANY and WAIT_ALL paths with heterogeneous object types:
-- <strong>5a</strong>: WFMO with 1 signaled mutex + 5 unsignaled objects &ndash; verifies correct index 0
-- <strong>5b</strong>: WFMO after signaling semaphore at index 2 &ndash; verifies semaphore wakeup
-- <strong>5c</strong>: WaitAll with 2 signaled objects (event + unowned mutex) &ndash; verifies wait-all atomicity
-- <strong>5d</strong>: Cross-thread signal into WFMO &ndash; verifies event wakeup timing
-<strong>PASS criteria:</strong> All 5 sub-tests plus 5a-5d PASS. Aggregate: total PASS vs total FAIL.</p>
-
-<hr />
+<p>PASS criteria: all 5 sub-tests plus 5a-5d PASS.</p>
 
 <h3>3.9 <code>socket-io</code> &ndash; Async TCP Loopback Latency</h3>
 
-<p><strong>What it tests:</strong> io_uring Phase 3 socket I/O bypass. Creates a TCP loopback pair and measures per-message recv latency using overlapped WSARecv in two phases.
-<strong>Phase A &ndash; Immediate recv:</strong> Sender sends data <em>before</em> receiver calls WSARecv. Exercises the fast path where <code>try_recv</code> succeeds immediately. Data is already buffered when recv is called.
-<strong>Phase B &ndash; Deferred recv:</strong> Receiver calls WSARecv <em>before</em> sender sends. Forces the async wait path: WSARecv returns <code>WSA_IO_PENDING</code>, then the sender is signaled. This exercises the server epoll monitoring path (or the io_uring poll bypass when Phase 3 is active).
-<strong>Key metrics per phase:</strong>
-- Latency: min, avg, p50, p95, p99, max (us)
-- Throughput: msgs/sec
-- Pending count: how many recvs went async (Phase B only)
-<strong>Usage:</strong> <code>socket-io</code> (no arguments, 2000 iterations per phase, 256-byte messages).
-<strong>PASS criteria:</strong> Both phases complete without recv errors.</p>
+<p>TCP loopback pair, per-message recv latency via overlapped WSARecv.</p>
 
-<hr />
+<ul>
+<li><strong>Phase A immediate:</strong> sender sends <em>before</em> receiver calls WSARecv.
+Exercises <code>try_recv</code> fast path.</li>
+<li><strong>Phase B deferred:</strong> receiver calls WSARecv <em>before</em> sender sends.
+Forces the async wait path: WSARecv returns <code>WSA_IO_PENDING</code>. With
+io_uring Phase 2 (sockets) enabled, this exercises the
+POLL_ADD/CQE/try_recv interception path.</li>
+</ul>
+
+
+<p>PASS criteria: both phases complete without recv errors.</p>
+
+<p>Note: Phase 2 sockets is currently pending revalidation against the
+post-audit ntsync module + audit §4.1 retry-loop hardening. Treat the
+io_uring socket bypass as not-yet-revalidated until that session
+lands.</p>
 
 <h3>3.10 <code>srw-bench</code> &ndash; SRW Lock Contention Benchmark</h3>
 
-<p><strong>What it tests:</strong> SRWLOCK acquire latency under contention. N threads (default 4) acquire/release a shared SRWLOCK in exclusive mode in a tight loop, measuring per-acquire latency in nanoseconds.
-<strong>Usage:</strong> <code>srw-bench [threads] [iterations]</code> &ndash; default 4 threads, 500,000 iterations each.
-<strong>Key metrics per thread:</strong> avg, p50, p99, max acquire latency (ns), ops/sec.
-<strong>PASS criteria:</strong> All threads complete. Outputs overall aggregate.</p>
+<p>N threads acquire/release a shared SRWLOCK in exclusive mode in a
+tight loop. Per-thread metrics: avg, p50, p99, max acquire latency
+(ns), ops/sec.</p>
+
+<h3>3.11 / 3.12 &ndash; internal <code>child-quickexit</code> and <code>help</code></h3>
 
 <hr />
 
-<h3>3.11 <code>child-quickexit</code> &ndash; Internal Helper</h3>
+<h2>4. Layer 1: native ntsync stress suite</h2>
 
-<p>Internal subcommand used by <code>fork-mutex</code>. Prints a marker line and exits with code 42. Not intended for direct use.</p>
+<p>Added during the 2026-04-26 -> 2026-04-28 audit cycle. These are plain
+C programs that talk directly to <code>/dev/ntsync</code> ioctls, exercising
+kernel-level invariants the Win32 surface can&rsquo;t reach. Located at
+<code>wine/nspa/tests/test-*.c</code>. Built on first invocation of
+<code>run-rt-suite.sh</code>.</p>
+
+<h3>Test Inventory</h3>
+
+<table>
+<thead>
+<tr>
+<th> Test </th>
+<th> What it stresses </th>
+<th> Why it exists </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> <code>test-event-set-pi.c</code> </td>
+<td> EVENT_SET_PI sanity (modified for ready-flag handshake) </td>
+<td> Baseline event-PI signal/wake pair, asserts the deferred-boost path lands </td>
+</tr>
+<tr>
+<td> <code>test-event-set-pi-stress.c</code> </td>
+<td> 8x8 EVENT_SET_PI hammer </td>
+<td> Stresses the EVENT_SET_PI path for the slab UAF that 1008 closed </td>
+</tr>
+<tr>
+<td> <code>test-channel-recv-exclusive.c</code> </td>
+<td> Symmetric cleanup on channel RECV </td>
+<td> Reproduces the channel RECV hang root-caused on 2026-04-27 (Bug 2: pre-1007 wake-all in SEND_PI) </td>
+</tr>
+<tr>
+<td> <code>test-mutex-pi-stress.c</code> </td>
+<td> Mutex contention + Tier B FIFO </td>
+<td> Stresses ntsync mutex PI under high contention with FIFO competition </td>
+</tr>
+<tr>
+<td> <code>test-channel-stress.c</code> </td>
+<td> Channel SEND_PI + RECV + REPLY + register churn </td>
+<td> Catches channel REPLY/cleanup UAFs (Bug 4 from 2026-04-27, fixed by patch 1009 channel_entry refcount) </td>
+</tr>
+<tr>
+<td> <code>test-mixed-load-stress.c</code> </td>
+<td> Full driver coverage (events SET/RESET/PI/PULSE + mutex + sem + chan + wait_all) </td>
+<td> 5-min mixed-load soak across all driver paths; the integration test </td>
+</tr>
+<tr>
+<td> <code>run-rt-suite.sh</code> </td>
+<td> Layer 1 native + Layer 2 PE matrix runner </td>
+<td> Integrates both layers; prints SKIPPED_BY_DESIGN list </td>
+</tr>
+</tbody>
+</table>
+
+
+<h3>SKIPPED_BY_DESIGN list</h3>
+
+<p><code>run-rt-suite.sh</code> excludes two tests from the active run because they
+assert behaviour that was rolled back (the 1007-1011 patch series shipped
+as &ldquo;audit findings&rdquo; without a confirmed bug &ndash; see memory entry
+<code>feedback_dont_shotgun_audit_into_unfound_bug</code>):</p>
+
+<ul>
+<li><code>test-cross-boost</code> &ndash; asserts 1007 cross-boost cleanup</li>
+<li><code>test-wait-rejects-channel</code> &ndash; asserts 1007 channel-reject in
+<code>setup_wait</code></li>
+</ul>
+
+
+<p>These are kept on disk and excluded from the suite list. Re-enable
+only if a future ntsync change makes their invariants real. Keeping
+the source around documents what we tried and why it was reverted.</p>
+
+<h3>Run</h3>
+
+<pre><code>cd wine/nspa/tests
+./run-rt-suite.sh native     # Layer 1 only
+./run-rt-suite.sh wine       # Layer 2 only
+./run-rt-suite.sh all        # both (default)
+</code></pre>
+
+<h3>Validation Totals (2026-04-28)</h3>
+
+<p>The current ntsync module (<code>srcversion A250A77651C8D5DAB719FE2</code>) has
+all four post-debug-kernel bugs fixed:</p>
+
+<ul>
+<li>Bug 1: test cleanup asymmetry stranding R1 in
+<code>test-channel-recv-exclusive</code> (test-side, fixed)</li>
+<li>Bug 2: pre-1007 wake-all in SEND_PI (real production priority
+inversion, fixed by 1007-style narrow patch: <code>wait_event_interruptible_exclusive</code>
+
+<ul>
+<li><code>wake_up_interruptible</code> in CHANNEL_RECV)</li>
+</ul>
+</li>
+<li>Bug 3: EVENT_SET_PI deferred-boost (1008 patch)</li>
+<li>Bug 4: channel_entry refcount UAF caught by KASAN in
+<code>test-channel-stress</code> (1009 patch)</li>
+</ul>
+
+
+<p>Cumulative ops since the audit session opened: ~370M on prod kernel
+across native + stress + 5-min mixed-load soak + Layer 2 PE matrix,
+zero syscall errors, zero KASAN/dmesg splats, ready for Ableton.</p>
+
+<h3>Layer 2 PE Matrix</h3>
+
+<p>The PE matrix (<code>nspa_rt_test.exe</code> baseline + RT) is unchanged in scope
+from the 2026-04-15 doc and continues to pass 22/22 (11 tests x 2
+modes) on the current build.</p>
 
 <hr />
 
-<h3>3.12 <code>help</code> &ndash; Usage Display</h3>
+<h2>5. Test Runner</h2>
 
-<p>Prints the list of subcommands, environment variables, and example invocations.</p>
+<h3>Two-Layer Runner: <code>wine/nspa/tests/run-rt-suite.sh</code></h3>
 
-<hr />
+<p>Drives Layer 1 (native ntsync ioctl tests) and Layer 2 (PE matrix via
+delegation to <code>wine/nspa/run_rt_tests.sh</code>):</p>
 
-<h2>4. Test Runner</h2>
+<pre><code>Usage: ./run-rt-suite.sh [native|wine|all]   (default: all)
+</code></pre>
 
-<h3>Runner Script: <code>nspa/run_rt_tests.sh</code></h3>
+<p>Layer 1 builds each test if its source is newer than the binary,
+checks <code>/dev/ntsync</code> accessibility, prints the SKIPPED_BY_DESIGN list,
+and runs each <code>NATIVE_TESTS[]</code> entry. Aggregates pass/fail/skip and
+returns the fail count.</p>
 
-<p>The runner script orchestrates the full test matrix. It runs every configured subcommand twice &ndash; once in baseline mode and once in RT mode &ndash; captures per-run logs, parses the binary&rsquo;s PASS/FAIL verdict line, and prints a summary.</p>
+<p>Layer 2 invokes <code>nspa/run_rt_tests.sh</code> with the existing baseline + RT
+matrix.</p>
 
-<h3>Runner Flow Diagram</h3>
+<h3>Layer 2 Runner: <code>nspa/run_rt_tests.sh</code></h3>
 
-<div class="diagram-container">
-<svg width="100%" viewBox="0 0 860 540" xmlns="http://www.w3.org/2000/svg">
-  <style>
-    .rn-box      { fill: #24283b; stroke: #3b4261; stroke-width: 1.5; rx: 6; }
-    .rn-box-act  { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 2; rx: 6; }
-    .rn-box-bl   { fill: #24283b; stroke: #7aa2f7; stroke-width: 2; rx: 6; }
-    .rn-box-rt   { fill: #24283b; stroke: #f7768e; stroke-width: 2; rx: 6; }
-    .rn-box-sum  { fill: #24283b; stroke: #e0af68; stroke-width: 2; rx: 6; }
-    .rn-box-dec  { fill: #24283b; stroke: #bb9af7; stroke-width: 1.5; rx: 14; }
-    .rn-label    { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
-    .rn-label-sm { fill: #c0caf5; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
-    .rn-label-hd { fill: #c0caf5; font-size: 13px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
-    .rn-label-grn{ fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
-    .rn-label-blu{ fill: #7aa2f7; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
-    .rn-label-red{ fill: #f7768e; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
-    .rn-label-ylw{ fill: #e0af68; font-size: 11px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
-    .rn-label-pur{ fill: #bb9af7; font-size: 10px; font-family: 'JetBrains Mono', monospace; }
-    .rn-label-cyn{ fill: #7dcfff; font-size: 10px; font-family: 'JetBrains Mono', monospace; }
-    .rn-arrow    { stroke: #565f89; stroke-width: 1.5; fill: none; }
-    .rn-arrow-grn{ stroke: #9ece6a; stroke-width: 2; fill: none; }
-    .rn-arrow-red{ stroke: #f7768e; stroke-width: 2; fill: none; }
-    .rn-region   { fill: none; stroke: #3b4261; stroke-width: 1; stroke-dasharray: 5,3; rx: 6; }
-  </style>
-  <defs>
-    <marker id="rn-arr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#c0caf5"/></marker>
-    <marker id="rn-arr-g" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#9ece6a"/></marker>
-    <marker id="rn-arr-r" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#f7768e"/></marker>
-  </defs>
-
-  <!-- Title -->
-  <text x="430" y="22" class="rn-label-ylw" text-anchor="middle">run_rt_tests.sh -- Runner Flow</text>
-
-  <!-- ═══ Phase 0: Preflight ═══ -->
-  <rect x="30" y="38" width="180" height="70" rx="6" class="rn-box-act"/>
-  <text x="120" y="58" class="rn-label-grn" text-anchor="middle">Preflight</text>
-  <text x="120" y="73" class="rn-label-sm" text-anchor="middle">resolve WINE, TEST_EXE</text>
-  <text x="120" y="85" class="rn-label-sm" text-anchor="middle">mkdir LOG_DIR</text>
-  <text x="120" y="97" class="rn-label-sm" text-anchor="middle">print config banner</text>
-
-  <line x1="210" y1="73" x2="260" y2="73" class="rn-arrow"/>
-
-  <!-- ═══ Cleanup ═══ -->
-  <rect x="260" y="38" width="180" height="70" rx="6" class="rn-box-act"/>
-  <text x="350" y="58" class="rn-label-grn" text-anchor="middle">Cleanup</text>
-  <text x="350" y="73" class="rn-label-sm" text-anchor="middle">pkill nspa_rt_test.exe</text>
-  <text x="350" y="85" class="rn-label-sm" text-anchor="middle">bracket trick: [n]spa..</text>
-  <text x="350" y="97" class="rn-label-sm" text-anchor="middle">SIGTERM, then SIGKILL</text>
-
-  <line x1="350" y1="108" x2="350" y2="138" class="rn-arrow"/>
-
-  <!-- ═══ Baseline Pass ═══ -->
-  <rect x="30" y="140" width="800" height="130" rx="6" class="rn-region"/>
-  <text x="50" y="160" class="rn-label-blu">Baseline Pass (mode: baseline)</text>
-
-  <rect x="50" y="167" width="170" height="50" rx="6" class="rn-box-bl"/>
-  <text x="135" y="185" class="rn-label-blu" text-anchor="middle">env: WINEDEBUG=-all</text>
-  <text x="135" y="200" class="rn-label-sm" text-anchor="middle">no RT promotion</text>
-
-  <line x1="220" y1="192" x2="250" y2="192" class="rn-arrow"/>
-
-  <rect x="250" y="167" width="170" height="50" rx="6" class="rn-box"/>
-  <text x="335" y="185" class="rn-label" text-anchor="middle">for test in tests[]:</text>
-  <text x="335" y="200" class="rn-label-sm" text-anchor="middle">run_one baseline $test</text>
-
-  <line x1="420" y1="192" x2="450" y2="192" class="rn-arrow"/>
-
-  <!-- Per-test detail -->
-  <rect x="450" y="167" width="200" height="50" rx="6" class="rn-box"/>
-  <text x="550" y="182" class="rn-label-cyn" text-anchor="middle">timeout --kill-after=5 120s</text>
-  <text x="550" y="196" class="rn-label-sm" text-anchor="middle">env ... wine $TEST_EXE $subcmd</text>
-  <text x="550" y="210" class="rn-label-sm" text-anchor="middle">> $LOG_DIR/baseline_$name.log</text>
-
-  <line x1="650" y1="192" x2="680" y2="192" class="rn-arrow"/>
-
-  <!-- Verdict parse -->
-  <rect x="680" y="167" width="130" height="50" rx="6" class="rn-box"/>
-  <text x="745" y="182" class="rn-label" text-anchor="middle">parse verdict</text>
-  <text x="745" y="196" class="rn-label-sm" text-anchor="middle">PASS/FAIL/TIMEOUT</text>
-  <text x="745" y="210" class="rn-label-sm" text-anchor="middle">or PASS*/FAIL* (rc)</text>
-
-  <!-- cleanup_stale between tests -->
-  <text x="335" y="242" class="rn-label-sm" text-anchor="middle">cleanup_stale between each test</text>
-  <text x="335" y="256" class="rn-label-pur" text-anchor="middle">(pkill stale nspa_rt_test processes)</text>
-
-  <line x1="430" y1="260" x2="430" y2="290" class="rn-arrow"/>
-
-  <!-- ═══ RT Pass ═══ -->
-  <rect x="30" y="290" width="800" height="100" rx="6" class="rn-region"/>
-  <text x="50" y="310" class="rn-label-red">RT Pass (mode: rt)</text>
-
-  <rect x="50" y="317" width="250" height="55" rx="6" class="rn-box-rt"/>
-  <text x="175" y="335" class="rn-label-red" text-anchor="middle">env: WINEDEBUG=-all</text>
-  <text x="175" y="349" class="rn-label-sm" text-anchor="middle">NSPA_RT_PRIO=80 NSPA_RT_POLICY=FF</text>
-  <text x="175" y="363" class="rn-label-sm" text-anchor="middle">WINEPRELOADREMAPVDSO=force</text>
-
-  <line x1="300" y1="344" x2="340" y2="344" class="rn-arrow"/>
-
-  <rect x="340" y="317" width="170" height="55" rx="6" class="rn-box"/>
-  <text x="425" y="335" class="rn-label" text-anchor="middle">for test in tests[]:</text>
-  <text x="425" y="349" class="rn-label-sm" text-anchor="middle">run_one rt $test</text>
-  <text x="425" y="363" class="rn-label-sm" text-anchor="middle">> $LOG_DIR/rt_$name.log</text>
-
-  <line x1="510" y1="344" x2="560" y2="344" class="rn-arrow"/>
-
-  <rect x="560" y="317" width="130" height="55" rx="6" class="rn-box"/>
-  <text x="625" y="335" class="rn-label" text-anchor="middle">parse verdict</text>
-  <text x="625" y="349" class="rn-label-sm" text-anchor="middle">append to</text>
-  <text x="625" y="363" class="rn-label-sm" text-anchor="middle">results[] array</text>
-
-  <line x1="430" y1="390" x2="430" y2="420" class="rn-arrow"/>
-
-  <!-- ═══ Summary ═══ -->
-  <rect x="120" y="420" width="620" height="110" rx="6" class="rn-region"/>
-  <text x="140" y="440" class="rn-label-ylw">Summary Matrix</text>
-
-  <rect x="140" y="448" width="270" height="70" rx="6" class="rn-box-sum"/>
-  <text x="275" y="468" class="rn-label-ylw" text-anchor="middle">test            baseline   rt</text>
-  <text x="275" y="482" class="rn-label-sm" text-anchor="middle">rapidmutex      PASS       PASS</text>
-  <text x="275" y="494" class="rn-label-sm" text-anchor="middle">philosophers    PASS       PASS</text>
-  <text x="275" y="506" class="rn-label-sm" text-anchor="middle">cs-contention   PASS       PASS</text>
-
-  <line x1="410" y1="488" x2="460" y2="488" class="rn-arrow"/>
-
-  <!-- Exit code decision -->
-  <rect x="460" y="453" width="260" height="62" rx="6" class="rn-box-dec"/>
-  <text x="590" y="474" class="rn-label-pur" text-anchor="middle">any FAIL, TIMEOUT, or UNKNOWN?</text>
-  <text x="590" y="490" class="rn-label-grn" text-anchor="middle">all PASS -> exit 0</text>
-  <text x="590" y="504" class="rn-label-red" text-anchor="middle">any failure -> exit 1</text>
-</svg>
-</div>
-
+<p>Orchestrates the PE matrix. Runs every configured subcommand twice &ndash;
+once in baseline mode and once in RT mode &ndash; captures per-run logs,
+parses the binary&rsquo;s PASS/FAIL verdict line, and prints a summary.</p>
 
 <h3>Test List Configuration</h3>
 
-<p>The runner script defines the test list as an array. Each entry is: <code>"display_name subcmd [args...]"</code>.</p>
+<p>The runner script defines the test list as an array. Each entry is:
+<code>"display_name subcmd [args...]"</code>.</p>
 
-<pre><code class="language-bash">tests=(
+<pre><code>tests=(
     "rapidmutex rapidmutex 4 500000"
     "philosophers philosophers 50 4"
     "fork-mutex fork-mutex 100"
@@ -851,45 +799,40 @@ i686-w64-mingw32-gcc -O2 -static programs/nspa_rt_test/main.c -o nspa_rt_test.ex
     "ntsync-d8 ntsync 8 4 100000 3 10"
     "ntsync-d12 ntsync 12 8 50000 3 16"
     "socket-io socket-io"
-)</code></pre>
+    "srw-bench srw-bench 4 500000"
+)
+</code></pre>
 
 <p>The <code>priority</code> subcommand is included only when <code>INCLUDE_PRIORITY=1</code>.</p>
 
 <h3>Verdict Resolution</h3>
 
-<p>The runner determines each test&rsquo;s verdict with this priority:</p>
+<p>The runner determines each test&rsquo;s verdict in this priority order:</p>
 
 <ol>
 <li><strong>Timeout</strong> (<code>rc=124</code> or <code>rc=137</code>) -> <code>TIMEOUT</code></li>
 <li><strong>Explicit PASS</strong> (line matching <code>^  PASS\s*$</code> in stdout) -> <code>PASS</code></li>
 <li><strong>Explicit FAIL</strong> (line matching <code>^  FAIL</code> in stdout) -> <code>FAIL</code></li>
-<li><strong>Implicit</strong> (no verdict line): <code>rc=0</code> -> <code>PASS*</code>, else -> <code>FAIL* (rc=N)</code></li>
+<li><strong>Implicit</strong> (no verdict line): <code>rc=0</code> -> <code>PASS*</code>, else
+<code>FAIL* (rc=N)</code></li>
 </ol>
 
 
-<p>The <code>*</code> marker in the summary distinguishes tests that emitted an explicit verdict from those relying on exit code.</p>
+<p>The <code>*</code> marker distinguishes tests that emitted an explicit verdict
+from those relying on exit code.</p>
 
 <h3>Log File Structure</h3>
 
-<p>All logs are written to <code>$LOG_DIR</code> (default <code>/tmp/nspa_rt_test_logs/</code>):
-<code>
-/tmp/nspa_rt_test_logs/
+<p>All logs are written to <code>$LOG_DIR</code> (default <code>/tmp/nspa_rt_test_logs/</code>):</p>
+
+<pre><code>/tmp/nspa_rt_test_logs/
   baseline_rapidmutex.log
   baseline_philosophers.log
-  baseline_fork-mutex.log
-  baseline_cs-contention.log
-  baseline_signal-recursion.log
-  baseline_large-pages.log
-  baseline_ntsync-d4.log
-  baseline_ntsync-d8.log
-  baseline_ntsync-d12.log
-  baseline_socket-io.log
+  ...
   rt_rapidmutex.log
   rt_philosophers.log
-  rt_fork-mutex.log
-  rt_cs-contention.log
   ...
-</code></p>
+</code></pre>
 
 <h3>Environment Overrides</h3>
 
@@ -974,133 +917,161 @@ i686-w64-mingw32-gcc -O2 -static programs/nspa_rt_test/main.c -o nspa_rt_test.ex
 
 <hr />
 
-<h2>5. Watchdog and Safety</h2>
+<h2>6. Watchdog and Safety</h2>
 
 <h3>Watchdog Timer</h3>
 
-<p>Every subcommand runs with a watchdog timer armed on entry. The watchdog is a dedicated thread at <code>THREAD_PRIORITY_TIME_CRITICAL</code> that calls <code>ExitProcess(99)</code> after a configurable timeout.</p>
+<p>Every PE subcommand runs with a watchdog timer armed on entry. The
+watchdog is a dedicated thread at <code>THREAD_PRIORITY_TIME_CRITICAL</code> that
+calls <code>ExitProcess(99)</code> after a configurable timeout.</p>
 
 <ul>
 <li><strong>Default timeout:</strong> 120 seconds</li>
 <li><strong>Override:</strong> <code>NSPA_TEST_TIMEOUT=N</code> environment variable (seconds)</li>
-<li><strong>Thread priority:</strong> TIME_CRITICAL &ndash; ensures the watchdog can preempt stuck SCHED_FIFO threads</li>
+<li><strong>Thread priority:</strong> TIME_CRITICAL &ndash; ensures the watchdog can
+preempt stuck SCHED_FIFO threads</li>
 </ul>
 
 
-<p>The watchdog is the <em>inner</em> safety net (inside the PE binary). The runner script&rsquo;s <code>timeout --kill-after=5</code> is the <em>outer</em> safety net (at the shell level). Together they guarantee that no test can hang indefinitely, even if SCHED_FIFO busyloop threads have saturated all cores.</p>
+<p>The watchdog is the <em>inner</em> safety net. The runner script&rsquo;s
+<code>timeout --kill-after=5</code> is the <em>outer</em> safety net at the shell level.
+Together they guarantee that no test can hang indefinitely, even if
+SCHED_FIFO busyloop threads have saturated all cores.</p>
 
 <h3>Ctrl+C Handler</h3>
 
-<p>A <code>SetConsoleCtrlHandler</code> callback is registered before any subcommand runs. On Ctrl+C:</p>
-
-<ol>
-<li>Sets all known stop flags: <code>g_global_abort</code>, <code>g_stop_load</code>, <code>phil_load_stop</code>, <code>nts_pi_stop_load</code>, <code>nts_chain_stop_load</code></li>
-<li>Sleeps 500 ms to give threads time to notice</li>
-<li>Calls <code>ExitProcess(1)</code></li>
-</ol>
-
-
-<p>This ensures that pressing Ctrl+C cleanly terminates even tests with active SCHED_FIFO busyloop threads.</p>
+<p>A <code>SetConsoleCtrlHandler</code> callback is registered before any
+subcommand runs. On Ctrl+C: sets all known stop flags
+(<code>g_global_abort</code>, <code>g_stop_load</code>, <code>phil_load_stop</code>,
+<code>nts_pi_stop_load</code>, <code>nts_chain_stop_load</code>), sleeps 500 ms to let
+threads notice, then calls <code>ExitProcess(1)</code>.</p>
 
 <h3>Stop Flag Architecture</h3>
 
-<p>Each subcommand uses its own volatile <code>LONG</code> stop flag, checked by busyloop threads via <code>InterlockedCompareExchange</code>. All flags are set atomically by both the Ctrl+C handler and the watchdog&rsquo;s <code>ExitProcess</code> path.</p>
+<p>Each subcommand uses its own volatile <code>LONG</code> stop flag, checked by
+busyloop threads via <code>InterlockedCompareExchange</code>. All flags are set
+atomically by both the Ctrl+C handler and the watchdog&rsquo;s
+<code>ExitProcess</code> path.</p>
 
 <h3>Runner-Level Safety</h3>
 
-<p>The runner script adds an additional safety layer:</p>
-
 <ul>
-<li><strong>Per-test cleanup:</strong> <code>cleanup_stale</code> runs between every test, using <code>pgrep -f '[n]spa_rt_test\.exe$'</code> with the bracket trick to avoid self-matching. First pass: SIGTERM. Second pass: SIGKILL.</li>
-<li><strong>Timeout wrapper:</strong> <code>timeout --kill-after=5 $TIMEOUT_SECS</code> wraps each Wine invocation. If the test ignores SIGTERM, SIGKILL arrives 5 seconds later.</li>
+<li><strong>Per-test cleanup:</strong> <code>cleanup_stale</code> runs between every test, using
+<code>pgrep -f '[n]spa_rt_test\.exe$'</code> with the bracket trick to avoid
+self-matching. First pass SIGTERM, second pass SIGKILL.</li>
+<li><strong>Timeout wrapper:</strong> <code>timeout --kill-after=5 $TIMEOUT_SECS</code> wraps
+each Wine invocation. If the test ignores SIGTERM, SIGKILL arrives
+5 seconds later.</li>
 </ul>
 
 
 <hr />
 
-<h2>6. Native Benchmarks</h2>
+<h2>7. Native Benchmarks</h2>
 
 <h3><code>pi_cond_bench.c</code> &ndash; Requeue-PI Condvar Benchmark</h3>
 
-<p>A native Linux benchmark (not a Wine program) that measures condvar signal-to-wake latency under RT priority contention. Located at <code>nspa/tests/pi_cond_bench.c</code>.
-<strong>What it measures:</strong> An RT waiter (SCHED_FIFO) sleeps on a pi_cond. A normal-priority signaler signals it after a delay. Background load threads compete for CPU. With requeue-PI, the wake-to-mutex-reacquire is atomic (kernel-side). Without it, there is a gap where no PI boost is in effect.
-<strong>Build (native Linux, not Wine):</strong>
-<pre><code class="language-bash">gcc -O2 -o pi_cond_bench nspa/tests/pi_cond_bench.c -lpthread -I../../libs/librtpi</code></pre>
-<strong>Run:</strong>
-sudo chrt -f 80 ./pi_cond_bench [iterations] [load_threads]</p>
+<p>A native Linux benchmark (not a Wine program) that measures condvar
+signal-to-wake latency under RT priority contention. Located at
+<code>wine/nspa/tests/pi_cond_bench.c</code>.</p>
 
-<h1>Default: 10000 iterations, 4 load threads</h1></code></pre>
+<p>An RT waiter (SCHED_FIFO) sleeps on a pi_cond. A normal-priority
+signaler signals it after a delay. Background load threads compete
+for CPU. With requeue-PI, the wake-to-mutex-reacquire is atomic
+(kernel-side). Without it, there is a gap where no PI boost is in
+effect.</p>
 
-<p><strong>Output:</strong> Wake latency histogram: avg, p50, p99, max in nanoseconds.</p>
+<p>Build:</p>
 
-<p><strong>Purpose:</strong> Validates the underlying kernel requeue-PI mechanism that Wine-NSPA&rsquo;s condvar path depends on. Running this benchmark outside Wine isolates kernel behavior from Wine&rsquo;s ntdll layer.</p>
+<pre><code>gcc -O2 -o pi_cond_bench wine/nspa/tests/pi_cond_bench.c -lpthread -I../../libs/librtpi
+</code></pre>
+
+<p>Run:</p>
+
+<pre><code>sudo chrt -f 80 ./pi_cond_bench [iterations] [load_threads]
+# Default: 10000 iterations, 4 load threads
+</code></pre>
+
+<p>Output: wake latency histogram (avg, p50, p99, max in nanoseconds).
+Validates the underlying kernel requeue-PI mechanism Wine-NSPA&rsquo;s
+condvar path depends on. Running outside Wine isolates kernel
+behaviour from Wine&rsquo;s ntdll layer.</p>
 
 <hr />
 
-<h2>7. Adding New Tests</h2>
-
-<p>The test harness is designed for easy extension. To add a new subcommand <code>foo</code>:</p>
+<h2>8. Adding New Tests</h2>
 
 <h3>Step 1: Write the Command Function</h3>
 
 <p>In <code>programs/nspa_rt_test/main.c</code>:</p>
 
-<pre><code class="language-c">static int cmd_foo(int argc, char <em><em>argv)
+<pre><code>static int cmd_foo(int argc, char **argv)
 {
-    print_banner(&ldquo;foo&rdquo;, &ldquo;description of what foo tests&rdquo;);
-    print_section(&ldquo;parameters&rdquo;);
-    /</em> &hellip; test logic &hellip; </em>/</p>
+    print_banner("foo", "description of what foo tests");
+    print_section("parameters");
+    /* ... test logic ... */
 
-<pre><code>/* Verdict: explicit PASS/FAIL for the runner to parse */
-if (success) {
-    print_verdict(1, NULL);  /* prints "  PASS" */
-    return 0;
-} else {
-    print_verdict(0, "reason for failure");  /* prints "  FAIL: reason" */
-    return 1;
+    if (success) {
+        print_verdict(1, NULL);  /* prints "  PASS" */
+        return 0;
+    } else {
+        print_verdict(0, "reason for failure");  /* "  FAIL: reason" */
+        return 1;
+    }
 }
 </code></pre>
 
-<p>}</code></pre>
-
 <h3>Step 2: Add to the Commands Table</h3>
 
-<pre><code class="language-c">static struct command commands[] = {
+<pre><code>static struct command commands[] = {
     /* ... existing entries ... */
     { "foo", "short description of foo", cmd_foo },
-    { NULL, NULL, NULL }  /* sentinel */
-};</code></pre>
+    { NULL, NULL, NULL }
+};
+</code></pre>
 
 <h3>Step 3: Add to the Runner Script</h3>
 
 <p>In <code>nspa/run_rt_tests.sh</code>, add to the <code>tests</code> array:</p>
 
-<pre><code class="language-bash">tests=(
-    # ... existing entries ...
+<pre><code>tests=(
+    # ...
     "foo foo [optional args]"
-)</code></pre>
-
-<p>Format: <code>"display_name subcmd [args...]"</code>.</p>
+)
+</code></pre>
 
 <h3>Guidelines</h3>
 
 <ul>
-<li>Use <code>print_banner()</code>, <code>print_section()</code>, <code>print_kv()</code>, <code>print_verdict()</code> for consistent output formatting</li>
-<li>Use <code>print_worker_start()</code> when spawning named threads</li>
-<li>Use <code>enter_realtime_class()</code> / <code>leave_realtime_class()</code> to switch to REALTIME_PRIORITY_CLASS</li>
-<li>Spawn SCHED_OTHER load threads <em>before</em> <code>enter_realtime_class()</code> so they stay OTHER</li>
-<li>Use <code>safe_load_count()</code> to cap load threads at (n_cpus - 1) to avoid saturating the machine</li>
-<li>Check <code>g_global_abort</code> in long-running loops for Ctrl+C responsiveness</li>
-<li>Use <code>now_us()</code> / <code>now_ms()</code> for timing measurements (QPC-based)</li>
-<li>Emit explicit PASS/FAIL via <code>print_verdict()</code> so the runner can parse verdicts without relying on exit codes</li>
+<li>Use <code>print_banner()</code>, <code>print_section()</code>, <code>print_kv()</code>,
+<code>print_verdict()</code> for consistent output formatting.</li>
+<li>Use <code>print_worker_start()</code> when spawning named threads.</li>
+<li>Use <code>enter_realtime_class()</code> / <code>leave_realtime_class()</code> to switch
+to <code>REALTIME_PRIORITY_CLASS</code>.</li>
+<li>Spawn SCHED_OTHER load threads <em>before</em> <code>enter_realtime_class()</code>
+so they stay OTHER.</li>
+<li>Use <code>safe_load_count()</code> to cap load threads at <code>(n_cpus - 1)</code> to
+avoid saturating the machine.</li>
+<li>Check <code>g_global_abort</code> in long-running loops for Ctrl+C
+responsiveness.</li>
+<li>Use <code>now_us()</code> / <code>now_ms()</code> for timing measurements (QPC-based).</li>
+<li>Emit explicit PASS/FAIL via <code>print_verdict()</code> so the runner can
+parse verdicts without relying on exit codes.</li>
 </ul>
 
 
+<h3>Adding a Layer 1 native test</h3>
+
+<p>Drop a <code>test-foo.c</code> in <code>wine/nspa/tests/</code> and add <code>test-foo</code> to the
+<code>NATIVE_TESTS=( ... )</code> array in <code>run-rt-suite.sh</code>. Use exit code 77
+to signal SKIP (e.g. driver feature missing). Runner will autobuild
+on next invocation if the source is newer than the binary.</p>
+
 <hr />
 
-<h2>8. Environment Variables</h2>
+<h2>9. Environment Variables</h2>
 
-<h3>Variables Consumed by nspa_rt_test.exe</h3>
+<h3>Variables Consumed by <code>nspa_rt_test.exe</code></h3>
 
 <table>
 <thead>
@@ -1114,23 +1085,23 @@ if (success) {
 <tr>
 <td> <code>NSPA_RT_PRIO</code> </td>
 <td> (unset) </td>
-<td> Enables v1 RT promotion. Sets the ceiling FIFO priority for TIME_CRITICAL threads. Typical value: <code>80</code>. </td>
+<td> Enables v1 RT promotion. Sets ceiling FIFO priority for TIME_CRITICAL threads. Typical: <code>80</code>. </td>
 </tr>
 <tr>
 <td> <code>NSPA_RT_POLICY</code> </td>
 <td> (unset) </td>
-<td> Scheduler policy for the lower RT band. <code>FF</code> = SCHED_FIFO, <code>RR</code> = SCHED_RR, <code>TS</code> = SCHED_OTHER. </td>
+<td> Scheduler policy for the lower RT band. <code>FF</code>/<code>RR</code>/<code>TS</code>. </td>
 </tr>
 <tr>
 <td> <code>NSPA_TEST_TIMEOUT</code> </td>
 <td> <code>120</code> </td>
-<td> Watchdog timeout in seconds. If the test has not exited after this many seconds, ExitProcess(99) is called. </td>
+<td> Watchdog timeout in seconds. </td>
 </tr>
 </tbody>
 </table>
 
 
-<h3>Variables Consumed by run_rt_tests.sh</h3>
+<h3>Variables Consumed by <code>run_rt_tests.sh</code></h3>
 
 <table>
 <thead>
@@ -1239,12 +1210,12 @@ if (success) {
 <tr>
 <td> <code>ntsync</code> module loaded </td>
 <td> <code>sudo modprobe ntsync</code> </td>
-<td> Required for ntsync sub-tests </td>
+<td> Required for ntsync sub-tests + Layer 1 </td>
 </tr>
 <tr>
 <td> Hugepages reserved </td>
 <td> <code>/proc/meminfo</code> HugePages_Total > 0 </td>
-<td> Required for large-pages test </td>
+<td> Required for <code>large-pages</code> test </td>
 </tr>
 <tr>
 <td> RT-capable kernel </td>
@@ -1259,5 +1230,4 @@ if (success) {
 </tbody>
 </table>
 
-<script>hljs.highlightAll();</script>
 </body></html>

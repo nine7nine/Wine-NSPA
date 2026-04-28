@@ -2,7 +2,7 @@
 <html lang="en"><head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Wine-NSPA -- Full Suite Comparison Report (v3 → v4)</title>
+<title>Wine-NSPA -- Full Suite Comparison Report</title>
 <style>
   :root {
     --bg: #1a1b26; --fg: #c0caf5; --accent: #7aa2f7;
@@ -56,18 +56,282 @@
   strong { color: var(--fg); }
   em { color: var(--muted); font-style: italic; }
 </style>
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/tokyo-night-dark.min.css">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
 </head><body>
-<h1>Wine-NSPA &ndash; Full Suite Comparison Report (v3 → v4)</h1>
+<h1>Wine-NSPA &ndash; Full Suite Comparison Report</h1>
 
-<p>Kernel: 6.19.11-rt1-1-nspa | CONFIG_NTSYNC=m (PI v2 patches, module loaded) | 2026-04-15
-Wine-NSPA 11.6 | nspa_rt_test.exe v4 via <code>run_rt_tests.sh</code> (10 tests, baseline + rt)
-Baseline = <code>WINEDEBUG=-all</code> only | RT = <code>NSPA_RT_PRIO=80 NSPA_RT_POLICY=FF WINEPRELOADREMAPVDSO=force</code></p>
+<p><strong>Date:</strong> 2026-04-28
+<strong>Author:</strong> Jordan Johnston
+<strong>Kernel:</strong> <code>6.19.11-rt1-1-nspa</code> (PREEMPT_RT_FULL, production)
+<strong>ntsync module:</strong> <code>srcversion A250A77651C8D5DAB719FE2</code>
+<strong>Wine:</strong> 11.6 + NSPA RT patchset
+Baseline = <code>WINEDEBUG=-all</code> only |
+RT = <code>NSPA_RT_PRIO=80 NSPA_RT_POLICY=FF WINEPRELOADREMAPVDSO=force</code></p>
 
-<p><strong>v4 changes from v3:</strong></p>
+<p>This doc tracks Wine-NSPA test-suite evolution from v3 through v7. Each
+version section is the report as captured at the time, plus a v7
+update bringing both layers (PE matrix + native ntsync stress) onto a
+single table for the current snapshot.</p>
 
-<h2>NTSync PI v2 Kernel Fixes [3 BUGS FIXED]</h2>
+<table>
+<thead>
+<tr>
+<th> Version </th>
+<th> Date </th>
+<th> Highlight </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> v3 -> v4 </td>
+<td> 2026-04-15 </td>
+<td> NTSync PI v2 kernel fixes; io_uring socket bypass landed (later renumbered to Phase 2) </td>
+</tr>
+<tr>
+<td> v4 -> v5 </td>
+<td> 2026-04-15 </td>
+<td> msvcrt SIMD + SRW spin + pi_cond requeue-PI </td>
+</tr>
+<tr>
+<td> v5 -> v6 </td>
+<td> 2026-04-16/17 </td>
+<td> (incremental tuning, stable matrix) </td>
+</tr>
+<tr>
+<td> <strong>v6 -> v7</strong> </td>
+<td> <strong>2026-04-28</strong> </td>
+<td> <strong>Native ntsync stress suite added; ~370M ops zero KASAN; PE matrix 22/22 stable</strong> </td>
+</tr>
+</tbody>
+</table>
+
+
+<hr />
+
+<h2>v7 / 2026-04-28 &ndash; Native ntsync stress suite added</h2>
+
+<h3>Headline</h3>
+
+<p>A two-layer test surface:</p>
+
+<ul>
+<li><strong>Layer 1 (new):</strong> native <code>/dev/ntsync</code> ioctl stress tests at
+<code>wine/nspa/tests/test-*.c</code>. Catches kernel bugs the Win32 surface
+can&rsquo;t reach (channels, EVENT_SET_PI, raw sched, channel REPLY/cleanup
+refcount).</li>
+<li><strong>Layer 2 (unchanged scope):</strong> <code>nspa_rt_test.exe</code> PE matrix &ndash;
+baseline + RT pass for all 11 tests. Continues to pass 22/22.</li>
+</ul>
+
+
+<h3>Layer 1 results &ndash; ~370M ops, zero KASAN, zero dmesg splats</h3>
+
+<p>Module under test: <code>srcversion A250A77651C8D5DAB719FE2</code>. All four bugs
+caught during the 2026-04-26 -> 2026-04-28 KASAN-armed debug-kernel
+session are fixed. Cumulative ops since the audit session opened.</p>
+
+<table>
+<thead>
+<tr>
+<th> Test </th>
+<th> Ops / config </th>
+<th> Result </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> <code>test-event-set-pi</code> </td>
+<td> sanity (modified for ready-flag handshake) </td>
+<td> PASS </td>
+</tr>
+<tr>
+<td> <code>test-event-set-pi-stress</code> </td>
+<td> 8x8 EVENT_SET_PI hammer </td>
+<td> PASS </td>
+</tr>
+<tr>
+<td> <code>test-channel-recv-exclusive</code> </td>
+<td> symmetric cleanup; was the channel-recv hang repro </td>
+<td> PASS </td>
+</tr>
+<tr>
+<td> <code>test-channel-stress</code> </td>
+<td> SEND_PI + RECV + REPLY + register churn </td>
+<td> PASS </td>
+</tr>
+<tr>
+<td> <code>test-mutex-pi-stress</code> </td>
+<td> mutex contention + Tier B FIFO </td>
+<td> PASS </td>
+</tr>
+<tr>
+<td> <code>test-mixed-load-stress</code> </td>
+<td> 5-min mixed-load soak (events SET/RESET/PI/PULSE + mutex + sem + chan + wait_all + pulse), ~10M ops </td>
+<td> PASS </td>
+</tr>
+<tr>
+<td> Cumulative session total </td>
+<td> ~370M ops across all paths (debug kernel + prod kernel) </td>
+<td> 0 KASAN, 0 dmesg, 0 syscall errors </td>
+</tr>
+</tbody>
+</table>
+
+
+<p>Tests deliberately excluded from the active run via
+<code>SKIPPED_BY_DESIGN</code>:</p>
+
+<ul>
+<li><code>test-cross-boost</code> &ndash; asserts 1007 cross-boost cleanup (rolled back)</li>
+<li><code>test-wait-rejects-channel</code> &ndash; asserts 1007 channel-reject in
+setup_wait (rolled back)</li>
+</ul>
+
+
+<p>These remain in-tree as documentation of what was tried and why it was
+reverted (memory: <code>feedback_dont_shotgun_audit_into_unfound_bug</code>).</p>
+
+<h3>Layer 2 PE matrix &ndash; 22/22 PASS</h3>
+
+<table>
+<thead>
+<tr>
+<th> Test </th>
+<th> Baseline </th>
+<th> RT </th>
+<th> Notes </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> rapidmutex </td>
+<td> PASS </td>
+<td> PASS </td>
+<td> CS-PI fast path + SIMD memcpy stable </td>
+</tr>
+<tr>
+<td> philosophers </td>
+<td> PASS </td>
+<td> PASS </td>
+<td> Transitive PI chain validated </td>
+</tr>
+<tr>
+<td> fork-mutex </td>
+<td> PASS </td>
+<td> PASS </td>
+<td> 100/100 children spawned + reaped </td>
+</tr>
+<tr>
+<td> cs-contention </td>
+<td> PASS </td>
+<td> PASS </td>
+<td> CS-PI fires correctly </td>
+</tr>
+<tr>
+<td> signal-recursion </td>
+<td> PASS </td>
+<td> PASS </td>
+<td> Recursive virtual_mutex path clean </td>
+</tr>
+<tr>
+<td> large-pages </td>
+<td> PASS </td>
+<td> PASS </td>
+<td> 2MB + 1GB pages, LargePage flag set </td>
+</tr>
+<tr>
+<td> ntsync-d4 </td>
+<td> 8/8 </td>
+<td> 8/8 </td>
+<td> Mutex PI + chain + prio + WFMO </td>
+</tr>
+<tr>
+<td> ntsync-d8 </td>
+<td> 8/8 </td>
+<td> 8/8 </td>
+<td> Same, depth 8 </td>
+</tr>
+<tr>
+<td> ntsync-d12 </td>
+<td> 8/8 </td>
+<td> 8/8 </td>
+<td> Same, depth 12, 8 rapid threads </td>
+</tr>
+<tr>
+<td> socket-io </td>
+<td> PASS </td>
+<td> PASS </td>
+<td> io_uring Phase 2 bypass code path; pending revalidation post-audit </td>
+</tr>
+<tr>
+<td> srw-bench </td>
+<td> PASS </td>
+<td> PASS </td>
+<td> SRW spin phase + RT skip </td>
+</tr>
+</tbody>
+</table>
+
+
+<p><strong>22/22 PASS</strong> (11 tests x 2 modes). All PI, sync, ntsync, and
+io_uring subsystems healthy.</p>
+
+<h3>v6 -> v7 changes</h3>
+
+<table>
+<thead>
+<tr>
+<th> Area </th>
+<th> Change </th>
+<th> Impact </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> Test surface </td>
+<td> Layer 1 native ntsync stress suite added (6 tests + runner) </td>
+<td> Catches kernel bugs Win32 layer can&rsquo;t reach </td>
+</tr>
+<tr>
+<td> ntsync module </td>
+<td> Bug 1 (test cleanup), Bug 2 (channel exclusive recv: 1007-style narrow patch), Bug 3 (EVENT_SET_PI deferred boost: 1008), Bug 4 (channel_entry refcount UAF: 1009) all fixed </td>
+<td> Production kernel solid: ~370M ops zero KASAN </td>
+</tr>
+<tr>
+<td> Wine ring code </td>
+<td> Audit §4.1 retry-loop hardening shipped (superproject <code>a7e34c7</code>) </td>
+<td> 7 sites + <code>NSPA_SHM_RETRY_GUARD</code>; subtests A+B PASS </td>
+</tr>
+<tr>
+<td> Runner </td>
+<td> <code>wine/nspa/tests/run-rt-suite.sh</code> orchestrates Layer 1 + Layer 2 </td>
+<td> Single command for full surface </td>
+</tr>
+<tr>
+<td> io_uring socket bypass </td>
+<td> Renumbered to Phase 2; pending revalidation against post-audit ntsync + §4.1 hardening </td>
+<td> PE socket-io test still PASSes against current build </td>
+</tr>
+</tbody>
+</table>
+
+
+<h3>Numbers (PE matrix, 2026-04-28)</h3>
+
+<p>PE matrix throughput / latency numbers are within run-to-run variance
+of v5/v6. The stable result is the 22/22 PASS itself plus the absence
+of regressions across the audit cycle. Verbose per-test deltas were
+useful in v3 -> v4 -> v5 when we were chasing PI v2 fixes; they&rsquo;re
+noise now that the PI surface is stable.</p>
+
+<hr />
+
+<h2>v3 -> v4 (2026-04-15) &ndash; NTSync PI v2 + io_uring socket bypass</h2>
+
+<p>Original report. Kernel: 6.19.11-rt1-1-nspa, CONFIG_NTSYNC=m (PI v2
+patches, module loaded). Wine-NSPA 11.6, <code>nspa_rt_test.exe</code> v4 via
+<code>run_rt_tests.sh</code> (10 tests, baseline + RT).</p>
+
+<h3>NTSync PI v2 Kernel Fixes [3 BUGS FIXED]</h3>
 
 <table>
 <thead>
@@ -85,19 +349,21 @@ Baseline = <code>WINEDEBUG=-all</code> only | RT = <code>NSPA_RT_PRIO=80 NSPA_RT
 </tr>
 <tr>
 <td> 2 </td>
-<td> wait_all had zero PI: ntsync_wait_all never called ntsync_pi_recalc, and recalc only scanned any_waiters </td>
+<td> wait_all had zero PI: <code>ntsync_wait_all</code> never called <code>ntsync_pi_recalc</code>, and recalc only scanned <code>any_waiters</code> </td>
 <td> WaitForMultipleObjects(bWaitAll=TRUE) with mutexes got no PI boost </td>
 </tr>
 <tr>
 <td> 3 </td>
-<td> Stale normal_prio comparison: after boost, sched_setattr_nocheck changed normal_prio; downward recalc failed </td>
+<td> Stale <code>normal_prio</code> comparison: after boost, <code>sched_setattr_nocheck</code> changed <code>normal_prio</code>; downward recalc failed </td>
 <td> Boost dropped entirely when highest-prio waiter left but lower-prio waiters remained </td>
 </tr>
 </tbody>
 </table>
 
 
-<h2>io_uring Phase 3: Socket I/O Bypass [NEW]</h2>
+<h3>io_uring Socket I/O Bypass [NEW in v4]</h3>
+
+<p>(Numbered &ldquo;Phase 3&rdquo; in the v4 report; renumbered to Phase 2 in 2026-04-28.)</p>
 
 <table>
 <thead>
@@ -110,26 +376,24 @@ Baseline = <code>WINEDEBUG=-all</code> only | RT = <code>NSPA_RT_PRIO=80 NSPA_RT
 <tbody>
 <tr>
 <td> 1 </td>
-<td> ALERTED-state interception: intercept before set_async_direct_result </td>
+<td> ALERTED-state interception: intercept before <code>set_async_direct_result</code> </td>
 <td> Async stays frozen on server (no epoll monitoring), CQE handler completes once </td>
 </tr>
 <tr>
 <td> 2 </td>
-<td> E2 bitmap in sock_get_poll_events </td>
-<td> Server skips epoll for client-monitored fds — no protocol change </td>
+<td> E2 bitmap in <code>sock_get_poll_events</code> </td>
+<td> Server skips epoll for client-monitored fds &ndash; no protocol change </td>
 </tr>
 <tr>
 <td> 3 </td>
-<td> ntsync uring_fd kernel extension </td>
+<td> ntsync <code>uring_fd</code> kernel extension </td>
 <td> Threads blocked in ntsync waits wake on io_uring CQE arrival </td>
 </tr>
 </tbody>
 </table>
 
 
-<hr />
-
-<h2>Overall Verdict</h2>
+<h3>v4 Overall Verdict</h3>
 
 <table>
 <thead>
@@ -137,7 +401,7 @@ Baseline = <code>WINEDEBUG=-all</code> only | RT = <code>NSPA_RT_PRIO=80 NSPA_RT
 <th> Test </th>
 <th> Baseline </th>
 <th> RT </th>
-<th> v3→v4 </th>
+<th> v3->v4 </th>
 <th> Notes </th>
 </tr>
 </thead>
@@ -146,14 +410,14 @@ Baseline = <code>WINEDEBUG=-all</code> only | RT = <code>NSPA_RT_PRIO=80 NSPA_RT
 <td> rapidmutex </td>
 <td> PASS </td>
 <td> PASS </td>
-<td> RT max wait 29→46us (noise) </td>
+<td> RT max wait 29->46us (noise) </td>
 <td> 312K ops/s RT </td>
 </tr>
 <tr>
 <td> philosophers </td>
 <td> PASS </td>
 <td> PASS </td>
-<td> <strong>RT max wait 1620→601us (-63%)</strong> </td>
+<td> <strong>RT max wait 1620->601us (-63%)</strong> </td>
 <td> PI v2 fix validated </td>
 </tr>
 <tr>
@@ -188,14 +452,14 @@ Baseline = <code>WINEDEBUG=-all</code> only | RT = <code>NSPA_RT_PRIO=80 NSPA_RT
 <td> ntsync-d4 </td>
 <td> 8/8 </td>
 <td> 8/8 </td>
-<td> PI avg 238→388ms (CFS variance) </td>
+<td> PI avg 238->388ms (CFS variance) </td>
 <td> chain + prio correct </td>
 </tr>
 <tr>
 <td> ntsync-d8 </td>
 <td> 8/8 </td>
 <td> 8/8 </td>
-<td> <strong>PI avg 479→419ms (fixed)</strong> </td>
+<td> <strong>PI avg 479->419ms (fixed)</strong> </td>
 <td> Was reversed in v3, now correct direction </td>
 </tr>
 <tr>
@@ -223,799 +487,9 @@ Baseline = <code>WINEDEBUG=-all</code> only | RT = <code>NSPA_RT_PRIO=80 NSPA_RT
 </table>
 
 
-<p><strong>20/20 PASS</strong> (10 tests x 2 modes). All PI, sync, and io_uring subsystems healthy.</p>
+<p><strong>20/20 PASS</strong> (10 tests x 2 modes).</p>
 
-<hr />
-
-<h2>1. rapidmutex [PASS]</h2>
-
-<p>4 threads (1 RT + 3 load) x 500K lock/unlock cycles on a shared CRITICAL_SECTION.</p>
-
-<table>
-<thead>
-<tr>
-<th> Metric </th>
-<th> Baseline </th>
-<th> RT </th>
-<th> Delta </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> Total elapsed </td>
-<td> 6522 ms </td>
-<td> 6407 ms </td>
-<td> <strong>-115 ms (-1.8%)</strong> </td>
-</tr>
-<tr>
-<td> Throughput </td>
-<td> 307K ops/s </td>
-<td> 312K ops/s </td>
-<td> <strong>+1.8%</strong> </td>
-</tr>
-<tr>
-<td> RT thread max wait </td>
-<td> 53 us </td>
-<td> 46 us </td>
-<td> <strong>-13.2%</strong> </td>
-</tr>
-<tr>
-<td> RT thread avg wait </td>
-<td> 1 us </td>
-<td> 1 us </td>
-<td> flat </td>
-</tr>
-<tr>
-<td> Load max wait (worst) </td>
-<td> 93 us </td>
-<td> 88 us </td>
-<td> -5.4% </td>
-</tr>
-<tr>
-<td> Counter </td>
-<td> 2,000,000 </td>
-<td> 2,000,000 </td>
-<td> correct </td>
-</tr>
-</tbody>
-</table>
-
-
-<blockquote><p><strong>v3→v4:</strong> RT max_wait stable in the 29-53us range across all runs. Throughput 262K→301K→288K→312K — run-to-run variance, not a trend.</p></blockquote>
-
-<hr />
-
-<h2>2. philosophers [PASS] — PI v2 improvement</h2>
-
-<p>5 diners (phil 0 = RT/SCHED_FIFO, phils 1-4 = SCHED_OTHER), 50 meals each, 4 SCHED_OTHER load threads.</p>
-
-<table>
-<thead>
-<tr>
-<th> Metric </th>
-<th> Baseline </th>
-<th> RT </th>
-<th> Delta </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> Total elapsed </td>
-<td> 199 ms </td>
-<td> 189 ms </td>
-<td> <strong>-10 ms (-5.0%)</strong> </td>
-</tr>
-<tr>
-<td> All meals served </td>
-<td> 250/250 </td>
-<td> 250/250 </td>
-<td> both correct </td>
-</tr>
-<tr>
-<td> Spread (max-min meals) </td>
-<td> 0 </td>
-<td> 0 </td>
-<td> perfect fairness </td>
-</tr>
-<tr>
-<td> RT phil max wait </td>
-<td> 616 us </td>
-<td> 601 us </td>
-<td> <strong>-2.4%</strong> </td>
-</tr>
-<tr>
-<td> Worst max wait (any) </td>
-<td> 933 us </td>
-<td> 1107 us </td>
-<td> load variance </td>
-</tr>
-</tbody>
-</table>
-
-
-<blockquote><p><strong>v3→v4:</strong> RT phil max wait: <strong>1620 → 601 us (-63%)</strong>. PI v2&rsquo;s comparison against saved <code>orig_normal_prio</code> eliminates boost/unboost thrashing.</p></blockquote>
-
-<hr />
-
-<h2>3. fork-mutex [PASS]</h2>
-
-<p>100 <code>CreateProcess</code> → child-quickexit cycles.</p>
-
-<table>
-<thead>
-<tr>
-<th> Metric </th>
-<th> Baseline </th>
-<th> RT </th>
-<th> Delta </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> Total elapsed </td>
-<td> 1024 ms </td>
-<td> 1021 ms </td>
-<td> flat </td>
-</tr>
-<tr>
-<td> Spawn time avg </td>
-<td> 4859 us </td>
-<td> 4872 us </td>
-<td> flat </td>
-</tr>
-<tr>
-<td> Spawn time max </td>
-<td> 8595 us </td>
-<td> 6824 us </td>
-<td> -20.6% </td>
-</tr>
-<tr>
-<td> Child total max </td>
-<td> 6766 us </td>
-<td> 6722 us </td>
-<td> flat </td>
-</tr>
-<tr>
-<td> 100/100 ok </td>
-<td> yes </td>
-<td> yes </td>
-<td> correct </td>
-</tr>
-</tbody>
-</table>
-
-
-<blockquote><p>Consistent across all versions. Wineserver at FF/64 provides stable fork behavior.</p></blockquote>
-
-<hr />
-
-<h2>4. cs-contention [PASS]</h2>
-
-<p>4 SCHED_OTHER load threads + PI holder/waiter pair, 3 iterations of 200M-iter work inside CS.</p>
-
-<table>
-<thead>
-<tr>
-<th> Metric </th>
-<th> Baseline </th>
-<th> RT </th>
-<th> Delta </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> Avg wait </td>
-<td> 424 ms </td>
-<td> 353 ms </td>
-<td> <strong>-71 ms (-16.7%)</strong> </td>
-</tr>
-<tr>
-<td> Min wait </td>
-<td> 423 ms </td>
-<td> 213 ms </td>
-<td> <strong>-49.6%</strong> </td>
-</tr>
-<tr>
-<td> Max wait </td>
-<td> 425 ms </td>
-<td> 424 ms </td>
-<td> iter-1 cold start </td>
-</tr>
-</tbody>
-</table>
-
-
-<blockquote><p>CS-PI fires correctly in both modes. RT min wait (213ms) matches uncontended work time, confirming PI boost pins the holder correctly. The avg is pulled up by iter-1 cold-start penalty.</p></blockquote>
-
-<hr />
-
-<h2>5. signal-recursion [PASS]</h2>
-
-<p>4 threads (1 RT + 3 load) x 500 guard-page fault iterations.</p>
-
-<table>
-<thead>
-<tr>
-<th> Metric </th>
-<th> Baseline </th>
-<th> RT </th>
-<th> Delta </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> Total elapsed </td>
-<td> 65 ms </td>
-<td> 60 ms </td>
-<td> -7.7% </td>
-</tr>
-<tr>
-<td> Faults caught (VEH) </td>
-<td> ~2000 </td>
-<td> ~1992 </td>
-<td> info only </td>
-</tr>
-<tr>
-<td> Errors </td>
-<td> 0 </td>
-<td> 0 </td>
-<td> correct </td>
-</tr>
-</tbody>
-</table>
-
-
-<blockquote><p>No sync primitives involved. Confirms no exception-path regression.</p></blockquote>
-
-<hr />
-
-<h2>6. large-pages [PASS]</h2>
-
-<p>Both modes identical: 2MB pages, 1GB pages, LargePage flag confirmed, privilege rejection. Deterministic.</p>
-
-<hr />
-
-<h2>7. ntsync-d4 [8/8 PASS]</h2>
-
-<p>NTSync kernel driver test, chain depth 4, 4 rapid threads, 100K iters, 8 PI iters, 5 prio waiters.</p>
-
-<h3>7.1 PI contention (kernel mutex)</h3>
-
-<table>
-<thead>
-<tr>
-<th> Metric </th>
-<th> Baseline </th>
-<th> RT </th>
-<th> Delta </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> Samples </td>
-<td> 8/8 </td>
-<td> 8/8 </td>
-<td> &ndash; </td>
-</tr>
-<tr>
-<td> Avg wait </td>
-<td> 415 ms </td>
-<td> 388 ms </td>
-<td> <strong>-27 ms (-6.5%)</strong> </td>
-</tr>
-<tr>
-<td> Min wait </td>
-<td> 378 ms </td>
-<td> 230 ms </td>
-<td> <strong>-39.2%</strong> </td>
-</tr>
-<tr>
-<td> Max wait </td>
-<td> 423 ms </td>
-<td> 423 ms </td>
-<td> same </td>
-</tr>
-</tbody>
-</table>
-
-
-<h3>7.2 Rapid kernel mutex (throughput)</h3>
-
-<table>
-<thead>
-<tr>
-<th> Metric </th>
-<th> Baseline </th>
-<th> RT </th>
-<th> Delta </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> Throughput </td>
-<td> 234K ops/s </td>
-<td> 238K ops/s </td>
-<td> <strong>+1.7%</strong> </td>
-</tr>
-<tr>
-<td> Counter </td>
-<td> 400K/400K </td>
-<td> 400K/400K </td>
-<td> correct </td>
-</tr>
-</tbody>
-</table>
-
-
-<h3>7.3 Priority-ordered wakeup (5 waiters)</h3>
-
-<p>All 5 waiters woke in correct priority order in both modes.</p>
-
-<h3>7.4 Transitive PI chain (depth 4)</h3>
-
-<table>
-<thead>
-<tr>
-<th> Metric </th>
-<th> Baseline </th>
-<th> RT </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> RT wait on mutex[0] </td>
-<td> 208 ms </td>
-<td> 209 ms </td>
-</tr>
-</tbody>
-</table>
-
-
-<h3>7.5 Mixed WFMO — all sub-tests PASS in both modes.</h3>
-
-<hr />
-
-<h2>8. ntsync-d8 [8/8 PASS]</h2>
-
-<h3>8.1 PI contention (kernel mutex)</h3>
-
-<table>
-<thead>
-<tr>
-<th> Metric </th>
-<th> Baseline </th>
-<th> RT </th>
-<th> Delta </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> Samples </td>
-<td> 3/3 </td>
-<td> 3/3 </td>
-<td> &ndash; </td>
-</tr>
-<tr>
-<td> Avg wait </td>
-<td> 342 ms </td>
-<td> 419 ms </td>
-<td> +77 ms (CFS load) </td>
-</tr>
-<tr>
-<td> Min wait </td>
-<td> 191 ms </td>
-<td> 418 ms </td>
-<td> </td>
-</tr>
-<tr>
-<td> Max wait </td>
-<td> 419 ms </td>
-<td> 422 ms </td>
-<td> </td>
-</tr>
-</tbody>
-</table>
-
-
-<blockquote><p><strong>Note:</strong> d8 RT showing higher avg than baseline is a CFS load-placement artifact (4 load threads competing for cores). The PI boost IS firing (chain test confirms), but CFS scheduling variability across runs is significant with 3 samples. The PI v2 fix is validated by the d4 min-wait and philosophers improvements.</p></blockquote>
-
-<h3>8.2 Rapid kernel mutex (throughput)</h3>
-
-<table>
-<thead>
-<tr>
-<th> Metric </th>
-<th> Baseline </th>
-<th> RT </th>
-<th> Delta </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> Throughput </td>
-<td> 239K ops/s </td>
-<td> 238K ops/s </td>
-<td> flat </td>
-</tr>
-<tr>
-<td> Counter </td>
-<td> 400K/400K </td>
-<td> 400K/400K </td>
-<td> correct </td>
-</tr>
-</tbody>
-</table>
-
-
-<h3>8.3 Priority-ordered wakeup (7 waiters)</h3>
-
-<p>All 7 waiters woke in correct priority order in both modes.</p>
-
-<h3>8.4 Transitive PI chain (depth 8)</h3>
-
-<table>
-<thead>
-<tr>
-<th> Metric </th>
-<th> Baseline </th>
-<th> RT </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> RT wait on mutex[0] </td>
-<td> 208 ms </td>
-<td> ~210 ms </td>
-</tr>
-</tbody>
-</table>
-
-
-<hr />
-
-<h2>9. ntsync-d12 [8/8 PASS]</h2>
-
-<h3>9.1 PI contention (kernel mutex)</h3>
-
-<table>
-<thead>
-<tr>
-<th> Metric </th>
-<th> Baseline </th>
-<th> RT </th>
-<th> Delta </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> Samples </td>
-<td> 3/3 </td>
-<td> 3/3 </td>
-<td> &ndash; </td>
-</tr>
-<tr>
-<td> Avg wait </td>
-<td> 210 ms </td>
-<td> 282 ms </td>
-<td> CFS artifact </td>
-</tr>
-<tr>
-<td> Min wait </td>
-<td> 198 ms </td>
-<td> 211 ms </td>
-<td> </td>
-</tr>
-<tr>
-<td> Max wait </td>
-<td> 231 ms </td>
-<td> 418 ms </td>
-<td> </td>
-</tr>
-</tbody>
-</table>
-
-
-<h3>9.2 Rapid kernel mutex (throughput)</h3>
-
-<table>
-<thead>
-<tr>
-<th> Metric </th>
-<th> Baseline </th>
-<th> RT </th>
-<th> Delta </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> Throughput </td>
-<td> 237K ops/s </td>
-<td> 237K ops/s </td>
-<td> flat </td>
-</tr>
-<tr>
-<td> Counter </td>
-<td> 400K/400K </td>
-<td> 400K/400K </td>
-<td> correct </td>
-</tr>
-</tbody>
-</table>
-
-
-<h3>9.3 Priority-ordered wakeup (7 waiters)</h3>
-
-<p>All 7 woke in correct priority order in both modes.</p>
-
-<h3>9.4 Transitive PI chain (depth 12)</h3>
-
-<table>
-<thead>
-<tr>
-<th> Metric </th>
-<th> Baseline </th>
-<th> RT </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> RT wait on mutex[0] </td>
-<td> 95 ms </td>
-<td> ~100 ms </td>
-</tr>
-</tbody>
-</table>
-
-
-<hr />
-
-<h2>10. socket-io [PASS] — NEW (io_uring Phase 3)</h2>
-
-<p>Async TCP loopback latency test. Phase A: immediate recv (data pre-buffered). Phase B: deferred overlapped recv (io_uring POLL_ADD → CQE → try_recv → set_async_direct_result).</p>
-
-<h3>Phase A: Immediate recv</h3>
-
-<table>
-<thead>
-<tr>
-<th> Metric </th>
-<th> Baseline </th>
-<th> RT </th>
-<th> Delta </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> Iterations </td>
-<td> 2000/2000 </td>
-<td> 2000/2000 </td>
-<td> &ndash; </td>
-</tr>
-<tr>
-<td> Avg latency </td>
-<td> 95.0 us </td>
-<td> 95.2 us </td>
-<td> flat </td>
-</tr>
-<tr>
-<td> p50 </td>
-<td> 90.9 us </td>
-<td> 93.5 us </td>
-<td> flat </td>
-</tr>
-<tr>
-<td> p95 </td>
-<td> 133.0 us </td>
-<td> 130.2 us </td>
-<td> flat </td>
-</tr>
-<tr>
-<td> p99 </td>
-<td> 174.0 us </td>
-<td> 161.9 us </td>
-<td> -7.0% </td>
-</tr>
-<tr>
-<td> Max </td>
-<td> 957 us </td>
-<td> 792 us </td>
-<td> -17.2% </td>
-</tr>
-<tr>
-<td> Throughput </td>
-<td> 10531 msg/s </td>
-<td> 10501 msg/s </td>
-<td> flat </td>
-</tr>
-</tbody>
-</table>
-
-
-<h3>Phase B: Deferred overlapped recv (io_uring bypass)</h3>
-
-<table>
-<thead>
-<tr>
-<th> Metric </th>
-<th> Baseline </th>
-<th> RT </th>
-<th> Delta </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> Iterations </td>
-<td> 2000/2000 </td>
-<td> 2000/2000 </td>
-<td> &ndash; </td>
-</tr>
-<tr>
-<td> Went async (PENDING) </td>
-<td> 2000 </td>
-<td> 2000 </td>
-<td> <strong>all overlapped</strong> </td>
-</tr>
-<tr>
-<td> Avg latency </td>
-<td> 133.2 us </td>
-<td> 113.2 us </td>
-<td> <strong>-15.0%</strong> </td>
-</tr>
-<tr>
-<td> p50 </td>
-<td> 124.6 us </td>
-<td> 106.3 us </td>
-<td> <strong>-14.7%</strong> </td>
-</tr>
-<tr>
-<td> p95 </td>
-<td> 173.7 us </td>
-<td> 148.6 us </td>
-<td> <strong>-14.5%</strong> </td>
-</tr>
-<tr>
-<td> p99 </td>
-<td> 250.0 us </td>
-<td> 189.0 us </td>
-<td> <strong>-24.4%</strong> </td>
-</tr>
-<tr>
-<td> Max </td>
-<td> 3110 us </td>
-<td> 3220 us </td>
-<td> noise </td>
-</tr>
-<tr>
-<td> Throughput </td>
-<td> 7506 msg/s </td>
-<td> 8837 msg/s </td>
-<td> <strong>+17.7%</strong> </td>
-</tr>
-</tbody>
-</table>
-
-
-<blockquote><p><strong>Key result:</strong> RT mode shows 15% lower avg latency and 18% higher throughput for overlapped socket I/O. All 2000 iterations went through the full io_uring ALERTED-state bypass path (EAGAIN → POLL_ADD → CQE → try_recv → set_async_direct_result). Phase A (immediate) shows no RT benefit because data is already buffered — no io_uring involved.</p></blockquote>
-
-<hr />
-
-<h2>Chain Depth Scaling Summary</h2>
-
-<h3>PI contention avg wait</h3>
-
-<table>
-<thead>
-<tr>
-<th> Depth </th>
-<th> Baseline avg </th>
-<th> RT avg </th>
-<th> Delta </th>
-<th> v3 RT avg </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> d4 (8 iters) </td>
-<td> 415 ms </td>
-<td> 388 ms </td>
-<td> <strong>-6.5%</strong> </td>
-<td> 238 ms </td>
-</tr>
-<tr>
-<td> d8 (3 iters) </td>
-<td> 342 ms </td>
-<td> 419 ms </td>
-<td> reversed (CFS) </td>
-<td> 479 ms </td>
-</tr>
-<tr>
-<td> d12 (3 iters) </td>
-<td> 210 ms </td>
-<td> 282 ms </td>
-<td> reversed (CFS) </td>
-<td> 226 ms </td>
-</tr>
-</tbody>
-</table>
-
-
-<blockquote><p>PI contention results are highly sensitive to CFS load placement across runs. The 3-sample d8/d12 runs show significant variance. The fix is validated by: (1) philosophers consistently improving, (2) d4 8-sample runs showing RT advantage, (3) chain/priority tests always correct. d8 v3 was 479ms (reversed), now 419ms — still noisy but no longer worse than baseline by 2x.</p></blockquote>
-
-<h3>Rapid throughput</h3>
-
-<table>
-<thead>
-<tr>
-<th> Depth </th>
-<th> Threads </th>
-<th> Baseline ops/s </th>
-<th> RT ops/s </th>
-<th> Delta </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> d4 </td>
-<td> 4 </td>
-<td> 234K </td>
-<td> 238K </td>
-<td> +1.7% </td>
-</tr>
-<tr>
-<td> d8 </td>
-<td> 4 </td>
-<td> 239K </td>
-<td> 238K </td>
-<td> flat </td>
-</tr>
-<tr>
-<td> d12 </td>
-<td> 8 </td>
-<td> 237K </td>
-<td> 237K </td>
-<td> flat </td>
-</tr>
-</tbody>
-</table>
-
-
-<h3>Priority wakeup order</h3>
-
-<table>
-<thead>
-<tr>
-<th> Config </th>
-<th> Waiters </th>
-<th> Baseline </th>
-<th> RT </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> d4 </td>
-<td> 5 </td>
-<td> correct </td>
-<td> correct </td>
-</tr>
-<tr>
-<td> d8 </td>
-<td> 7 </td>
-<td> correct </td>
-<td> correct </td>
-</tr>
-<tr>
-<td> d12 </td>
-<td> 7 </td>
-<td> correct </td>
-<td> correct </td>
-</tr>
-</tbody>
-</table>
-
-
-<hr />
-
-<h2>v3 → v4 Key Improvements</h2>
+<h3>v3 -> v4 Key Improvements</h3>
 
 <table>
 <thead>
@@ -1047,13 +521,13 @@ Baseline = <code>WINEDEBUG=-all</code> only | RT = <code>NSPA_RT_PRIO=80 NSPA_RT
 </tr>
 <tr>
 <td> socket-io Phase B avg </td>
-<td> — </td>
+<td> &ndash; </td>
 <td> <strong>113 us</strong> </td>
 <td> NEW: io_uring overlapped socket bypass </td>
 </tr>
 <tr>
 <td> socket-io Phase B throughput </td>
-<td> — </td>
+<td> &ndash; </td>
 <td> <strong>8837 msg/s</strong> </td>
 <td> NEW: +18% vs baseline </td>
 </tr>
@@ -1061,33 +535,25 @@ Baseline = <code>WINEDEBUG=-all</code> only | RT = <code>NSPA_RT_PRIO=80 NSPA_RT
 </table>
 
 
-<h3>Resolved Investigation Targets</h3>
+<h3>Resolved in v4</h3>
 
 <ul>
-<li><del>#2: Philosophers RT max wait 1620us</del> — <strong>RESOLVED.</strong> Buggy PI code (stale normal_prio), not sched_setattr_nocheck. PI v2 fix: 1620→601us.</li>
-<li><del>#5: ntsync module autoload</del> — <strong>RESOLVED.</strong> Was CRITICAL, not &ldquo;convenience.&rdquo; Now autoloaded via /etc/modules-load.d/ntsync.conf.</li>
-<li><del>Overlapped socket bypass</del> — <strong>RESOLVED.</strong> 4 failed approaches (signal reentrancy, deadlock, double completion, ALERTED/PENDING race). 5th approach (ALERTED-state interception) works: async stays frozen on server, CQE handler completes once.</li>
+<li>Philosophers RT max wait 1620us &ndash; root cause was buggy PI code
+(stale <code>normal_prio</code>), not <code>sched_setattr_nocheck</code>. PI v2 fix:
+1620 -> 601us.</li>
+<li>ntsync module autoload &ndash; promoted from &ldquo;convenience&rdquo; to CRITICAL.
+Now autoloaded via <code>/etc/modules-load.d/ntsync.conf</code>.</li>
+<li>Overlapped socket bypass &ndash; 4 failed approaches (signal reentrancy,
+deadlock, double completion, ALERTED/PENDING race). 5th approach
+(ALERTED-state interception) works.</li>
 </ul>
 
 
 <hr />
 
-<p>Raw logs: <code>wine/nspa/docs/logs/v4/</code> | Previous v3: <code>/tmp/nspa_rt_test_logs_v3/</code>
-Generated: 2026-04-15 | Wine-NSPA RT test harness v4 — full suite 20/20</p>
+<h2>v4 -> v5 (2026-04-15) &ndash; msvcrt SIMD + SRW spin + pi_cond requeue-PI</h2>
 
-<hr />
-
-<hr />
-
-<h1>Wine-NSPA &ndash; Full Suite Comparison Report (v4 → v5)</h1>
-
-<p>Kernel: 6.19.11-rt1-1-nspa | CONFIG_NTSYNC=m (PI v2 patches, module loaded) | 2026-04-15
-Wine-NSPA 11.6 | nspa_rt_test.exe v5 via <code>run_rt_tests.sh</code> (10 tests, baseline + rt)
-Baseline = <code>WINEDEBUG=-all</code> only | RT = <code>NSPA_RT_PRIO=80 NSPA_RT_POLICY=FF WINEPRELOADREMAPVDSO=force</code></p>
-
-<p><strong>v5 changes from v4:</strong></p>
-
-<h2>msvcrt SIMD Optimizations [NEW]</h2>
+<h3>msvcrt SIMD Optimizations [NEW]</h3>
 
 <table>
 <thead>
@@ -1100,24 +566,24 @@ Baseline = <code>WINEDEBUG=-all</code> only | RT = <code>NSPA_RT_PRIO=80 NSPA_RT
 <tbody>
 <tr>
 <td> 1 </td>
-<td> AVX/SSE2 memcpy/memmove — compiler intrinsics replacing hand-written assembly </td>
-<td> Wider stores, better codegen, lower overhead for buffer copies </td>
+<td> AVX/SSE2 memcpy/memmove </td>
+<td> Wider stores, lower overhead for buffer copies </td>
 </tr>
 <tr>
 <td> 2 </td>
-<td> SSE2 memchr, strlen, memcmp — SIMD string/memory search </td>
+<td> SSE2 memchr, strlen, memcmp </td>
 <td> Faster string operations across all Wine code paths </td>
 </tr>
 <tr>
 <td> 3 </td>
-<td> Runtime CPU dispatch — AVX path selected at init when CPUID confirms support </td>
-<td> Zero-cost selection, SSE2 fallback on older hardware </td>
+<td> Runtime CPU dispatch </td>
+<td> AVX path selected at init when CPUID confirms support </td>
 </tr>
 </tbody>
 </table>
 
 
-<h2>Synchronization Improvements [3 CHANGES]</h2>
+<h3>Synchronization Improvements [3 CHANGES]</h3>
 
 <table>
 <thead>
@@ -1130,7 +596,7 @@ Baseline = <code>WINEDEBUG=-all</code> only | RT = <code>NSPA_RT_PRIO=80 NSPA_RT
 <tbody>
 <tr>
 <td> 4 </td>
-<td> CoWaitForMultipleHandles correctness rewrite </td>
+<td> <code>CoWaitForMultipleHandles</code> correctness rewrite </td>
 <td> Removes 100-msg hack, correct COM message pumping </td>
 </tr>
 <tr>
@@ -1141,13 +607,13 @@ Baseline = <code>WINEDEBUG=-all</code> only | RT = <code>NSPA_RT_PRIO=80 NSPA_RT
 <tr>
 <td> 6 </td>
 <td> pi_cond requeue-PI upgrade (FUTEX_WAIT_REQUEUE_PI / FUTEX_CMP_REQUEUE_PI) </td>
-<td> Closes PI gap in condition variable wakeup — waiter transitions atomically from cond to mutex with PI </td>
+<td> Closes PI gap in condition variable wakeup </td>
 </tr>
 </tbody>
 </table>
 
 
-<h2>New Test Subcommands [2 NEW]</h2>
+<h3>New Test Subcommands [2 NEW]</h3>
 
 <table>
 <thead>
@@ -1161,20 +627,18 @@ Baseline = <code>WINEDEBUG=-all</code> only | RT = <code>NSPA_RT_PRIO=80 NSPA_RT
 <tr>
 <td> 7a </td>
 <td> SRW contention benchmark </td>
-<td> Measures SRW lock throughput under load, validates spin phase </td>
+<td> Measures SRW lock throughput under load </td>
 </tr>
 <tr>
 <td> 7b </td>
 <td> pi_cond requeue-PI benchmark (native Linux) </td>
-<td> Validates requeue-PI kernel path, measures wakeup latency </td>
+<td> Validates requeue-PI kernel path </td>
 </tr>
 </tbody>
 </table>
 
 
-<hr />
-
-<h2>Overall Verdict</h2>
+<h3>v5 Overall Verdict</h3>
 
 <table>
 <thead>
@@ -1182,7 +646,7 @@ Baseline = <code>WINEDEBUG=-all</code> only | RT = <code>NSPA_RT_PRIO=80 NSPA_RT
 <th> Test </th>
 <th> Baseline </th>
 <th> RT </th>
-<th> v4→v5 Delta </th>
+<th> v4->v5 Delta </th>
 <th> Notes </th>
 </tr>
 </thead>
@@ -1191,21 +655,21 @@ Baseline = <code>WINEDEBUG=-all</code> only | RT = <code>NSPA_RT_PRIO=80 NSPA_RT
 <td> rapidmutex </td>
 <td> PASS </td>
 <td> PASS </td>
-<td> <strong>RT throughput 312K→327K (+4.7%)</strong> </td>
+<td> <strong>RT throughput 312K->327K (+4.7%)</strong> </td>
 <td> SIMD + SRW spin benefit </td>
 </tr>
 <tr>
 <td> philosophers </td>
 <td> PASS </td>
 <td> PASS </td>
-<td> RT max wait 601→1301us (CFS variance) </td>
+<td> RT max wait 601->1301us (CFS variance) </td>
 <td> PI still correct, run-to-run noise </td>
 </tr>
 <tr>
 <td> fork-mutex </td>
 <td> PASS </td>
 <td> PASS </td>
-<td> <strong>RT elapsed 1021→948ms (-7.1%)</strong> </td>
+<td> <strong>RT elapsed 1021->948ms (-7.1%)</strong> </td>
 <td> Faster process startup </td>
 </tr>
 <tr>
@@ -1233,14 +697,14 @@ Baseline = <code>WINEDEBUG=-all</code> only | RT = <code>NSPA_RT_PRIO=80 NSPA_RT
 <td> ntsync-d4 </td>
 <td> 8/8 </td>
 <td> 8/8 </td>
-<td> <strong>baseline PI avg 415→209ms (-50%)</strong> </td>
+<td> <strong>baseline PI avg 415->209ms (-50%)</strong> </td>
 <td> Dramatic improvement </td>
 </tr>
 <tr>
 <td> ntsync-d8 </td>
 <td> 8/8 </td>
 <td> 8/8 </td>
-<td> <strong>RT PI avg 419→201ms (-52%)</strong> </td>
+<td> <strong>RT PI avg 419->201ms (-52%)</strong> </td>
 <td> CFS variance resolved </td>
 </tr>
 <tr>
@@ -1268,987 +732,9 @@ Baseline = <code>WINEDEBUG=-all</code> only | RT = <code>NSPA_RT_PRIO=80 NSPA_RT
 </table>
 
 
-<p><strong>20/20 PASS</strong> (10 tests x 2 modes). All PI, sync, and io_uring subsystems healthy.</p>
+<p><strong>20/20 PASS</strong>.</p>
 
-<hr />
-
-<h2>1. rapidmutex [PASS] — SIMD improvement</h2>
-
-<p>4 threads (1 RT + 3 load) x 500K lock/unlock cycles on a shared CRITICAL_SECTION.</p>
-
-<table>
-<thead>
-<tr>
-<th> Metric </th>
-<th> v4 Baseline </th>
-<th> v5 Baseline </th>
-<th> v4 RT </th>
-<th> v5 RT </th>
-<th> v4→v5 RT Delta </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> Total elapsed </td>
-<td> 6522 ms </td>
-<td> 6259 ms </td>
-<td> 6407 ms </td>
-<td> 6118 ms </td>
-<td> <strong>-289 ms (-4.5%)</strong> </td>
-</tr>
-<tr>
-<td> Throughput </td>
-<td> 307K ops/s </td>
-<td> 320K ops/s </td>
-<td> 312K ops/s </td>
-<td> 327K ops/s </td>
-<td> <strong>+4.7%</strong> </td>
-</tr>
-<tr>
-<td> RT thread max wait </td>
-<td> 53 us </td>
-<td> 120 us </td>
-<td> 46 us </td>
-<td> 36 us </td>
-<td> <strong>-21.7%</strong> </td>
-</tr>
-<tr>
-<td> RT thread avg wait </td>
-<td> 1 us </td>
-<td> 1 us </td>
-<td> 1 us </td>
-<td> 1 us </td>
-<td> flat </td>
-</tr>
-<tr>
-<td> Load max wait (worst) </td>
-<td> 93 us </td>
-<td> 143 us </td>
-<td> 88 us </td>
-<td> 61 us </td>
-<td> <strong>-30.7%</strong> </td>
-</tr>
-<tr>
-<td> Counter </td>
-<td> 2,000,000 </td>
-<td> 2,000,000 </td>
-<td> 2,000,000 </td>
-<td> 2,000,000 </td>
-<td> correct </td>
-</tr>
-</tbody>
-</table>
-
-
-<blockquote><p><strong>v4→v5:</strong> RT throughput improved 312K→327K (+4.7%), RT max_wait dropped 46→36us. Both baseline and RT see consistent throughput gains from SIMD memcpy/memmove in the CS fast path overhead. The RT max_wait improvement (36us, best seen across all runs) suggests reduced lock transition overhead.</p></blockquote>
-
-<hr />
-
-<h2>2. philosophers [PASS]</h2>
-
-<p>5 diners (phil 0 = RT/SCHED_FIFO, phils 1-4 = SCHED_OTHER), 50 meals each, 4 SCHED_OTHER load threads.</p>
-
-<table>
-<thead>
-<tr>
-<th> Metric </th>
-<th> v4 Baseline </th>
-<th> v5 Baseline </th>
-<th> v4 RT </th>
-<th> v5 RT </th>
-<th> v4→v5 RT Delta </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> Total elapsed </td>
-<td> 199 ms </td>
-<td> 186 ms </td>
-<td> 189 ms </td>
-<td> 205 ms </td>
-<td> +16 ms (noise) </td>
-</tr>
-<tr>
-<td> All meals served </td>
-<td> 250/250 </td>
-<td> 250/250 </td>
-<td> 250/250 </td>
-<td> 250/250 </td>
-<td> both correct </td>
-</tr>
-<tr>
-<td> Spread </td>
-<td> 0 </td>
-<td> 0 </td>
-<td> 0 </td>
-<td> 0 </td>
-<td> perfect fairness </td>
-</tr>
-<tr>
-<td> RT phil max wait </td>
-<td> 616 us </td>
-<td> 1 us </td>
-<td> 601 us </td>
-<td> 1301 us </td>
-<td> regression (CFS noise) </td>
-</tr>
-<tr>
-<td> Worst max wait (any) </td>
-<td> 933 us </td>
-<td> 780 us </td>
-<td> 1107 us </td>
-<td> 1301 us </td>
-<td> noise </td>
-</tr>
-</tbody>
-</table>
-
-
-<blockquote><p><strong>v4→v5:</strong> RT phil max wait regressed from 601→1301us. This is CFS load-placement variance, not a real regression — the v5 baseline shows 1us RT max_wait (best ever), and the v4 RT value of 601us was itself a lucky run. PI boost continues to fire correctly as confirmed by all NTSync chain tests. The v5 baseline result of 1us RT max_wait is notable — perfect uncontended acquisition.</p></blockquote>
-
-<hr />
-
-<h2>3. fork-mutex [PASS]</h2>
-
-<p>100 <code>CreateProcess</code> -> child-quickexit cycles.</p>
-
-<table>
-<thead>
-<tr>
-<th> Metric </th>
-<th> v4 Baseline </th>
-<th> v5 Baseline </th>
-<th> v4 RT </th>
-<th> v5 RT </th>
-<th> v4→v5 RT Delta </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> Total elapsed </td>
-<td> 1024 ms </td>
-<td> 1030 ms </td>
-<td> 1021 ms </td>
-<td> 948 ms </td>
-<td> <strong>-73 ms (-7.1%)</strong> </td>
-</tr>
-<tr>
-<td> Spawn time avg </td>
-<td> 4859 us </td>
-<td> 4839 us </td>
-<td> 4872 us </td>
-<td> 4496 us </td>
-<td> <strong>-7.7%</strong> </td>
-</tr>
-<tr>
-<td> Spawn time max </td>
-<td> 8595 us </td>
-<td> 6625 us </td>
-<td> 6824 us </td>
-<td> 6348 us </td>
-<td> -7.0% </td>
-</tr>
-<tr>
-<td> Child total max </td>
-<td> 6766 us </td>
-<td> 7286 us </td>
-<td> 6722 us </td>
-<td> 7241 us </td>
-<td> +7.7% (noise) </td>
-</tr>
-<tr>
-<td> 100/100 ok </td>
-<td> yes </td>
-<td> yes </td>
-<td> yes </td>
-<td> yes </td>
-<td> correct </td>
-</tr>
-</tbody>
-</table>
-
-
-<blockquote><p><strong>v4→v5:</strong> RT total elapsed improved 1021→948ms (-7.1%), spawn time avg dropped 4872→4496us. SIMD string ops speed up the process setup path (environment parsing, path resolution). Consistent across both modes.</p></blockquote>
-
-<hr />
-
-<h2>4. cs-contention [PASS]</h2>
-
-<p>4 SCHED_OTHER load threads + PI holder/waiter pair, 3 iterations of 200M-iter work inside CS.</p>
-
-<table>
-<thead>
-<tr>
-<th> Metric </th>
-<th> v4 Baseline </th>
-<th> v5 Baseline </th>
-<th> v4 RT </th>
-<th> v5 RT </th>
-<th> v4→v5 RT Delta </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> Avg wait </td>
-<td> 424 ms </td>
-<td> 353 ms </td>
-<td> 353 ms </td>
-<td> 349 ms </td>
-<td> flat </td>
-</tr>
-<tr>
-<td> Min wait </td>
-<td> 423 ms </td>
-<td> 216 ms </td>
-<td> 213 ms </td>
-<td> 202 ms </td>
-<td> -5.2% </td>
-</tr>
-<tr>
-<td> Max wait </td>
-<td> 425 ms </td>
-<td> 423 ms </td>
-<td> 424 ms </td>
-<td> 423 ms </td>
-<td> flat </td>
-</tr>
-</tbody>
-</table>
-
-
-<blockquote><p><strong>v4→v5:</strong> CS-PI continues to fire correctly. The v5 baseline avg dropping from 424→353ms is interesting — the SRW spin phase change may affect CFS scheduling behavior even for CS tests through reduced kernel transitions. RT mode is flat as expected since the holder is always boosted.</p></blockquote>
-
-<hr />
-
-<h2>5. signal-recursion [PASS]</h2>
-
-<p>4 threads (1 RT + 3 load) x 500 guard-page fault iterations.</p>
-
-<table>
-<thead>
-<tr>
-<th> Metric </th>
-<th> v4 Baseline </th>
-<th> v5 Baseline </th>
-<th> v4 RT </th>
-<th> v5 RT </th>
-<th> v4→v5 RT Delta </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> Total elapsed </td>
-<td> 65 ms </td>
-<td> 57 ms </td>
-<td> 60 ms </td>
-<td> 57 ms </td>
-<td> -3 ms (-5.0%) </td>
-</tr>
-<tr>
-<td> Faults caught (VEH) </td>
-<td> ~1975 </td>
-<td> ~1958 </td>
-<td> ~1992 </td>
-<td> ~1972 </td>
-<td> info only </td>
-</tr>
-<tr>
-<td> Errors </td>
-<td> 0 </td>
-<td> 0 </td>
-<td> 0 </td>
-<td> 0 </td>
-<td> correct </td>
-</tr>
-</tbody>
-</table>
-
-
-<blockquote><p>No sync primitives involved. Both modes slightly faster (57ms vs 60-65ms), likely SIMD string ops in exception path setup.</p></blockquote>
-
-<hr />
-
-<h2>6. large-pages [PASS]</h2>
-
-<p>Both modes identical: 2MB pages, 1GB pages, LargePage flag confirmed, privilege rejection. Deterministic.</p>
-
-<hr />
-
-<h2>7. ntsync-d4 [8/8 PASS] — PI contention improvement</h2>
-
-<p>NTSync kernel driver test, chain depth 4, 4 rapid threads, 100K iters, 8 PI iters, 5 prio waiters.</p>
-
-<h3>7.1 PI contention (kernel mutex)</h3>
-
-<table>
-<thead>
-<tr>
-<th> Metric </th>
-<th> v4 Baseline </th>
-<th> v5 Baseline </th>
-<th> v4 RT </th>
-<th> v5 RT </th>
-<th> v4→v5 RT Delta </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> Samples </td>
-<td> 8/8 </td>
-<td> 8/8 </td>
-<td> 8/8 </td>
-<td> 8/8 </td>
-<td> &ndash; </td>
-</tr>
-<tr>
-<td> Avg wait </td>
-<td> 415 ms </td>
-<td> 209 ms </td>
-<td> 387 ms </td>
-<td> 270 ms </td>
-<td> <strong>-117 ms (-30.2%)</strong> </td>
-</tr>
-<tr>
-<td> Min wait </td>
-<td> 378 ms </td>
-<td> 195 ms </td>
-<td> 230 ms </td>
-<td> 193 ms </td>
-<td> <strong>-16.1%</strong> </td>
-</tr>
-<tr>
-<td> Max wait </td>
-<td> 423 ms </td>
-<td> 245 ms </td>
-<td> 423 ms </td>
-<td> 419 ms </td>
-<td> flat </td>
-</tr>
-</tbody>
-</table>
-
-
-<blockquote><p><strong>v4→v5:</strong> Dramatic improvement in both baseline and RT. Baseline PI avg dropped from 415→209ms (-50%), RT from 387→270ms (-30%). The improvement is consistent with reduced overhead from SIMD + SRW spin phase keeping the holder on-core longer during short contention windows.</p></blockquote>
-
-<h3>7.2 Rapid kernel mutex (throughput)</h3>
-
-<table>
-<thead>
-<tr>
-<th> Metric </th>
-<th> v4 Baseline </th>
-<th> v5 Baseline </th>
-<th> v4 RT </th>
-<th> v5 RT </th>
-<th> v4→v5 RT Delta </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> Throughput </td>
-<td> 234K ops/s </td>
-<td> 261K ops/s </td>
-<td> 232K ops/s </td>
-<td> 259K ops/s </td>
-<td> <strong>+11.6%</strong> </td>
-</tr>
-<tr>
-<td> RT max_wait </td>
-<td> 430 us </td>
-<td> 37 us </td>
-<td> 54 us </td>
-<td> 47 us </td>
-<td> -13.0% </td>
-</tr>
-<tr>
-<td> Counter </td>
-<td> 400K/400K </td>
-<td> 400K/400K </td>
-<td> 400K/400K </td>
-<td> 400K/400K </td>
-<td> correct </td>
-</tr>
-</tbody>
-</table>
-
-
-<h3>7.3 Priority-ordered wakeup (5 waiters)</h3>
-
-<p>All 5 waiters woke in correct priority order in both modes, both v4 and v5.</p>
-
-<h3>7.4 Transitive PI chain (depth 4)</h3>
-
-<table>
-<thead>
-<tr>
-<th> Metric </th>
-<th> v4 Baseline </th>
-<th> v5 Baseline </th>
-<th> v4 RT </th>
-<th> v5 RT </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> RT wait on mutex[0] </td>
-<td> 208 ms </td>
-<td> 209 ms </td>
-<td> 101 ms </td>
-<td> 208 ms </td>
-</tr>
-</tbody>
-</table>
-
-
-<blockquote><p>Chain wait time shows CFS run-to-run variance (v4 RT had a fast 101ms vs v5 RT at 208ms). PI propagation confirmed correct at all depths.</p></blockquote>
-
-<h3>7.5 Mixed WFMO &ndash; all sub-tests PASS in both modes.</h3>
-
-<hr />
-
-<h2>8. ntsync-d8 [8/8 PASS] — PI contention resolved</h2>
-
-<h3>8.1 PI contention (kernel mutex)</h3>
-
-<table>
-<thead>
-<tr>
-<th> Metric </th>
-<th> v4 Baseline </th>
-<th> v5 Baseline </th>
-<th> v4 RT </th>
-<th> v5 RT </th>
-<th> v4→v5 RT Delta </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> Samples </td>
-<td> 3/3 </td>
-<td> 3/3 </td>
-<td> 3/3 </td>
-<td> 3/3 </td>
-<td> &ndash; </td>
-</tr>
-<tr>
-<td> Avg wait </td>
-<td> 342 ms </td>
-<td> 225 ms </td>
-<td> 419 ms </td>
-<td> 201 ms </td>
-<td> <strong>-218 ms (-52.0%)</strong> </td>
-</tr>
-<tr>
-<td> Min wait </td>
-<td> 191 ms </td>
-<td> 209 ms </td>
-<td> 418 ms </td>
-<td> 190 ms </td>
-<td> <strong>-54.5%</strong> </td>
-</tr>
-<tr>
-<td> Max wait </td>
-<td> 419 ms </td>
-<td> 240 ms </td>
-<td> 422 ms </td>
-<td> 207 ms </td>
-<td> <strong>-50.9%</strong> </td>
-</tr>
-</tbody>
-</table>
-
-
-<blockquote><p><strong>v4→v5:</strong> The d8 CFS reversal from v4 is resolved. v4 RT showed 419ms avg (worse than baseline&rsquo;s 342ms). v5 RT shows 201ms avg — now correctly lower than baseline (225ms). The tight range (190-207ms) vs v4&rsquo;s stuck-at-420ms range confirms the SRW spin phase and SIMD improvements are reducing CFS load contention that was artificially inflating the hold times.</p></blockquote>
-
-<h3>8.2 Rapid kernel mutex (throughput)</h3>
-
-<table>
-<thead>
-<tr>
-<th> Metric </th>
-<th> v4 Baseline </th>
-<th> v5 Baseline </th>
-<th> v4 RT </th>
-<th> v5 RT </th>
-<th> v4→v5 RT Delta </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> Throughput </td>
-<td> 239K ops/s </td>
-<td> 255K ops/s </td>
-<td> 238K ops/s </td>
-<td> 253K ops/s </td>
-<td> <strong>+6.3%</strong> </td>
-</tr>
-<tr>
-<td> Counter </td>
-<td> 400K/400K </td>
-<td> 400K/400K </td>
-<td> 400K/400K </td>
-<td> 400K/400K </td>
-<td> correct </td>
-</tr>
-</tbody>
-</table>
-
-
-<h3>8.3 Priority-ordered wakeup (7 waiters)</h3>
-
-<p>All 7 waiters woke in correct priority order in both modes, both v4 and v5.</p>
-
-<h3>8.4 Transitive PI chain (depth 8)</h3>
-
-<table>
-<thead>
-<tr>
-<th> Metric </th>
-<th> v4 Baseline </th>
-<th> v5 Baseline </th>
-<th> v4 RT </th>
-<th> v5 RT </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> RT wait on mutex[0] </td>
-<td> 208 ms </td>
-<td> 208 ms </td>
-<td> 212 ms </td>
-<td> 207 ms </td>
-</tr>
-</tbody>
-</table>
-
-
-<hr />
-
-<h2>9. ntsync-d12 [8/8 PASS]</h2>
-
-<h3>9.1 PI contention (kernel mutex)</h3>
-
-<table>
-<thead>
-<tr>
-<th> Metric </th>
-<th> v4 Baseline </th>
-<th> v5 Baseline </th>
-<th> v4 RT </th>
-<th> v5 RT </th>
-<th> v4→v5 RT Delta </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> Samples </td>
-<td> 3/3 </td>
-<td> 3/3 </td>
-<td> 3/3 </td>
-<td> 3/3 </td>
-<td> &ndash; </td>
-</tr>
-<tr>
-<td> Avg wait </td>
-<td> 210 ms </td>
-<td> 279 ms </td>
-<td> 282 ms </td>
-<td> 418 ms </td>
-<td> +136 ms (CFS artifact) </td>
-</tr>
-<tr>
-<td> Min wait </td>
-<td> 198 ms </td>
-<td> 0 ms </td>
-<td> 211 ms </td>
-<td> 417 ms </td>
-<td> </td>
-</tr>
-<tr>
-<td> Max wait </td>
-<td> 231 ms </td>
-<td> 419 ms </td>
-<td> 418 ms </td>
-<td> 419 ms </td>
-<td> </td>
-</tr>
-</tbody>
-</table>
-
-
-<blockquote><p><strong>Note:</strong> d12 PI contention shows high CFS variance with 3 samples, as in v4. The v5 RT avg of 418ms represents a run where all 3 iters landed near the uncontended work time (419ms hold), meaning the PI waiter was never actually competing — likely the waiter arrived after the holder released. This is a timing artifact, not a regression. Chain tests and priority wakeup remain correct.</p></blockquote>
-
-<h3>9.2 Rapid kernel mutex (throughput)</h3>
-
-<table>
-<thead>
-<tr>
-<th> Metric </th>
-<th> v4 Baseline </th>
-<th> v5 Baseline </th>
-<th> v4 RT </th>
-<th> v5 RT </th>
-<th> v4→v5 RT Delta </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> Throughput </td>
-<td> 237K ops/s </td>
-<td> 251K ops/s </td>
-<td> 237K ops/s </td>
-<td> 231K ops/s </td>
-<td> -2.5% (noise) </td>
-</tr>
-<tr>
-<td> Counter </td>
-<td> 400K/400K </td>
-<td> 400K/400K </td>
-<td> 400K/400K </td>
-<td> 400K/400K </td>
-<td> correct </td>
-</tr>
-</tbody>
-</table>
-
-
-<h3>9.3 Priority-ordered wakeup (7 waiters)</h3>
-
-<p>All 7 woke in correct priority order in both modes, both v4 and v5.</p>
-
-<h3>9.4 Transitive PI chain (depth 12)</h3>
-
-<table>
-<thead>
-<tr>
-<th> Metric </th>
-<th> v4 Baseline </th>
-<th> v5 Baseline </th>
-<th> v4 RT </th>
-<th> v5 RT </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> RT wait on mutex[0] </td>
-<td> 95 ms </td>
-<td> 207 ms </td>
-<td> 207 ms </td>
-<td> 96 ms </td>
-</tr>
-</tbody>
-</table>
-
-
-<blockquote><p>Chain scaling remains correct. v5 RT got the fast 96ms result (v4 baseline had it). This confirms the chain test is working — the variance is which run gets the favorable CFS placement.</p></blockquote>
-
-<hr />
-
-<h2>10. socket-io [PASS]</h2>
-
-<p>Async TCP loopback latency test. Phase A: immediate recv (data pre-buffered). Phase B: deferred overlapped recv (io_uring POLL_ADD -> CQE -> try_recv -> set_async_direct_result).</p>
-
-<h3>Phase A: Immediate recv</h3>
-
-<table>
-<thead>
-<tr>
-<th> Metric </th>
-<th> v4 Baseline </th>
-<th> v5 Baseline </th>
-<th> v4 RT </th>
-<th> v5 RT </th>
-<th> v4→v5 RT Delta </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> Iterations </td>
-<td> 2000/2000 </td>
-<td> 2000/2000 </td>
-<td> 2000/2000 </td>
-<td> 2000/2000 </td>
-<td> &ndash; </td>
-</tr>
-<tr>
-<td> Avg latency </td>
-<td> 95.0 us </td>
-<td> 86.4 us </td>
-<td> 95.2 us </td>
-<td> 95.8 us </td>
-<td> flat </td>
-</tr>
-<tr>
-<td> p50 </td>
-<td> 90.9 us </td>
-<td> 85.7 us </td>
-<td> 93.5 us </td>
-<td> 92.6 us </td>
-<td> flat </td>
-</tr>
-<tr>
-<td> p95 </td>
-<td> 133.0 us </td>
-<td> 102.1 us </td>
-<td> 130.2 us </td>
-<td> 123.4 us </td>
-<td> -5.2% </td>
-</tr>
-<tr>
-<td> p99 </td>
-<td> 174.0 us </td>
-<td> 123.3 us </td>
-<td> 161.9 us </td>
-<td> 168.6 us </td>
-<td> noise </td>
-</tr>
-<tr>
-<td> Max </td>
-<td> 957 us </td>
-<td> 250 us </td>
-<td> 792 us </td>
-<td> 3301 us </td>
-<td> outlier spike </td>
-</tr>
-<tr>
-<td> Throughput </td>
-<td> 10531 msg/s </td>
-<td> 11581 msg/s </td>
-<td> 10501 msg/s </td>
-<td> 10439 msg/s </td>
-<td> flat </td>
-</tr>
-</tbody>
-</table>
-
-
-<blockquote><p><strong>v4→v5:</strong> Baseline shows a nice improvement (avg 95→86us, p99 174→123us, max 957→250us). RT mode is flat. The v5 baseline improvement may come from SIMD memcpy in the socket buffer path. RT max spike to 3301us is a single outlier — p99 is still 168us.</p></blockquote>
-
-<h3>Phase B: Deferred overlapped recv (io_uring bypass)</h3>
-
-<table>
-<thead>
-<tr>
-<th> Metric </th>
-<th> v4 Baseline </th>
-<th> v5 Baseline </th>
-<th> v4 RT </th>
-<th> v5 RT </th>
-<th> v4→v5 RT Delta </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> Iterations </td>
-<td> 2000/2000 </td>
-<td> 2000/2000 </td>
-<td> 2000/2000 </td>
-<td> 2000/2000 </td>
-<td> &ndash; </td>
-</tr>
-<tr>
-<td> Went async (PENDING) </td>
-<td> 2000 </td>
-<td> 2000 </td>
-<td> 2000 </td>
-<td> 2000 </td>
-<td> <strong>all overlapped</strong> </td>
-</tr>
-<tr>
-<td> Avg latency </td>
-<td> 133.2 us </td>
-<td> 104.5 us </td>
-<td> 113.2 us </td>
-<td> 115.4 us </td>
-<td> flat </td>
-</tr>
-<tr>
-<td> p50 </td>
-<td> 124.6 us </td>
-<td> 101.8 us </td>
-<td> 106.3 us </td>
-<td> 106.1 us </td>
-<td> flat </td>
-</tr>
-<tr>
-<td> p95 </td>
-<td> 173.7 us </td>
-<td> 122.3 us </td>
-<td> 148.6 us </td>
-<td> 144.1 us </td>
-<td> -3.0% </td>
-</tr>
-<tr>
-<td> p99 </td>
-<td> 250.0 us </td>
-<td> 152.8 us </td>
-<td> 189.0 us </td>
-<td> 178.4 us </td>
-<td> -5.6% </td>
-</tr>
-<tr>
-<td> Max </td>
-<td> 3110 us </td>
-<td> 311 us </td>
-<td> 3220 us </td>
-<td> 3647 us </td>
-<td> outlier </td>
-</tr>
-<tr>
-<td> Throughput </td>
-<td> 7506 msg/s </td>
-<td> 9568 msg/s </td>
-<td> 8837 msg/s </td>
-<td> 8666 msg/s </td>
-<td> flat </td>
-</tr>
-</tbody>
-</table>
-
-
-<blockquote><p><strong>v4→v5:</strong> Baseline Phase B shows significant improvement: avg 133→105us (-21%), throughput 7506→9568 (+27%). This is likely SIMD memcpy benefiting the io_uring buffer copy path. RT mode is stable (avg 113→115us). All 2000 iterations continue to go through the full io_uring ALERTED-state bypass path.</p></blockquote>
-
-<hr />
-
-<h2>Chain Depth Scaling Summary</h2>
-
-<h3>PI contention avg wait</h3>
-
-<table>
-<thead>
-<tr>
-<th> Depth </th>
-<th> v4 Baseline avg </th>
-<th> v5 Baseline avg </th>
-<th> v4 RT avg </th>
-<th> v5 RT avg </th>
-<th> v4→v5 RT Delta </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> d4 (8 iters) </td>
-<td> 415 ms </td>
-<td> 209 ms </td>
-<td> 387 ms </td>
-<td> 270 ms </td>
-<td> <strong>-30.2%</strong> </td>
-</tr>
-<tr>
-<td> d8 (3 iters) </td>
-<td> 342 ms </td>
-<td> 225 ms </td>
-<td> 419 ms </td>
-<td> 201 ms </td>
-<td> <strong>-52.0%</strong> </td>
-</tr>
-<tr>
-<td> d12 (3 iters) </td>
-<td> 210 ms </td>
-<td> 279 ms </td>
-<td> 282 ms </td>
-<td> 418 ms </td>
-<td> reversed (CFS) </td>
-</tr>
-</tbody>
-</table>
-
-
-<blockquote><p>v5 resolves the d8 CFS reversal from v4 (419ms RT → 201ms RT, now correctly below baseline). d4 shows 30% improvement with more samples (8). d12 continues to show CFS variance with 3 samples.</p></blockquote>
-
-<h3>Rapid throughput</h3>
-
-<table>
-<thead>
-<tr>
-<th> Depth </th>
-<th> Threads </th>
-<th> v4 Baseline </th>
-<th> v5 Baseline </th>
-<th> v4 RT </th>
-<th> v5 RT </th>
-<th> v4→v5 RT Delta </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> d4 </td>
-<td> 4 </td>
-<td> 234K </td>
-<td> 261K </td>
-<td> 232K </td>
-<td> 259K </td>
-<td> <strong>+11.6%</strong> </td>
-</tr>
-<tr>
-<td> d8 </td>
-<td> 4 </td>
-<td> 239K </td>
-<td> 255K </td>
-<td> 238K </td>
-<td> 253K </td>
-<td> <strong>+6.3%</strong> </td>
-</tr>
-<tr>
-<td> d12 </td>
-<td> 8 </td>
-<td> 237K </td>
-<td> 251K </td>
-<td> 237K </td>
-<td> 231K </td>
-<td> -2.5% (noise) </td>
-</tr>
-</tbody>
-</table>
-
-
-<blockquote><p>Consistent throughput improvement at d4 and d8 from SIMD + reduced lock transition overhead.</p></blockquote>
-
-<h3>Priority wakeup order</h3>
-
-<table>
-<thead>
-<tr>
-<th> Config </th>
-<th> Waiters </th>
-<th> v4 Baseline </th>
-<th> v5 Baseline </th>
-<th> v4 RT </th>
-<th> v5 RT </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> d4 </td>
-<td> 5 </td>
-<td> correct </td>
-<td> correct </td>
-<td> correct </td>
-<td> correct </td>
-</tr>
-<tr>
-<td> d8 </td>
-<td> 7 </td>
-<td> correct </td>
-<td> correct </td>
-<td> correct </td>
-<td> correct </td>
-</tr>
-<tr>
-<td> d12 </td>
-<td> 7 </td>
-<td> correct </td>
-<td> correct </td>
-<td> correct </td>
-<td> correct </td>
-</tr>
-</tbody>
-</table>
-
-
-<hr />
-
-<h2>v4 → v5 Key Improvements</h2>
+<h3>v4 -> v5 Key Improvements</h3>
 
 <table>
 <thead>
@@ -2306,19 +792,114 @@ Baseline = <code>WINEDEBUG=-all</code> only | RT = <code>NSPA_RT_PRIO=80 NSPA_RT
 </table>
 
 
-<h3>Notable</h3>
+<hr />
+
+<h2>v5 -> v6 (2026-04-16/17) &ndash; incremental tuning</h2>
+
+<p>Stable matrix; no new test subcommands. Tuning passes on the gamma
+channel scaffolding and msg-ring v2 Phase A (redraw_window push ring)
+landed in this window. PE matrix continued to pass 20/20 throughout.</p>
+
+<hr />
+
+<h2>Chain Depth Scaling Summary (PE matrix)</h2>
+
+<p>PI contention avg wait (informational only &ndash; highly sensitive to CFS
+load placement; PASS criteria stay on chain + prio + WFMO correctness,
+which are stable):</p>
+
+<table>
+<thead>
+<tr>
+<th> Depth </th>
+<th> v4 RT avg </th>
+<th> v5 RT avg </th>
+<th> v7 status </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> d4 (8 iters) </td>
+<td> 387 ms </td>
+<td> 270 ms </td>
+<td> stable, within run-to-run </td>
+</tr>
+<tr>
+<td> d8 (3 iters) </td>
+<td> 419 ms </td>
+<td> 201 ms </td>
+<td> stable, within run-to-run </td>
+</tr>
+<tr>
+<td> d12 (3 iters) </td>
+<td> 282 ms </td>
+<td> 418 ms </td>
+<td> high variance with 3 samples </td>
+</tr>
+</tbody>
+</table>
+
+
+<p>Rapid throughput (kernel mutex):</p>
+
+<table>
+<thead>
+<tr>
+<th> Depth </th>
+<th> Threads </th>
+<th> v4 RT </th>
+<th> v5 RT </th>
+<th> v7 status </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> d4 </td>
+<td> 4 </td>
+<td> 232K </td>
+<td> 259K </td>
+<td> stable </td>
+</tr>
+<tr>
+<td> d8 </td>
+<td> 4 </td>
+<td> 238K </td>
+<td> 253K </td>
+<td> stable </td>
+</tr>
+<tr>
+<td> d12 </td>
+<td> 8 </td>
+<td> 237K </td>
+<td> 231K </td>
+<td> stable </td>
+</tr>
+</tbody>
+</table>
+
+
+<p>Priority wakeup order: correct in all configs across all versions.</p>
+
+<hr />
+
+<h2>Notes on Cross-Version Comparison</h2>
 
 <ul>
-<li><strong>SIMD impact is measurable across the stack</strong> — not just in synthetic benchmarks but in real subsystems (process creation, socket I/O, kernel mutex throughput)</li>
-<li><strong>d8 CFS reversal resolved</strong> — v4 showed RT 419ms worse than baseline 342ms; v5 shows RT 201ms correctly below baseline 225ms</li>
-<li><strong>Baseline improvements are larger than RT improvements</strong> — this is expected because SIMD benefits are constant-time, and RT mode was already optimized by PI; the baseline had more room to gain</li>
-<li><strong>No regressions</strong> — all 20/20 PASS, all PI chains correct, all priority wakeups correct</li>
+<li>Benchmark numbers (latency, throughput) are run-to-run noisy and
+also skew when slub_debug / KFENCE are on. The authoritative signal
+across versions is <strong>PASS/FAIL plus presence of KASAN splats</strong> &ndash;
+not specific microsecond or ops/sec deltas. (Memory:
+<code>feedback_slub_debug_skews_benchmarks</code>.)</li>
+<li>The 2026-04-26 -> 2026-04-28 audit cycle paid bills against the
+ntsync surface and the wine ring-retry loop. Both surfaces are
+stable as of v7. Velocity is now back on the bypass roadmap (msg-ring
+v2 Phase C get_message bypass paused mid-development is the next
+resume target).</li>
 </ul>
 
 
 <hr />
 
-<p>Raw logs: <code>wine/nspa/docs/logs/v5/</code> | Previous v4: <code>wine/nspa/docs/logs/v4/</code>
-Generated: 2026-04-15 | Wine-NSPA RT test harness v5 — full suite 20/20</p>
-<script>hljs.highlightAll();</script>
+<p>Generated: 2026-04-28 | Wine-NSPA RT test harness v7 (Layer 1 +
+Layer 2) &ndash; ~370M native ops + 22/22 PE matrix.</p>
 </body></html>

@@ -1,110 +1,45 @@
-<!DOCTYPE html>
-<html lang="en"><head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Wine-NSPA -- Win32 Condvar PI (Requeue-PI)</title>
-<style>
-  :root {
-    --bg: #1a1b26; --fg: #c0caf5; --accent: #7aa2f7;
-    --green: #9ece6a; --red: #f7768e; --yellow: #e0af68;
-    --surface: #24283b; --border: #3b4261; --muted: #8c92b3;
-    --purple: #bb9af7; --orange: #ff9e64; --cyan: #7dcfff;
-  }
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body {
-    font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
-    background: var(--bg); color: var(--fg);
-    max-width: 1100px; margin: 0 auto; padding: 2rem 1.5rem;
-    line-height: 1.7;
-  }
-  h1 { color: var(--accent); font-size: 1.5rem; margin: 1.5rem 0 0.5rem; }
-  h2 { color: var(--accent); font-size: 1.2rem; margin: 2rem 0 0.75rem;
-       border-bottom: 1px solid var(--border); padding-bottom: 0.3rem; }
-  h3 { color: var(--yellow); font-size: 1rem; margin: 1.25rem 0 0.5rem; }
-  h4 { color: var(--cyan); font-size: 0.95rem; margin: 1rem 0 0.4rem; }
-  p, li { font-size: 0.85rem; margin-bottom: 0.5rem; }
-  ul, ol { padding-left: 1.5rem; margin-bottom: 0.75rem; }
-  a { color: var(--accent); text-decoration: none; }
-  a:hover { text-decoration: underline; }
-  table {
-    width: 100%; border-collapse: collapse;
-    margin: 0.75rem 0 1rem; font-size: 0.8rem;
-  }
-  th, td {
-    padding: 0.4rem 0.75rem; text-align: left;
-    border: 1px solid var(--border);
-  }
-  th { background: var(--surface); color: var(--accent); font-weight: 600; }
-  td { background: var(--bg); }
-  code {
-    background: var(--surface); padding: 0.15rem 0.4rem;
-    border-radius: 3px; font-size: 0.82rem; color: var(--cyan);
-  }
-  pre {
-    background: var(--surface); padding: 1rem; border-radius: 6px;
-    overflow-x: auto; margin: 0.75rem 0 1rem;
-    border: 1px solid var(--border);
-  }
-  pre code { background: none; padding: 0; font-size: 0.8rem; color: var(--fg); }
-  blockquote {
-    background: var(--surface); border-left: 3px solid var(--accent);
-    padding: 0.75rem 1rem; margin: 1rem 0; border-radius: 0 4px 4px 0;
-    font-size: 0.82rem;
-  }
-  blockquote strong { color: var(--yellow); }
-  hr { border: none; border-top: 1px solid var(--border); margin: 2rem 0; }
-  strong { color: var(--fg); }
-  em { color: var(--muted); font-style: italic; }
-</style>
-</head><body>
-<h1>Wine-NSPA &ndash; Win32 Condvar PI (Requeue-PI)</h1>
+# Wine-NSPA -- Win32 Condvar PI (Requeue-PI)
 
-<blockquote><p><strong>Status: SHIPPED 2026-04-16 (v6 &ndash; Win32 condvar-PI requeue).</strong>
-22/22 RT test suite PASS post-ship; validated against ~370M ops mixed-load 2026-04-28.</p></blockquote>
+> **Status: SHIPPED 2026-04-16 (v6 -- Win32 condvar-PI requeue).**
+> 22/22 RT test suite PASS post-ship; validated against ~370M ops mixed-load 2026-04-28.
 
-<hr />
+---
 
-<p>Wine 11.6 + NSPA RT patchset | Kernel 6.19.x-rt with NTSync PI | 2026-04-16
-Author: jordan Johnston</p>
+Wine 11.6 + NSPA RT patchset | Kernel 6.19.x-rt with NTSync PI | 2026-04-16
+Author: jordan Johnston
 
-<h2>Table of Contents</h2>
+## Table of Contents
 
-<ol>
-<li><a href="#1-overview">Overview</a></li>
-<li><a href="#2-the-problem">The Problem</a></li>
-<li><a href="#3-architecture">Architecture</a></li>
-<li><a href="#4-condvar-to-mutex-mapping-table">Condvar-to-Mutex Mapping Table</a></li>
-<li><a href="#5-syscall-interface">Syscall Interface</a></li>
-<li><a href="#6-correctness-properties">Correctness Properties</a></li>
-<li><a href="#7-relationship-to-existing-pi-infrastructure">Relationship to Existing PI Infrastructure</a></li>
-<li><a href="#8-test-results">Test Results</a></li>
-<li><a href="#9-files-changed">Files Changed</a></li>
-</ol>
+1. [Overview](#1-overview)
+2. [The Problem](#2-the-problem)
+3. [Architecture](#3-architecture)
+4. [Condvar-to-Mutex Mapping Table](#4-condvar-to-mutex-mapping-table)
+5. [Syscall Interface](#5-syscall-interface)
+6. [Correctness Properties](#6-correctness-properties)
+7. [Relationship to Existing PI Infrastructure](#7-relationship-to-existing-pi-infrastructure)
+8. [Test Results](#8-test-results)
+9. [Files Changed](#9-files-changed)
 
+---
 
-<hr />
+## 1. Overview
 
-<h2>1. Overview</h2>
+Win32 condvar PI bridges `RtlSleepConditionVariableCS` to the Linux kernel's requeue-PI mechanism. When a `SCHED_FIFO` (RT) thread waits on a condition variable protected by a PI-enabled critical section, the kernel atomically requeues the waiter from the condvar futex onto the CS's PI mutex on signal. This eliminates the priority inversion window between condvar wake and CS reacquire that exists in the standard Win32 condvar path.
 
-<p>Win32 condvar PI bridges <code>RtlSleepConditionVariableCS</code> to the Linux kernel&rsquo;s requeue-PI mechanism. When a <code>SCHED_FIFO</code> (RT) thread waits on a condition variable protected by a PI-enabled critical section, the kernel atomically requeues the waiter from the condvar futex onto the CS&rsquo;s PI mutex on signal. This eliminates the priority inversion window between condvar wake and CS reacquire that exists in the standard Win32 condvar path.</p>
+The implementation uses two Linux futex operations that form a matched pair:
 
-<p>The implementation uses two Linux futex operations that form a matched pair:</p>
+- **`FUTEX_WAIT_REQUEUE_PI`** -- the waiter sleeps on the condvar futex but declares a PI mutex it expects to be requeued onto
+- **`FUTEX_CMP_REQUEUE_PI`** -- the signaler atomically wakes/requeues waiters from the condvar futex onto that PI mutex
 
-<ul>
-<li><strong><code>FUTEX_WAIT_REQUEUE_PI</code></strong> &ndash; the waiter sleeps on the condvar futex but declares a PI mutex it expects to be requeued onto</li>
-<li><strong><code>FUTEX_CMP_REQUEUE_PI</code></strong> &ndash; the signaler atomically wakes/requeues waiters from the condvar futex onto that PI mutex</li>
-</ul>
+The entire condvar PI path is gated behind `nspa_cs_pi_active()` -- when inactive (no `NSPA_RT_PRIO` set), the code is byte-identical to upstream Wine. The gate also requires `RecursionCount == 1` (non-recursive lock hold) because the kernel's PI mutex has no recursion concept.
 
+---
 
-<p>The entire condvar PI path is gated behind <code>nspa_cs_pi_active()</code> &ndash; when inactive (no <code>NSPA_RT_PRIO</code> set), the code is byte-identical to upstream Wine. The gate also requires <code>RecursionCount == 1</code> (non-recursive lock hold) because the kernel&rsquo;s PI mutex has no recursion concept.</p>
+## 2. The Problem
 
-<hr />
+The standard Win32 `SleepConditionVariableCS` implementation has a structural priority inversion gap. Between the moment a waiter is woken from the condvar and the moment it reacquires the critical section, there is no PI protection -- a low-priority thread holding the CS will not be boosted, and the RT waiter can be preempted by medium-priority threads (classic priority inversion).
 
-<h2>2. The Problem</h2>
-
-<p>The standard Win32 <code>SleepConditionVariableCS</code> implementation has a structural priority inversion gap. Between the moment a waiter is woken from the condvar and the moment it reacquires the critical section, there is no PI protection &ndash; a low-priority thread holding the CS will not be boosted, and the RT waiter can be preempted by medium-priority threads (classic priority inversion).</p>
-
-<h3>Priority Inversion Gap Diagram</h3>
+### Priority Inversion Gap Diagram
 
 <div class="diagram-container">
 <svg width="100%" viewBox="0 0 900 520" xmlns="http://www.w3.org/2000/svg">
@@ -250,16 +185,15 @@ Author: jordan Johnston</p>
 </svg>
 </div>
 
+> **Key insight:** The standard path has a window between wake and CS reacquire where no PI protection exists. The requeue-PI path eliminates this entirely -- the kernel atomically moves the waiter from the condvar futex to the PI mutex chain, so the waiter either owns the CS immediately on wake or is on the PI chain (triggering priority boost) with zero gap.
 
-<blockquote><p><strong>Key insight:</strong> The standard path has a window between wake and CS reacquire where no PI protection exists. The requeue-PI path eliminates this entirely &ndash; the kernel atomically moves the waiter from the condvar futex to the PI mutex chain, so the waiter either owns the CS immediately on wake or is on the PI chain (triggering priority boost) with zero gap.</p></blockquote>
+---
 
-<hr />
+## 3. Architecture
 
-<h2>3. Architecture</h2>
+The condvar PI implementation spans the PE-unix boundary. The PE side (`dlls/ntdll/sync.c`) manages the condvar-to-mutex mapping table and CS bookkeeping. The unix side (`dlls/ntdll/unix/sync.c`) issues the actual futex syscalls. Three new Nt-level syscalls bridge the two.
 
-<p>The condvar PI implementation spans the PE-unix boundary. The PE side (<code>dlls/ntdll/sync.c</code>) manages the condvar-to-mutex mapping table and CS bookkeeping. The unix side (<code>dlls/ntdll/unix/sync.c</code>) issues the actual futex syscalls. Three new Nt-level syscalls bridge the two.</p>
-
-<h3>Call Flow Diagram</h3>
+### Call Flow Diagram
 
 <div class="diagram-container">
 <svg width="100%" viewBox="0 0 900 720" xmlns="http://www.w3.org/2000/svg">
@@ -454,270 +388,153 @@ Author: jordan Johnston</p>
 </svg>
 </div>
 
+---
 
-<hr />
+## 4. Condvar-to-Mutex Mapping Table
 
-<h2>4. Condvar-to-Mutex Mapping Table</h2>
+The Win32 `WakeConditionVariable` API only takes the condvar address -- unlike POSIX `pthread_cond_signal` which has access to the mutex through the `pthread_cond_wait` call. But `FUTEX_CMP_REQUEUE_PI` requires *both* the condvar futex address and the PI mutex address. The signal side needs a way to find the PI mutex from only the condvar address.
 
-<p>The Win32 <code>WakeConditionVariable</code> API only takes the condvar address &ndash; unlike POSIX <code>pthread_cond_signal</code> which has access to the mutex through the <code>pthread_cond_wait</code> call. But <code>FUTEX_CMP_REQUEUE_PI</code> requires <em>both</em> the condvar futex address and the PI mutex address. The signal side needs a way to find the PI mutex from only the condvar address.</p>
+### Solution: Open-Addressed Hash Table
 
-<h3>Solution: Open-Addressed Hash Table</h3>
+A 64-entry open-addressed hash table with tombstone deletion and refcounting, shared by all threads in the process. The table maps condvar addresses to PI mutex addresses.
 
-<p>A 64-entry open-addressed hash table with tombstone deletion and refcounting, shared by all threads in the process. The table maps condvar addresses to PI mutex addresses.</p>
+#### Operations
 
-<h4>Operations</h4>
+- **Register** (on wait entry, under spinlock): Hash condvar address, linear probe for matching or empty slot. If found, increment refcount. If new, insert with refcount=1. If table full, silently fall back to non-PI path.
+- **Deregister** (on wait exit, under spinlock): Find matching entry, decrement refcount. On refcount reaching 0, replace entry with `CONDVAR_PI_TOMBSTONE` (preserves probe chains for other entries).
+- **Lookup** (on signal, under spinlock): Linear probe from hash. Skip tombstones, stop at NULL. Return pi_mutex address or NULL (meaning no PI waiters -- fall back to normal signal path).
 
-<ul>
-<li><strong>Register</strong> (on wait entry, under spinlock): Hash condvar address, linear probe for matching or empty slot. If found, increment refcount. If new, insert with refcount=1. If table full, silently fall back to non-PI path.</li>
-<li><strong>Deregister</strong> (on wait exit, under spinlock): Find matching entry, decrement refcount. On refcount reaching 0, replace entry with <code>CONDVAR_PI_TOMBSTONE</code> (preserves probe chains for other entries).</li>
-<li><strong>Lookup</strong> (on signal, under spinlock): Linear probe from hash. Skip tombstones, stop at NULL. Return pi_mutex address or NULL (meaning no PI waiters &ndash; fall back to normal signal path).</li>
-</ul>
+#### Why Tombstones
 
+Open-addressing with linear probing cannot simply clear a slot on deletion -- it would break probe chains for entries that were inserted past the deleted slot. The standard solution is tombstone deletion: a deleted slot is marked with a sentinel value (`CONDVAR_PI_TOMBSTONE`) that lookup skips over but insertion can reuse.
 
-<h4>Why Tombstones</h4>
+#### Design Choices
 
-<p>Open-addressing with linear probing cannot simply clear a slot on deletion &ndash; it would break probe chains for entries that were inserted past the deleted slot. The standard solution is tombstone deletion: a deleted slot is marked with a sentinel value (<code>CONDVAR_PI_TOMBSTONE</code>) that lookup skips over but insertion can reuse.</p>
+- **64 entries** -- more than enough for typical Win32 applications (most have <10 active condvars)
+- **Spinlock** -- not a PI mutex. The critical section is tiny (a few pointer comparisons), and the spinlock is only held during table operations, never across syscalls
+- **Refcounting** -- multiple threads can wait on the same condvar simultaneously. The mapping entry stays alive until the last waiter deregisters
 
-<h4>Design Choices</h4>
+    struct condvar_pi_entry {
+        const volatile void *condvar_addr;   /* key (or TOMBSTONE) */
+        LONG                *pi_mutex_addr;  /* value */
+        LONG                 refcount;       /* waiters using this entry */
+    };
 
-<ul>
-<li><strong>64 entries</strong> &ndash; more than enough for typical Win32 applications (most have &lt;10 active condvars)</li>
-<li><strong>Spinlock</strong> &ndash; not a PI mutex. The critical section is tiny (a few pointer comparisons), and the spinlock is only held during table operations, never across syscalls</li>
-<li><p><strong>Refcounting</strong> &ndash; multiple threads can wait on the same condvar simultaneously. The mapping entry stays alive until the last waiter deregisters</p>
+---
 
-<p>  struct condvar_pi_entry {
-      const volatile void <em>condvar_addr;   /</em> key (or TOMBSTONE) <em>/
-      LONG                </em>pi_mutex_addr;  /<em> value </em>/
-      LONG                 refcount;       /<em> waiters using this entry </em>/
-  };</p></li>
-</ul>
+## 5. Syscall Interface
 
+Three new Nt-level syscalls cross the PE-unix boundary. These are NSPA-specific extensions to the NT syscall table, numbered in the 0x00b1-0x00b3 range.
 
-<hr />
+| Syscall | Number | Parameters | Description |
+| --- | --- | --- | --- |
+| `NtNspaCondWaitPI` | 0x00b1 | `condvar_futex, condvar_val, pi_mutex, timeout` | Wait on condvar with requeue-PI. Unlocks PI mutex, sleeps on condvar, gets requeued onto PI mutex on signal. |
+| `NtNspaCondSignalPI` | 0x00b2 | `condvar_futex, pi_mutex` | Signal one waiter. Increments condvar, then `FUTEX_CMP_REQUEUE_PI` to wake 1, requeue 0. |
+| `NtNspaCondBroadcastPI` | 0x00b3 | `condvar_futex, pi_mutex` | Broadcast to all waiters. Same as signal but wake 1, requeue INT_MAX. |
 
-<h2>5. Syscall Interface</h2>
+### Contract
 
-<p>Three new Nt-level syscalls cross the PE-unix boundary. These are NSPA-specific extensions to the NT syscall table, numbered in the 0x00b1-0x00b3 range.</p>
+`NtNspaCondWaitPI` **ALWAYS** returns with the PI mutex owned by the caller, regardless of how it returns:
 
-<table>
-<thead>
-<tr>
-<th> Syscall </th>
-<th> Number </th>
-<th> Parameters </th>
-<th> Description </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> <code>NtNspaCondWaitPI</code> </td>
-<td> 0x00b1 </td>
-<td> <code>condvar_futex, condvar_val, pi_mutex, timeout</code> </td>
-<td> Wait on condvar with requeue-PI. Unlocks PI mutex, sleeps on condvar, gets requeued onto PI mutex on signal. </td>
-</tr>
-<tr>
-<td> <code>NtNspaCondSignalPI</code> </td>
-<td> 0x00b2 </td>
-<td> <code>condvar_futex, pi_mutex</code> </td>
-<td> Signal one waiter. Increments condvar, then <code>FUTEX_CMP_REQUEUE_PI</code> to wake 1, requeue 0. </td>
-</tr>
-<tr>
-<td> <code>NtNspaCondBroadcastPI</code> </td>
-<td> 0x00b3 </td>
-<td> <code>condvar_futex, pi_mutex</code> </td>
-<td> Broadcast to all waiters. Same as signal but wake 1, requeue INT_MAX. </td>
-</tr>
-</tbody>
-</table>
+- **Normal wake:** kernel requeued waiter onto PI mutex, waiter owns it
+- **EAGAIN:** value mismatch (signal raced) -- falls through to `FUTEX_LOCK_PI` to acquire the mutex explicitly
+- **Timeout:** `FUTEX_LOCK_PI` to reacquire, then return `STATUS_TIMEOUT`
 
+This "always own on return" contract matches what the PE side expects: it clears CS bookkeeping before the syscall and restores it after, so the unix side must guarantee the PI mutex is held on every return path.
 
-<h3>Contract</h3>
+### Fallback
 
-<p><code>NtNspaCondWaitPI</code> <strong>ALWAYS</strong> returns with the PI mutex owned by the caller, regardless of how it returns:</p>
+If `NtNspaCondWaitPI` returns `STATUS_NOT_SUPPORTED` (kernel too old, or futex ops unavailable), the PE side falls through to the standard Win32 condvar path with normal `RtlLeaveCriticalSection` / `RtlWaitOnAddress` / `RtlEnterCriticalSection`. The CS-PI leave/enter still provides PI protection during those calls -- the gap just isn't eliminated.
 
-<ul>
-<li><strong>Normal wake:</strong> kernel requeued waiter onto PI mutex, waiter owns it</li>
-<li><strong>EAGAIN:</strong> value mismatch (signal raced) &ndash; falls through to <code>FUTEX_LOCK_PI</code> to acquire the mutex explicitly</li>
-<li><strong>Timeout:</strong> <code>FUTEX_LOCK_PI</code> to reacquire, then return <code>STATUS_TIMEOUT</code></li>
-</ul>
+---
 
+## 6. Correctness Properties
 
-<p>This &ldquo;always own on return&rdquo; contract matches what the PE side expects: it clears CS bookkeeping before the syscall and restores it after, so the unix side must guarantee the PI mutex is held on every return path.</p>
+### No Lost Wakeups
 
-<h3>Fallback</h3>
+`EAGAIN` from `FUTEX_WAIT_REQUEUE_PI` means the condvar value changed between our read and the futex call -- a signal raced with us. This is treated as "we were signaled" rather than an error. The waiter falls through to `FUTEX_LOCK_PI` to acquire the PI mutex, then returns `STATUS_SUCCESS`. No wakeup is lost.
 
-<p>If <code>NtNspaCondWaitPI</code> returns <code>STATUS_NOT_SUPPORTED</code> (kernel too old, or futex ops unavailable), the PE side falls through to the standard Win32 condvar path with normal <code>RtlLeaveCriticalSection</code> / <code>RtlWaitOnAddress</code> / <code>RtlEnterCriticalSection</code>. The CS-PI leave/enter still provides PI protection during those calls &ndash; the gap just isn&rsquo;t eliminated.</p>
+### No Over-Increment
 
-<hr />
+The signal path increments the condvar counter exactly once, then issues `FUTEX_CMP_REQUEUE_PI` with the post-increment value. On `EAGAIN` (another signal raced), it re-reads the current value and retries the `CMP_REQUEUE_PI` without incrementing again. This avoids the counter drifting upward and causing spurious wakeups.
 
-<h2>6. Correctness Properties</h2>
+### No Orphaned Waiters
 
-<h3>No Lost Wakeups</h3>
+The mapping table uses refcounting. Every `condvar_pi_register` increments the refcount, every `condvar_pi_deregister` decrements it. The entry is only cleared (tombstoned) when the refcount reaches zero. This ensures the signal path can always find the PI mutex address for active waiters, even if some waiters have already returned.
 
-<p><code>EAGAIN</code> from <code>FUTEX_WAIT_REQUEUE_PI</code> means the condvar value changed between our read and the futex call &ndash; a signal raced with us. This is treated as &ldquo;we were signaled&rdquo; rather than an error. The waiter falls through to <code>FUTEX_LOCK_PI</code> to acquire the PI mutex, then returns <code>STATUS_SUCCESS</code>. No wakeup is lost.</p>
-
-<h3>No Over-Increment</h3>
-
-<p>The signal path increments the condvar counter exactly once, then issues <code>FUTEX_CMP_REQUEUE_PI</code> with the post-increment value. On <code>EAGAIN</code> (another signal raced), it re-reads the current value and retries the <code>CMP_REQUEUE_PI</code> without incrementing again. This avoids the counter drifting upward and causing spurious wakeups.</p>
-
-<h3>No Orphaned Waiters</h3>
-
-<p>The mapping table uses refcounting. Every <code>condvar_pi_register</code> increments the refcount, every <code>condvar_pi_deregister</code> decrements it. The entry is only cleared (tombstoned) when the refcount reaches zero. This ensures the signal path can always find the PI mutex address for active waiters, even if some waiters have already returned.</p>
-
-<h3>Tombstone Probing</h3>
-
-<p>Open-addressing deletion uses <code>CONDVAR_PI_TOMBSTONE</code> sentinel values. Lookup probes skip tombstones (they are not the entry we want, but entries beyond them might be). Probe chains terminate only at a true NULL slot. Insertion can reuse tombstone slots, keeping table density manageable.</p>
-
-<h3>Graceful Fallback</h3>
-
-<p>If the unix side detects that the kernel does not support <code>FUTEX_WAIT_REQUEUE_PI</code> (returns <code>ENOSYS</code>), it returns <code>STATUS_NOT_SUPPORTED</code>. The PE side catches this and falls through to the standard Win32 condvar path. This means Wine-NSPA can run on kernels without requeue-PI support &ndash; the RT guarantees just degrade gracefully to the CS-PI-only path (PI on enter/leave, but gap between wake and enter).</p>
-
-<hr />
-
-<h2>7. Relationship to Existing PI Infrastructure</h2>
-
-<p>Win32 condvar PI is the fourth PI mechanism in Wine-NSPA. Together, these four paths provide priority inheritance coverage across the entire Wine synchronization surface:</p>
+### Tombstone Probing
 
-<table>
-<thead>
-<tr>
-<th> Path </th>
-<th> Mechanism </th>
-<th> Scope </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> <strong>CS-PI</strong> </td>
-<td> <code>FUTEX_LOCK_PI</code> on <code>LockSemaphore</code> </td>
-<td> Win32 CriticalSection enter/leave </td>
-</tr>
-<tr>
-<td> <strong>NTSync PI</strong> </td>
-<td> Kernel ntsync driver with priority-ordered wakeup </td>
-<td> Win32 Mutex / Semaphore / Event </td>
-</tr>
-<tr>
-<td> <strong>pi_cond requeue-PI</strong> </td>
-<td> <code>FUTEX_WAIT_REQUEUE_PI</code> in librtpi </td>
-<td> Unix-side condvars (audio, gstreamer) </td>
-</tr>
-<tr>
-<td> <strong>Win32 condvar PI</strong> </td>
-<td> <code>FUTEX_WAIT_REQUEUE_PI</code> for <code>RtlSleepConditionVariableCS</code> </td>
-<td> Win32 <code>SleepConditionVariableCS</code> </td>
-</tr>
-</tbody>
-</table>
-
-
-<blockquote><p><strong>SRW gap:</strong> SRW-backed condvars (<code>RtlSleepConditionVariableSRW</code>) are <em>not</em> covered by this work. SRW locks have no PI mechanism &ndash; this is an unsolved problem even in the Linux kernel (reader-writer locks with priority inheritance require tracking all readers, which is prohibitively expensive). Applications using <code>SleepConditionVariableSRW</code> in RT paths should switch to <code>SleepConditionVariableCS</code> for PI coverage.</p></blockquote>
-
-<h3>How the Paths Layer</h3>
-
-<ul>
-<li><strong>CS-PI</strong> provides the foundation: any <code>EnterCriticalSection</code> / <code>LeaveCriticalSection</code> gets PI protection via <code>FUTEX_LOCK_PI</code> on the <code>LockSemaphore</code> field.</li>
-<li><strong>Win32 condvar PI</strong> builds on CS-PI: it reuses the same <code>LockSemaphore</code> PI mutex as the requeue target. The CS-PI mutex IS the condvar-PI mutex.</li>
-<li><strong>pi_cond requeue-PI</strong> covers the unix side &ndash; Wine&rsquo;s internal condition variables (used by the audio stack, gstreamer, etc.) that never cross the PE boundary.</li>
-<li><strong>NTSync PI</strong> covers the kernel-level Win32 sync objects (Mutex, Semaphore, Event) that go through the ntsync driver.</li>
-</ul>
-
-
-<hr />
-
-<h2>8. Test Results</h2>
-
-<p>The <code>condvar-pi</code> test validates the requeue-PI path under contention: an RT waiter (<code>THREAD_PRIORITY_TIME_CRITICAL</code>, mapped to <code>SCHED_FIFO</code>) waits on a condvar while a normal-priority signaler sends signals and 4 CPU-bound load threads create scheduling pressure.</p>
-
-<h3>Test Configuration</h3>
-
-<ul>
-<li>500 iterations per run</li>
-<li>RT waiter: <code>THREAD_PRIORITY_TIME_CRITICAL</code> (<code>SCHED_FIFO</code> at <code>NSPA_RT_PRIO</code>)</li>
-<li>Signaler: normal priority (<code>SCHED_OTHER</code>)</li>
-<li>Load threads: 4 CPU-bound spinners</li>
-</ul>
-
-
-<h3>Latency Results</h3>
-
-<table>
-<thead>
-<tr>
-<th> Mode </th>
-<th> avg wait </th>
-<th> max wait </th>
-<th> min wait </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> With PI (<code>NSPA_RT_PRIO=80</code>) </td>
-<td> 129 us </td>
-<td> <strong>152 us</strong> </td>
-<td> 124 us </td>
-</tr>
-<tr>
-<td> Without PI </td>
-<td> 100 us </td>
-<td> <strong>263 us</strong> </td>
-<td> 29 us </td>
-</tr>
-</tbody>
-</table>
-
-
-<blockquote><p><strong>Key finding:</strong> PI tightens the distribution &ndash; max wait drops from 263 to 152 us (42% lower worst-case). The average is slightly higher with PI due to requeue overhead (extra kernel work for the atomic requeue), but the tail latency is dramatically better. For RT audio, worst-case matters more than average: a 263 us spike at the wrong moment causes a buffer underrun, while a consistent 129 us does not.</p></blockquote>
-
-<h3>Distribution Characteristics</h3>
-
-<ul>
-<li><strong>With PI:</strong> Tight distribution (124-152 us range = 28 us spread). The requeue-PI mechanism ensures deterministic wake-to-own timing.</li>
-<li><strong>Without PI:</strong> Wide distribution (29-263 us range = 234 us spread). The 29 us minimum shows uncontended fast path, but the 263 us maximum shows the priority inversion gap under load.</li>
-</ul>
-
-
-<h3>Full Suite Results</h3>
-
-<p>22/22 PASS (11 tests x 2 modes: with and without PI), no regressions vs the v5 test suite baseline.</p>
-
-<hr />
-
-<h2>9. Files Changed</h2>
-
-<table>
-<thead>
-<tr>
-<th> File </th>
-<th> Role </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> <code>dlls/ntdll/sync.c</code> </td>
-<td> PE-side condvar PI implementation: mapping table (<code>condvar_pi_register</code> / <code>condvar_pi_deregister</code> / <code>condvar_pi_lookup</code>), modified <code>RtlSleepConditionVariableCS</code>, <code>RtlWakeConditionVariable</code>, <code>RtlWakeAllConditionVariable</code> </td>
-</tr>
-<tr>
-<td> <code>dlls/ntdll/unix/sync.c</code> </td>
-<td> Unix-side futex operations: <code>NtNspaCondWaitPI</code> (<code>FUTEX_UNLOCK_PI</code> + <code>FUTEX_WAIT_REQUEUE_PI</code> + <code>EAGAIN</code> fallback), <code>NtNspaCondSignalPI</code> (<code>FUTEX_CMP_REQUEUE_PI</code>), <code>NtNspaCondBroadcastPI</code> </td>
-</tr>
-<tr>
-<td> <code>dlls/ntdll/ntsyscalls.h</code> </td>
-<td> Syscall table entries: 0x00b1 (<code>NtNspaCondWaitPI</code>), 0x00b2 (<code>NtNspaCondSignalPI</code>), 0x00b3 (<code>NtNspaCondBroadcastPI</code>) for both i386 and x86_64 </td>
-</tr>
-<tr>
-<td> <code>include/winternl.h</code> </td>
-<td> Function declarations for the three new <code>NtNspaCond*PI</code> syscalls </td>
-</tr>
-<tr>
-<td> <code>programs/nspa_rt_test/main.c</code> </td>
-<td> Validation test: <code>cmd_condvar_pi</code> &ndash; RT waiter + normal signaler + 4 load threads, 500 iterations, latency measurement </td>
-</tr>
-</tbody>
-</table>
-
-
-<hr />
-
-<p>Wine-NSPA Win32 Condvar PI Reference | Generated 2026-04-16 | Wine 11.6 + NSPA RT patchset</p>
-</body></html>
+Open-addressing deletion uses `CONDVAR_PI_TOMBSTONE` sentinel values. Lookup probes skip tombstones (they are not the entry we want, but entries beyond them might be). Probe chains terminate only at a true NULL slot. Insertion can reuse tombstone slots, keeping table density manageable.
+
+### Graceful Fallback
+
+If the unix side detects that the kernel does not support `FUTEX_WAIT_REQUEUE_PI` (returns `ENOSYS`), it returns `STATUS_NOT_SUPPORTED`. The PE side catches this and falls through to the standard Win32 condvar path. This means Wine-NSPA can run on kernels without requeue-PI support -- the RT guarantees just degrade gracefully to the CS-PI-only path (PI on enter/leave, but gap between wake and enter).
+
+---
+
+## 7. Relationship to Existing PI Infrastructure
+
+Win32 condvar PI is the fourth PI mechanism in Wine-NSPA. Together, these four paths provide priority inheritance coverage across the entire Wine synchronization surface:
+
+| Path | Mechanism | Scope |
+| --- | --- | --- |
+| **CS-PI** | `FUTEX_LOCK_PI` on `LockSemaphore` | Win32 CriticalSection enter/leave |
+| **NTSync PI** | Kernel ntsync driver with priority-ordered wakeup | Win32 Mutex / Semaphore / Event |
+| **pi_cond requeue-PI** | `FUTEX_WAIT_REQUEUE_PI` in librtpi | Unix-side condvars (audio, gstreamer) |
+| **Win32 condvar PI** | `FUTEX_WAIT_REQUEUE_PI` for `RtlSleepConditionVariableCS` | Win32 `SleepConditionVariableCS` |
+
+> **SRW gap:** SRW-backed condvars (`RtlSleepConditionVariableSRW`) are *not* covered by this work. SRW locks have no PI mechanism -- this is an unsolved problem even in the Linux kernel (reader-writer locks with priority inheritance require tracking all readers, which is prohibitively expensive). Applications using `SleepConditionVariableSRW` in RT paths should switch to `SleepConditionVariableCS` for PI coverage.
+
+### How the Paths Layer
+
+- **CS-PI** provides the foundation: any `EnterCriticalSection` / `LeaveCriticalSection` gets PI protection via `FUTEX_LOCK_PI` on the `LockSemaphore` field.
+- **Win32 condvar PI** builds on CS-PI: it reuses the same `LockSemaphore` PI mutex as the requeue target. The CS-PI mutex IS the condvar-PI mutex.
+- **pi_cond requeue-PI** covers the unix side -- Wine's internal condition variables (used by the audio stack, gstreamer, etc.) that never cross the PE boundary.
+- **NTSync PI** covers the kernel-level Win32 sync objects (Mutex, Semaphore, Event) that go through the ntsync driver.
+
+---
+
+## 8. Test Results
+
+The `condvar-pi` test validates the requeue-PI path under contention: an RT waiter (`THREAD_PRIORITY_TIME_CRITICAL`, mapped to `SCHED_FIFO`) waits on a condvar while a normal-priority signaler sends signals and 4 CPU-bound load threads create scheduling pressure.
+
+### Test Configuration
+
+- 500 iterations per run
+- RT waiter: `THREAD_PRIORITY_TIME_CRITICAL` (`SCHED_FIFO` at `NSPA_RT_PRIO`)
+- Signaler: normal priority (`SCHED_OTHER`)
+- Load threads: 4 CPU-bound spinners
+
+### Latency Results
+
+| Mode | avg wait | max wait | min wait |
+| --- | --- | --- | --- |
+| With PI (`NSPA_RT_PRIO=80`) | 129 us | **152 us** | 124 us |
+| Without PI | 100 us | **263 us** | 29 us |
+
+> **Key finding:** PI tightens the distribution -- max wait drops from 263 to 152 us (42% lower worst-case). The average is slightly higher with PI due to requeue overhead (extra kernel work for the atomic requeue), but the tail latency is dramatically better. For RT audio, worst-case matters more than average: a 263 us spike at the wrong moment causes a buffer underrun, while a consistent 129 us does not.
+
+### Distribution Characteristics
+
+- **With PI:** Tight distribution (124-152 us range = 28 us spread). The requeue-PI mechanism ensures deterministic wake-to-own timing.
+- **Without PI:** Wide distribution (29-263 us range = 234 us spread). The 29 us minimum shows uncontended fast path, but the 263 us maximum shows the priority inversion gap under load.
+
+### Full Suite Results
+
+22/22 PASS (11 tests x 2 modes: with and without PI), no regressions vs the v5 test suite baseline.
+
+---
+
+## 9. Files Changed
+
+| File | Role |
+| --- | --- |
+| `dlls/ntdll/sync.c` | PE-side condvar PI implementation: mapping table (`condvar_pi_register` / `condvar_pi_deregister` / `condvar_pi_lookup`), modified `RtlSleepConditionVariableCS`, `RtlWakeConditionVariable`, `RtlWakeAllConditionVariable` |
+| `dlls/ntdll/unix/sync.c` | Unix-side futex operations: `NtNspaCondWaitPI` (`FUTEX_UNLOCK_PI` + `FUTEX_WAIT_REQUEUE_PI` + `EAGAIN` fallback), `NtNspaCondSignalPI` (`FUTEX_CMP_REQUEUE_PI`), `NtNspaCondBroadcastPI` |
+| `dlls/ntdll/ntsyscalls.h` | Syscall table entries: 0x00b1 (`NtNspaCondWaitPI`), 0x00b2 (`NtNspaCondSignalPI`), 0x00b3 (`NtNspaCondBroadcastPI`) for both i386 and x86_64 |
+| `include/winternl.h` | Function declarations for the three new `NtNspaCond*PI` syscalls |
+| `programs/nspa_rt_test/main.c` | Validation test: `cmd_condvar_pi` -- RT waiter + normal signaler + 4 load threads, 500 iterations, latency measurement |
+
+---
+
+Wine-NSPA Win32 Condvar PI Reference | Generated 2026-04-16 | Wine 11.6 + NSPA RT patchset

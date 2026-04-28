@@ -1,0 +1,983 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Wine-NSPA -- NT-local stubs</title>
+<style>
+  :root {
+    --bg: #1a1b26; --fg: #c0caf5; --accent: #7aa2f7;
+    --green: #9ece6a; --red: #f7768e; --yellow: #e0af68;
+    --surface: #24283b; --border: #3b4261; --muted: #8c92b3;
+    --purple: #bb9af7; --orange: #ff9e64; --cyan: #7dcfff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+    background: var(--bg); color: var(--fg);
+    max-width: 1100px; margin: 0 auto; padding: 2rem 1.5rem;
+    line-height: 1.7;
+  }
+  h1 { color: var(--accent); font-size: 1.5rem; margin: 1.5rem 0 0.5rem; }
+  h2 { color: var(--accent); font-size: 1.2rem; margin: 2rem 0 0.75rem;
+       border-bottom: 1px solid var(--border); padding-bottom: 0.3rem; }
+  h3 { color: var(--yellow); font-size: 1rem; margin: 1.25rem 0 0.5rem; }
+  h4 { color: var(--cyan); font-size: 0.95rem; margin: 1rem 0 0.4rem; }
+  p, li { font-size: 0.85rem; margin-bottom: 0.5rem; }
+  ul, ol { padding-left: 1.5rem; margin-bottom: 0.75rem; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  table {
+    width: 100%; border-collapse: collapse;
+    margin: 0.75rem 0 1rem; font-size: 0.8rem;
+  }
+  th, td {
+    padding: 0.4rem 0.75rem; text-align: left;
+    border: 1px solid var(--border);
+  }
+  th { background: var(--surface); color: var(--accent); font-weight: 600; }
+  td { background: var(--bg); }
+  code {
+    background: var(--surface); padding: 0.15rem 0.4rem;
+    border-radius: 3px; font-size: 0.82rem; color: var(--cyan);
+  }
+  pre {
+    background: var(--surface); padding: 1rem; border-radius: 6px;
+    overflow-x: auto; margin: 0.75rem 0 1rem;
+    border: 1px solid var(--border);
+  }
+  pre code { background: none; padding: 0; font-size: 0.8rem; color: var(--fg); }
+  blockquote {
+    background: var(--surface); border-left: 3px solid var(--accent);
+    padding: 0.75rem 1rem; margin: 1rem 0; border-radius: 0 4px 4px 0;
+    font-size: 0.82rem;
+  }
+  blockquote strong { color: var(--yellow); }
+  hr { border: none; border-top: 1px solid var(--border); margin: 2rem 0; }
+  strong { color: var(--fg); }
+  em { color: var(--muted); font-style: italic; }
+</style>
+</head><body>
+<h1>Wine-NSPA &ndash; NT-local stubs</h1>
+
+<p>Wine 11.6 + NSPA RT patchset | Kernel 6.19.x-rt with NTSync PI | 2026-04-27
+Author: jordan Johnston</p>
+
+<h2>Table of Contents</h2>
+
+<ol>
+<li><a href="#1-overview">Overview</a></li>
+<li><a href="#2-the-shape-of-an-nt-local-stub">The shape of an NT-local stub</a></li>
+<li><a href="#3-why-progressive-stubs-beat-monolithic-decomposition">Why progressive stubs beat monolithic decomposition</a></li>
+<li><a href="#4-cross-process-state-arbitration">Cross-process state arbitration</a></li>
+<li><a href="#5-lazy-server-handle-promotion">Lazy server-handle promotion</a></li>
+<li><a href="#6-lock-discipline-shared-by-every-stub">Lock discipline shared by every stub</a></li>
+<li><a href="#7-currently-shipped-stubs">Currently shipped stubs</a>
+
+<ol>
+<li><a href="#71-nspa_local_file--ntcreatefile-bypass"><code>nspa_local_file</code> &ndash; <code>NtCreateFile</code> bypass</a></li>
+<li><a href="#72-nspa_local_timer--ntsettimer-fast-path"><code>nspa_local_timer</code> &ndash; <code>NtSetTimer</code> fast path</a></li>
+<li><a href="#73-nspa_local_wm_timer--wm_timer-dispatcher"><code>nspa_local_wm_timer</code> &ndash; <code>WM_TIMER</code> dispatcher</a></li>
+</ol>
+</li>
+<li><a href="#8-future-stubs-roadmap">Future stubs (roadmap)</a></li>
+<li><a href="#9-connection-to-wineserver-decomposition">Connection to wineserver decomposition</a></li>
+<li><a href="#10-references">References</a></li>
+</ol>
+
+
+<hr />
+
+<h2>1. Overview</h2>
+
+<p>Wineserver is the historical bottleneck of Wine on PREEMPT_RT. Every NT-API
+call that touches kernel-mediated state &ndash; a file handle, a synchronization
+object, a timer, a message queue, a window &ndash; traditionally crosses a
+request-shmem RPC into wineserver, where one global <code>pi_mutex_t global_lock</code>
+is held while a handler runs the request. Throughput is fine on idle systems;
+<em>latency</em> is not. Under contention the global lock serialises every handler,
+priority-inverts low-priority handlers against the RT audio thread, and
+turns every NT-API call into a queue-depth-bounded wait. This is the lock
+that perf 2026-04-26 keeps showing in every wineserver capture: <code>channel_dispatcher</code>
+6-11%, <code>get_ptid_entry</code> 1-10%, <code>main_loop_epoll</code> 2-7%, all under one lock.</p>
+
+<p>NSPA&rsquo;s response is not &ldquo;rewrite wineserver from scratch&rdquo;. It is an
+architectural pattern we call <strong>NT-local stubs</strong>: client-process-resident
+handlers that satisfy a class of NT-API calls <em>without</em> crossing into
+wineserver, and fall back to the server only when an honest cross-process
+arbitration is required. Each stub picks an NT surface, owns its own
+data structures (a private handle range, a per-process table, a shmem
+region, a dispatcher thread), and short-circuits the server when it can.</p>
+
+<p>The pattern is already shipping. As of 2026-04-27 there are three live
+NT-local stubs in tree:</p>
+
+<table>
+<thead>
+<tr>
+<th> Stub </th>
+<th> NT surface </th>
+<th> Lives in </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> <code>nspa_local_file</code> </td>
+<td> <code>NtCreateFile</code> (read-only regulars) + downstream <code>NtReadFile</code>, <code>NtClose</code>, <code>NtQueryInformationFile</code>, <code>NtCreateSection</code>, <code>NtDuplicateObject</code> routing </td>
+<td> <code>dlls/ntdll/unix/nspa/local_file.c</code> </td>
+</tr>
+<tr>
+<td> <code>nspa_local_timer</code> </td>
+<td> <code>NtCreateTimer</code> / <code>NtSetTimer</code> / <code>NtCancelTimer</code> / <code>NtQueryTimer</code> (anonymous) </td>
+<td> <code>dlls/ntdll/unix/nspa/local_timer.c</code> </td>
+</tr>
+<tr>
+<td> <code>nspa_local_wm_timer</code> </td>
+<td> <code>NtUserSetTimer</code> / <code>NtUserSetSystemTimer</code> / <code>NtUserKillTimer</code> / <code>WM_TIMER</code> posting </td>
+<td> <code>dlls/win32u/nspa/local_wm_timer.c</code> </td>
+</tr>
+</tbody>
+</table>
+
+
+<p>Each stub is independent &ndash; they do not share state, do not coordinate,
+and can be enabled or disabled independently via env vars. Together they
+form a <em>strategy</em>: shrink wineserver request-by-request, until the
+handlers that remain are honest and small. The end state &ndash; which is
+the long arc of <code>wine/nspa/docs/wineserver-decomposition-plan.md</code> &ndash; is
+a metadata service for cross-process arbitration only, not an application
+server.</p>
+
+<hr />
+
+<h2>2. The shape of an NT-local stub</h2>
+
+<p>Every stub follows the same skeleton. Strip away the API-specific details
+and the structure is:</p>
+
+<pre><code>NTSTATUS NtSomething( ..., IO_STATUS_BLOCK *io )
+{
+    if (NSPA_LOCAL_X_active())
+    {
+        NTSTATUS bypass = nspa_local_X_try_bypass( ... );
+        if (bypass == STATUS_SUCCESS)        return STATUS_SUCCESS;
+        if (bypass == STATUS_&lt;real_error&gt;)   return bypass;
+        /* otherwise STATUS_NOT_SUPPORTED -- fall through */
+    }
+    /* original server path -- unmodified */
+    ...
+}
+</code></pre>
+
+<p>The five invariants every stub honours:</p>
+
+<ol>
+<li><strong>Eligibility predicate.</strong> The stub inspects the call arguments and
+either takes the fast path or returns <code>STATUS_NOT_SUPPORTED</code> /
+<code>STATUS_NOT_IMPLEMENTED</code>. Anything outside the stub&rsquo;s correctness
+envelope falls back to the unmodified server path. No silent
+correctness drift &ndash; the stub either handles the call exactly as
+the server would, or refuses it.</li>
+<li><strong>Private data structures.</strong> A handle range disjoint from the
+server&rsquo;s, a per-process hash table, a per-bucket lock, optionally
+a shmem region, optionally a dispatcher pthread. The stub owns
+these completely; nothing in the server&rsquo;s request handlers
+touches them.</li>
+<li><strong>Hot-path locks held briefly.</strong> Every stub takes a <code>pi_mutex_t</code>
+(PI-priority-boosting under PREEMPT_RT), mutates its in-memory
+tables, and releases. No blocking syscall, no RPC, no inter-stub
+call is made under the stub&rsquo;s lock. (See §6.)</li>
+<li><strong>Feature gate.</strong> Every stub has a default-on or default-off env
+var (<code>NSPA_DISABLE_LOCAL_TIMERS</code>, <code>NSPA_DISABLE_LOCAL_WM_TIMERS</code>,
+<code>NSPA_LOCAL_FILES</code>, etc.). When the gate is off the stub returns
+<code>STATUS_NOT_SUPPORTED</code> from its first entry point and the original
+server path is used unchanged. This is the bisection mechanism
+when something regresses.</li>
+<li><strong>Never observable to the app.</strong> A correctness regression in a stub
+would be caught by Win32 semantics tests, not app-visible behaviour
+shifts. The bypass is an optimisation; it does not relax NT
+semantics, sharing arbitration, error codes, <code>STATUS_*</code> returns,
+or <code>IO_STATUS_BLOCK</code> content.</li>
+</ol>
+
+
+<p>The shape is mechanical enough that a new stub for a new NT surface &ndash;
+say <code>NtQueryDirectoryFile</code> &ndash; would be drop-in: define a private handle
+range or reuse one, build a per-process table, decide an eligibility
+predicate, write the bypass entry point, gate it behind an env var.
+The pattern itself is what&rsquo;s load-bearing; the per-stub specifics fill
+in the obvious blanks.</p>
+
+<hr />
+
+<h2>3. Why progressive stubs beat monolithic decomposition</h2>
+
+<p>A reasonable counter-proposal to &ldquo;ship many NT-local stubs&rdquo; is &ldquo;rewrite
+wineserver as a multi-threaded handler with per-subsystem locks&rdquo;. This
+is the §3.4 of <code>wineserver-decomposition-plan.md</code>. It is the right
+<em>endgame</em> but the wrong starting move, for three reasons:</p>
+
+<p><strong>Audit surface.</strong> Wineserver assumes &ldquo;nothing else changes during my
+handler&rdquo; pervasively. Every handler reads + writes shared state, often
+mutually entangled (a file open might create a kernel object that is
+named in the object directory that is held in the handle table that is
+referenced from the parent process&rsquo;s handle table). Partitioning the
+lock means proving every cross-subsystem invariant explicitly. That&rsquo;s
+months of audit work for one architectural change, and the change does
+not deliver any user-visible improvement until the whole partitioning
+is done.</p>
+
+<p><strong>Strangler-fig migration vs full rewrite.</strong> The strangler-fig pattern
+(Martin Fowler, 2004) wraps a legacy system in incremental replacements
+until the legacy system can be removed. Each NT-local stub is a
+strangler vine: it intercepts one specific NT surface, services it
+from outside the server, and routes anything it can&rsquo;t handle back to
+the server. The interception point is the stub&rsquo;s eligibility check;
+the routing is the <code>STATUS_NOT_SUPPORTED</code> fallback. Each stub
+<em>independently</em> delivers a measurable win (latency reduction on its
+NT surface) and is independently revertible. By the time enough
+strangler vines have grown, what remains in wineserver is the small
+set of handlers that genuinely need cross-process arbitration &ndash; the
+honest list in §4 of the decomposition plan: cross-process object
+naming, process / thread lifecycle, handle inheritance, NT-specific
+path resolution.</p>
+
+<p><strong>Practical wins happen before the lock dissolves.</strong> Consider Ableton&rsquo;s
+startup profile: ~28,500 file opens in the first session boot, of which
+the vast majority are read-only regular-file opens of DLL manifests,
+<code>.pyc</code> files, and theme resources. Every one of those round-trips into
+the server today, holds the global lock during sharing arbitration, and
+returns. The local-file bypass eliminates the round-trip for the
+eligible subset; lock contention drops because the server is not
+running the handler at all. Lock partitioning would help the <em>handlers
+that are still running</em>. Eliminating the handler entirely is a
+strictly bigger win.</p>
+
+<p>The progressive-stubs strategy lets us sequence the work:</p>
+
+<ol>
+<li>Build stubs that absorb the highest-volume NT surfaces (file opens,
+timers, message-queue carve-outs).</li>
+<li>Watch the wineserver footprint shrink in <code>perf</code> captures.</li>
+<li>Once a subsystem&rsquo;s wineserver footprint is small, the partitioning
+audit for <em>that subsystem</em> is small too &ndash; because there isn&rsquo;t much
+left in the server to audit.</li>
+<li>Eventually only the §4 honest handlers remain, and at that point
+the lock-partitioning question becomes &ldquo;is it worth bothering&rdquo; &ndash;
+if wineserver is doing &lt; 1% CPU end-to-end the answer may be &ldquo;no&rdquo;.</li>
+</ol>
+
+
+<p>This is the inverted ordering relative to &ldquo;monolithic rewrite&rdquo; and it
+matches the de-risking discipline the rest of the project uses
+(<code>feedback_validate_before_default_on.md</code>, <code>feedback_ship_default_off.md</code>).</p>
+
+<hr />
+
+<h2>4. Cross-process state arbitration</h2>
+
+<p>Some NT semantics genuinely cross processes. A <code>FILE_SHARE_NONE</code> open
+in process A must reject a subsequent open in process B. A named
+synchronization object created in A must be openable by name from B.
+A handle inherited from a parent at process create must be reachable
+from the child. These cannot be serviced from within one client&rsquo;s
+address space alone &ndash; somebody has to arbitrate.</p>
+
+<p>Stubs handle cross-process state in one of two ways:</p>
+
+<p><strong>(a) Process-shared shmem with a PSHARED PI mutex.</strong> When the
+arbitration data is small, well-bounded, and update-rate-limited, the
+stub publishes it into a shared memory region. Wineserver creates the
+region (memfd-backed) at first request from a client, and clients
+mmap it into their own address space. A <code>pi_mutex_t</code> in the shmem,
+initialised with <code>RTPI_MUTEX_PSHARED</code>, serialises writers across
+processes; readers use a seqlock and never block. The local-file
+bypass uses this exclusively for its inode-aggregation table:</p>
+
+<pre><code>/* server/nspa/local_file.c:113 */
+for (b = 0; b &lt; NSPA_INODE_BUCKETS; b++)
+    pi_mutex_init( nspa_lock_of( (nspa_inode_bucket_t *)&amp;t-&gt;buckets[b] ),
+                   RTPI_MUTEX_PSHARED );
+</code></pre>
+
+<p>Writers (server + clients) take the per-bucket PSHARED PI mutex,
+bump the bucket&rsquo;s seq odd, mutate the slot, bump the seq even. Readers
+take no lock &ndash; they ACQUIRE-load the seq, copy the slot, ACQUIRE-load
+the seq again, and retry on mismatch. Bounded retry (8 attempts in
+the local-file table) followed by silent fall-back to &ldquo;treat as not
+found, ask the server&rdquo; keeps reads RT-safe. The lock holders are the
+processes that <em>own</em> opens; they boost each other under PI when the
+server thread holding the same bucket is at low priority.</p>
+
+<p><strong>(b) Bypass disabled for the cross-process case.</strong> When the
+arbitration is too entangled to map onto shmem-with-seqlock, the stub
+simply refuses the cross-process path. Anonymous timers are eligible
+for the local-timer bypass; named timers (<code>OBJECT_ATTRIBUTES-&gt;ObjectName</code>
+non-empty) fall through to the server, because their cross-process
+visibility lives in the NT object directory which is only accessible
+from the server. The local-WM_TIMER stub is even stricter: hwnds owned
+by other processes are server-only:</p>
+
+<pre><code>/* dlls/win32u/nspa/local_wm_timer.c:474 */
+if (owner_pid != GetCurrentProcessId()) return STATUS_NOT_IMPLEMENTED;
+</code></pre>
+
+<p>The cost of refusal is the lost optimisation on that one call. The
+benefit is that the stub never has to model cross-process semantics
+that are honestly server-side. Cross-process correctness stays where
+it belongs.</p>
+
+<p><strong>Rule of thumb:</strong> if the arbitration data is <code>&lt;= 256 KB</code>, idempotent
+under retry, and read-mostly, push it through shmem (option a). If
+it&rsquo;s bigger, mutable, or tied to NT object naming, refuse the bypass
+(option b). The local-file bypass is currently the only stub using
+option (a); the timer stubs both use (b). Future stubs (named pipes,
+section objects) will likely require (a) for their refcount tables.</p>
+
+<hr />
+
+<h2>5. Lazy server-handle promotion</h2>
+
+<p>Stubs intercept the <em>creation</em> call. They do not (necessarily) intercept
+every downstream API on the resulting handle. NT has dozens of
+<code>NtSomethingFile</code> syscalls; instead of stubbing all of them, NSPA&rsquo;s
+stubs cover the high-volume hot path (open + read + close) and <em>lazily
+mint a server-recognised handle on demand</em> for the rare downstream
+APIs that need it.</p>
+
+<p>Mechanism, using the local-file bypass as the canonical example:</p>
+
+<ol>
+<li><code>NtCreateFile</code> returns a local-range handle (<code>0x7FFFCxxx</code> &ndash;
+<code>0x7FFFFFFE</code>). The handle is recognised as local by a constant-time
+range check <code>nspa_local_file_is_local_handle(h)</code>.</li>
+<li><code>NtReadFile</code>, <code>NtClose</code>, and <code>server_get_unix_fd</code> all check the
+range and route to the local table &ndash; zero RPC.</li>
+<li><p>Some less-common API (<code>NtCreateSection</code>, <code>NtDuplicateObject</code>,
+<code>NtQueryInformationFile</code> for an unsupported info class) genuinely
+needs a server-side handle. Those entry points call:</p>
+
+<pre><code>/* dlls/ntdll/unix/nspa/local_file.c:1414 */
+HANDLE nspa_local_file_get_or_promote_server_handle( HANDLE local_handle );
+</code></pre>
+
+<p>On first call, it issues <code>nspa_create_file_from_unix_fd</code> &ndash; an
+NSPA-specific RPC that hands the server the unix fd, a path string,
+and access bits, and gets back a fresh server handle. The server
+handle is cached in the per-process opens table; subsequent calls
+on the same local handle return the cached promoted handle without
+another RPC.</p></li>
+<li>The original API can then operate on the promoted handle exactly
+as it would have if the bypass had never been taken. The app sees
+nothing different.</li>
+</ol>
+
+
+<p>The principle: <strong>stubs accelerate the dominant API set; promotion
+preserves correctness for the long tail.</strong> The long-tail APIs cost
+exactly one extra RPC (the promotion), once per lifetime of the
+handle. Compare to the no-bypass case where the <em>entire</em> lifetime is
+RPCs.</p>
+
+<p>The same lazy-mint pattern shows up elsewhere. NTSync direct-sync
+(client-side sync object creation, <code>feedback_test_with_pe_binaries.md</code>)
+mints client-range NTSync handles that bypass wineserver, then
+promotes to a server handle on first cross-process duplication.
+Section objects that back local-file handles get promoted via
+<code>nspa_create_mapping_from_unix_fd</code> (the same shape as the file
+promotion). Each promotion path is a small RPC that wineserver still
+serves &ndash; but only at the moment of promotion, not on every API
+afterwards.</p>
+
+<p>References:</p>
+
+<table>
+<thead>
+<tr>
+<th> Stub </th>
+<th> Promotion entry point </th>
+<th> RPC </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> <code>nspa_local_file</code> </td>
+<td> <code>nspa_local_file_get_or_promote_server_handle</code> (<code>dlls/ntdll/unix/nspa/local_file.c:1414</code>) </td>
+<td> <code>nspa_create_file_from_unix_fd</code> </td>
+</tr>
+<tr>
+<td> <code>nspa_local_file</code> (sections) </td>
+<td> <code>NtCreateSection</code> intercept </td>
+<td> <code>nspa_create_mapping_from_unix_fd</code> </td>
+</tr>
+<tr>
+<td> NTSync direct-sync </td>
+<td> client-range handle promote on dup </td>
+<td> existing wineserver <code>dup_handle</code> </td>
+</tr>
+<tr>
+<td> <code>nspa_local_timer</code> </td>
+<td> (none &ndash; backing event is server-allocated up front) </td>
+<td> <code>NtCreateEvent</code> </td>
+</tr>
+<tr>
+<td> <code>nspa_local_wm_timer</code> </td>
+<td> (none &ndash; pure shmem dispatch) </td>
+<td> n/a </td>
+</tr>
+</tbody>
+</table>
+
+
+<p>Notice that the <code>nspa_local_timer</code> stub takes a different design:
+rather than returning a private handle and lazily promoting, it
+returns a server-allocated <code>NtCreateEvent</code> handle from the start.
+The bypass is in the <em>expiry path</em> (zero-RTT <code>NtSetEvent</code> instead of
+a server timer-fire), not in the <em>creation path</em>. Same goal &ndash; avoid
+RPCs on the hot path &ndash; different mechanics. Per-stub design choice.</p>
+
+<hr />
+
+<h2>6. Lock discipline shared by every stub</h2>
+
+<p>Every NT-local stub takes a lock during table mutation. None of them
+hold that lock across an RPC, a blocking syscall, or a callback into
+unrelated code. This is not optional &ndash; it is the property that lets
+the stubs be safe to call from RT-priority client threads and from
+audio-callback contexts.</p>
+
+<p>The discipline, as written in <code>feedback_never_fifo_busyloops.md</code> and
+the <code>wine-nspa-lockup-audit-20260427.md</code> audit:</p>
+
+<ol>
+<li><strong>Lock taken briefly.</strong> Acquire <code>pi_mutex_t</code>, mutate in-memory
+tables, release. Worst-case hold time is dozens of nanoseconds.</li>
+<li><strong>No blocking syscall under lock.</strong> <code>open()</code>, <code>stat()</code>, <code>read()</code>,
+<code>mmap()</code> all happen <em>outside</em> the per-stub lock. The stub
+sequences them: stat first (no lock), check + publish under
+lock, open second (no lock), insert under lock.</li>
+<li><strong>No RPC under lock.</strong> A <code>wine_server_call</code> would defeat the
+entire point of the stub &ndash; it&rsquo;s the call we&rsquo;re trying to
+eliminate. RPCs happen before the lock is taken (e.g. table
+mmap-fetch via <code>nspa_get_inode_table</code> at first-use) or after
+it&rsquo;s released (e.g. lazy server-handle promotion).</li>
+<li><strong>No callback into app code under lock.</strong> Timer fires invoke
+<code>NtSetEvent</code> and <code>NtQueueApcThread</code> &ndash; both of which can wake
+threads that try to re-enter the stub. The fire path drops the
+lock first, fires, re-acquires.</li>
+</ol>
+
+
+<p>The local-timer dispatcher&rsquo;s fire loop is a clean illustration:</p>
+
+<pre><code>/* dlls/ntdll/unix/nspa/local_timer.c:381-432 */
+if (!list_empty( &amp;fire_batch ))
+{
+    pi_mutex_unlock( &amp;timer_lock );
+
+    LIST_FOR_EACH_ENTRY_SAFE( t, next, &amp;fire_batch, ... )
+    {
+        list_remove( &amp;t-&gt;queue_entry );
+        if (!t-&gt;cancelled) fire_timer( t );          /* NtSetEvent + APC */
+        pi_mutex_lock( &amp;timer_lock );
+        /* re-arm under lock, then drop */
+        ...
+        pi_mutex_unlock( &amp;timer_lock );
+    }
+
+    pi_mutex_lock( &amp;timer_lock );
+    continue;
+}
+</code></pre>
+
+<p>The lock is dropped before any <code>NtSetEvent</code> &ndash; which can wake a higher-
+priority thread that immediately calls <code>NtSetTimer</code> or <code>NtCancelTimer</code>,
+both of which take <code>timer_lock</code>. If the dispatcher held <code>timer_lock</code>
+through the fire, the woken thread would block on the dispatcher&rsquo;s
+release &ndash; a textbook unbounded priority inversion mediated by PI on
+the lock, which is <em>survivable</em> but expensive. Dropping the lock
+makes the inversion impossible at the cost of a refcount on the
+in-flight entry (<code>t-&gt;refcount++</code> before drop, <code>--t-&gt;refcount</code> after
+re-acquire) so a concurrent close can&rsquo;t free the entry mid-fire.</p>
+
+<p>This pattern &ndash; &ldquo;drop lock, do the dangerous thing, re-acquire&rdquo; &ndash;
+shows up in every stub. It is the same discipline <code>feedback_no_blocking_under_lock.md</code>
+calls out for the wineserver itself; the stubs apply it locally.</p>
+
+<p>The 2026-04-27 audit (see <code>wine-nspa-lockup-audit-20260427.md</code>)
+explicitly verified this property for every NT-local stub:</p>
+
+<blockquote><p>Out of scope: ntsync.c (validated), client-side bucket_lock discipline
+(other-process behaviour), Ableton-internal bugs, performance.
+[&hellip;]
+F1-F12: every NT-local stub holds its lock for in-memory mutation only.
+No syscalls, no RPCs, no callbacks under any stub&rsquo;s lock. Refcount
+patterns ensure entries survive lock drops in fire / promote paths.</p></blockquote>
+
+<p>The audit was a precondition for re-arming the lockup repro. With the
+discipline confirmed, the path forward is more stubs &ndash; not different
+locking.</p>
+
+<hr />
+
+<h2>7. Currently shipped stubs</h2>
+
+<h3>7.1 <code>nspa_local_file</code> &ndash; <code>NtCreateFile</code> bypass</h3>
+
+<p><strong>Surface:</strong> <code>NtCreateFile</code> for read-only regular-file opens, plus
+downstream <code>NtReadFile</code> / <code>NtClose</code> / <code>NtQueryInformationFile</code> /
+<code>NtCreateSection</code> / <code>NtDuplicateObject</code> routing through promotion.</p>
+
+<p><strong>Files:</strong></p>
+
+<table>
+<thead>
+<tr>
+<th> Path </th>
+<th> Role </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> <code>dlls/ntdll/unix/nspa/local_file.c</code> (1630 lines) </td>
+<td> client-side stub: handle range, table, lookup, bypass entry, promotion </td>
+</tr>
+<tr>
+<td> <code>server/nspa/local_file.c</code> (300 lines) </td>
+<td> server-side cross-process inode-aggregation shmem </td>
+</tr>
+<tr>
+<td> <code>include/wine/server_protocol.h</code> </td>
+<td> <code>nspa_get_inode_table</code>, <code>nspa_create_file_from_unix_fd</code> requests </td>
+</tr>
+</tbody>
+</table>
+
+
+<p><strong>Entry point:</strong> <code>nspa_local_file_try_bypass</code> at <code>local_file.c:1238</code>.
+Called from <code>dlls/ntdll/unix/file.c:4717</code> inside <code>NtCreateFile</code>,
+right after path resolution.</p>
+
+<p><strong>Eligibility predicate:</strong> <code>FILE_OPEN</code> or <code>FILE_OPEN_IF</code>-on-existing,
+<code>access</code> is read-only after <code>GENERIC_*</code> expansion, <code>options</code> does
+not include <code>FILE_DIRECTORY_FILE</code> / <code>FILE_DELETE_ON_CLOSE</code> / open-by-id,
+no <code>attr-&gt;RootDirectory</code>, no security descriptor, target is <code>S_ISREG</code>.
+Encoded in the categoriser at <code>local_file.c:281-345</code>. Anything else
+returns <code>STATUS_NOT_SUPPORTED</code> and falls through.</p>
+
+<p><strong>Private handle range:</strong> <code>[0x7FFFC000, 0x80000000)</code> (16 KiB window,
+4096 handles), excluding <code>0x7FFFFFFF</code> for <code>CURRENT_PROCESS</code>. Range
+check via <code>nspa_local_file_is_local_handle(h)</code> is constant-time.</p>
+
+<p><strong>Per-process table:</strong> linked list of <code>struct nspa_local_open</code> under
+a single <code>pi_mutex_t nspa_lf_opens_mutex</code>. Each entry caches:
+- the local handle returned to the app
+- the unix fd
+- (device, inode) for shmem cross-process arbitration
+- access / sharing bits
+- the original NT path string for <code>GetFinalPathNameByHandle</code>
+- the lazy-promoted server handle (0 until first promote)</p>
+
+<p><strong>Cross-process arbitration:</strong> server-allocated memfd-backed shmem
+region of <code>nspa_inode_bucket_t</code> buckets. Each bucket has a PSHARED
+PI mutex, a seqlock, and N subentries (one per process holding an
+open of any inode that hashes to this bucket). Server publishes its
+own subentry under index 0; clients publish into 1..N-1. Hash:
+<code>device * 0x9E3779B97F4A7C15 + inode</code>, mixed twice &ndash; byte-identical
+between client and server (<code>local_file.c:180</code> mirrors
+<code>server/nspa/local_file.c:135</code>).</p>
+
+<p><strong>Lock discipline:</strong> <code>nspa_lf_opens_mutex</code> covers in-memory list
+operations only; <code>stat</code>, <code>open</code>, <code>mmap</code> happen outside. The PSHARED
+bucket mutex is taken cross-process for the seqlock-write, dropped
+before any further work. Reads are seqlock-bounded with 8-retry cap.</p>
+
+<p><strong>Lazy promotion:</strong> <code>nspa_local_file_get_or_promote_server_handle</code>
+mints a server handle via <code>nspa_create_file_from_unix_fd</code> RPC and
+caches it. Long tail of NT-API surface (info classes, section creation,
+duplication) routes through the promoted handle.</p>
+
+<p><strong>Feature gate:</strong> <code>NSPA_LOCAL_FILES=1</code> (default-off as of 2026-04-27,
+pending production validation; the table machinery is always built).</p>
+
+<p><strong>Dedicated reference:</strong> <code>nspa-local-file-architecture.gen.html</code> &ndash;
+the per-stub deep dive. Read it for the full design rationale,
+sharing-arbitration semantics, eligibility matrix, and Phase history.</p>
+
+<h3>7.2 <code>nspa_local_timer</code> &ndash; <code>NtSetTimer</code> fast path</h3>
+
+<p><strong>Surface:</strong> <code>NtCreateTimer</code> (anonymous only), <code>NtSetTimer</code>,
+<code>NtCancelTimer</code>, <code>NtQueryTimer</code>.</p>
+
+<p><strong>Files:</strong></p>
+
+<table>
+<thead>
+<tr>
+<th> Path </th>
+<th> Role </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> <code>dlls/ntdll/unix/nspa/local_timer.c</code> (713 lines) </td>
+<td> the entire stub: dispatcher, table, fire path </td>
+</tr>
+</tbody>
+</table>
+
+
+<p><strong>Entry points</strong> (all in <code>dlls/ntdll/unix/sync.c</code>, all check
+<code>nspa_local_timer_*</code> first and fall through on <code>STATUS_NOT_IMPLEMENTED</code>):</p>
+
+<table>
+<thead>
+<tr>
+<th> Sync.c line </th>
+<th> Function </th>
+<th> Stub call </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> 2655 </td>
+<td> <code>NtCreateTimer</code> </td>
+<td> <code>nspa_promote_if_local</code> (no-op for timers) </td>
+</tr>
+<tr>
+<td> 2709 </td>
+<td> <code>NtCreateTimer</code> </td>
+<td> <code>nspa_local_timer_create</code> </td>
+</tr>
+<tr>
+<td> 2768 </td>
+<td> <code>NtSetTimer</code> </td>
+<td> <code>nspa_local_timer_set</code> </td>
+</tr>
+<tr>
+<td> 2803 </td>
+<td> <code>NtCancelTimer</code> </td>
+<td> <code>nspa_local_timer_cancel</code> </td>
+</tr>
+<tr>
+<td> 2837 </td>
+<td> <code>NtQueryTimer</code> </td>
+<td> <code>nspa_local_timer_query</code> </td>
+</tr>
+</tbody>
+</table>
+
+
+<p><strong>Design twist:</strong> unlike the local-file bypass, the timer stub does
+<em>not</em> return a private handle. The handle returned to the app is a
+server-allocated <code>NtCreateEvent</code> handle (<code>local_timer.c:485-489</code>):</p>
+
+<pre><code>event_type = (timer_type == NotificationTimer) ? NotificationEvent : SynchronizationEvent;
+if ((ret = NtCreateEvent( &amp;event, access, NULL,
+                          event_type, FALSE )))
+    return ret;
+</code></pre>
+
+<p>The bypass is in the <em>firing</em> path, not the creation path. A
+dispatcher pthread (SCHED_FIFO at <code>NSPA_RT_PRIO - 1</code>) sleeps on a
+<code>pi_cond_t</code> with <code>CLOCK_MONOTONIC</code> absolute deadlines. On expiry it
+issues <code>NtSetEvent</code> against the backing event handle. Because the
+backing handle is an NTSync event with <code>direct-sync</code> enabled (the
+client-range fast-path), <code>NtSetEvent</code> is a futex-only operation &ndash;
+no wineserver RPC. Net result: timer expiry costs a <code>pi_cond_timedwait</code>
+wake-up + an <code>NtSetEvent</code> futex op + optional <code>NtQueueApcThread</code> RPC.
+Server&rsquo;s old <code>timer_callback</code> path is bypassed entirely.</p>
+
+<p><strong>Eligibility:</strong> anonymous only (<code>!attr-&gt;ObjectName</code>). Named timers
+fall through to the server because their cross-process visibility
+lives in the NT object directory.</p>
+
+<p><strong>Clock semantics:</strong> internal deadlines are <code>CLOCK_MONOTONIC</code>
+absolute nanoseconds. NT relative <code>when</code> (negative LARGE_INTEGER)
+maps cleanly &ndash; elapsed time is what monotonic measures. NT absolute
+<code>when</code> (positive FILETIME) is converted at insert time via the
+current <code>CLOCK_REALTIME / CLOCK_MONOTONIC</code> offset; an NTP step
+between insert and fire is absorbed at the cost of the step size.
+For audio/RT workloads using only relative timers, this is the
+correct trade. (See <code>local_timer.c:34-48</code> for the design comment.)</p>
+
+<p><strong>Lock discipline:</strong> <code>pi_mutex_t timer_lock</code> covers the table and
+the deadline queue. <code>fire_timer</code> (which calls <code>NtSetEvent</code> and
+<code>NtQueueApcThread</code>) runs <em>outside</em> the lock with a refcount on the
+entry. The dispatcher loop at <code>local_timer.c:346-437</code> is the
+canonical drop-fire-reacquire pattern.</p>
+
+<p><strong>Feature gate:</strong> <code>NSPA_DISABLE_LOCAL_TIMERS</code> (default-on; gate
+disables the bypass).</p>
+
+<h3>7.3 <code>nspa_local_wm_timer</code> &ndash; <code>WM_TIMER</code> dispatcher</h3>
+
+<p><strong>Surface:</strong> <code>NtUserSetTimer</code>, <code>NtUserSetSystemTimer</code>, <code>NtUserKillTimer</code>,
+<code>NtUserKillSystemTimer</code>, plus <code>WM_TIMER</code> / <code>WM_SYSTIMER</code> posting into
+the message queue.</p>
+
+<p><strong>Files:</strong></p>
+
+<table>
+<thead>
+<tr>
+<th> Path </th>
+<th> Role </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> <code>dlls/win32u/nspa/local_wm_timer.c</code> (638 lines) </td>
+<td> the entire stub: dispatcher, table, ring publish </td>
+</tr>
+<tr>
+<td> <code>dlls/win32u/message.c:4694, 4736, 4770, 4791</code> </td>
+<td> call-sites in <code>NtUserSetTimer</code> etc. </td>
+</tr>
+</tbody>
+</table>
+
+
+<p><strong>Entry points</strong> (all check <code>nspa_local_wm_timer_*</code> first and fall
+through on <code>STATUS_NOT_IMPLEMENTED</code>):</p>
+
+<table>
+<thead>
+<tr>
+<th> message.c line </th>
+<th> Function </th>
+<th> Stub call </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> 4694 </td>
+<td> <code>NtUserSetTimer</code> </td>
+<td> <code>nspa_local_wm_timer_set(WM_TIMER)</code> </td>
+</tr>
+<tr>
+<td> 4736 </td>
+<td> <code>NtUserSetSystemTimer</code> </td>
+<td> <code>nspa_local_wm_timer_set(WM_SYSTIMER)</code> </td>
+</tr>
+<tr>
+<td> 4770 </td>
+<td> <code>NtUserKillTimer</code> </td>
+<td> <code>nspa_local_wm_timer_kill(WM_TIMER)</code> </td>
+</tr>
+<tr>
+<td> 4791 </td>
+<td> <code>NtUserKillSystemTimer</code> </td>
+<td> <code>nspa_local_wm_timer_kill(WM_SYSTIMER)</code> </td>
+</tr>
+</tbody>
+</table>
+
+
+<p><strong>Design twist:</strong> WM_TIMERs are posted into the <em>owner thread&rsquo;s</em>
+message queue, not the calling thread&rsquo;s. The stub resolves
+<code>hwnd -&gt; owner_tid</code> at SetTimer time (which is when the caller has
+a wineserver session and can do the resolution), caches a pointer
+into the <em>peer&rsquo;s</em> <code>nspa_queue_bypass_shm_t</code>, and the dispatcher
+thread later writes WM_TIMER ring slots into that peer shmem
+directly:</p>
+
+<pre><code>/* dlls/win32u/nspa/local_wm_timer.c:478-484 */
+if (owner_tid == GetCurrentThreadId())
+    peer_shm = nspa_get_own_bypass_shm_public();
+else
+    peer_shm = nspa_get_peer_bypass_shm_public( owner_tid );
+if (!peer_shm) return STATUS_NOT_IMPLEMENTED;
+</code></pre>
+
+<p>The dispatcher pthread is a pure shmem-writer &ndash; it never enters
+wineserver. <code>peek_message</code> on the consumer side drains the ring
+client-side via <code>nspa_try_pop_own_timer_ring</code>. End-to-end, a
+WM_TIMER expiry is a <code>pi_cond_timedwait</code> wake + a ring slot store +
+a consumer ring-pop. Server&rsquo;s old <code>pending_timers</code> / <code>expired_timers</code>
+dispatch is bypassed entirely.</p>
+
+<p><strong>Cross-process refusal:</strong> hwnds owned by other processes are
+explicitly rejected (<code>local_wm_timer.c:474</code>). Cross-process WM_TIMERs
+go through the server, where the server can do the cross-process
+post correctly. The bypass declines cases it can&rsquo;t handle as
+correctly as the server &ndash; option (b) of §4.</p>
+
+<p><strong>Coalescing semantics:</strong> NT&rsquo;s <code>WM_TIMER</code> has implicit coalescing &ndash;
+if the message pump stalls across N periods, the app sees one
+<code>WM_TIMER</code>. The stub replicates this by tagging entries with <code>in_ring</code>
+on publish; the dispatcher only re-arms once the consumer drains
+the slot (<code>local_wm_timer.c:281-309</code>). Server&rsquo;s <code>restart_timer</code>
+discipline mapped to a slot-state check.</p>
+
+<p><strong>Lock discipline:</strong> <code>pi_mutex_t wm_timer_lock</code> covers the table
+and wheel. Ring publishes use atomic state machine on the slot
+without taking the lock &ndash; the slot&rsquo;s state byte is the
+synchronisation point with the consumer. The dispatcher does not
+issue any wineserver RPC.</p>
+
+<p><strong>Feature gate:</strong> <code>NSPA_DISABLE_LOCAL_WM_TIMERS</code> (default-on; gate
+disables the bypass).</p>
+
+<hr />
+
+<h2>8. Future stubs (roadmap)</h2>
+
+<p>The pattern is generalisable. A handful of high-volume NT surfaces
+remain in the server today; each is a candidate for a future stub.</p>
+
+<p><strong><code>NtQueryDirectoryFile</code>.</strong> Directory enumerations dominate certain
+workloads (file dialogs, plugin scanners, installers). A stub backed
+by a per-process directory-handle table and <code>getdents64</code> syscalls,
+returning a private handle range, is a natural extension of the
+local-file bypass. Eligibility predicate: read-only directory open,
+no notify, single-process consumer. Cross-process visibility is not
+a concern &ndash; directory contents are filesystem state, the kernel is
+the source of truth, no wineserver mediation is needed once the
+handle is in our table.</p>
+
+<p><strong><code>NtFsControlFile</code> for named-pipe and registry ops.</strong> Many FSCTLs
+(query mountpoint, query partition, registry queries) are read-only
+and don&rsquo;t need server arbitration. Per-FSCTL stubbing is feasible.</p>
+
+<p><strong>Section objects.</strong> Already partially refcounted (see
+<code>project_kernel_refobj_future_uses.md</code>). A future stub could absorb
+read-only section creation backed by a local-file unix fd, in the
+same shape as <code>nspa_local_file_get_or_promote_server_handle</code> does
+today for sections opened <em>from</em> a local file. The mapping table
+would live alongside the file table or in its own region.</p>
+
+<p><strong>More message-queue carve-outs.</strong> The <code>nspa_msg_ring</code> v2 work
+(see <code>MEMORY.md</code> indices) is a stub-shaped bypass for message
+posting and peeking. Phase C &ldquo;get_message bypass&rdquo; continues this
+direction: the bucketing diag shipped (<code>project_msg_ring_v2_phase_c_stage1_validated</code>)
+identified that server-generated <code>WM_PAINT</code> / hardware / winevent
+messages dominate the Ableton workload&rsquo;s get_message traffic. A
+stub for those classes would push the consumer side fully off the
+server&rsquo;s <code>find_msg_to_get</code> path.</p>
+
+<p><strong>Timer further work.</strong> The <code>NtSetTimerEx</code> variant with completion
+ports is currently always server-routed. A completion-port-aware
+local-timer stub would extend <code>nspa_local_timer</code> to handle that
+case, at the cost of building a per-process completion-port-mux.</p>
+
+<p>The roadmap section of <code>wineserver-decomposition-plan.md</code> has the
+broader timeline; this list is the NT-local-stub-shaped subset.</p>
+
+<hr />
+
+<h2>9. Connection to wineserver decomposition</h2>
+
+<p>Each NT-local stub shrinks the wineserver footprint along one NT
+surface. As the surfaces add up, the decomposition story shifts:</p>
+
+<p><strong>Today (2026-04-27):</strong> wineserver runs <code>channel_dispatcher</code> 6-11%
+of CPU under load, <code>get_ptid_entry</code> 1-10%, <code>main_loop_epoll</code> 2-7%.
+The hot path is the channel-RECV / handler / channel-REPLY loop
+running under <code>global_lock</code>. Stubs are absorbing the
+highest-frequency NT calls (file opens, anonymous timers, owner-
+process WM_TIMERs); the channel traffic is shrinking in those
+classes.</p>
+
+<p><strong>Mid-term:</strong> as more stubs ship &ndash; directory enumeration,
+named-pipe FSCTLs, section objects &ndash; the channel traffic that
+remains in the server is exactly the cross-process arbitration set
+of §4 of the decomposition plan. At that point the §3.2
+&ldquo;router/handler split&rdquo; of the decomposition plan becomes natural:
+the router&rsquo;s &ldquo;fast-path&rdquo; is just &ldquo;pass to a stub if a stub claims
+the call&rdquo;. Most of the codebase is already structured this way &ndash;
+the stub call is the first thing the NT entry point does, so the
+&ldquo;router&rdquo; is the current control flow. Decomposition becomes folding
+existing handlers into nt-local stubs, not rewriting wineserver.</p>
+
+<p><strong>End-state:</strong> wineserver is a metadata service. Cross-process
+object naming, process / thread lifecycle, handle inheritance,
+NT-specific path resolution &ndash; the §4 list. At that point the §3.4
+&ldquo;lock partitioning&rdquo; question is not &ldquo;should we&rdquo; but &ldquo;is it worth
+the audit&rdquo;. If the metadata service is doing &lt; 0.5% CPU end-to-end
+under audio + UI load, the answer is probably no &ndash; and the lock
+stays a single global pi_mutex_t because there&rsquo;s nothing left to
+contend on.</p>
+
+<p><strong>The strangler-fig completes when wineserver is small enough that
+nobody profiles it.</strong></p>
+
+<hr />
+
+<h2>10. References</h2>
+
+<table>
+<thead>
+<tr>
+<th> Reference </th>
+<th> Purpose </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> <code>nspa-local-file-architecture.gen.html</code> </td>
+<td> Per-stub deep dive on the local-file bypass </td>
+</tr>
+<tr>
+<td> <code>dlls/ntdll/unix/nspa/local_file.c:1238</code> </td>
+<td> <code>nspa_local_file_try_bypass</code> entry </td>
+</tr>
+<tr>
+<td> <code>dlls/ntdll/unix/nspa/local_file.c:1414</code> </td>
+<td> <code>nspa_local_file_get_or_promote_server_handle</code> (lazy promotion) </td>
+</tr>
+<tr>
+<td> <code>dlls/ntdll/unix/nspa/local_file.c:1207</code> </td>
+<td> <code>nspa_local_file_is_local_handle</code> (range check) </td>
+</tr>
+<tr>
+<td> <code>server/nspa/local_file.c:113</code> </td>
+<td> PSHARED PI mutex init for inode-table buckets </td>
+</tr>
+<tr>
+<td> <code>server/nspa/local_file.c:181</code> </td>
+<td> <code>nspa_inode_publish_slot</code> seqlock-write protocol </td>
+</tr>
+<tr>
+<td> <code>dlls/ntdll/unix/nspa/local_timer.c:346</code> </td>
+<td> <code>dispatcher_main</code> (drop-fire-reacquire) </td>
+</tr>
+<tr>
+<td> <code>dlls/ntdll/unix/nspa/local_timer.c:465</code> </td>
+<td> <code>nspa_local_timer_create</code> (anonymous-only check) </td>
+</tr>
+<tr>
+<td> <code>dlls/ntdll/unix/sync.c:2709</code> </td>
+<td> <code>NtCreateTimer</code> call-site for local-timer stub </td>
+</tr>
+<tr>
+<td> <code>dlls/win32u/nspa/local_wm_timer.c:227</code> </td>
+<td> <code>publish_timer_slot</code> (peer-shmem ring write) </td>
+</tr>
+<tr>
+<td> <code>dlls/win32u/nspa/local_wm_timer.c:457</code> </td>
+<td> <code>nspa_local_wm_timer_set</code> (cross-process refusal) </td>
+</tr>
+<tr>
+<td> <code>dlls/win32u/message.c:4694</code> </td>
+<td> <code>NtUserSetTimer</code> call-site for WM_TIMER stub </td>
+</tr>
+<tr>
+<td> <code>wine/nspa/docs/wineserver-decomposition-plan.md</code> </td>
+<td> Long-arc decomposition plan (NT-local stubs are §3.x) </td>
+</tr>
+<tr>
+<td> <code>wine/nspa/docs/wine-nspa-lockup-audit-20260427.md</code> </td>
+<td> Lock-discipline audit confirming every stub holds locks briefly </td>
+</tr>
+<tr>
+<td> <code>wine/nspa/docs/local-file-bypass-design.md</code> </td>
+<td> Original design doc for the local-file bypass </td>
+</tr>
+<tr>
+<td> <code>MEMORY.md: project_msg_ring_v2_phase_c_stage1_validated</code> </td>
+<td> Phase C msg-ring bucketing diag (basis for future message-queue stubs) </td>
+</tr>
+</tbody>
+</table>
+
+</body></html>

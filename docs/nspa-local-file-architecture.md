@@ -541,6 +541,15 @@ Proper fix options (ranked):
 1. **Batched promote RPC** -- single server round-trip that promotes an array of local handles. Caps the CreateProcess cost at one RTT regardless of list length.
 2. **Async pre-promotion at mint time** -- if the open carried `OBJ_INHERIT`, fire the promote RPC off the critical path so the server handle is already cached when `alloc_handle_list` runs. Lower CreateProcess latency but higher complexity.
 
+#### Relationship to 14.1
+
+14.1 and 14.2 share the same underlying shape -- "an LF handle must become a real server handle before it crosses a process boundary" -- but the fix surfaces differ:
+
+- **14.2 is in-process.** The CreateProcess caller owns both the LF table and the calling thread, so the unix fds are locally accessible. Option 1 is a pure "batch the existing promote RPC" change.
+- **14.1 is cross-process.** Process B holds a handle that refers to process A's LF table. Neither B nor the server has the unix fd. Servicing it requires the server to wake **process A** and have A run the promote on its own entry before the dup can proceed. That needs new server-to-peer-client signaling, which is not LF infrastructure -- it is closer to how the msg-ring wakes peer threads.
+
+The two fixes compose: **14.2's batched RPC is a prerequisite of 14.1.** Once `nspa_promote_local_handles` exists as a handler, 14.1 can reuse it on process A, driven by a new "remote promote" request where process B asks the server to wake A and invoke it. 14.1's complexity is then the wake mechanism, not the promote itself. Ship 14.2 first; 14.1 composes on top.
+
 ### 14.3 Eligibility widening
 
 The current envelope captures the hot path. Anything outside it falls back cleanly. Worth widening only when a real workload demands:
