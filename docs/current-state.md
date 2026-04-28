@@ -164,10 +164,10 @@ upstream Wine. Zero overhead.
 
 ### 3.2 Bypass and infrastructure subsystems
 
-The story for the last six months has been moving state out of the
-single-threaded wineserver event loop into bounded shmem rings or
-direct kernel-mediated channels, each with its own correctness
-proof and gate.
+The dominant architectural change over the last six months has been
+moving state out of the single-threaded wineserver event loop into
+bounded shmem rings or direct kernel-mediated channels, each with its
+own correctness proof and gate.
 
 | Subsystem | Status | Default | Brief | Doc |
 |---|---|---|---|---|
@@ -229,8 +229,8 @@ proof and gate.
   send rate, and an ABA-driven misdirected `LRESULT` builds up
   state-machine corruption faster than the off-paint-cache baseline.
   Cannot be confirmed without a from-scratch repro on the pre-fix
-  binary while bpftrace-armed — not worth the cost given empirical
-  "fixed" with a plausible mechanism story.
+  binary while bpftrace-armed — not worth the cost given the matching
+  fix set and the clean post-fix validation run.
 
 ### 4.4 Observations from run-4
 

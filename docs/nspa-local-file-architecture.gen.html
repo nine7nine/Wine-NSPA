@@ -41,11 +41,19 @@
     border-radius: 3px; font-size: 0.82rem; color: var(--cyan);
   }
   pre {
-    background: var(--surface); padding: 1rem; border-radius: 6px;
+    background: var(--surface); padding: 1rem 1.1rem; border-radius: 8px;
     overflow-x: auto; margin: 0.75rem 0 1rem;
     border: 1px solid var(--border);
   }
-  pre code { background: none; padding: 0; font-size: 0.8rem; color: var(--fg); }
+  pre code {
+    display: block; background: transparent; padding: 0;
+    font-size: 0.8rem; color: inherit;
+  }
+  pre code.hljs,
+  code.hljs {
+    background: transparent;
+    padding: 0;
+  }
   blockquote {
     background: var(--surface); border-left: 3px solid var(--accent);
     padding: 0.75rem 1rem; margin: 1rem 0; border-radius: 0 4px 4px 0;
@@ -55,7 +63,25 @@
   hr { border: none; border-top: 1px solid var(--border); margin: 2rem 0; }
   strong { color: var(--fg); }
   em { color: var(--muted); font-style: italic; }
+  .diagram-container {
+    display: flex; justify-content: center;
+    margin: 1.25rem auto 1.5rem; padding: 0.75rem;
+    background: rgba(36, 40, 59, 0.55);
+    border: 1px solid var(--border); border-radius: 10px;
+    overflow-x: auto;
+  }
+  .diagram-container svg {
+    display: block;
+    width: 100% !important;
+    max-width: 100%;
+    height: auto !important;
+    margin: 0 auto;
+    flex: 0 0 auto;
+  }
 </style>
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/tokyo-night-dark.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
 </head><body>
 <h1>Wine-NSPA &ndash; Local-File Bypass Architecture</h1>
 
@@ -159,7 +185,7 @@ Author: jordan Johnston</p>
 <h2>4. Vanilla Wine vs Wine-NSPA File Open</h2>
 
 <div class="diagram-container">
-<svg width="920" height="580" viewBox="0 0 920 580" xmlns="http://www.w3.org/2000/svg">
+<svg width="920" height="580" viewBox="0 0 920 580" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
   <style>
     .box-vanilla { fill: #24283b; stroke: #9aa5ce; stroke-width: 1.5; rx: 6; }
     .box-nspa { fill: #24283b; stroke: #7aa2f7; stroke-width: 2; rx: 6; }
@@ -278,7 +304,7 @@ Author: jordan Johnston</p>
 
 <h3>5.2 Per-process table</h3>
 
-<pre><code>c
+<p><code>c
 struct nspa_local_open {
     struct list       entry;
     HANDLE            handle;         /* local-range handle returned to app */
@@ -293,7 +319,7 @@ struct nspa_local_open {
     WCHAR            *nt_name;        /* original NT path for GetFinalPathNameByHandle */
     USHORT            nt_name_len;
 };
-</code></pre>
+</code></p>
 
 <p>Protected by a single process-wide PI mutex (<code>nspa_lf_opens_mutex</code>). Linear list &ndash; walk is O(N) per lookup. For Ableton&rsquo;s typical workload the list reaches a few hundred entries at peak; the walk is in the noise next to a server RTT it avoids.</p>
 
@@ -309,7 +335,7 @@ struct nspa_local_open {
 
 <p>The wineserver publishes a <code>NSPA_INODE_BUCKETS</code> = 1024 bucket hash table as a memfd-backed shmem region. Each bucket has 4 slots of <code>(dev, inode, agg_access, agg_sharing, refcount)</code> + a per-bucket PI mutex. Clients map the region read-only for arbitration lookups, read-write on the mutex word for publishing their own opens.</p>
 
-<pre><code>
+<p><code>
 ┌───────────────────────────────────────────────┐
 │ nspa_inode_table_shm_t (~160 KB)              │
 ├───────────────────────────────────────────────┤
@@ -320,7 +346,7 @@ struct nspa_local_open {
 │   ├─ slot[2]                                  │
 │   └─ slot[3]                                  │
 └───────────────────────────────────────────────┘
-</code></pre>
+</code></p>
 
 <p>Bucket index = hash(dev, inode) mod 1024. Slot selection is linear within the bucket (first free or matching). If all 4 slots are full and none match, the bypass returns <code>STATUS_NOT_SUPPORTED</code> and the open falls back to the server &ndash; this is an overflow-safety valve, not a correctness path.</p>
 
@@ -384,7 +410,7 @@ HANDLE nspa_promote_if_local( HANDLE h );</p>
 <h2>8. Dispatch Flow</h2>
 
 <div class="diagram-container">
-<svg width="920" height="640" viewBox="0 0 920 640" xmlns="http://www.w3.org/2000/svg">
+<svg width="920" height="640" viewBox="0 0 920 640" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
   <style>
     .box-gate { fill: #24283b; stroke: #7aa2f7; stroke-width: 2; rx: 6; }
     .box-fast { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 2; rx: 6; }
@@ -472,7 +498,7 @@ HANDLE nspa_promote_if_local( HANDLE h );</p>
 
 <p>The bypass accepts only a tightly-scoped subset. The eligibility gate in <code>file.c</code>&rsquo;s <code>NtCreateFile</code>:</p>
 
-<pre><code>c
+<p><code>c
 if (!loader_open &amp;&amp;
     !attr-&gt;RootDirectory &amp;&amp; !attr-&gt;SecurityDescriptor &amp;&amp;
     (disposition == FILE_OPEN || disposition == FILE_OPEN_IF) &amp;&amp;
@@ -486,7 +512,7 @@ if (!loader_open &amp;&amp;
     if (bypass == STATUS_SHARING_VIOLATION) { status = bypass; goto done; }
     /* STATUS_NOT_SUPPORTED -&gt; fall through */
 }
-</code></pre>
+</code></p>
 
 <p>Disqualifiers and their reasons:</p>
 
@@ -723,7 +749,7 @@ dlls/ntdll/unix/nspa/
 
 <h1>define NSPA_TRACE_ENABLED_FN(name) \</h1>
 
-<pre><code>static inline int nspa_trace_##name##_enabled(void) { \
+<pre><code class="code-block">static inline int nspa_trace_##name##_enabled(void) { \
     static int cache = -1; \
     int v = __atomic_load_n( &amp;cache, __ATOMIC_RELAXED ); \
     if (v &lt; 0) { \
@@ -740,7 +766,7 @@ NSPA_TRACE_ENABLED_FN(LF_TRACE_SRV)
 
 <h1>define NSPA_TRACE(name, &hellip;) \</h1>
 
-<pre><code>do { if (nspa_trace_##name##_enabled()) fprintf( stderr, __VA_ARGS__ ); } while (0)
+<pre><code class="code-block">do { if (nspa_trace_##name##_enabled()) fprintf( stderr, __VA_ARGS__ ); } while (0)
 </code></pre>
 
 <h1>else</h1>
@@ -986,4 +1012,12 @@ NSPA_TRACE_ENABLED_FN(LF_TRACE_SRV)
 
 
 <hr />
+
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+  document.querySelectorAll("pre code").forEach(function (block) {
+    hljs.highlightElement(block);
+  });
+});
+</script>
 </body></html>

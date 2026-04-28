@@ -41,11 +41,19 @@
     border-radius: 3px; font-size: 0.82rem; color: var(--cyan);
   }
   pre {
-    background: var(--surface); padding: 1rem; border-radius: 6px;
+    background: var(--surface); padding: 1rem 1.1rem; border-radius: 8px;
     overflow-x: auto; margin: 0.75rem 0 1rem;
     border: 1px solid var(--border);
   }
-  pre code { background: none; padding: 0; font-size: 0.8rem; color: var(--fg); }
+  pre code {
+    display: block; background: transparent; padding: 0;
+    font-size: 0.8rem; color: inherit;
+  }
+  pre code.hljs,
+  code.hljs {
+    background: transparent;
+    padding: 0;
+  }
   blockquote {
     background: var(--surface); border-left: 3px solid var(--accent);
     padding: 0.75rem 1rem; margin: 1rem 0; border-radius: 0 4px 4px 0;
@@ -55,7 +63,25 @@
   hr { border: none; border-top: 1px solid var(--border); margin: 2rem 0; }
   strong { color: var(--fg); }
   em { color: var(--muted); font-style: italic; }
+  .diagram-container {
+    display: flex; justify-content: center;
+    margin: 1.25rem auto 1.5rem; padding: 0.75rem;
+    background: rgba(36, 40, 59, 0.55);
+    border: 1px solid var(--border); border-radius: 10px;
+    overflow-x: auto;
+  }
+  .diagram-container svg {
+    display: block;
+    width: 100% !important;
+    max-width: 100%;
+    height: auto !important;
+    margin: 0 auto;
+    flex: 0 0 auto;
+  }
 </style>
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/tokyo-night-dark.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
 </head><body>
 <h1>Wine-NSPA &ndash; NT-local stubs</h1>
 
@@ -154,7 +180,7 @@ server.</p>
 <p>Every stub follows the same skeleton. Strip away the API-specific details
 and the structure is:</p>
 
-<pre><code>NTSTATUS NtSomething( ..., IO_STATUS_BLOCK *io )
+<pre><code class="code-block">NTSTATUS NtSomething( ..., IO_STATUS_BLOCK *io )
 {
     if (NSPA_LOCAL_X_active())
     {
@@ -204,8 +230,8 @@ or <code>IO_STATUS_BLOCK</code> content.</li>
 say <code>NtQueryDirectoryFile</code> &ndash; would be drop-in: define a private handle
 range or reuse one, build a per-process table, decide an eligibility
 predicate, write the bypass entry point, gate it behind an env var.
-The pattern itself is what&rsquo;s load-bearing; the per-stub specifics fill
-in the obvious blanks.</p>
+The pattern itself is the reusable element; the per-stub specifics are
+surface-dependent.</p>
 
 <hr />
 
@@ -213,8 +239,8 @@ in the obvious blanks.</p>
 
 <p>A reasonable counter-proposal to &ldquo;ship many NT-local stubs&rdquo; is &ldquo;rewrite
 wineserver as a multi-threaded handler with per-subsystem locks&rdquo;. This
-is the §3.4 of <code>wineserver-decomposition-plan.md</code>. It is the right
-<em>endgame</em> but the wrong starting move, for three reasons:</p>
+is the §3.4 of <code>wineserver-decomposition-plan.md</code>. It is a valid
+long-horizon target but the wrong starting move, for three reasons:</p>
 
 <p><strong>Audit surface.</strong> Wineserver assumes &ldquo;nothing else changes during my
 handler&rdquo; pervasively. Every handler reads + writes shared state, often
@@ -226,20 +252,16 @@ months of audit work for one architectural change, and the change does
 not deliver any user-visible improvement until the whole partitioning
 is done.</p>
 
-<p><strong>Strangler-fig migration vs full rewrite.</strong> The strangler-fig pattern
-(Martin Fowler, 2004) wraps a legacy system in incremental replacements
-until the legacy system can be removed. Each NT-local stub is a
-strangler vine: it intercepts one specific NT surface, services it
-from outside the server, and routes anything it can&rsquo;t handle back to
-the server. The interception point is the stub&rsquo;s eligibility check;
-the routing is the <code>STATUS_NOT_SUPPORTED</code> fallback. Each stub
-<em>independently</em> delivers a measurable win (latency reduction on its
-NT surface) and is independently revertible. By the time enough
-strangler vines have grown, what remains in wineserver is the small
-set of handlers that genuinely need cross-process arbitration &ndash; the
-honest list in §4 of the decomposition plan: cross-process object
-naming, process / thread lifecycle, handle inheritance, NT-specific
-path resolution.</p>
+<p><strong>Incremental migration vs full rewrite.</strong> Each NT-local stub
+intercepts one specific NT surface, services it from outside the
+server, and routes anything it cannot model back to the server. The
+interception point is the stub&rsquo;s eligibility check; the routing path is
+the <code>STATUS_NOT_SUPPORTED</code> fallback. Each stub independently delivers a
+measurable win on its NT surface and is independently revertible. After
+enough surfaces move out, what remains in wineserver is the small set
+of handlers that genuinely need cross-process arbitration &ndash; the list
+in §4 of the decomposition plan: cross-process object naming, process /
+thread lifecycle, handle inheritance, and NT-specific path resolution.</p>
 
 <p><strong>Practical wins happen before the lock dissolves.</strong> Consider Ableton&rsquo;s
 startup profile: ~28,500 file opens in the first session boot, of which
@@ -293,7 +315,7 @@ initialised with <code>RTPI_MUTEX_PSHARED</code>, serialises writers across
 processes; readers use a seqlock and never block. The local-file
 bypass uses this exclusively for its inode-aggregation table:</p>
 
-<pre><code>/* server/nspa/local_file.c:113 */
+<pre><code class="code-block">/* server/nspa/local_file.c:113 */
 for (b = 0; b &lt; NSPA_INODE_BUCKETS; b++)
     pi_mutex_init( nspa_lock_of( (nspa_inode_bucket_t *)&amp;t-&gt;buckets[b] ),
                    RTPI_MUTEX_PSHARED );
@@ -317,7 +339,7 @@ visibility lives in the NT object directory which is only accessible
 from the server. The local-WM_TIMER stub is even stricter: hwnds owned
 by other processes are server-only:</p>
 
-<pre><code>/* dlls/win32u/nspa/local_wm_timer.c:474 */
+<pre><code class="code-block">/* dlls/win32u/nspa/local_wm_timer.c:474 */
 if (owner_pid != GetCurrentProcessId()) return STATUS_NOT_IMPLEMENTED;
 </code></pre>
 
@@ -356,7 +378,7 @@ range and route to the local table &ndash; zero RPC.</li>
 <code>NtQueryInformationFile</code> for an unsupported info class) genuinely
 needs a server-side handle. Those entry points call:</p>
 
-<pre><code>/* dlls/ntdll/unix/nspa/local_file.c:1414 */
+<pre><code class="code-block">/* dlls/ntdll/unix/nspa/local_file.c:1414 */
 HANDLE nspa_local_file_get_or_promote_server_handle( HANDLE local_handle );
 </code></pre>
 
@@ -469,7 +491,7 @@ lock first, fires, re-acquires.</li>
 
 <p>The local-timer dispatcher&rsquo;s fire loop is a clean illustration:</p>
 
-<pre><code>/* dlls/ntdll/unix/nspa/local_timer.c:381-432 */
+<pre><code class="code-block">/* dlls/ntdll/unix/nspa/local_timer.c:381-432 */
 if (!list_empty( &amp;fire_batch ))
 {
     pi_mutex_unlock( &amp;timer_lock );
@@ -671,7 +693,7 @@ sharing-arbitration semantics, eligibility matrix, and Phase history.</p>
 <em>not</em> return a private handle. The handle returned to the app is a
 server-allocated <code>NtCreateEvent</code> handle (<code>local_timer.c:485-489</code>):</p>
 
-<pre><code>event_type = (timer_type == NotificationTimer) ? NotificationEvent : SynchronizationEvent;
+<pre><code class="code-block">event_type = (timer_type == NotificationTimer) ? NotificationEvent : SynchronizationEvent;
 if ((ret = NtCreateEvent( &amp;event, access, NULL,
                           event_type, FALSE )))
     return ret;
@@ -781,7 +803,7 @@ into the <em>peer&rsquo;s</em> <code>nspa_queue_bypass_shm_t</code>, and the dis
 thread later writes WM_TIMER ring slots into that peer shmem
 directly:</p>
 
-<pre><code>/* dlls/win32u/nspa/local_wm_timer.c:478-484 */
+<pre><code class="code-block">/* dlls/win32u/nspa/local_wm_timer.c:478-484 */
 if (owner_tid == GetCurrentThreadId())
     peer_shm = nspa_get_own_bypass_shm_public();
 else
@@ -868,7 +890,7 @@ broader timeline; this list is the NT-local-stub-shaped subset.</p>
 <h2>9. Connection to wineserver decomposition</h2>
 
 <p>Each NT-local stub shrinks the wineserver footprint along one NT
-surface. As the surfaces add up, the decomposition story shifts:</p>
+surface. As the surfaces add up, the decomposition plan changes:</p>
 
 <p><strong>Today (2026-04-27):</strong> wineserver runs <code>channel_dispatcher</code> 6-11%
 of CPU under load, <code>get_ptid_entry</code> 1-10%, <code>main_loop_epoll</code> 2-7%.
@@ -898,8 +920,8 @@ under audio + UI load, the answer is probably no &ndash; and the lock
 stays a single global pi_mutex_t because there&rsquo;s nothing left to
 contend on.</p>
 
-<p><strong>The strangler-fig completes when wineserver is small enough that
-nobody profiles it.</strong></p>
+<p><strong>The migration is complete when wineserver is small enough that it is
+no longer a meaningful hot-path component.</strong></p>
 
 <hr />
 
@@ -980,4 +1002,12 @@ nobody profiles it.</strong></p>
 </tbody>
 </table>
 
+
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+  document.querySelectorAll("pre code").forEach(function (block) {
+    hljs.highlightElement(block);
+  });
+});
+</script>
 </body></html>

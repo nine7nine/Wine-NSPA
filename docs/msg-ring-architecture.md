@@ -1593,8 +1593,7 @@ increasing the chance that a wake delivered via
 
 Cannot be definitively confirmed without a from-scratch repro on the
 pre-fix wine binary while bpftrace-armed — and that's not worth the
-cost given we now have empirical "fixed" with a plausible mechanism
-story.
+cost given the matching fix set and the clean post-fix validation run.
 
 **DO NOT flip paint-cache default-on yet.** Per
 `feedback_validate_before_default_on.md` (NSPA project memory):
@@ -1666,8 +1665,8 @@ winevent push ring co-located in `nspa_queue_bypass_shm_t`.
 Phase B1.0 (paint cache) hit the 5-min lockup on its first default-on
 validation run, and the audit walked back through the entire
 ring-family critical path. MR1 / MR2 / MR4 fix-pack shipped before
-Phase C resumes. Phase C is the obvious resume target for the next
-session per `project_msg_ring_v2_phase_c_stage1_validated.md`.
+Phase C resumes. The next queued message-path work item is Phase C per
+`project_msg_ring_v2_phase_c_stage1_validated.md`.
 
 ### 13.4 Files queued for Phase C
 
@@ -1911,7 +1910,6 @@ this footnote.
 
 ### 17.4 Related architecture docs in this site
 
-- [bypass-overview.md](bypass-overview.md) — Whole-surface NSPA bypass map.
 - [current-state.md](current-state.md) — Wine-NSPA state of the art (2026-04-28).
 - [gamma-channel-dispatcher.md](gamma-channel-dispatcher.md) — gamma backbone for in-process wineserver dispatch.
 - [shmem-ipc.gen.html](shmem-ipc.gen.html) — Shmem v1.5 (orthogonal to the message ring; both share NTSync).

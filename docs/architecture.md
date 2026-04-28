@@ -6,7 +6,7 @@ Author: Jordan Johnston
 ## Table of Contents
 
 1. [What Wine-NSPA is](#1-what-wine-nspa-is)
-2. [The architecture in one diagram](#2-the-architecture-in-one-diagram)
+2. [Layered architecture](#2-layered-architecture)
 3. [Subsystem map](#3-subsystem-map)
     - 3.1 [Synchronization and priority inheritance](#31-synchronization-and-priority-inheritance)
     - 3.2 [Wineserver IPC](#32-wineserver-ipc)
@@ -15,11 +15,11 @@ Author: Jordan Johnston
     - 3.5 [Hook chains](#35-hook-chains)
     - 3.6 [File I/O](#36-file-io)
     - 3.7 [Audio](#37-audio)
-4. [The bypass trajectory](#4-the-bypass-trajectory)
-5. [Where this is heading](#5-where-this-is-heading)
+4. [Bypass topology](#4-bypass-topology)
+5. [Wineserver residual design](#5-wineserver-residual-design)
 6. [RT priority mapping](#6-rt-priority-mapping)
-7. [Live state](#7-live-state)
-8. [Doc index](#8-doc-index)
+7. [Status reference](#7-status-reference)
+8. [Document index](#8-document-index)
 
 ---
 
@@ -27,15 +27,15 @@ Author: Jordan Johnston
 
 Wine-NSPA is a PREEMPT_RT-tuned fork of Wine 11.x. It targets `PREEMPT_RT_FULL` Linux kernels, grafts kernel-level priority inheritance onto every Win32 sync primitive, replaces Wine's single-threaded wineserver event loop in the hot path with kernel-mediated channels and bounded shmem rings, and ships a custom `ntsync` kernel module that gives `/dev/ntsync` Windows-faithful priority semantics with PI boost.
 
-The scope is broad: Wine on PREEMPT_RT and all that implies. UI responsiveness, application startup latency, COM service-chain correctness, installer behaviour, GUI determinism, and audio-callback latency are all weighted equally. Audio is one serious consideration -- the user runs Ableton Live and a stack of VST instruments -- but it is not the framing motivation. A patch that helps installer hangs or context-menu RPC freezes counts. The bar is "does this latency, hang, inversion, or single-point-of-failure affect anything the user runs under Wine on PREEMPT_RT?" If yes, it's in scope.
+Scope covers latency-sensitive and correctness-sensitive Wine surfaces on PREEMPT_RT: synchronization, wineserver IPC, UI dispatch, startup and steady-state file I/O, hook dispatch, timer delivery, and audio callback paths. Audio workloads are part of the validation matrix, but the architecture is not audio-specific.
 
-NSPA is not an acronym. It does not expand. The project sits in the `Wine-NSPA` lineage, which descends from earlier RT work the user was doing on Wine 8.x and 10.x; the current 11.x line is a from-scratch reimplementation that leverages NTSync (introduced upstream in Wine 9.x and the kernel in 6.10) instead of the messy Gen-2 shmem dispatcher pile that the older lines depended on.
+NSPA is not an acronym. The current 11.x line is a reimplementation of earlier Wine 8.x and 10.x RT branches, updated to use NTSync (introduced upstream in Wine 9.x and Linux 6.10) instead of the older shmem-dispatcher-based design.
 
 The whole project is a small Linux kernel module (~3 kLOC of `ntsync.{c,h}` deltas on top of upstream) plus a Wine fork that increasingly bypasses wineserver through bounded shmem rings, all gated behind a single env var (`NSPA_RT_PRIO`). When `NSPA_RT_PRIO` is unset, every NSPA code path short-circuits to upstream Wine and behaviour is byte-identical. There is no zero-config tax for users who don't opt in.
 
 ---
 
-## 2. The architecture in one diagram
+## 2. Layered architecture
 
 The architecture has three layers: a kernel layer (NTSync, io_uring, librtpi-style PI futexes, RT scheduler), a wineserver layer (gamma channel dispatcher + main loop + handler tables), and a client layer (ntdll, win32u, NT-local stubs, audio drivers, application/PE code). Most NSPA bypasses route around the wineserver layer entirely on the common case, falling back only when the bypass envelope is exceeded.
 
@@ -211,7 +211,7 @@ The architecture has three layers: a kernel layer (NTSync, io_uring, librtpi-sty
 </svg>
 </div>
 
-The diagram tells the story in one picture. Vanilla Wine routes everything through the wineserver layer; that layer is single-threaded and holds `global_lock` around almost every handler, which serializes every Win32 process on the system. NSPA grafts a kernel-side `ntsync.ko` and adds direct ioctl paths from clients to the kernel, plus a per-process gamma dispatcher that replaces the legacy per-thread pthread shmem dispatcher. The dashed orange lines are the bypasses that avoid the wineserver layer entirely on the common case. The wineserver layer is still there -- it has to be, for cross-process naming and lifecycle -- but it stops being on the hot path of any normal application's main loop.
+The diagram defines the routing boundaries. Vanilla Wine routes these surfaces through wineserver, which serializes most handlers under `global_lock`. NSPA adds kernel-mediated and client-local bypasses that remove wineserver from the common path while preserving wineserver ownership of cross-process naming, lifecycle, and residual server-managed state.
 
 ---
 
@@ -231,7 +231,7 @@ All four paths are gated on `NSPA_RT_PRIO`. When unset, every PI code path short
 
 The classical Wine IPC architecture has every client thread `read()`/`write()` over a unix socket pair to the wineserver process, which dispatches under `global_lock`. The earlier NSPA work (Torge Matthies's 2022 patch, forward-ported as the v1.5 line) replaced the socket round-trip with a per-thread shmem region and a futex signal, served by a pool of pthread dispatchers inside the server. That worked but had its own pile of correctness rough edges; it has been superseded by the **gamma channel dispatcher**.
 
-The gamma dispatcher uses the ntsync 1004 channel object to deliver a per-process kernel-mediated request/reply queue. The client thread `ioctl(NTSYNC_CHANNEL_SEND, request)`; the wineserver dispatcher thread `ioctl(NTSYNC_CHANNEL_RECV)`s the request, runs the handler, and `ioctl(NTSYNC_CHANNEL_REPLY)`s the result. The channel object carries a 1005 thread-token so the kernel knows which client thread sent the request (used to drive 2026-era PI boost decisions on the dispatcher). T1+T2+T3 thread-token consumption is shipped default-on. The legacy shmem-IPC path (`shmem-ipc.gen.html`) is **historical and superseded**; it is documented for archaeology rather than as the current path.
+The gamma dispatcher uses the ntsync 1004 channel object to deliver a per-process kernel-mediated request/reply queue. The client thread `ioctl(NTSYNC_CHANNEL_SEND, request)`; the wineserver dispatcher thread `ioctl(NTSYNC_CHANNEL_RECV)`s the request, runs the handler, and `ioctl(NTSYNC_CHANNEL_REPLY)`s the result. The channel object carries a 1005 thread-token so the kernel knows which client thread sent the request (used to drive 2026-era PI boost decisions on the dispatcher). T1+T2+T3 thread-token consumption is shipped default-on. The legacy shmem-IPC path (`shmem-ipc.gen.html`) is **historical and superseded** and retained as reference material only.
 
 **Detail: see [gamma-channel-dispatcher](gamma-channel-dispatcher.gen.html). Historical: [shmem-ipc](shmem-ipc.gen.html) (superseded).**
 
@@ -247,7 +247,7 @@ Three stubs are shipped: `nspa_local_file` (NT-local file for read-only regular 
 
 The Win32 message pump is the second-hottest source of wineserver round-trips (after `NtCreateFile`, which `nspa_local_file` already drains). A typical Win32 application calls `GetMessage` / `PeekMessage` on every UI tick; cross-thread `PostMessage` and `SendMessage` go through the server even when sender and receiver are in the same process; `RedrawWindow` and `InvalidateRect` push paint flags into the server.
 
-NSPA's msg-ring v1 ships a per-thread bounded MPMC shmem ring for cross-thread same-process `PostMessage`/`SendMessage`/reply, signalled via NTSync events. Msg-ring v2 extends this with three further pieces: **Phase A** (a redraw-window push ring drained lazily by the server), **B1.0 paint cache** (a per-window shmem flag for `nspa_get_update_flags_try_fastpath`, gated default-off behind `NSPA_ENABLE_PAINT_CACHE=1` pending a second long-soak validation run), and **Phase C** (a `GetMessage` bypass that pulls directly from the per-thread ring; paused mid-development and is the obvious resume target for the next session).
+NSPA's msg-ring v1 ships a per-thread bounded MPMC shmem ring for cross-thread same-process `PostMessage`/`SendMessage`/reply, signalled via NTSync events. Msg-ring v2 extends this with three further pieces: **Phase A** (a redraw-window push ring drained lazily by the server), **B1.0 paint cache** (a per-window shmem flag for `nspa_get_update_flags_try_fastpath`, gated default-off behind `NSPA_ENABLE_PAINT_CACHE=1` pending a second long-soak validation run), and **Phase C** (a `GetMessage` bypass that pulls directly from the per-thread ring; currently deferred).
 
 Three pre-existing wine-userspace bugs in `dlls/win32u/nspa/msg_ring.c` were found and fixed in the 2026-04-27 audit (MR1 reply-slot ABA, MR2 `FUTEX_PRIVATE` on `MAP_SHARED` memfd, MR4 POST wake-loss on dual-signal-fail rollback), all of the silent-contract-violation class.
 
@@ -273,7 +273,7 @@ The wineserver `read_request_shm` path -- the canonical Wine I/O machinery -- sh
 
 ### 3.7 Audio
 
-Audio is delivered via a unified `winejack.drv` driver (replacing `winealsa`, `winepulse`, `wineoss` for users who opt in -- those are slated for drop once `winejack` is fully stable). `winejack.drv` ships Phase 1 MIDI and Phase 2 WASAPI audio, both routed through JACK. On top of that sits `nspaASIO`, a custom ASIO driver that delivers Phase F: zero-latency `bufferSwitch` invoked **inside** the JACK RT callback so the ASIO host process and the JACK callback share the same period -- no double-buffering hop, no extra latency.
+Audio is delivered through `winejack.drv`, with Phase 1 MIDI and Phase 2 WASAPI audio both routed through JACK. `nspaASIO` layers ASIO on top of the same transport and provides Phase F: zero-latency `bufferSwitch` dispatch **inside** the JACK RT callback so the ASIO host and JACK callback execute on the same period boundary.
 
 The audio thread typically runs at NT band 31 / `TIME_CRITICAL`, which under `NSPA_RT_PRIO=80` maps to SCHED_FIFO 80. JACK's own callback runs at FIFO 88-89 (above NSPA's ceiling but below the `99 (reserved)` kernel-thread band). Wineserver runs at FIFO 64 (auto-derived `NSPA_RT_PRIO - 16`) -- below the entire RT band, so dispatcher contention can never preempt the audio path.
 
@@ -281,25 +281,23 @@ The audio thread typically runs at NT band 31 / `TIME_CRITICAL`, which under `NS
 
 ---
 
-## 4. The bypass trajectory
+## 4. Bypass topology
 
-Every NSPA bypass is a step along one trajectory: progressively moving NT-API state OUT of wineserver, until what remains is small enough to decompose with surgery instead of with a rewrite. This is a strangler-fig migration applied to a userspace IPC architecture rather than a web service. Each bypass starts behind a default-off env var, validates against a real workload (Ableton, plugin scans, drum-track-load-while-playing, message storms), and flips default-on after passing.
+Each bypass moves a specific class of NT-API state or I/O work out of wineserver and into client-local state, bounded shared memory, or kernel-mediated primitives. Every path is independently gated, validated, and revertible.
 
-The trajectory map covers eleven concrete bypasses plus the architectural floor (process/thread lifecycle, cross-process naming -- which cannot be moved out and stays in wineserver permanently). Roughly seven bypasses are shipped default-on as of 2026-04-28 (file I/O, sync primitives, hooks, NtCreateFile, timers, msg-ring v1 send, redraw-window push). Paint-cache (B1.0) is shipped and validating. Phase C (`GetMessage`) is paused mid-development. Sechost device-IRP poll and io_uring 2/3 are queued.
+The current topology covers eleven concrete bypass surfaces plus the residual wineserver floor (process/thread lifecycle, cross-process naming, path resolution, handle inheritance). As of 2026-04-28, the shipped/default-on set includes sync primitives, hook caching, NT-local regular-file open, io_uring Phase 1 regular-file I/O, timers, msg-ring v1 same-process send/reply, and redraw-window push. Paint-cache (B1.0) remains in validation. Phase C (`GetMessage`), sechost device-IRP poll, and io_uring socket/pipe work remain pending.
 
-The key property is that each bypass is independently revertible (env-var gate flips off, server path takes over) and independently valuable (the bypasses already shipped are concrete wins -- 28k file opens off Ableton's startup path, hook lookups dropped to zero on the wire, all four PI paths working end-to-end). Compare that to the cost-shape of a unified rewrite: ships when it ships, no intermediate value, regression risk concentrated in one mega-change. The bypass-first sequencing isn't an alternative to decomposition -- it's the precondition that makes decomposition cheap.
-
-**Detail: see [bypass-overview](bypass-overview.gen.html).**
+This staging keeps regression scope local and rebase cost bounded. The shipped paths already remove measurable server traffic while preserving an immediate fallback to the canonical wineserver path when a gate is disabled.
 
 ---
 
-## 5. Where this is heading
+## 5. Wineserver residual design
 
-The long-arc plan is a phased decomposition of the wineserver process itself. The plan covers Phase 1 (audit and partition the lock surface), Phase 2 (introduce a small set of NTSync extensions that let the dispatcher delegate work safely), Phase 3 (split the wineserver process into separate threads -- timer thread, FD poll thread, aggregate-wait thread -- now that each subsystem has been pruned to its minimum viable footprint), and Phase 4 (router/handler split, lock partitioning, ultimately turning off the wineserver supervisor process for normal apps).
+The decomposition plan for wineserver itself is phased: Phase 1 audits and partitions the lock surface, Phase 2 introduces the ntsync extensions needed for safe delegation, Phase 3 splits the process into subsystem threads (timer, fd-poll, aggregate-wait), and Phase 4 separates routing from handlers and further partitions the remaining lock surface.
 
-Phase 3 only becomes feasible *after* enough state has migrated client-side via bypasses. Splitting the timer thread is trivial when most timer state has already moved to `nspa_local_timer`. Splitting the FD poll thread is trivial when most file I/O has migrated via io_uring 1+2+3. Lock partitioning is feasible only after the remaining lock-holders are auditable as a small set. The user previously stalled on the decomposition because trying to land it directly was premature -- every bypass shipped is one less handler the decomposition has to re-implement.
+Phase 3 depends on prior client-side migration. Timer splitting becomes tractable after `nspa_local_timer` reduces server ownership. fd-poll splitting becomes tractable after io_uring absorbs the regular-file and socket surfaces. Lock partitioning becomes tractable only after the residual lock holders are a small, auditable set.
 
-The endgame wineserver is not "no wineserver." Process and thread lifecycle, cross-process named-object registration, NT path resolution (`\??\`, NT object directory, 8.3 names, case-insensitive on case-sensitive FS), and handle-inheritance coordination at `CreateProcess` time -- those genuinely need a single source of truth and stay in the supervisor. But after the trajectory map fills in, what remains is a thin metadata service rather than an application server.
+The target is not elimination of wineserver. Process and thread lifecycle, cross-process named-object registration, NT path resolution (`\??\`, NT object directory, 8.3 names, case-insensitive behavior on case-sensitive filesystems), and handle-inheritance coordination at `CreateProcess` time remain centralized. The objective is to reduce wineserver to the authoritative metadata and lifecycle surfaces that cannot be safely decentralized.
 
 **Detail: see [wineserver-decomposition](wineserver-decomposition.gen.html).**
 
@@ -345,15 +343,15 @@ The mapping is governed by these env vars:
 
 ---
 
-## 7. Live state
+## 7. Status reference
 
-The state of the art -- what's shipped, what's gated, what's pending, what the next session resumes -- lives at **[current-state](current-state.gen.html)**. That document is the canonical "what does NSPA look like today" board. It includes the full ntsync patch stack (1003-1009), the validation totals against the production kernel (~370M ops, zero errors, zero KASAN splats, two clean Ableton runs on 2026-04-28), the active-features matrix with default polarity and gating env vars per subsystem, the recent investigation arc (2026-04-26 to 2026-04-28), and the open-work priority order.
+The canonical status board lives at **[current-state](current-state.gen.html)**. It tracks shipped vs gated vs pending features, the ntsync patch stack (1003-1009), validation totals against the production kernel (~370M ops, zero errors, zero KASAN splats, two clean Ableton runs on 2026-04-28), and the active env-var matrix per subsystem.
 
-This architecture overview describes the **shape** of the system. `current-state.md` describes its **status**. Both should be read together when getting up to speed on the project.
+This document describes system structure. `current-state.md` records current validation and default polarity.
 
 ---
 
-## 8. Doc index
+## 8. Document index
 
 Master overview (this doc) plus dedicated subsystem pages.
 
@@ -361,7 +359,6 @@ Master overview (this doc) plus dedicated subsystem pages.
 |---|---|
 | `architecture.gen.html` (this doc) | Master overview -- shape and structure |
 | `current-state.gen.html` | Live state board -- what's shipped, what's pending, validation totals, recent arc |
-| `bypass-overview.gen.html` | The strangler trajectory -- every bypass, status, composition |
 | `wineserver-decomposition.gen.html` | Long-horizon plan -- Phase 1-4 wineserver process decomposition |
 | `gamma-channel-dispatcher.gen.html` | Per-process kernel-mediated wineserver IPC (gamma dispatcher) |
 | `nt-local-stubs.gen.html` | NT-local stubs architectural pattern |

@@ -41,11 +41,19 @@
     border-radius: 3px; font-size: 0.82rem; color: var(--cyan);
   }
   pre {
-    background: var(--surface); padding: 1rem; border-radius: 6px;
+    background: var(--surface); padding: 1rem 1.1rem; border-radius: 8px;
     overflow-x: auto; margin: 0.75rem 0 1rem;
     border: 1px solid var(--border);
   }
-  pre code { background: none; padding: 0; font-size: 0.8rem; color: var(--fg); }
+  pre code {
+    display: block; background: transparent; padding: 0;
+    font-size: 0.8rem; color: inherit;
+  }
+  pre code.hljs,
+  code.hljs {
+    background: transparent;
+    padding: 0;
+  }
   blockquote {
     background: var(--surface); border-left: 3px solid var(--accent);
     padding: 0.75rem 1rem; margin: 1rem 0; border-radius: 0 4px 4px 0;
@@ -55,7 +63,25 @@
   hr { border: none; border-top: 1px solid var(--border); margin: 2rem 0; }
   strong { color: var(--fg); }
   em { color: var(--muted); font-style: italic; }
+  .diagram-container {
+    display: flex; justify-content: center;
+    margin: 1.25rem auto 1.5rem; padding: 0.75rem;
+    background: rgba(36, 40, 59, 0.55);
+    border: 1px solid var(--border); border-radius: 10px;
+    overflow-x: auto;
+  }
+  .diagram-container svg {
+    display: block;
+    width: 100% !important;
+    max-width: 100%;
+    height: auto !important;
+    margin: 0 auto;
+    flex: 0 0 auto;
+  }
 </style>
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/tokyo-night-dark.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
 </head><body>
 <h1>Wine Window Decoration Feedback Loop &ndash; Investigation Report</h1>
 
@@ -90,7 +116,7 @@ Wayland path: <code>GetWindowStyleMasks</code> added but untested.</p>
 
 <p>The feedback loop is in <strong>win32u&rsquo;s <code>set_window_pos</code> chain</strong>, not in the display drivers. The cycle:</p>
 
-<pre><code>ConfigureNotify (from WM or Wine desktop)
+<pre><code class="code-block">ConfigureNotify (from WM or Wine desktop)
   -&gt; WM_WINE_WINDOW_STATE_CHANGED
   -&gt; NtUserSetWindowPos (with WM's constrained rect)
   -&gt; calc_ncsize -&gt; sends WM_NCCALCSIZE -&gt; computes client rect with NC area
@@ -144,7 +170,7 @@ Wayland path: <code>GetWindowStyleMasks</code> added but untested.</p>
 
 <p>Each cycle, <code>window_rect_from_visible</code> converts the WM&rsquo;s ConfigureNotify rect back to a window rect using Wine&rsquo;s stored offsets. The mismatch produces a different window rect every time. Specifically, a constant <strong>-48px height delta</strong> per cycle (observed in traces):</p>
 
-<pre><code>NSPA_CFG 0x1009a config_vis (389,59)-(2430,1818) stored_vis (389,59)-(2430,1899) stored_win (389,59)-(2430,1899)
+<pre><code class="code-block">NSPA_CFG 0x1009a config_vis (389,59)-(2430,1818) stored_vis (389,59)-(2430,1899) stored_win (389,59)-(2430,1899)
   -&gt; new_win (389,59)-(2430,1818) old_win (389,59)-(2430,1899) delta(0,0,0,-81) flags 0x16
 </code></pre>
 
@@ -187,7 +213,7 @@ Wayland path: <code>GetWindowStyleMasks</code> added but untested.</p>
 
 <p>In <code>apply_window_pos</code> (dlls/win32u/window.c:2277):</p>
 
-<pre><code>if (old_surface != new_surface) swp_flags |= SWP_FRAMECHANGED;
+<pre><code class="code-block">if (old_surface != new_surface) swp_flags |= SWP_FRAMECHANGED;
 </code></pre>
 
 <p>Any visible rect change that triggers a new surface forces <code>SWP_FRAMECHANGED</code>, which triggers <code>WM_NCCALCSIZE</code>, which recalculates the NC area, which changes the visible rect &ndash; amplifying the loop.</p>
@@ -296,7 +322,7 @@ Wayland path: <code>GetWindowStyleMasks</code> added but untested.</p>
 
 <h3>The visible rect model</h3>
 
-<pre><code>struct window_rects {
+<pre><code class="code-block">struct window_rects {
     RECT window;   // Full Win32 window area (including NC frame)
     RECT client;   // Client area (from WM_NCCALCSIZE)
     RECT visible;  // X11/Wayland surface area (from get_visible_rect)
@@ -309,7 +335,7 @@ Wayland path: <code>GetWindowStyleMasks</code> added but untested.</p>
 
 <p>Any decorated window on any Linux WM. Simple test:</p>
 
-<pre><code>wine notepad  # then maximize, resize, move -- watch for drift/flicker
+<pre><code class="code-block">wine notepad  # then maximize, resize, move -- watch for drift/flicker
 </code></pre>
 
 <p>Ableton Live is a good test case because it&rsquo;s large and the artifacts are very visible.</p>
@@ -341,7 +367,7 @@ Wayland path: <code>GetWindowStyleMasks</code> added but untested.</p>
 
 <p>In <code>apply_window_pos</code>:</p>
 
-<pre><code>if (old_surface != new_surface) swp_flags |= SWP_FRAMECHANGED;
+<pre><code class="code-block">if (old_surface != new_surface) swp_flags |= SWP_FRAMECHANGED;
 </code></pre>
 
 <p>This forces NC recalculation whenever the surface changes. If the visible rect changes by even 1px (due to the offset mismatch), a new surface is created, FRAMECHANGED fires, NCCALCSIZE runs, and the cycle amplifies.</p>
@@ -413,13 +439,13 @@ Wayland path: <code>GetWindowStyleMasks</code> added but untested.</p>
 
 <p><strong>NSPA_DBG in get_visible_rect:</strong></p>
 
-<pre><code>NSPA_DBG hwnd 0x1009a using WM frame extents (-6,-27)-(6,6)
+<pre><code class="code-block">NSPA_DBG hwnd 0x1009a using WM frame extents (-6,-27)-(6,6)
 NSPA_DBG hwnd 0x1009a using AdjustWindowRect (-4,-30)-(4,4) (no frame extents yet)
 </code></pre>
 
 <p><strong>NSPA_CFG in window_update_client_config:</strong></p>
 
-<pre><code>NSPA_CFG 0x1009a config_vis (389,59)-(2430,1818) stored_vis (389,59)-(2430,1899) stored_win (389,59)-(2430,1899) -&gt; new_win (389,59)-(2430,1818) old_win (389,59)-(2430,1899) delta(0,0,0,-81) flags 0x16
+<pre><code class="code-block">NSPA_CFG 0x1009a config_vis (389,59)-(2430,1818) stored_vis (389,59)-(2430,1899) stored_win (389,59)-(2430,1899) -&gt; new_win (389,59)-(2430,1818) old_win (389,59)-(2430,1899) delta(0,0,0,-81) flags 0x16
 </code></pre>
 
 <ul>
@@ -441,4 +467,12 @@ NSPA_DBG hwnd 0x1009a using AdjustWindowRect (-4,-30)-(4,4) (no frame extents ye
 3. <code>get_visible_rect</code>: upstream behavior restored (EqualRect + NtUserAdjustWindowRect)
 4. Diagnostic ERR traces (NSPA_DBG, NSPA_CFG) &ndash; should be removed before shipping
 5. WS_EX_LAYERED MWM exclusion removed (from earlier session, still correct)</p>
+
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+  document.querySelectorAll("pre code").forEach(function (block) {
+    hljs.highlightElement(block);
+  });
+});
+</script>
 </body></html>

@@ -6,7 +6,7 @@ Author: Jordan Johnston
 ## Table of Contents
 
 1. [Overview](#1-overview)
-2. [Why a custom audio stack](#2-why-a-custom-audio-stack)
+2. [Backend constraints and JACK selection](#2-backend-constraints-and-jack-selection)
 3. [Stack layering](#3-stack-layering)
 4. [winejack.drv: the JACK backend for Wine](#4-winejackdrv-the-jack-backend-for-wine)
 5. [WASAPI surface and shared mode](#5-wasapi-surface-and-shared-mode)
@@ -14,8 +14,8 @@ Author: Jordan Johnston
 7. [MIDI](#7-midi)
 8. [nspaASIO: the ASIO bridge](#8-nspaasio-the-asio-bridge)
 9. [Phase F: zero-latency bufferSwitch in the JACK callback](#9-phase-f-zero-latency-bufferswitch-in-the-jack-callback)
-10. [What's not implemented (by design)](#10-whats-not-implemented-by-design)
-11. [What's deferred](#11-whats-deferred)
+10. [Intentionally unimplemented surfaces](#10-intentionally-unimplemented-surfaces)
+11. [Deferred work](#11-deferred-work)
 12. [Other audio drivers](#12-other-audio-drivers)
 13. [Validation](#13-validation)
 14. [References](#14-references)
@@ -24,7 +24,7 @@ Author: Jordan Johnston
 
 ## 1. Overview
 
-Wine-NSPA is a Wine fork tuned for PREEMPT_RT, with the practical goal of making Windows DAWs and music-production software run with deterministic latency on Linux. The primary target is Ableton Live 12 driving a graph of native and bridged VST plugins, but the same surface serves any Windows audio application that opens WASAPI or ASIO.
+The Wine-NSPA audio stack provides deterministic low-latency WASAPI and ASIO transport on PREEMPT_RT systems. Validation focuses on DAW workloads, but the same backend serves any Windows audio application that opens WASAPI or ASIO.
 
 The audio stack consists of three components that work together:
 
@@ -34,7 +34,7 @@ The audio stack consists of three components that work together:
 
 This document describes how those pieces fit together, what each one is responsible for, and which design decisions were forced by the constraint of running on a PREEMPT_RT kernel under JACK.
 
-## 2. Why a custom audio stack
+## 2. Backend constraints and JACK selection
 
 Vanilla Wine ships three audio drivers: `winealsa.drv` (ALSA PCM), `winepulse.drv` (PulseAudio), and `wineoss.drv` (OSS). Each of them satisfies the WASAPI surface in their own way, and each of them runs into the same set of problems on a PREEMPT_RT kernel hosting a real-time audio workload.
 
@@ -42,17 +42,17 @@ Vanilla Wine ships three audio drivers: `winealsa.drv` (ALSA PCM), `winepulse.dr
 
 **PulseAudio routes audio through a userspace daemon that is not on the RT path.** PipeWire's PulseAudio compatibility layer is closer to RT-correct, but `winepulse.drv` is still talking to PulseAudio through its compatibility ABI, not directly to the underlying RT engine. There is an extra hop, and that hop costs both latency and predictability.
 
-**OSS is dead.** It is preserved in upstream Wine for legacy systems and is not a real option for low-latency music work in 2026.
+**OSS is a legacy compatibility path.** It remains in upstream Wine for older systems and is not a target backend for low-latency PREEMPT_RT workloads.
 
 The deeper problem is that each of these drivers tries to *manufacture* a clock from the host system's general-purpose timing primitives -- a CLOCK_MONOTONIC sleep, an ALSA wakeup timed against PCM availability, a PulseAudio buffer-fill notification. None of those clocks were designed to be authoritative for a hard-real-time audio callback running at SCHED_FIFO 80+. On a PREEMPT_RT kernel they can be made *better*, but they cannot be made *deterministic*.
 
-JACK is built around a different premise. The JACK process callback runs on a SCHED_FIFO thread inside the JACK server (or, with PipeWire-JACK, inside the PipeWire RT loop, which provides the same contract). The callback fires once per period at a frame boundary that the rest of the system has already committed to. Every JACK client on the box is woken by JACK and produces or consumes one period's worth of audio inside that callback. There is no separate clock; *the JACK callback is the clock*. This is the right anchor point for an audio driver targeting RT determinism.
+JACK is built around a different premise. The JACK process callback runs on a SCHED_FIFO thread inside the JACK server (or, with PipeWire-JACK, inside the PipeWire RT loop, which provides the same contract). The callback fires once per period at a frame boundary that the rest of the system has already committed to. Every JACK client on the box is woken by JACK and produces or consumes one period's worth of audio inside that callback. There is no separate clock; *the JACK callback is the clock*. That callback is the authoritative timing source for an RT-correct Wine audio driver.
 
-So the design choice is mechanical: stop pretending that a Wine timer thread can make ALSA, PulseAudio, or OSS behave like JACK, and write a Wine audio driver that talks to JACK directly. That is `winejack.drv`.
+Accordingly, the implementation uses a JACK-native Wine audio driver. That driver is `winejack.drv`.
 
 ## 3. Stack layering
 
-The full path from a Windows application's audio callback to a JACK output port has three flavors, depending on the API the application uses.
+The transport has three modes, selected by API surface.
 
 **WASAPI shared mode** (Windows media players, browsers, generic apps):
 
@@ -77,7 +77,7 @@ The full path from a Windows application's audio callback to a JACK output port 
               -> JACK audio ports
               -> JACK RT engine
 
-The *same* JACK transport carries all three flavors. Two ASIO apps and a media player can run side by side, each with its own WASAPI / ASIO stream, and JACK handles the mixing at the graph level. There is no exclusive-mode lockout the way there would be on real Windows hardware -- this is a feature, not a bug, and is discussed below.
+The *same* JACK transport carries all three modes. Multiple ASIO and WASAPI clients can coexist, and JACK handles graph-level mixing and routing. The stack does not implement Windows-style exclusive-device lockout; that behavior is discussed in Section 10.
 
 MIDI takes a parallel path through the same driver:
 
@@ -86,6 +86,107 @@ MIDI takes a parallel path through the same driver:
               -> external synths / soft synths / DAW MIDI tracks
 
 WinMM MIDI is a separate JACK client (`wine-midi`) from the audio one (`wine-audio`). They have separate process callbacks, separate lifecycles, and separate port sets. Sharing a single client for audio and MIDI is possible but offers no real benefit -- JACK callbacks are cheap, and decoupling lets MIDI come up before audio is initialized and stay up after audio shuts down.
+
+The three flavors above resolve into a single layered data path. Every Win32 audio API ultimately funnels through `mmdevapi` into `winejack.drv`'s Unix side, which holds the JACK client and the per-period process callback. Phase F shortcuts ASIO data past the WASAPI ring while still re-using the same JACK client, the same port set, and the same process callback. The diagram below shows the layering and which boundary each API surface enters at.
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 940 580" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .lbl { fill: #c0caf5; font-family: 'JetBrains Mono', monospace; font-size: 12px; }
+    .lbl-sm { fill: #c0caf5; font-family: 'JetBrains Mono', monospace; font-size: 10px; }
+    .lbl-hdr { fill: #7aa2f7; font-family: 'JetBrains Mono', monospace; font-size: 14px; font-weight: bold; }
+    .lbl-tier { fill: #7dcfff; font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: bold; }
+    .lbl-acc { fill: #bb9af7; font-family: 'JetBrains Mono', monospace; font-size: 11px; }
+    .lbl-grn { fill: #9ece6a; font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: bold; }
+    .lbl-yel { fill: #e0af68; font-family: 'JetBrains Mono', monospace; font-size: 10px; }
+    .lbl-mut { fill: #8c92b3; font-family: 'JetBrains Mono', monospace; font-size: 10px; }
+    .box-pe { fill: #1a1b26; stroke: #7aa2f7; stroke-width: 1.5; }
+    .box-bridge { fill: #24283b; stroke: #bb9af7; stroke-width: 1.5; }
+    .box-driver { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; }
+    .box-jack { fill: #1f2535; stroke: #7dcfff; stroke-width: 1.5; }
+    .box-hw { fill: #2a2418; stroke: #e0af68; stroke-width: 1.5; }
+    .conn { stroke: #565f89; stroke-width: 1.4; }
+    .conn-fast { stroke: #bb9af7; stroke-width: 1.6; stroke-dasharray: 6 3; }
+    .divider { stroke: #3b4261; stroke-width: 1; stroke-dasharray: 4 4; }
+  </style>
+
+  <text x="470" y="26" text-anchor="middle" class="lbl-hdr">Wine-NSPA audio data path -- three API surfaces, one JACK transport</text>
+
+  <text x="20" y="62" class="lbl-tier">Win32 PE</text>
+  <rect x="100" y="48" width="220" height="32" class="box-pe"/>
+  <text x="210" y="68" text-anchor="middle" class="lbl">WASAPI shared (media player)</text>
+  <rect x="350" y="48" width="220" height="32" class="box-pe"/>
+  <text x="460" y="68" text-anchor="middle" class="lbl">WASAPI exclusive event-driven</text>
+  <rect x="600" y="48" width="220" height="32" class="box-pe"/>
+  <text x="710" y="68" text-anchor="middle" class="lbl">ASIO host (DAW + plugins)</text>
+
+  <line x1="210" y1="80" x2="210" y2="110" class="conn"/>
+  <line x1="460" y1="80" x2="460" y2="110" class="conn"/>
+  <line x1="710" y1="80" x2="710" y2="110" class="conn"/>
+
+  <text x="20" y="130" class="lbl-tier">Win32 ABI</text>
+  <rect x="100" y="112" width="470" height="32" class="box-bridge"/>
+  <text x="335" y="132" text-anchor="middle" class="lbl-acc">mmdevapi -- IAudioClient / IAudioRenderClient (WASAPI surface)</text>
+  <rect x="600" y="112" width="220" height="32" class="box-bridge"/>
+  <text x="710" y="132" text-anchor="middle" class="lbl-acc">nspaasio.dll -- IASIO COM</text>
+
+  <line x1="210" y1="144" x2="210" y2="172" class="conn"/>
+  <line x1="460" y1="144" x2="460" y2="172" class="conn"/>
+  <line x1="710" y1="144" x2="710" y2="172" class="conn"/>
+
+  <text x="20" y="194" class="lbl-tier">PE / Unix</text>
+  <text x="20" y="208" class="lbl-mut">boundary</text>
+  <line x1="80" y1="180" x2="900" y2="180" class="divider"/>
+
+  <text x="20" y="246" class="lbl-tier">Wine driver</text>
+  <text x="20" y="260" class="lbl-mut">(Unix side)</text>
+
+  <rect x="100" y="220" width="720" height="120" class="box-driver"/>
+  <text x="460" y="244" text-anchor="middle" class="lbl-grn">winejack.drv (jack.c) -- WASAPI client implementation, stream state machine</text>
+
+  <rect x="120" y="258" width="200" height="32" class="box-driver"/>
+  <text x="220" y="278" text-anchor="middle" class="lbl-sm">general path: interleaved ring</text>
+
+  <rect x="340" y="258" width="200" height="32" class="box-driver"/>
+  <text x="440" y="278" text-anchor="middle" class="lbl-sm">fast path: per-channel double-buf</text>
+
+  <rect x="560" y="258" width="240" height="32" class="box-driver"/>
+  <text x="680" y="278" text-anchor="middle" class="lbl-sm">Phase F: register_asio + futex pair</text>
+
+  <text x="460" y="310" text-anchor="middle" class="lbl-yel">single JACK process callback services every active stream (shared / excl / Phase F)</text>
+  <text x="460" y="326" text-anchor="middle" class="lbl-mut">pi_mutex_trylock against WASAPI threads -- no blocking inside RT callback</text>
+
+  <line x1="210" y1="340" x2="210" y2="370" class="conn"/>
+  <line x1="460" y1="340" x2="460" y2="370" class="conn"/>
+  <line x1="710" y1="340" x2="710" y2="370" class="conn"/>
+
+  <text x="20" y="392" class="lbl-tier">JACK</text>
+  <rect x="100" y="372" width="720" height="48" class="box-jack"/>
+  <text x="460" y="392" text-anchor="middle" class="lbl-acc">wine-audio JACK client -- jack_port_register output_1..N + input_1..N (deinterleaved float32)</text>
+  <text x="460" y="410" text-anchor="middle" class="lbl-mut">SCHED_FIFO process_callback owns the period clock; wakes via libjack</text>
+
+  <line x1="460" y1="420" x2="460" y2="450" class="conn"/>
+
+  <text x="20" y="476" class="lbl-tier">JACK server</text>
+  <rect x="100" y="452" width="720" height="40" class="box-jack"/>
+  <text x="460" y="476" text-anchor="middle" class="lbl-acc">jackd / pipewire-jack RT engine -- graph mix, port routing, period scheduling</text>
+
+  <line x1="460" y1="492" x2="460" y2="520" class="conn"/>
+
+  <text x="20" y="546" class="lbl-tier">Hardware</text>
+  <rect x="100" y="522" width="720" height="40" class="box-hw"/>
+  <text x="460" y="546" text-anchor="middle" class="lbl-yel">ALSA hw: device -- USB / PCI audio interface, sample-rate clock owner</text>
+
+  <text x="710" y="200" class="lbl-acc">Phase F shortcut:</text>
+  <line x1="710" y1="160" x2="710" y2="172" class="conn-fast"/>
+  <text x="855" y="280" class="lbl-mut">same-period</text>
+  <text x="855" y="294" class="lbl-mut">zero-copy</text>
+  <text x="855" y="308" class="lbl-mut">data lands at HW</text>
+  <text x="855" y="322" class="lbl-mut">in 1 JACK period</text>
+</svg>
+</div>
+
+The Phase F path (rightmost column) removes an extra JACK-period staging step. Instead of filling an intermediate ring and waiting for the next callback to consume it, the host's `bufferSwitch` data is emitted in the same JACK period in which it was produced.
 
 ## 4. winejack.drv: the JACK backend for Wine
 
@@ -117,11 +218,9 @@ Inside `winejack.drv` the audio side is organized into eight loosely-coupled pie
 
 The audio side runs to roughly 3000 lines in `jack.c`. MIDI is roughly 700 lines in `jackmidi.c`.
 
-### The core mental model
+### Timing model
 
-The single sentence that drives every design decision in `winejack.drv`:
-
-> **JACK callback timing is the real engine. WASAPI-facing events, padding, periods, position, and latency are the Windows contract synthesized on top of it.**
+`winejack.drv` treats JACK callback timing as the authoritative engine. WASAPI-facing events, padding, periods, position, and latency are synthesized on top of that callback cadence.
 
 WASAPI gives the application a contract: the device has a period, you'll be woken at period boundaries (or you can poll), padding is accurate, position monotonic. winejack honors that contract. But the contract is *synthesized* -- there is no Windows audio engine underneath. The JACK process callback fires, winejack updates internal state, and the next time the application reads padding or waits on its event, it sees a state consistent with one more JACK period having elapsed.
 
@@ -261,11 +360,117 @@ The shape:
 
 The lock-free ringbuffers are the standard SPSC variety with atomic head and tail. The JACK process callback never blocks; the WinMM threads never block on the JACK callback.
 
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 940 540" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .lbl { fill: #c0caf5; font-family: 'JetBrains Mono', monospace; font-size: 12px; }
+    .lbl-sm { fill: #c0caf5; font-family: 'JetBrains Mono', monospace; font-size: 10px; }
+    .lbl-hdr { fill: #7aa2f7; font-family: 'JetBrains Mono', monospace; font-size: 14px; font-weight: bold; }
+    .lbl-tier { fill: #7dcfff; font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: bold; }
+    .lbl-grn { fill: #9ece6a; font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: bold; }
+    .lbl-yel { fill: #e0af68; font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: bold; }
+    .lbl-mut { fill: #8c92b3; font-family: 'JetBrains Mono', monospace; font-size: 10px; }
+    .lbl-state { fill: #bb9af7; font-family: 'JetBrains Mono', monospace; font-size: 10px; }
+    .box-app { fill: #1a1b26; stroke: #7aa2f7; stroke-width: 1.5; }
+    .box-winmm { fill: #24283b; stroke: #bb9af7; stroke-width: 1.5; }
+    .box-driver { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; }
+    .box-jack { fill: #1f2535; stroke: #7dcfff; stroke-width: 1.5; }
+    .box-state { fill: #2a2418; stroke: #e0af68; stroke-width: 1.5; }
+    .box-ring { fill: #2a1a1a; stroke: #f7768e; stroke-width: 1.5; }
+    .conn { stroke: #565f89; stroke-width: 1.4; }
+    .conn-ring { stroke: #f7768e; stroke-width: 1.4; }
+  </style>
+
+  <text x="470" y="24" text-anchor="middle" class="lbl-hdr">WinMM MIDI flow + lifecycle (jackmidi.c, wine-midi JACK client)</text>
+
+  <text x="220" y="58" text-anchor="middle" class="lbl-tier">OUTPUT (host -&gt; external)</text>
+  <text x="720" y="58" text-anchor="middle" class="lbl-tier">INPUT  (external -&gt; host)</text>
+
+  <rect x="60" y="74" width="320" height="36" class="box-app"/>
+  <text x="220" y="97" text-anchor="middle" class="lbl">Win32 host: midiOutShortMsg / midiOutLongMsg</text>
+
+  <rect x="560" y="74" width="320" height="36" class="box-app"/>
+  <text x="720" y="97" text-anchor="middle" class="lbl">External MIDI source (keyboard / DAW track)</text>
+
+  <line x1="220" y1="110" x2="220" y2="138" class="conn"/>
+  <line x1="720" y1="110" x2="720" y2="138" class="conn"/>
+
+  <rect x="60" y="140" width="320" height="36" class="box-winmm"/>
+  <text x="220" y="163" text-anchor="middle" class="lbl-state">midi_out_data / midi_out_long_data (WinMM thread)</text>
+
+  <rect x="560" y="140" width="320" height="36" class="box-jack"/>
+  <text x="720" y="163" text-anchor="middle" class="lbl-state">JACK input port (jack_midi_event_get)</text>
+
+  <line x1="220" y1="176" x2="220" y2="204" class="conn-ring"/>
+  <line x1="720" y1="176" x2="720" y2="204" class="conn-ring"/>
+
+  <rect x="60" y="206" width="320" height="48" class="box-ring"/>
+  <text x="220" y="226" text-anchor="middle" class="lbl-yel">SPSC ringbuffer (8 KB) -- atomic head/tail</text>
+  <text x="220" y="244" text-anchor="middle" class="lbl-mut">producer: WinMM    consumer: JACK callback</text>
+
+  <rect x="560" y="206" width="320" height="48" class="box-ring"/>
+  <text x="720" y="226" text-anchor="middle" class="lbl-yel">SPSC ringbuffer (8 KB) per port</text>
+  <text x="720" y="244" text-anchor="middle" class="lbl-mut">producer: JACK callback    consumer: WinMM</text>
+
+  <line x1="220" y1="254" x2="220" y2="282" class="conn-ring"/>
+  <line x1="720" y1="254" x2="720" y2="282" class="conn-ring"/>
+
+  <rect x="60" y="284" width="820" height="62" class="box-driver"/>
+  <text x="470" y="306" text-anchor="middle" class="lbl-grn">jack_midi_process_cb (one wine-midi JACK client, RT thread)</text>
+  <text x="220" y="324" text-anchor="middle" class="lbl-sm">drain output ring -&gt; jack_midi_event_write(port_buf, ev.time, data)</text>
+  <text x="720" y="324" text-anchor="middle" class="lbl-sm">push input ev -&gt; (timestamp = base + ev.time/rate)</text>
+  <text x="470" y="340" text-anchor="middle" class="lbl-mut">no allocation, no Wine call, no locks held inside the callback</text>
+
+  <line x1="220" y1="346" x2="220" y2="372" class="conn"/>
+  <line x1="720" y1="346" x2="720" y2="372" class="conn"/>
+
+  <rect x="60" y="374" width="320" height="36" class="box-jack"/>
+  <text x="220" y="397" text-anchor="middle" class="lbl-state">JACK output port -&gt; external MIDI device</text>
+
+  <rect x="560" y="374" width="320" height="36" class="box-winmm"/>
+  <text x="720" y="397" text-anchor="middle" class="lbl-state">WinMM dispatch -&gt; MIM_DATA / MIM_LONGDATA</text>
+
+  <text x="470" y="446" text-anchor="middle" class="lbl-tier">Per-port lifecycle (DRVM_*)</text>
+
+  <rect x="60" y="458" width="155" height="60" class="box-state"/>
+  <text x="137" y="480" text-anchor="middle" class="lbl-state">DRVM_INIT</text>
+  <text x="137" y="498" text-anchor="middle" class="lbl-mut">jack client</text>
+  <text x="137" y="510" text-anchor="middle" class="lbl-mut">connect</text>
+
+  <rect x="240" y="458" width="155" height="60" class="box-state"/>
+  <text x="317" y="480" text-anchor="middle" class="lbl-state">MOM_OPEN / MIM_OPEN</text>
+  <text x="317" y="498" text-anchor="middle" class="lbl-mut">port register</text>
+  <text x="317" y="510" text-anchor="middle" class="lbl-mut">ringbuf alloc</text>
+
+  <rect x="420" y="458" width="160" height="60" class="box-state"/>
+  <text x="500" y="480" text-anchor="middle" class="lbl-state">RUNNING</text>
+  <text x="500" y="498" text-anchor="middle" class="lbl-mut">events flow,</text>
+  <text x="500" y="510" text-anchor="middle" class="lbl-mut">MIM_ERROR on overflow</text>
+
+  <rect x="605" y="458" width="155" height="60" class="box-state"/>
+  <text x="682" y="480" text-anchor="middle" class="lbl-state">MOM_CLOSE / MIM_CLOSE</text>
+  <text x="682" y="498" text-anchor="middle" class="lbl-mut">port unregister</text>
+  <text x="682" y="510" text-anchor="middle" class="lbl-mut">drain queue</text>
+
+  <rect x="785" y="458" width="95" height="60" class="box-state"/>
+  <text x="832" y="480" text-anchor="middle" class="lbl-state">DRVM_EXIT</text>
+  <text x="832" y="498" text-anchor="middle" class="lbl-mut">walk arrays,</text>
+  <text x="832" y="510" text-anchor="middle" class="lbl-mut">close leaks</text>
+
+  <line x1="215" y1="488" x2="240" y2="488" class="conn"/>
+  <line x1="395" y1="488" x2="420" y2="488" class="conn"/>
+  <line x1="580" y1="488" x2="605" y2="488" class="conn"/>
+  <line x1="760" y1="488" x2="785" y2="488" class="conn"/>
+</svg>
+</div>
+
+The two ringbuffers are the synchronisation surface between the WinMM threads and the JACK process callback. Output's producer side and input's consumer side are owned by WinMM threads at SCHED_OTHER (or SCHED_FIFO under MMCSS naming when applicable); the other side of each ring is owned by the JACK RT callback. The lifecycle row at the bottom is the per-port progression: `DRVM_INIT` opens the JACK client lazily on first use, `MOM_OPEN` / `MIM_OPEN` registers a port and allocates its ring, the RUNNING state is where the audit's six bug fixes sit, `MOM_CLOSE` / `MIM_CLOSE` unregisters cleanly, and `DRVM_EXIT` is the audit's leak-fix path that walks the destination and source arrays to close anything still open at process exit.
+
 ### Bugs and fixes (the MIDI audit)
 
 A six-issue audit of `jackmidi.c` produced the following fixes. Each shipped as a separate commit.
 
-**Input timestamp jitter.** The original code stamped MIDI input events with `get_time_msec()` *at dequeue time* -- that is, when the WinMM thread drained the ringbuffer, not when JACK saw the event. JACK provides a per-event frame offset (`ev.time`) within the period, but the dequeue-time approach ignored it entirely. The result was that multiple events in the same period got the same timestamp and the next-period boundary added up to one full JACK period of jitter on every event. For DAWs that record MIDI -- the user's keyboard playing into a piano roll -- that jitter is audible as smeared timing.
+**Input timestamp jitter.** The original code stamped MIDI input events with `get_time_msec()` *at dequeue time* -- that is, when the WinMM thread drained the ringbuffer, not when JACK saw the event. JACK provides a per-event frame offset (`ev.time`) within the period, but the dequeue-time approach ignored it entirely. The result was that multiple events in the same period got the same timestamp and the next-period boundary added up to one full JACK period of jitter on every event. For DAWs that record MIDI -- a keyboard playing into a piano roll -- that jitter is audible as smeared timing.
 
 The fix is to compute the timestamp at *enqueue* time, in the JACK callback, as `base_time + (ev.time * 1000 / jack_rate)`. Sub-millisecond resolution, no smearing. This was the largest single contributor to the "clunky MIDI" feel that motivated the audit.
 
@@ -301,7 +506,7 @@ There is no allocation, no Wine call, no lock taken in the callback. SPSC ringbu
 
 ## 8. nspaASIO: the ASIO bridge
 
-`dlls/nspaasio/` is a Wine-side COM DLL that implements the `IASIO` interface. It is the audio driver name a DAW sees when it asks Windows for a list of installed ASIO drivers, and it is what gets loaded when the user picks "nspaASIO" from the DAW's audio device menu.
+`dlls/nspaasio/` is a Wine-side COM DLL that implements the `IASIO` interface. It is the audio driver name a DAW sees when it asks Windows for a list of installed ASIO drivers, and it is what gets loaded when "nspaASIO" is selected from the DAW's audio device menu.
 
 ASIO is Steinberg's audio driver model and is the de facto standard for low-latency audio on Windows. DAWs prefer it over WASAPI for two reasons: ASIO predates WASAPI and has a longer track record on professional audio hardware, and ASIO's callback model exposes a cleaner notion of "fill this output buffer right now" than WASAPI's pull-from-event loop. From a DAW author's perspective, ASIO is the easy path.
 
@@ -492,11 +697,90 @@ The play_thread is created at `AvSetMmThreadCharacteristics` priority, which on 
 
 The handshake state is a single 32-bit `int` shared between the play_thread and the JACK callback. The CAS sequence is `IDLE -> CAPTURE_READY -> OUTPUT_READY -> IDLE`, and a malformed transition (state observed in an unexpected value) is treated as a protocol error: the JACK callback drops to silence for that period and a counter ticks. In practice the transitions are deterministic; the only error path is timeout, which fires if `bufferSwitch` takes more than two periods to return -- in that case the audio is clearly broken at the host level, and dropping the period is the correct response.
 
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 920 460" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .lbl { fill: #c0caf5; font-family: 'JetBrains Mono', monospace; font-size: 12px; }
+    .lbl-sm { fill: #c0caf5; font-family: 'JetBrains Mono', monospace; font-size: 10px; }
+    .lbl-hdr { fill: #7aa2f7; font-family: 'JetBrains Mono', monospace; font-size: 14px; font-weight: bold; }
+    .lbl-state { fill: #e0af68; font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: bold; }
+    .lbl-trans { fill: #bb9af7; font-family: 'JetBrains Mono', monospace; font-size: 10px; }
+    .lbl-trans-em { fill: #bb9af7; font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: bold; }
+    .lbl-mut { fill: #8c92b3; font-family: 'JetBrains Mono', monospace; font-size: 10px; }
+    .lbl-grn { fill: #9ece6a; font-family: 'JetBrains Mono', monospace; font-size: 10px; }
+    .lbl-red { fill: #f7768e; font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: bold; }
+    .state { fill: #1f2335; stroke: #e0af68; stroke-width: 2.2; }
+    .state-err { fill: #2a1a1a; stroke: #f7768e; stroke-width: 1.8; }
+    .legend { fill: #24283b; stroke: #3b4261; stroke-width: 1; }
+    .conn { stroke: #bb9af7; stroke-width: 1.8; }
+    .conn-err { stroke: #f7768e; stroke-width: 1.5; stroke-dasharray: 6 3; }
+    .conn-loop { stroke: #bb9af7; stroke-width: 1.8; fill: none; }
+  </style>
+
+  <text x="460" y="26" text-anchor="middle" class="lbl-hdr">Phase F handshake state machine -- one period</text>
+  <text x="460" y="44" text-anchor="middle" class="lbl-mut">int handshake_state shared between T_jack and T_play; CAS transitions only</text>
+
+  <rect x="380" y="70" width="160" height="78" rx="8" class="state"/>
+  <text x="460" y="98" text-anchor="middle" class="lbl-state">IDLE</text>
+  <text x="460" y="116" text-anchor="middle" class="lbl-sm">period boundary</text>
+  <text x="460" y="132" text-anchor="middle" class="lbl-mut">T_jack: ready to fire</text>
+  <text x="460" y="146" text-anchor="middle" class="lbl-mut">T_play: futex_wait</text>
+
+  <rect x="700" y="220" width="180" height="78" rx="8" class="state"/>
+  <text x="790" y="248" text-anchor="middle" class="lbl-state">CAPTURE_READY</text>
+  <text x="790" y="266" text-anchor="middle" class="lbl-sm">capture buf populated</text>
+  <text x="790" y="282" text-anchor="middle" class="lbl-mut">T_jack: futex_wait OUTPUT</text>
+  <text x="790" y="296" text-anchor="middle" class="lbl-mut">T_play: bufferSwitch()</text>
+
+  <rect x="380" y="345" width="160" height="78" rx="8" class="state"/>
+  <text x="460" y="373" text-anchor="middle" class="lbl-state">OUTPUT_READY</text>
+  <text x="460" y="391" text-anchor="middle" class="lbl-sm">host wrote output</text>
+  <text x="460" y="407" text-anchor="middle" class="lbl-mut">T_jack: copy + flip</text>
+  <text x="460" y="421" text-anchor="middle" class="lbl-mut">T_play: futex_wait</text>
+
+  <rect x="40" y="220" width="170" height="78" rx="8" class="state-err"/>
+  <text x="125" y="248" text-anchor="middle" class="lbl-red">SILENCE / DROP</text>
+  <text x="125" y="266" text-anchor="middle" class="lbl-sm">timeout = 2 * period</text>
+  <text x="125" y="282" text-anchor="middle" class="lbl-mut">T_jack: zero output</text>
+  <text x="125" y="296" text-anchor="middle" class="lbl-mut">period counter++</text>
+
+  <line x1="540" y1="130" x2="700" y2="240" class="conn"/>
+  <text x="615" y="178" class="lbl-trans-em">CAS: IDLE -&gt; CAPTURE_READY</text>
+  <text x="615" y="192" class="lbl-trans">T_jack copies capture, futex_wake T_play</text>
+
+  <line x1="780" y1="298" x2="540" y2="380" class="conn"/>
+  <text x="565" y="332" class="lbl-trans-em">CAS: CAPTURE_READY -&gt; OUTPUT_READY</text>
+  <text x="565" y="346" class="lbl-trans">T_play returns from bufferSwitch, futex_wake T_jack</text>
+
+  <path d="M 380 380 Q 250 380 250 230 Q 250 130 380 130" class="conn-loop"/>
+  <text x="170" y="166" class="lbl-trans-em">CAS: OUTPUT_READY -&gt; IDLE</text>
+  <text x="170" y="180" class="lbl-trans">T_jack copies output -&gt; JACK ports, flip buf_idx</text>
+
+  <line x1="700" y1="285" x2="210" y2="270" class="conn-err"/>
+  <text x="320" y="222" class="lbl-red">timeout: bufferSwitch &gt; 2 periods</text>
+
+  <line x1="380" y1="120" x2="210" y2="245" class="conn-err"/>
+  <text x="225" y="200" class="lbl-red">malformed transition (protocol error)</text>
+
+  <rect x="40" y="78" width="220" height="86" class="legend"/>
+  <text x="50" y="96" class="lbl-trans-em">legend</text>
+  <line x1="50" y1="108" x2="80" y2="108" class="conn"/>
+  <text x="88" y="112" class="lbl-sm">normal CAS transition</text>
+  <line x1="50" y1="126" x2="80" y2="126" class="conn-err"/>
+  <text x="88" y="130" class="lbl-sm">timeout / malformed</text>
+  <text x="50" y="150" class="lbl-mut">all transitions: __atomic_compare_exchange</text>
+
+  <text x="460" y="450" text-anchor="middle" class="lbl-grn">one JACK period: IDLE -&gt; CAPTURE_READY -&gt; OUTPUT_READY -&gt; IDLE  (~ period_us total wallclock)</text>
+</svg>
+</div>
+
+The state field is a single 32-bit integer; every transition is a `__atomic_compare_exchange` on it. The two threads coordinate without a shared lock or condition variable -- the futex pair (one per direction) plus the CAS state is the entire IPC surface inside the audio period. Errors are noisy but recoverable: a timeout drops one period to silence, the counter ticks, and the next period restarts the cycle from IDLE. There is no recovery state machine because there is no useful recovery -- if `bufferSwitch` ran long, the data it produced is no longer fresh by the time it returns.
+
 ### Fallback
 
 If Phase F registration fails -- non-float32 format, channel mismatch, bug in the registration path -- nspaASIO falls back to the WASAPI slow path described in Section 8. The application still works, just with one extra period of latency. There is no version of the code where the application sees an error because of Phase F unavailability; Phase F is a strict performance enhancement on top of a working WASAPI fallback.
 
-The driver description seen by the DAW is just "nspaASIO" regardless of which path is active. There is no "Phase F" string in the user-facing UI; the design distinction is not something the DAW user needs to know about.
+The driver description seen by the DAW is just "nspaASIO" regardless of which path is active. There is no "Phase F" string in the DAW-visible UI; the distinction is internal only.
 
 ### What Phase D became
 
@@ -504,7 +788,7 @@ The earlier per-channel direct-buffer plan -- Phase D in the rework roadmap -- w
 
 Phase F is strictly better than Phase D for the ASIO case because it removes the period of latency that Phase D could not. Phase D existed in a partial form (the fast-path per-channel double buffers in Section 6 are descended from it), but the nspaASIO-side direct-buffer access was superseded by Phase F before it was completed. The fast path on the WASAPI exclusive side remains -- it serves any non-ASIO exclusive WASAPI stream that meets the criteria.
 
-## 10. What's not implemented (by design)
+## 10. Intentionally unimplemented surfaces
 
 A few things that look like gaps but are deliberate non-features.
 
@@ -514,13 +798,13 @@ A few things that look like gaps but are deliberate non-features.
 
 **Exclusive-mode lockout.** On real Windows hardware, exclusive mode locks every other application out of the audio device. The Wine-NSPA stack does not enforce this. Two ASIO applications can coexist; an ASIO application and a WASAPI application can coexist; a WASAPI exclusive stream does not preclude a WASAPI shared stream. JACK handles the mixing at the graph level.
 
-This is intentional and is a *feature* of running on JACK. On Windows, exclusive mode's lockout is a drawback for users who want to run a DAW and a chat application simultaneously and have to choose. On Linux + JACK, both work. Wineasio has the same behavior. Anyone who relies on exclusive-mode lockout for any reason should be aware that they will not get it here.
+This is intentional and follows JACK's graph model. Wineasio has the same behavior. Workloads that require Windows-style exclusive-device lockout should not expect it from this stack.
 
 **Spatial audio (`ISpatialAudioClient`).** No Wine driver implements this and there is no near-term reason to.
 
 **Auxiliary device** (legacy CD-audio volume control). Irrelevant in 2026.
 
-## 11. What's deferred
+## 11. Deferred work
 
 These are real gaps that aren't shipped yet, in priority order.
 
@@ -586,7 +870,7 @@ The kernel side -- the PI mutex behavior, the futex round-trip latency under PRE
 - `plan_winejack_wasapi_audio.md` -- Phase 2 implementation plan, ALSA driver audit, wineasio research, ASIO2WASAPI study
 - `project_asio2wasapi_bridge.md` -- Phase 3 design, ASIO-as-WASAPI-exclusive
 - `project_phase_f_implementation.md` -- Phase F implementation, futex handshake, files changed
-- `plan_winejack_wasapi_rework.md` -- Phases A through F: per-channel double buffers, fast path, zero-interleave, Phase F endgame
+- `plan_winejack_wasapi_rework.md` -- Phases A through F: per-channel double buffers, fast path, zero-interleave, final Phase F path
 - `project_jackmidi_bugs_and_fixes.md` -- the six MIDI bugs and their fixes
 - `project_winejack_feature_gaps.md` -- gaps and won't-implement list
 - `project_drop_other_audio_drivers.md` -- plan to drop `winealsa`, `winepulse`, `wineoss`

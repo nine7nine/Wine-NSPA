@@ -29,16 +29,16 @@ Author: jordan Johnston
 
 ## 1. What this doc is
 
-`bypass-overview.md` is the catalog of trajectories along which NT-API state moves *out* of wineserver. This doc is the other half: what eventually happens to wineserver itself, after enough state has migrated.
+The NSPA bypass catalog describes the trajectories along which NT-API state moves *out* of wineserver. This doc is the other half: what eventually happens to wineserver itself, after enough state has migrated.
 
-The high-level NSPA strategy is a two-stroke engine. The first stroke is bypasses: each trajectory picks a class of state and hosts it client-side, leaving wineserver as a fallback for cases the bypass cannot model. The second stroke is decomposition: once enough state has moved out, the residual wineserver becomes small enough to surgically split into multiple cooperating threads with subsystem-scoped locks instead of a single `global_lock`.
+The high-level NSPA strategy has two coordinated parts. First, bypasses move specific classes of state client-side while retaining wineserver as fallback for cases the bypass cannot model. Second, decomposition reduces the residual wineserver to a smaller set of cooperating threads with subsystem-scoped locks instead of a single `global_lock`.
 
-This is the second-stroke document. It exists to answer the question: "what does wineserver look like in 1-2 years and why are NSPA bypasses laid out the way they are?" If `bypass-overview.md` is the menu of trajectories, this is the road-map for the destination.
+This document describes the decomposition side of that plan: the target wineserver shape and the dependency relationship between bypass work and server-internal restructuring.
 
 A few framing notes before getting into the details:
 
 - This is not a rewrite plan. The premise is that wineserver as a process continues to exist and continues to be the source of truth for a small set of irreducibly-cross-process semantics (process and thread lifecycle, named-object directories, handle inheritance). What changes is what's *inside* it.
-- This is not a "kill the global_lock" plan in isolation. The lock partitioning step is the endgame, not the opening move. Each earlier step is independently valuable and lets us approach the lock surgery with a much smaller surface to audit.
+- This is not a "kill the global_lock" plan in isolation. Lock partitioning is a late-stage step, not the opening move. Each earlier step is independently valuable and reduces the audit surface for later lock work.
 - This is not chronological reading. Phase 1 and Phase 2 are already shipped (`open_fd` lock-drop default-on, NTSync §2.1 thread-token pass-through default-on). Phases 3 and 4 are the road ahead. The phase table in section 7 is the canonical status; the body sections describe each component split in isolation.
 - This is not a one-author plan. Several pieces (the gamma dispatcher itself, NTSync's PI machinery, the open_fd lock-drop framing) emerged from the kernel + wineserver co-design sessions and have been shaped over many iterations under real-workload validation. The road map here reflects what those iterations have converged on, not a top-down architectural mandate.
 
@@ -82,17 +82,17 @@ The `open_fd` lock-drop work shipped in Phase 1 attacked one specific instance o
 
 NSPA addresses the wineserver bottleneck along two complementary directions, and this doc is about the second one. They are not alternatives -- they compose.
 
-**Direction A: move state out.** Each NSPA bypass picks a class of NT-API state, hosts it in the client process via a local stub or kernel-mediated primitive, and falls back to the server only when the bypass envelope is exceeded. Sync primitives go to NTSync. File I/O goes to io_uring. Hooks get a Tier 1+2 cache. Read-only file opens go to local_file. Timers go to a per-process timer dispatcher. Cross-thread same-process messages go through msg-ring. Each bypass shrinks the residual surface that wineserver still has to authoritatively serve. Catalog: `bypass-overview.md`.
+**Direction A: move state out.** Each NSPA bypass picks a class of NT-API state, hosts it in the client process via a local stub or kernel-mediated primitive, and falls back to the server only when the bypass envelope is exceeded. Sync primitives go to NTSync. File I/O goes to io_uring. Hooks get a Tier 1+2 cache. Read-only file opens go to local_file. Timers go to a per-process timer dispatcher. Cross-thread same-process messages go through msg-ring. Each bypass shrinks the residual surface that wineserver still has to authoritatively serve.
 
 **Direction B: restructure what remains.** Once the residual surface is small enough, wineserver can be split into multiple cooperating threads with finer-grained locks. The split has three components:
 
 1. *Kernel-side primitives.* Extend NTSync with the wait/dispatch primitives wineserver needs to do its work without the main-loop conflation (aggregate-wait, thread-token pass-through). These are kernel patches in `ntsync-patches/`.
 2. *Userspace dispatcher decomposition.* Split the gamma dispatcher's RECV → handler → REPLY into router (fast-path classifier) + handler (slow-path), and split the main loop's poll into a non-RT FD polling thread that hands off to RT handlers.
-3. *Lock partitioning.* The endgame: per-subsystem locks (windows, hooks, files, sync, processes) instead of one `global_lock`.
+3. *Lock partitioning.* Target state: per-subsystem locks (windows, hooks, files, sync, processes) instead of one `global_lock`.
 
 This is the doc for direction B. The two directions interact in a specific way: Direction A reduces the *amount* of state still under the lock; Direction B reduces the *overhead per access* to what's left. Direction A is incremental, parallelizable across many bypasses, and starts paying immediately. Direction B has higher per-step risk and more design surface, and it pays its big dividends only after the surface has already been pruned. That ordering is the central design choice of the whole roadmap.
 
-A useful mental model: Direction A is the slow shrinking of the haystack; Direction B is the eventual surgical extraction of the needles that are left. Don't try to do surgery on the haystack.
+Direction A reduces the amount of state still owned by wineserver. Direction B reduces the dispatch and locking cost of the state that remains. The ordering matters: reducing the residual surface first lowers the risk and audit cost of later server-internal restructuring.
 
 There is a third direction worth naming explicitly even though it's not a separate workstream: **lock discipline inside existing handlers.** The Phase B `open_fd` lock-drop is the canonical example -- a single handler that holds `global_lock` across a slow blocking syscall, fixed by carefully releasing the lock around the syscall and reacquiring with a generation check. That kind of work doesn't move state out (Direction A) and doesn't restructure the threading (Direction B); it just reduces the lock-hold duration of one specific handler. It's surgical and labour-intensive, but several handlers benefit from it and the wins are immediate. It compounds with both other directions: a handler whose lock-hold has been minimized is a smaller obstacle once aggregate-wait or lock partitioning lands.
 
@@ -224,13 +224,13 @@ The win compounds with the timer split (5.1) and aggregate-wait (4.2): after bot
 
 The risk is moderate. The handoff queue adds an extra context switch per fd-driven request: "fd ready" → polling thread wakes → enqueues → handler thread wakes → runs. Today that's "fd ready → main loop wakes → runs" -- one fewer context switch. Whether that latency increase matters depends on which fds carry latency-critical traffic. Most wineserver fds are control plane (request channels, sockets to clients), not data plane; the latency of "client request enqueued" to "server starts processing" is dominated by the existing channel + lock costs, not by an extra wakeup hop.
 
-The other risk is the PREEMPT_RT epoll story. If epoll on PREEMPT_RT is fine for our workload (the runtime A/B via `NSPA_DISABLE_EPOLL` will tell us), the urgency on this split drops -- the existing RT main loop is already adequate for the polling work. The split is still architecturally clean (it's the right shape for a multi-threaded wineserver), but it stops being a priority. If epoll on PREEMPT_RT shows real priority inversions on its internal locks, the split becomes both an architectural and a correctness fix.
+The other risk is the PREEMPT_RT epoll behavior. If epoll on PREEMPT_RT is adequate for the workload (the runtime A/B via `NSPA_DISABLE_EPOLL` will determine this), the urgency on this split drops. If epoll shows real priority inversions on its internal locks, the split becomes both an architectural and correctness requirement.
 
 ### 5.4 Lock partitioning
 
 Status: **long horizon, Phase 4**. Don't start until 2-3 subsystems have already been pruned.
 
-The endgame. One `global_lock` (a `pi_mutex_t`) covers all wineserver state. Every handler takes it. The lock is a serialization point for every Win32 process running on the system.
+Current lock state: one `global_lock` (a `pi_mutex_t`) covers all wineserver state. Every handler takes it. The lock is a serialization point for every Win32 process running on the system.
 
 The proposal: per-subsystem locks. Windows, hooks, files, sync objects, processes, message queues -- each with its own lock. Handlers grab only the lock(s) for the subsystem they touch. Cross-subsystem operations (rare) take multiple locks in a canonical order to avoid deadlock.
 
@@ -249,7 +249,7 @@ The recommendation: do not start this work until at least 2-3 subsystems (probab
 
 ## 6. What MUST stay in wineserver
 
-A short, honest list. These are the things wineserver legitimately is the source of truth for, and which no bypass or kernel primitive obviates. The endgame wineserver is a metadata service for these:
+These are the surfaces for which wineserver remains the source of truth and which no bypass or kernel primitive eliminates. The residual wineserver remains a metadata service for these:
 
 - **Cross-process object naming.** Win32's `\BaseNamedObjects\Foo` and the NT object directory tree are shared across processes. Someone has to be the source of truth for "what's the object that handle H in process P refers to?" when H or its name is shared with another process.
 - **Process and thread lifecycle.** Process start/exit, thread create/exit, parent-child relationships, exit codes propagation, `WaitForSingleObject` on a process or thread handle. NT semantics are server-mediated and the cross-process visibility requires a centralized authority.
@@ -258,7 +258,7 @@ A short, honest list. These are the things wineserver legitimately is the source
 - **NT path resolution.** `\??\` paths, NT object directory hierarchy, some reparse-point handling, cross-process name redirection. These are NT-specific path rules without a Linux equivalent; they have to live somewhere and the only honest home is the source of truth for the NT name space.
 - **Filesystem-as-kernel-object semantics that don't map to Linux primitives.** Some object types (mailslots, sections, specific reparse-point flavors) have semantics that NT exposes through the same mechanism as files and which Linux exposes through entirely different mechanisms. The translation layer lives server-side.
 
-These are *small* relative to what can move out. Windows, hooks, file inodes, message queues, timers, sync primitives, file I/O -- all already in flight or shipped to client-side. The endgame wineserver is a thin metadata service that answers cross-process naming questions and brokers lifecycle events, not an application server that runs handlers for every NT call.
+These are *small* relative to what can move out. Windows, hooks, file inodes, message queues, timers, sync primitives, and file I/O are already in flight or shipped client-side. The residual wineserver becomes a thin metadata service that answers cross-process naming questions and brokers lifecycle events, not an application server that runs handlers for every NT call.
 
 This list is also why the strategy is "decompose, not delete." A from-scratch replacement would have to re-implement all of the above plus everything that hasn't been moved yet. Decomposition keeps the existing implementations of the must-stay items and just rearranges how they're locked and dispatched.
 
@@ -266,7 +266,7 @@ This list is also why the strategy is "decompose, not delete." A from-scratch re
 
 ## 7. Phasing
 
-The single canonical phase table for the decomposition arc. Bypass trajectories live in `bypass-overview.md` and have their own table; this one is just the four phases of decomposition itself.
+The single canonical phase table for the decomposition arc. This table covers the four phases of decomposition itself; bypass trajectories are tracked separately in their own subsystem docs.
 
 | Phase | Items | Status |
 |---|---|---|
@@ -294,15 +294,15 @@ The natural alternative to this plan is: rewrite wineserver from scratch with th
 
 There are real reasons NSPA chose decomposition over rewrite:
 
-- **Strangler-fig migration ships value continuously.** Each phase ships a discrete, testable, revertible win. Phase 1 alone (open_fd lock-drop) measurably improved drum-track-load-while-playing. Phase 2 alone reclaims ~10% of dispatcher CPU. A rewrite has no intermediate value; it ships when it ships, and the integration risk is concentrated at the moment of swap-over.
+- **Incremental migration ships value continuously.** Each phase ships a discrete, testable, revertible win. Phase 1 alone (open_fd lock-drop) measurably improved drum-track-load-while-playing. Phase 2 alone reclaims ~10% of dispatcher CPU. A rewrite has no intermediate value; it ships when it ships, and the integration risk is concentrated at the moment of swap-over.
 - **The existing handler bodies are correct.** Wine has decades of bugfixing inside the handler implementations -- corner cases, app compatibility, NT-quirk-of-the-month fixes. A rewrite has to re-port all of that, and "we missed a quirk" is a regression that's expensive to find. Decomposition reuses the handler bodies; only the dispatch and locking discipline around them changes.
 - **Each step is independently revertible.** If Phase 3 turns out to introduce a regression, the env-var gates flip off and Phase 2 + Phase 1 + the bypasses all keep working. Compare the cost of reverting one phase to the cost of rolling back from a unified rewrite that's already replaced the old wineserver.
 - **The bypass arc shrinks the rewrite target.** By the time decomposition gets to lock partitioning, the surface that needs partitioning is much smaller than today's wineserver. A rewrite's target is fixed at the time the rewrite starts; a decomposition's target shrinks while the work is in progress.
-- **The direction is clear at every step.** "Less wineserver, less global_lock, more event-driven RT primitives" is the same direction at every phase. There's no point at which the project asks "what should the new design look like?" -- the new design is whatever the strangler converges to. That's a much more forgiving design constraint than committing up front to a specific replacement architecture.
+- **The direction is consistent at every step.** "Less wineserver, less global_lock, more event-driven RT primitives" is the same direction at every phase. The target architecture is refined incrementally instead of requiring a single up-front replacement design.
 
 The cost of decomposition is a slight cost in design uniformity. Each phase has its own approach, its own gating env var, its own validation discipline. There's no single "wineserver 2.0" that you can point at; instead there's a wineserver that's been progressively reshaped. That is, on net, the right trade for a project that has to ship usable improvements continuously rather than commit to a multi-quarter rewrite.
 
-A useful comparison is `bypass-overview.md`'s framing: bypasses are strangler-fig migration applied to NT-API state. Decomposition is strangler-fig migration applied to wineserver internals. Same pattern, different surface. They're consistent with each other because they're the same engineering philosophy.
+A useful framing: bypasses and decomposition use the same incremental-migration discipline on different surfaces. Bypasses move NT-API state; decomposition restructures the remaining wineserver internals.
 
 ### 8.1 The validation discipline
 
@@ -310,7 +310,7 @@ A constraint that runs through the whole arc: each phase has to pass real-worklo
 
 This discipline has caught real bugs. The post-1006 ntsync work re-validated several "shipped" bypasses against a kernel module that finally didn't lock the host; the validation found that some of the lockup attribution had been wrong (Phase B `open_fd` was blamed for a lockup that turned out to be an unrelated NTSync slab corruption). Without re-validation under stable conditions, the wrong bypass would have stayed gated.
 
-The implication for Phase 3: every component split needs its own gate (`NSPA_TIMER_THREAD_SPLIT=1`, `NSPA_AGG_WAIT=1`, `NSPA_FD_POLL_THREAD=1` or similar), each with its own A/B story, each validated independently and in combination. The all-three-on configuration is the eventual default, but each piece ships with the gate first and flips after.
+The implication for Phase 3: every component split needs its own gate (`NSPA_TIMER_THREAD_SPLIT=1`, `NSPA_AGG_WAIT=1`, `NSPA_FD_POLL_THREAD=1` or similar), its own validation plan, and independent combination testing. The all-three-on configuration is the eventual default, but each piece ships with the gate first and flips after validation.
 
 ---
 
@@ -422,7 +422,7 @@ A vertical phase ladder. Phases 1 and 2 are below the line ("done"); Phases 3 an
   <text x="690" y="164" text-anchor="middle" class="label-sm">handler queue, NTSync-mediated handoff</text>
   <text x="690" y="184" text-anchor="middle" class="label">5.4 Lock partitioning</text>
   <text x="690" y="202" text-anchor="middle" class="label-sm">per-subsystem locks: windows / hooks / files / sync</text>
-  <text x="690" y="218" text-anchor="middle" class="label-sm">the endgame; massive audit surface</text>
+  <text x="690" y="218" text-anchor="middle" class="label-sm">late-stage split; massive audit surface</text>
 
   <text x="470" y="690" text-anchor="middle" class="label-mut">each phase ships independently; bypasses progress in parallel</text>
 </svg>
@@ -434,7 +434,6 @@ The visual point of the ladder: the bottom two phases are done, the middle phase
 
 ## 11. Cross-references
 
-- `bypass-overview.md` -- the catalog of NT-API state migrations OUT of wineserver. The trajectories there earn the right to land Phase 3+ here. Strongly recommended companion reading; this doc and that doc are two views of the same strategic engine.
 - `gamma-channel-dispatcher.md` -- the existing gamma dispatcher, which 5.2's router/handler split decomposes. Also the home of the Phase 2 thread-token pass-through implementation.
 - `nt-local-stubs.md` -- the architectural pattern for client-resident handlers. Section 6's "what stays in wineserver" defines the floor that nt-local stubs and bypasses converge toward.
 - `ntsync-driver.gen.html` -- the kernel module that hosts the NTSync primitives. Section 4's extensions live in this module's patch series.

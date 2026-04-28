@@ -48,11 +48,19 @@ CSS='<style>
     border-radius: 3px; font-size: 0.82rem; color: var(--cyan);
   }
   pre {
-    background: var(--surface); padding: 1rem; border-radius: 6px;
+    background: var(--surface); padding: 1rem 1.1rem; border-radius: 8px;
     overflow-x: auto; margin: 0.75rem 0 1rem;
     border: 1px solid var(--border);
   }
-  pre code { background: none; padding: 0; font-size: 0.8rem; color: var(--fg); }
+  pre code {
+    display: block; background: transparent; padding: 0;
+    font-size: 0.8rem; color: inherit;
+  }
+  pre code.hljs,
+  code.hljs {
+    background: transparent;
+    padding: 0;
+  }
   blockquote {
     background: var(--surface); border-left: 3px solid var(--accent);
     padding: 0.75rem 1rem; margin: 1rem 0; border-radius: 0 4px 4px 0;
@@ -62,12 +70,43 @@ CSS='<style>
   hr { border: none; border-top: 1px solid var(--border); margin: 2rem 0; }
   strong { color: var(--fg); }
   em { color: var(--muted); font-style: italic; }
+  .diagram-container {
+    display: flex; justify-content: center;
+    margin: 1.25rem auto 1.5rem; padding: 0.75rem;
+    background: rgba(36, 40, 59, 0.55);
+    border: 1px solid var(--border); border-radius: 10px;
+    overflow-x: auto;
+  }
+  .diagram-container svg {
+    display: block;
+    width: 100% !important;
+    max-width: 100%;
+    height: auto !important;
+    margin: 0 auto;
+    flex: 0 0 auto;
+  }
 </style>'
+
+HIGHLIGHT_HEAD='
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/tokyo-night-dark.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>'
+
+HIGHLIGHT_TAIL='
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+  document.querySelectorAll("pre code").forEach(function (block) {
+    hljs.highlightElement(block);
+  });
+});
+</script>'
 
 convert_one() {
     local md="$1"
     local html="${md%.md}.gen.html"  # .gen.html to avoid clobbering hand-crafted HTML
+    local script_dir
     local title
+
+    script_dir=$(cd "$(dirname "$0")" && pwd)
     title=$(head -5 "$md" | grep -m1 '^#' | sed 's/^#\+ *//' || basename "$md" .md)
 
     {
@@ -77,10 +116,14 @@ convert_one() {
         echo "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">"
         echo "<title>$title</title>"
         echo "$CSS"
+        echo "$HIGHLIGHT_HEAD"
         echo "</head><body>"
         markdown "$md"
+        echo "$HIGHLIGHT_TAIL"
         echo "</body></html>"
     } > "$html"
+
+    bash "$script_dir/postprocess-html.sh" "$html"
 
     echo "  $md -> $html"
 }

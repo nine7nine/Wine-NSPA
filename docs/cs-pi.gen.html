@@ -41,11 +41,19 @@
     border-radius: 3px; font-size: 0.82rem; color: var(--cyan);
   }
   pre {
-    background: var(--surface); padding: 1rem; border-radius: 6px;
+    background: var(--surface); padding: 1rem 1.1rem; border-radius: 8px;
     overflow-x: auto; margin: 0.75rem 0 1rem;
     border: 1px solid var(--border);
   }
-  pre code { background: none; padding: 0; font-size: 0.8rem; color: var(--fg); }
+  pre code {
+    display: block; background: transparent; padding: 0;
+    font-size: 0.8rem; color: inherit;
+  }
+  pre code.hljs,
+  code.hljs {
+    background: transparent;
+    padding: 0;
+  }
   blockquote {
     background: var(--surface); border-left: 3px solid var(--accent);
     padding: 0.75rem 1rem; margin: 1rem 0; border-radius: 0 4px 4px 0;
@@ -55,7 +63,25 @@
   hr { border: none; border-top: 1px solid var(--border); margin: 2rem 0; }
   strong { color: var(--fg); }
   em { color: var(--muted); font-style: italic; }
+  .diagram-container {
+    display: flex; justify-content: center;
+    margin: 1.25rem auto 1.5rem; padding: 0.75rem;
+    background: rgba(36, 40, 59, 0.55);
+    border: 1px solid var(--border); border-radius: 10px;
+    overflow-x: auto;
+  }
+  .diagram-container svg {
+    display: block;
+    width: 100% !important;
+    max-width: 100%;
+    height: auto !important;
+    margin: 0 auto;
+    flex: 0 0 auto;
+  }
 </style>
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/tokyo-night-dark.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
 </head><body>
 <h1>Wine-NSPA &ndash; Critical Section Priority Inheritance (CS-PI)</h1>
 
@@ -138,7 +164,7 @@ Author: Jordan Johnston</p>
 <p>The following diagram shows the complete acquire and release flow for both upstream Wine and NSPA CS-PI, side by side. The left column is upstream Wine&rsquo;s legacy path; the right column is NSPA&rsquo;s PI-enabled path. Both start from the same <code>RtlEnterCriticalSection</code> entry point.</p>
 
 <div class="diagram-container">
-<svg width="100%" viewBox="0 0 960 920" xmlns="http://www.w3.org/2000/svg">
+<svg width="100%" viewBox="0 0 960 920" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
   <!-- Background -->
   <rect width="960" height="920" fill="#1a1b26" rx="6"/>
 
@@ -355,7 +381,7 @@ Author: Jordan Johnston</p>
 <p>Under CS-PI, <code>LockSemaphore</code> is repurposed as a <strong>FUTEX_LOCK_PI word</strong>. The field is still pointer-sized, but only the low 32 bits are used, matching the <code>LONG</code> that <code>FUTEX_LOCK_PI</code> operates on. The bit layout follows the kernel&rsquo;s <code>futex.h</code> protocol exactly:</p>
 
 <div class="diagram-container">
-<svg width="100%" viewBox="0 0 780 260" xmlns="http://www.w3.org/2000/svg">
+<svg width="100%" viewBox="0 0 780 260" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
   <rect width="780" height="260" fill="#1a1b26" rx="6"/>
 
   <text x="390" y="25" text-anchor="middle" fill="#c0caf5" font-size="13" font-weight="bold">LockSemaphore as FUTEX_LOCK_PI Word (32-bit layout)</text>
@@ -457,7 +483,7 @@ Author: Jordan Johnston</p>
 
 <h3>Code Path</h3>
 
-<pre><code>static inline BOOL nspa_cs_try_fast( RTL_CRITICAL_SECTION *crit, DWORD unix_tid )
+<pre><code class="code-block">static inline BOOL nspa_cs_try_fast( RTL_CRITICAL_SECTION *crit, DWORD unix_tid )
 {
     LONG *futex = (LONG *)&amp;crit-&gt;LockSemaphore;
     return InterlockedCompareExchange( futex, (LONG)unix_tid, 0 ) == 0;
@@ -497,7 +523,7 @@ Author: Jordan Johnston</p>
 <h3>PI Chain Diagram</h3>
 
 <div class="diagram-container">
-<svg width="100%" viewBox="0 0 880 380" xmlns="http://www.w3.org/2000/svg">
+<svg width="100%" viewBox="0 0 880 380" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
   <!-- Background -->
   <rect width="880" height="380" fill="#1a1b26" rx="6"/>
 
@@ -643,7 +669,7 @@ Author: Jordan Johnston</p>
 
 <p>The PE side cannot include <code>unix_private.h</code> (it&rsquo;s Unix-only). Instead, it reads the TID at a hardcoded byte offset from <code>GdiTebBatch</code>:</p>
 
-<pre><code>#ifdef _WIN64
+<pre><code class="code-block">#ifdef _WIN64
 #define NSPA_UNIX_TID_OFFSET 0xf8
 #else
 #define NSPA_UNIX_TID_OFFSET 0x88
@@ -674,7 +700,7 @@ static inline DWORD nspa_get_unix_tid(void)
 
 <h3>Tri-State Machine</h3>
 
-<pre><code>nspa_cs_pi_state (static LONG):
+<pre><code class="code-block">nspa_cs_pi_state (static LONG):
   0  = uninitialized (first CS op on any thread triggers probe)
   1  = active (NSPA_RT_PRIO is set with a non-empty value)
   -1 = inactive (NSPA_RT_PRIO unset, or kernel returned ENOSYS)
@@ -688,7 +714,7 @@ static inline DWORD nspa_get_unix_tid(void)
 
 <p>Instead, <code>nspa_cs_pi_active()</code> reads the PEB environment block directly:</p>
 
-<pre><code>NtCurrentTeb()-&gt;Peb-&gt;ProcessParameters-&gt;Environment
+<pre><code class="code-block">NtCurrentTeb()-&gt;Peb-&gt;ProcessParameters-&gt;Environment
 </code></pre>
 
 <p>This is a null-separated list of <code>L"VAR=value\0"</code> strings. The function walks the list comparing against <code>L"NSPA_RT_PRIO="</code> character by character, using no Rtl functions and no locks. This mirrors how the Windows loader reads environment variables before kernel32 is loaded.</p>
@@ -752,7 +778,7 @@ static inline DWORD nspa_get_unix_tid(void)
 
 <p>Windows SRW locks spin approximately 1024 iterations before parking via <code>NtWaitForAlertByThreadId</code>. Upstream Wine does zero spinning &ndash; every contended acquire immediately calls <code>RtlWaitOnAddress</code>, which translates to a futex syscall. NSPA adds 256 spin iterations for normal threads before falling through to the wait.</p>
 
-<pre><code>#define SRW_SPIN_COUNT 256
+<pre><code class="code-block">#define SRW_SPIN_COUNT 256
 </code></pre>
 
 <p><strong>RT threads skip spinning entirely.</strong> An RT thread at <code>SCHED_FIFO</code> spinning on a lock held by a <code>SCHED_OTHER</code> thread would starve the holder &ndash; the holder cannot make progress while the RT thread monopolizes the CPU. Better to fall through to the futex wait immediately, allowing the scheduler to handle priority properly (or, for CS, allowing PI to boost the holder).</p>
@@ -984,4 +1010,12 @@ static inline DWORD nspa_get_unix_tid(void)
 <hr />
 
 <p><em>Wine-NSPA CS-PI documentation. Source: <code>dlls/ntdll/sync.c</code> (PE), <code>dlls/ntdll/unix/sync.c</code> (Unix). Generated 2026-04-15.</em></p>
+
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+  document.querySelectorAll("pre code").forEach(function (block) {
+    hljs.highlightElement(block);
+  });
+});
+</script>
 </body></html>

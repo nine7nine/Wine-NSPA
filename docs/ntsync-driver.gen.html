@@ -41,11 +41,19 @@
     border-radius: 3px; font-size: 0.82rem; color: var(--cyan);
   }
   pre {
-    background: var(--surface); padding: 1rem; border-radius: 6px;
+    background: var(--surface); padding: 1rem 1.1rem; border-radius: 8px;
     overflow-x: auto; margin: 0.75rem 0 1rem;
     border: 1px solid var(--border);
   }
-  pre code { background: none; padding: 0; font-size: 0.8rem; color: var(--fg); }
+  pre code {
+    display: block; background: transparent; padding: 0;
+    font-size: 0.8rem; color: inherit;
+  }
+  pre code.hljs,
+  code.hljs {
+    background: transparent;
+    padding: 0;
+  }
   blockquote {
     background: var(--surface); border-left: 3px solid var(--accent);
     padding: 0.75rem 1rem; margin: 1rem 0; border-radius: 0 4px 4px 0;
@@ -55,7 +63,25 @@
   hr { border: none; border-top: 1px solid var(--border); margin: 2rem 0; }
   strong { color: var(--fg); }
   em { color: var(--muted); font-style: italic; }
+  .diagram-container {
+    display: flex; justify-content: center;
+    margin: 1.25rem auto 1.5rem; padding: 0.75rem;
+    background: rgba(36, 40, 59, 0.55);
+    border: 1px solid var(--border); border-radius: 10px;
+    overflow-x: auto;
+  }
+  .diagram-container svg {
+    display: block;
+    width: 100% !important;
+    max-width: 100%;
+    height: auto !important;
+    margin: 0 auto;
+    flex: 0 0 auto;
+  }
 </style>
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/tokyo-night-dark.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
 </head><body>
 <h1>Wine-NSPA &ndash; NTSync Kernel Driver</h1>
 
@@ -258,7 +284,7 @@ Author: Jordan Johnston</p>
 
 <p>The driver has three locks. NSPA classifies them explicitly for PREEMPT_RT:</p>
 
-<pre><code>raw_spinlock_t obj-&gt;lock          per-object, protects state + waiter lists
+<pre><code class="code-block">raw_spinlock_t obj-&gt;lock          per-object, protects state + waiter lists
 rt_mutex       dev-&gt;wait_all_lock device-wide, serializes wait-all setup
 raw_spinlock_t dev-&gt;boost_lock    device-wide, protects boosted_owners list
 </code></pre>
@@ -273,7 +299,7 @@ raw_spinlock_t dev-&gt;boost_lock    device-wide, protects boosted_owners list
 
 <p>Upstream ntsync uses <code>list_add_tail()</code> to append waiters: FIFO order. NSPA replaces this with <code>ntsync_insert_waiter()</code>, which performs a sorted insertion based on the kernel-internal <code>task-&gt;prio</code> (lower numeric value = higher scheduling priority).</p>
 
-<pre><code>static void ntsync_insert_waiter(struct ntsync_q_entry *new_entry,
+<pre><code class="code-block">static void ntsync_insert_waiter(struct ntsync_q_entry *new_entry,
                                  struct list_head *head)
 {
     struct ntsync_q_entry *entry;
@@ -409,7 +435,7 @@ raw_spinlock_t dev-&gt;boost_lock    device-wide, protects boosted_owners list
 
 <p>The channel object&rsquo;s per-instance state lives in <code>obj-&gt;u.channel</code>:</p>
 
-<pre><code>struct {
+<pre><code class="code-block">struct {
     struct rb_root  pending;     /* PENDING entries (prio DESC, seq ASC) */
     struct list_head dispatched; /* DISPATCHED entries (REPLY can find by id) */
     atomic64_t  next_id;
@@ -423,7 +449,7 @@ raw_spinlock_t dev-&gt;boost_lock    device-wide, protects boosted_owners list
 
 <p>Each entry is a <code>struct ntsync_channel_entry</code>:</p>
 
-<pre><code>struct ntsync_channel_entry {
+<pre><code class="code-block">struct ntsync_channel_entry {
     struct rb_node      rb;       /* in pending rb-tree */
     struct list_head    list;     /* in dispatched list */
     __u64               id, seq;
@@ -508,7 +534,7 @@ raw_spinlock_t dev-&gt;boost_lock    device-wide, protects boosted_owners list
 
 <p>The wineserver registers <code>(tid, token)</code> per channel via a new ioctl. The kernel stores the mapping in a 64-bucket hash on the channel (<code>hlist_head thread_regs[64]</code>, keyed by <code>tid &amp; 63</code>, protected by the existing <code>obj_lock</code>). At RECV2 time the kernel looks up the token for <code>e-&gt;sender_tid</code> and returns it in extended args.</p>
 
-<pre><code>struct ntsync_channel_recv2_args {
+<pre><code class="code-block">struct ntsync_channel_recv2_args {
     __u64 entry_id;
     __u64 payload_off;
     __u64 reply_off;
@@ -584,7 +610,7 @@ raw_spinlock_t dev-&gt;boost_lock    device-wide, protects boosted_owners list
 
 <p>After installing the freshly-built thread-token <code>ntsync.ko</code> (srcversion <code>635D3C3857C859418827A5C</code>), Ableton hard-froze the host 13 minutes into a session:</p>
 
-<pre><code>BUG: kernel NULL pointer dereference, address: 0x9a
+<pre><code class="code-block">BUG: kernel NULL pointer dereference, address: 0x9a
 RIP: ___slab_alloc+0x316  (xor (%rbx,%rdx,1),%rax  RBX=0x3a)
 Call: __kmalloc_cache_noprof &lt;- ntsync_obj_ioctl+0x427 [ntsync]
 Comm: Ableton Web Con      PREEMPT_{RT,(lazy)}
@@ -656,7 +682,7 @@ Comm: Ableton Web Con      PREEMPT_{RT,(lazy)}
 
 <p>The fix introduces a stack-resident <code>struct ntsync_pi_work</code> that the caller pre-allocates and finishes outside any raw lock:</p>
 
-<pre><code>struct ntsync_pi_work {
+<pre><code class="code-block">struct ntsync_pi_work {
     struct list_head new_po_pool;     /* pre-allocated; consumed on demand */
     struct list_head to_free_list;    /* removed entries to free post-unlock */
 };
@@ -664,7 +690,7 @@ Comm: Ableton Web Con      PREEMPT_{RT,(lazy)}
 
 <p>Three helpers:</p>
 
-<pre><code>void ntsync_pi_work_init(w);                  /* INIT_LIST_HEAD x2 */
+<pre><code class="code-block">void ntsync_pi_work_init(w);                  /* INIT_LIST_HEAD x2 */
 void ntsync_pi_work_prealloc(w);              /* kzalloc + list_add to pool, OUTSIDE locks */
 struct ntsync_pi_owner *ntsync_pi_work_take_new(w); /* pointer-only list_del under raw */
 void ntsync_pi_work_finish(w);                /* kfree pool leftovers + to_free_list */
@@ -672,7 +698,7 @@ void ntsync_pi_work_finish(w);                /* kfree pool leftovers + to_free_
 
 <p>Lifecycle of a <code>pi_owner</code> via this struct:</p>
 
-<pre><code>kzalloc -&gt; list_add to new_po_pool                  (caller, no lock)
+<pre><code class="code-block">kzalloc -&gt; list_add to new_po_pool                  (caller, no lock)
 consumed: list_del from pool, list_add to dev list  (pi_recalc, raw)
 removed: list_move from dev list to to_free_list    (pi_recalc/_drop, raw)
 kfree from new_po_pool + to_free_list               (caller, no lock)
@@ -684,7 +710,7 @@ kfree from new_po_pool + to_free_list               (caller, no lock)
 
 <p>Every ioctl entry that may invoke <code>pi_recalc</code> / <code>pi_drop</code> declares one of these on stack:</p>
 
-<pre><code>struct ntsync_pi_work pi_work;
+<pre><code class="code-block">struct ntsync_pi_work pi_work;
 ntsync_pi_work_init(&amp;pi_work);
 ntsync_pi_work_prealloc(&amp;pi_work);
 
@@ -718,7 +744,7 @@ ntsync_pi_work_finish(&amp;pi_work);
 
 <h3>Three lines</h3>
 
-<pre><code>-  ret = wait_event_interruptible(ch-&gt;u.channel.recv_wq,
+<pre><code class="code-block">-  ret = wait_event_interruptible(ch-&gt;u.channel.recv_wq,
 +  /* Exclusive wait: wake_up() in SEND_PI walks the recv_wq and
 +   * stops at the first exclusive waiter.  This makes the head
 +   * (which SEND_PI speculatively boosted) the unique winner of
@@ -758,7 +784,7 @@ ntsync_pi_work_finish(&amp;pi_work);
 
 <h3>The race</h3>
 
-<pre><code>Thread A (consumer, fast path)         Thread B (signaler, EVENT_SET_PI)
+<pre><code class="code-block">Thread A (consumer, fast path)         Thread B (signaler, EVENT_SET_PI)
 obj_lock(event)
 if (signaled) {                        kzalloc(new_ep)
    /* signaled=false set later */
@@ -783,7 +809,7 @@ obj_unlock(event)
 
 <p>New per-event state in the event union:</p>
 
-<pre><code>struct {
+<pre><code class="code-block">struct {
     u32 policy;
     u32 prio;
     struct ntsync_event_pi *new_ep;   /* pre-allocated; consumer takes ownership */
@@ -807,7 +833,7 @@ obj_unlock(event)
 
 <p>Called from <code>wait_any</code> unqueue loop on the signaled obj if it is an event:</p>
 
-<pre><code>static void consume_event_pi_boost(struct ntsync_obj *event)
+<pre><code class="code-block">static void consume_event_pi_boost(struct ntsync_obj *event)
 {
     struct ntsync_event_pi *new_ep = NULL;
     u32 policy = 0, prio = 0;
@@ -840,7 +866,7 @@ obj_unlock(event)
 
 <p>The new <code>ntsync_event_set_pi</code>:</p>
 
-<pre><code>new_ep = kzalloc(sizeof(*new_ep), GFP_KERNEL);
+<pre><code class="code-block">new_ep = kzalloc(sizeof(*new_ep), GFP_KERNEL);
 if (!new_ep) return -ENOMEM;
 
 ntsync_pi_work_init(&amp;pi_work);
@@ -873,7 +899,7 @@ kfree(prior_new_ep);
 
 <p>Resetting the event cancels the signal, so it must cancel any pending boost too:</p>
 
-<pre><code>prior_new_ep = event-&gt;u.event.pending_pi.new_ep;
+<pre><code class="code-block">prior_new_ep = event-&gt;u.event.pending_pi.new_ep;
 event-&gt;u.event.pending_pi.new_ep = NULL;
 ntsync_unlock_obj(dev, event, all);
 kfree(prior_new_ep);
@@ -883,7 +909,7 @@ kfree(prior_new_ep);
 
 <p>If the event dies unconsumed, free the staging entry:</p>
 
-<pre><code>if (obj-&gt;type == NTSYNC_TYPE_EVENT)
+<pre><code class="code-block">if (obj-&gt;type == NTSYNC_TYPE_EVENT)
     kfree(obj-&gt;u.event.pending_pi.new_ep);
 </code></pre>
 
@@ -891,7 +917,7 @@ kfree(prior_new_ep);
 
 <p>Inside the wait_any unqueue loop, after the obj is unlocked but before <code>put_obj</code>:</p>
 
-<pre><code>if ((int)i == signaled &amp;&amp; obj-&gt;type == NTSYNC_TYPE_EVENT)
+<pre><code class="code-block">if ((int)i == signaled &amp;&amp; obj-&gt;type == NTSYNC_TYPE_EVENT)
     consume_event_pi_boost(obj);
 </code></pre>
 
@@ -901,7 +927,7 @@ kfree(prior_new_ep);
 
 <p><code>ntsync_wait_all</code> cannot call <code>consume_event_pi_boost</code> because that helper takes the obj&rsquo;s wait-all lock path (via <code>ntsync_lock_obj</code>), and the unqueue loop already holds <code>wait_all_lock</code>. The audio-callback path uses <code>wait_any</code> so this gap is rare in practice; revisit if cross-event boost across <code>wait_all</code> becomes a workload concern. Comment in source:</p>
 
-<pre><code>/* NSPA: TODO -- wait_all consumer hook for EVENT_SET_PI deferred
+<pre><code class="code-block">/* NSPA: TODO -- wait_all consumer hook for EVENT_SET_PI deferred
  * boost.  Cannot call consume_event_pi_boost here because it
  * takes obj's wait-all lock path and we already hold
  * wait_all_lock.  Audio-callback path uses wait_any (handled in
@@ -930,7 +956,7 @@ kfree(prior_new_ep);
 
 <h3>The KASAN splat</h3>
 
-<pre><code>BUG: KASAN: slab-use-after-free in do_raw_spin_lock+0x23c/0x270
+<pre><code class="code-block">BUG: KASAN: slab-use-after-free in do_raw_spin_lock+0x23c/0x270
 Read of size 4 at addr ffff8882e30b2564 by task test-channel-st/51072
 
 Call: __wake_up -&gt; ntsync_obj_ioctl+0x8d5 [ntsync]
@@ -953,7 +979,7 @@ Address is 100 bytes inside freed region.
 
 <h3>The race</h3>
 
-<pre><code>Thread A (SEND_PI sleeper)              Thread B (REPLY)
+<pre><code class="code-block">Thread A (SEND_PI sleeper)              Thread B (REPLY)
                                         obj_lock(ch)
                                         find e in dispatched
                                         e-&gt;replied = true
@@ -975,7 +1001,7 @@ kfree(e)                                 wake_up_all(&amp;e-&gt;wq)  &lt;-- UAF
 
 <p>Code addition is ~15 LOC:</p>
 
-<pre><code>struct ntsync_channel_entry {
+<pre><code class="code-block">struct ntsync_channel_entry {
     ...
     refcount_t refcnt;
 };
@@ -1075,7 +1101,7 @@ if (refcount_dec_and_test(&amp;e-&gt;refcnt))
 
 <p>The wait wrapper is largely unchanged from upstream. NSPA&rsquo;s only addition is the <code>uring_fd</code> parameter (passed via the repurposed <code>pad</code> field) that lets a single <code>WAIT_ANY</code> call wake on either an ntsync object signal or an io_uring CQE. See <code>ntsync-driver.gen.html</code> Section 7 for the original 1003-era discussion of <code>uring_fd</code>.</p>
 
-<pre><code>static NTSTATUS linux_wait_objs(int device, DWORD count, const int *objs,
+<pre><code class="code-block">static NTSTATUS linux_wait_objs(int device, DWORD count, const int *objs,
                                 WAIT_TYPE type, int alert_fd, int uring_fd,
                                 const LARGE_INTEGER *timeout)
 {
@@ -1101,7 +1127,7 @@ if (refcount_dec_and_test(&amp;e-&gt;refcnt))
 
 <p>The cross-thread priority-intent setter is a thin ioctl wrapper:</p>
 
-<pre><code>static NTSTATUS linux_set_event_obj_pi(int obj, unsigned int policy,
+<pre><code class="code-block">static NTSTATUS linux_set_event_obj_pi(int obj, unsigned int policy,
                                        unsigned int prio)
 {
     struct ntsync_event_set_pi_args args = {
@@ -1126,7 +1152,7 @@ if (refcount_dec_and_test(&amp;e-&gt;refcnt))
 
 <p>The dispatcher loop calls:</p>
 
-<pre><code>ioctl(channel_fd, NTSYNC_IOC_CHANNEL_RECV2, &amp;args);
+<pre><code class="code-block">ioctl(channel_fd, NTSYNC_IOC_CHANNEL_RECV2, &amp;args);
 /* dispatch using args.thread_token */
 ioctl(channel_fd, NTSYNC_IOC_CHANNEL_REPLY, &amp;args.entry_id);
 </code></pre>
@@ -1539,4 +1565,12 @@ ioctl(channel_fd, NTSYNC_IOC_CHANNEL_REPLY, &amp;args.entry_id);
 <li><code>gamma-channel-dispatcher.gen.html</code> &ndash; how the gamma dispatcher userspace code uses the channel object and consumes the thread-token.</li>
 </ul>
 
+
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+  document.querySelectorAll("pre code").forEach(function (block) {
+    hljs.highlightElement(block);
+  });
+});
+</script>
 </body></html>

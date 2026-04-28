@@ -112,8 +112,8 @@ The shape is mechanical enough that a new stub for a new NT surface --
 say `NtQueryDirectoryFile` -- would be drop-in: define a private handle
 range or reuse one, build a per-process table, decide an eligibility
 predicate, write the bypass entry point, gate it behind an env var.
-The pattern itself is what's load-bearing; the per-stub specifics fill
-in the obvious blanks.
+The pattern itself is the reusable element; the per-stub specifics are
+surface-dependent.
 
 ---
 
@@ -121,8 +121,8 @@ in the obvious blanks.
 
 A reasonable counter-proposal to "ship many NT-local stubs" is "rewrite
 wineserver as a multi-threaded handler with per-subsystem locks". This
-is the §3.4 of `wineserver-decomposition-plan.md`. It is the right
-*endgame* but the wrong starting move, for three reasons:
+is the §3.4 of `wineserver-decomposition-plan.md`. It is a valid
+long-horizon target but the wrong starting move, for three reasons:
 
 **Audit surface.** Wineserver assumes "nothing else changes during my
 handler" pervasively. Every handler reads + writes shared state, often
@@ -134,20 +134,16 @@ months of audit work for one architectural change, and the change does
 not deliver any user-visible improvement until the whole partitioning
 is done.
 
-**Strangler-fig migration vs full rewrite.** The strangler-fig pattern
-(Martin Fowler, 2004) wraps a legacy system in incremental replacements
-until the legacy system can be removed. Each NT-local stub is a
-strangler vine: it intercepts one specific NT surface, services it
-from outside the server, and routes anything it can't handle back to
-the server. The interception point is the stub's eligibility check;
-the routing is the `STATUS_NOT_SUPPORTED` fallback. Each stub
-*independently* delivers a measurable win (latency reduction on its
-NT surface) and is independently revertible. By the time enough
-strangler vines have grown, what remains in wineserver is the small
-set of handlers that genuinely need cross-process arbitration -- the
-honest list in §4 of the decomposition plan: cross-process object
-naming, process / thread lifecycle, handle inheritance, NT-specific
-path resolution.
+**Incremental migration vs full rewrite.** Each NT-local stub
+intercepts one specific NT surface, services it from outside the
+server, and routes anything it cannot model back to the server. The
+interception point is the stub's eligibility check; the routing path is
+the `STATUS_NOT_SUPPORTED` fallback. Each stub independently delivers a
+measurable win on its NT surface and is independently revertible. After
+enough surfaces move out, what remains in wineserver is the small set
+of handlers that genuinely need cross-process arbitration -- the list
+in §4 of the decomposition plan: cross-process object naming, process /
+thread lifecycle, handle inheritance, and NT-specific path resolution.
 
 **Practical wins happen before the lock dissolves.** Consider Ableton's
 startup profile: ~28,500 file opens in the first session boot, of which
@@ -630,7 +626,7 @@ broader timeline; this list is the NT-local-stub-shaped subset.
 ## 9. Connection to wineserver decomposition
 
 Each NT-local stub shrinks the wineserver footprint along one NT
-surface. As the surfaces add up, the decomposition story shifts:
+surface. As the surfaces add up, the decomposition plan changes:
 
 **Today (2026-04-27):** wineserver runs `channel_dispatcher` 6-11%
 of CPU under load, `get_ptid_entry` 1-10%, `main_loop_epoll` 2-7%.
@@ -660,8 +656,8 @@ under audio + UI load, the answer is probably no -- and the lock
 stays a single global pi_mutex_t because there's nothing left to
 contend on.
 
-**The strangler-fig completes when wineserver is small enough that
-nobody profiles it.**
+**The migration is complete when wineserver is small enough that it is
+no longer a meaningful hot-path component.**
 
 ---
 
@@ -685,4 +681,3 @@ nobody profiles it.**
 | `wine/nspa/docs/wine-nspa-lockup-audit-20260427.md` | Lock-discipline audit confirming every stub holds locks briefly |
 | `wine/nspa/docs/local-file-bypass-design.md` | Original design doc for the local-file bypass |
 | `MEMORY.md: project_msg_ring_v2_phase_c_stage1_validated` | Phase C msg-ring bucketing diag (basis for future message-queue stubs) |
-

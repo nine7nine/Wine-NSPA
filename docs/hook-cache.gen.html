@@ -41,11 +41,19 @@
     border-radius: 3px; font-size: 0.82rem; color: var(--cyan);
   }
   pre {
-    background: var(--surface); padding: 1rem; border-radius: 6px;
+    background: var(--surface); padding: 1rem 1.1rem; border-radius: 8px;
     overflow-x: auto; margin: 0.75rem 0 1rem;
     border: 1px solid var(--border);
   }
-  pre code { background: none; padding: 0; font-size: 0.8rem; color: var(--fg); }
+  pre code {
+    display: block; background: transparent; padding: 0;
+    font-size: 0.8rem; color: inherit;
+  }
+  pre code.hljs,
+  code.hljs {
+    background: transparent;
+    padding: 0;
+  }
   blockquote {
     background: var(--surface); border-left: 3px solid var(--accent);
     padding: 0.75rem 1rem; margin: 1rem 0; border-radius: 0 4px 4px 0;
@@ -55,7 +63,25 @@
   hr { border: none; border-top: 1px solid var(--border); margin: 2rem 0; }
   strong { color: var(--fg); }
   em { color: var(--muted); font-style: italic; }
+  .diagram-container {
+    display: flex; justify-content: center;
+    margin: 1.25rem auto 1.5rem; padding: 0.75rem;
+    background: rgba(36, 40, 59, 0.55);
+    border: 1px solid var(--border); border-radius: 10px;
+    overflow-x: auto;
+  }
+  .diagram-container svg {
+    display: block;
+    width: 100% !important;
+    max-width: 100%;
+    height: auto !important;
+    margin: 0 auto;
+    flex: 0 0 auto;
+  }
 </style>
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/tokyo-night-dark.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
 </head><body>
 <h1>Wine-NSPA &ndash; Two-Tier Win32 Hook Chain Cache</h1>
 
@@ -155,7 +181,7 @@ Author: Jordan Johnston</p>
 <p>Tier 2 lives in <code>nspa_queue_bypass_shm_t</code>, NSPA&rsquo;s per-queue auxiliary shmem region (one mapping per queue, separate from the main queue_shm). The chain entries are fixed-size 64-byte structs (one cache line) and the module-name strings live in a separate 4 KB pool referenced by byte offset.</p>
 
 <div class="diagram-container">
-<svg width="100%" viewBox="0 0 920 540" xmlns="http://www.w3.org/2000/svg">
+<svg width="100%" viewBox="0 0 920 540" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
   <rect x="0" y="0" width="920" height="540" fill="#1a1b26"/>
 
   <text x="460" y="30" text-anchor="middle" fill="#7aa2f7" font-family="monospace" font-size="16" font-weight="bold">call_message_hooks( id, ... ) -- one dispatch path</text>
@@ -197,7 +223,7 @@ Author: Jordan Johnston</p>
 
 <p>The client-side reader is <code>is_hooked</code> in <code>dlls/win32u/hook.c:64-82</code>:</p>
 
-<pre><code>BOOL is_hooked( INT id )
+<pre><code class="code-block">BOOL is_hooked( INT id )
 {
     struct object_lock lock = OBJECT_LOCK_INIT;
     const queue_shm_t *queue_shm;
@@ -236,7 +262,7 @@ Author: Jordan Johnston</p>
 
 <p>Tier 2&rsquo;s layout is in <code>protocol.def</code> lines 1142-1170:</p>
 
-<pre><code>#define NSPA_HOOK_CHAIN_CAP     8
+<pre><code class="code-block">#define NSPA_HOOK_CHAIN_CAP     8
 #define NSPA_HOOK_MODULE_POOL   4096    /* per-queue UTF-16 string pool, bytes */
 
 typedef volatile struct
@@ -271,7 +297,7 @@ typedef volatile struct
 
 <p>The reader &ndash; <code>nspa_hook_try_read_cache</code> in <code>dlls/win32u/hook.c:151-238</code> &ndash; is the tier 2 entry point. Skeleton:</p>
 
-<pre><code>for (retry = 0; retry &lt; 8; retry++)
+<pre><code class="code-block">for (retry = 0; retry &lt; 8; retry++)
 {
     v1 = __atomic_load_n( &amp;chain-&gt;version, __ATOMIC_ACQUIRE );
     if (v1 &amp; 1) { pause(); sched_yield(); continue; }   /* writer mid-update */
@@ -374,7 +400,7 @@ return -1;   /* retry exhausted */
 
 <p>The writer side is straightforward but worth spelling out. From <code>nspa_hook_cache_rebuild</code>:</p>
 
-<pre><code>/* Begin write: bump version to odd so concurrent readers retry. */
+<pre><code class="code-block">/* Begin write: bump version to odd so concurrent readers retry. */
 v = chain-&gt;version;
 __atomic_store_n( &amp;chain-&gt;version, v + 1, __ATOMIC_RELEASE );
 __atomic_thread_fence( __ATOMIC_ACQ_REL );
@@ -481,7 +507,7 @@ __atomic_store_n( &amp;chain-&gt;version, v + 2, __ATOMIC_RELEASE );
 
 <p>The pool is bump-allocated during rebuild (<code>hook_cache.c:40-57</code>):</p>
 
-<pre><code>static unsigned int hook_pool_alloc( shm, *cursor, src, size_bytes )
+<pre><code class="code-block">static unsigned int hook_pool_alloc( shm, *cursor, src, size_bytes )
 {
     if (!size_bytes || !src) return 0;
     if (size_bytes &gt; NSPA_HOOK_MODULE_POOL) return 0;
@@ -503,7 +529,7 @@ __atomic_store_n( &amp;chain-&gt;version, v + 2, __ATOMIC_RELEASE );
 
 <p>If a module string can&rsquo;t fit (cursor + size_bytes > pool size), <code>hook_pool_alloc</code> returns 0. The rebuild loop checks for this and forces <code>overflowed = 1</code> if a real module name failed to allocate (<code>hook_cache.c:131-137</code>):</p>
 
-<pre><code>e-&gt;module_offset = hook_pool_alloc( shm, &amp;pool_cursor, hook-&gt;module, hook-&gt;module_size );
+<pre><code class="code-block">e-&gt;module_offset = hook_pool_alloc( shm, &amp;pool_cursor, hook-&gt;module, hook-&gt;module_size );
 if (hook-&gt;module_size &amp;&amp; hook-&gt;module &amp;&amp; e-&gt;module_offset == 0)
 {
     /* pool exhausted -- fall back to RPC */
@@ -752,4 +778,12 @@ if (hook-&gt;module_size &amp;&amp; hook-&gt;module &amp;&amp; e-&gt;module_offs
 
 
 <p>Both variables are read once per process (cached) and matched server-side via <code>reply-&gt;tier1_active</code> so client and server agree on whether the bypass is active for any given queue.</p>
+
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+  document.querySelectorAll("pre code").forEach(function (block) {
+    hljs.highlightElement(block);
+  });
+});
+</script>
 </body></html>

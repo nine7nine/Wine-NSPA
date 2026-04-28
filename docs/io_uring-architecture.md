@@ -41,7 +41,7 @@ current kernel + ring code.
 | Phase 2 | Sockets (sync + overlapped) | **Pending** | -- | E2 bitmap + ALERTED interception design validated; socket-io PE test passed historically; needs revalidation against post-audit ntsync + audit §4.1 retry-loop hardening |
 | Phase 3 | Pipes + named events | **Pending** | -- | Not yet designed; expected to reuse Phase 2 ALERTED-interception pattern with object-class-specific completion paths |
 
-### What changed vs the 2026-04-15 doc
+### Delta from the 2026-04-15 plan
 
 - Phases 1 and 2 of the 2026-04-15 plan (sync poll replacement, async
   file I/O bypass) have collapsed into a single shipped Phase 1.
@@ -54,12 +54,12 @@ current kernel + ring code.
 
 ## 2. Overview
 
-This document is the deep-dive companion to the Wine-NSPA architecture
-overview. It covers the design decisions, tradeoffs, and implementation
-details of io_uring integration. For background on Wine's I/O model and
-why io_uring matters for RT audio, see the architecture page.
+This document is the io_uring design and implementation reference for
+Wine-NSPA. It covers the integration boundary, per-thread ring model,
+ALERTED-state interception, and the remaining socket/pipe work. For
+project-wide context, see the architecture overview.
 
-The two bottlenecks targeted by this work:
+This design addresses two bottlenecks:
 
 1. **Syscall overhead.** 4+ kernel transitions per async file read
    (register + epoll + alert + read). io_uring collapses this to 1
@@ -78,21 +78,18 @@ The two bottlenecks targeted by this work:
 | CS-PI (FUTEX_LOCK_PI) | **No conflict.** io_uring operations happen client-side in ntdll, never acquiring server locks. |
 | RT scheduling (SCHED_FIFO/RR) | **Compatible.** `COOP_TASKRUN` ensures completions run in the submitting thread's context, preserving RT priority. |
 
-### Reference: rbernon's Archived Attempt
+### Prior art: `archive/iouring`
 
-Rémi Bernon attempted a full wineserver main-loop replacement with
-io_uring circa 2021-2022 (`gitlab.winehq.org/rbernon/wine`, branch
-`archive/iouring`). It was abandoned because io_uring was immature at
-the time -- missing features, kernel bugs, API instability. That
-approach replaced the server's epoll entirely (~500 LOC across
-`server/fd.c`, `request.c`, `thread.c`).
+Rémi Bernon's 2021-2022 `archive/iouring` branch attempted direct
+replacement of wineserver's epoll loop. That design touched core server
+files (`server/fd.c`, `request.c`, `thread.c`) and depended on an
+earlier io_uring feature set.
 
-Wine-NSPA's approach is fundamentally different: with the shmem fast
-path already handling request/reply IPC, the server main loop is **no
-longer the bottleneck**. Instead, we target the remaining
-server-dependent paths -- file and socket I/O -- from the **client
-side**, keeping changes isolated in a new `io_uring.c` file with minimal
-modifications to existing code.
+Wine-NSPA uses a different integration boundary. The shmem and gamma
+paths already remove request/reply IPC from the hot path, so io_uring is
+applied client-side to file and socket I/O. The bulk of the
+implementation remains isolated in `dlls/ntdll/unix/io_uring.c`, with
+thin call-site conditionals in existing files.
 
 ---
 
@@ -398,113 +395,117 @@ ALERTED block *before* `set_async_direct_result` is called:
       Server: completes async, signals event/IOCP
 
 <div class="diagram-container">
-<svg width="100%" viewBox="0 0 880 720" xmlns="http://www.w3.org/2000/svg">
+<svg width="100%" viewBox="0 0 920 760" xmlns="http://www.w3.org/2000/svg">
   <style>
-    .p3-box-server { fill: #24283b; stroke: #7aa2f7; stroke-width: 2; rx: 6; }
-    .p3-box-old { fill: #2a1a1a; stroke: #f7768e; stroke-width: 2; rx: 6; }
-    .p3-box-new { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 2; rx: 6; }
-    .p3-box-uring { fill: #1a1a2a; stroke: #7dcfff; stroke-width: 2; rx: 6; }
-    .p3-box-intercept { fill: #2a2418; stroke: #e0af68; stroke-width: 2.5; rx: 6; }
-    .p3-box-neutral { fill: #24283b; stroke: #9aa5ce; stroke-width: 1.5; rx: 6; }
-    .p3-label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
-    .p3-label-sm { fill: #c0caf5; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
-    .p3-label-blue { fill: #7aa2f7; font-size: 11px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
-    .p3-label-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
-    .p3-label-red { fill: #f7768e; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
-    .p3-label-cyan { fill: #7dcfff; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
-    .p3-label-yellow { fill: #e0af68; font-size: 11px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
-    .p3-label-muted { fill: #c0caf5; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
-    .p3-arrow { stroke: #9aa5ce; stroke-width: 1.5; fill: none; }
-    .p3-arrow-blue { stroke: #7aa2f7; stroke-width: 2; fill: none; }
-    .p3-arrow-green { stroke: #9ece6a; stroke-width: 2; fill: none; }
-    .p3-arrow-red { stroke: #f7768e; stroke-width: 1.5; fill: none; }
-    .p3-arrow-cyan { stroke: #7dcfff; stroke-width: 2; fill: none; }
-    .p3-arrow-yellow { stroke: #e0af68; stroke-width: 2; fill: none; }
+    .bg { fill: #1a1b26; }
+    .lane-old { fill: #271a22; stroke: #f7768e; stroke-width: 1.5; }
+    .lane-new { fill: #16251a; stroke: #9ece6a; stroke-width: 1.5; }
+    .box-shared { fill: #24283b; stroke: #7aa2f7; stroke-width: 1.8; rx: 8; }
+    .box-neutral { fill: #24283b; stroke: #9aa5ce; stroke-width: 1.4; rx: 8; }
+    .box-intercept { fill: #2a2418; stroke: #e0af68; stroke-width: 2.2; rx: 8; }
+    .box-old { fill: #2a1a1a; stroke: #f7768e; stroke-width: 1.8; rx: 8; }
+    .box-new { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
+    .box-kernel { fill: #1a1f2a; stroke: #7dcfff; stroke-width: 1.8; rx: 8; }
+    .summary-old { fill: #2a1a1a; stroke: #f7768e; stroke-width: 1.6; rx: 20; }
+    .summary-new { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.6; rx: 20; }
+    .label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+    .label-sm { fill: #c0caf5; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+    .label-muted { fill: #8c92b3; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+    .label-blue { fill: #7aa2f7; font-size: 12px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .label-red { fill: #f7768e; font-size: 12px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .label-green { fill: #9ece6a; font-size: 12px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .label-cyan { fill: #7dcfff; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .label-yellow { fill: #e0af68; font-size: 12px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .arrow-shared { stroke: #7aa2f7; stroke-width: 1.8; fill: none; }
+    .arrow-old { stroke: #f7768e; stroke-width: 1.8; fill: none; }
+    .arrow-new { stroke: #9ece6a; stroke-width: 1.8; fill: none; }
+    .arrow-kernel { stroke: #7dcfff; stroke-width: 1.8; fill: none; }
+    .footnote { fill: #8c92b3; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
   </style>
 
-  <text x="440" y="22" class="p3-label-yellow" text-anchor="middle" font-size="13">ALERTED-State Interception Flow (Phase 2)</text>
+  <rect x="0" y="0" width="920" height="760" class="bg"/>
+  <text x="460" y="28" text-anchor="middle" class="label-yellow">Phase 2 Socket Recv: ALERTED-State Interception</text>
 
-  <rect x="240" y="38" width="400" height="38" rx="6" class="p3-box-server"/>
-  <text x="440" y="55" class="p3-label-blue" text-anchor="middle">Server: recv_socket()</text>
-  <text x="440" y="69" class="p3-label-sm" text-anchor="middle">returns STATUS_ALERTED + wait_handle</text>
+  <rect x="250" y="52" width="420" height="54" class="box-shared"/>
+  <text x="460" y="74" text-anchor="middle" class="label-blue">1. Server returns ALERTED async</text>
+  <text x="460" y="91" text-anchor="middle" class="label-sm">recv_socket() -> STATUS_ALERTED + wait_handle</text>
 
-  <line x1="440" y1="76" x2="440" y2="96" class="p3-arrow-blue"/>
+  <line x1="460" y1="106" x2="460" y2="132" class="arrow-shared"/>
 
-  <rect x="240" y="98" width="400" height="38" rx="6" class="p3-box-neutral"/>
-  <text x="440" y="115" class="p3-label" text-anchor="middle">Client: try_recv(fd)</text>
-  <text x="440" y="129" class="p3-label-muted" text-anchor="middle">returns EAGAIN (data not ready yet)</text>
+  <rect x="250" y="132" width="420" height="54" class="box-neutral"/>
+  <text x="460" y="154" text-anchor="middle" class="label">2. Client probes fd immediately</text>
+  <text x="460" y="171" text-anchor="middle" class="label-sm">try_recv(fd) -> EAGAIN</text>
 
-  <line x1="440" y1="136" x2="440" y2="160" class="p3-arrow-yellow"/>
+  <line x1="460" y1="186" x2="460" y2="212" class="arrow-shared"/>
 
-  <rect x="140" y="162" width="600" height="32" rx="6" class="p3-box-intercept"/>
-  <text x="440" y="183" class="p3-label-yellow" text-anchor="middle">INTERCEPTION POINT  --  before set_async_direct_result()</text>
+  <rect x="170" y="212" width="580" height="42" class="box-intercept"/>
+  <text x="460" y="238" text-anchor="middle" class="label-yellow">3. Interception point: before set_async_direct_result(PENDING)</text>
 
-  <text x="230" y="208" class="p3-label-red" text-anchor="middle">OLD PATH</text>
-  <text x="560" y="208" class="p3-label-green" text-anchor="middle">NEW PATH (NSPA)</text>
+  <rect x="40" y="284" width="390" height="392" rx="12" class="lane-old"/>
+  <rect x="490" y="284" width="390" height="392" rx="12" class="lane-new"/>
 
-  <line x1="230" y1="194" x2="300" y2="240" class="p3-arrow-red"/>
-  <line x1="560" y1="194" x2="580" y2="240" class="p3-arrow-green"/>
+  <text x="235" y="308" text-anchor="middle" class="label-red">Legacy server-monitored path</text>
+  <text x="685" y="308" text-anchor="middle" class="label-green">NSPA io_uring path</text>
 
-  <rect x="100" y="242" width="400" height="50" rx="6" class="p3-box-old"/>
-  <text x="300" y="260" class="p3-label-red" text-anchor="middle">set_async_direct_result(PENDING)</text>
-  <text x="300" y="274" class="p3-label-sm" text-anchor="middle">server restarts async</text>
-  <text x="300" y="287" class="p3-label-muted" text-anchor="middle">async re-queued, server monitors via epoll</text>
+  <line x1="235" y1="254" x2="235" y2="330" class="arrow-old"/>
+  <line x1="685" y1="254" x2="685" y2="330" class="arrow-new"/>
 
-  <line x1="300" y1="292" x2="230" y2="316" class="p3-arrow-red"/>
+  <rect x="85" y="330" width="300" height="58" class="box-old"/>
+  <text x="235" y="352" text-anchor="middle" class="label-red">set_async_direct_result(PENDING)</text>
+  <text x="235" y="369" text-anchor="middle" class="label-sm">server requeues async</text>
+  <text x="235" y="382" text-anchor="middle" class="label-muted">fd returns to server poll ownership</text>
 
-  <rect x="60" y="318" width="340" height="38" rx="6" class="p3-box-old"/>
-  <text x="230" y="335" class="p3-label-red" text-anchor="middle">Server: epoll monitors fd</text>
-  <text x="230" y="349" class="p3-label-muted" text-anchor="middle">global_lock held during dispatch</text>
+  <line x1="235" y1="388" x2="235" y2="414" class="arrow-old"/>
 
-  <line x1="230" y1="356" x2="230" y2="380" class="p3-arrow-red"/>
+  <rect x="85" y="414" width="300" height="58" class="box-old"/>
+  <text x="235" y="436" text-anchor="middle" class="label-red">epoll monitors fd</text>
+  <text x="235" y="453" text-anchor="middle" class="label-sm">dispatch runs under global_lock</text>
+  <text x="235" y="466" text-anchor="middle" class="label-muted">extra kernel wake and server pass</text>
 
-  <rect x="60" y="382" width="340" height="38" rx="6" class="p3-box-old"/>
-  <text x="230" y="399" class="p3-label-red" text-anchor="middle">Server: async_wake_up(ALERTED)</text>
-  <text x="230" y="413" class="p3-label-muted" text-anchor="middle">client callback, re-fetches fd, completes</text>
+  <line x1="235" y1="472" x2="235" y2="498" class="arrow-old"/>
 
-  <rect x="60" y="432" width="300" height="32" rx="6" fill="#2a1a1a" stroke="#f7768e" stroke-width="1"/>
-  <text x="230" y="452" class="p3-label-red" text-anchor="middle">2 server round-trips + epoll cycle</text>
+  <rect x="85" y="498" width="300" height="58" class="box-old"/>
+  <text x="235" y="520" text-anchor="middle" class="label-red">async_wake_up(ALERTED)</text>
+  <text x="235" y="537" text-anchor="middle" class="label-sm">client callback re-fetches fd</text>
+  <text x="235" y="550" text-anchor="middle" class="label-muted">final completion after server wake</text>
 
-  <rect x="480" y="222" width="380" height="62" rx="6" class="p3-box-new"/>
-  <text x="670" y="244" class="p3-label-green" text-anchor="middle">set E2 bitmap bit for fd</text>
-  <text x="670" y="260" class="p3-label-green" text-anchor="middle">io_uring POLL_ADD(fd, POLLIN)</text>
-  <text x="670" y="274" class="p3-label-sm" text-anchor="middle">async stays ALERTED (frozen on server)</text>
-  <text x="670" y="282" class="p3-label-muted" text-anchor="middle">return STATUS_PENDING</text>
+  <rect x="95" y="594" width="280" height="34" class="summary-old"/>
+  <text x="235" y="616" text-anchor="middle" class="label-red">2 server calls after interception + epoll cycle</text>
 
-  <line x1="640" y1="284" x2="640" y2="334" class="p3-arrow-cyan"/>
+  <rect x="535" y="330" width="300" height="62" class="box-new"/>
+  <text x="685" y="352" text-anchor="middle" class="label-green">set E2 bitmap bit + return STATUS_PENDING</text>
+  <text x="685" y="369" text-anchor="middle" class="label-sm">server-side async remains ALERTED</text>
+  <text x="685" y="382" text-anchor="middle" class="label-muted">sock_get_poll_events() can exclude the fd</text>
 
-  <rect x="480" y="336" width="340" height="48" rx="6" class="p3-box-uring"/>
-  <text x="640" y="355" class="p3-label-cyan" text-anchor="middle">io_uring monitors fd in kernel</text>
-  <text x="640" y="369" class="p3-label-sm" text-anchor="middle">no server involvement</text>
-  <text x="640" y="380" class="p3-label-muted" text-anchor="middle">no global_lock contention</text>
+  <line x1="685" y1="392" x2="685" y2="418" class="arrow-new"/>
 
-  <line x1="640" y1="384" x2="640" y2="414" class="p3-arrow-cyan"/>
+  <rect x="535" y="418" width="300" height="58" class="box-kernel"/>
+  <text x="685" y="440" text-anchor="middle" class="label-cyan">io_uring POLL_ADD(fd, POLLIN)</text>
+  <text x="685" y="457" text-anchor="middle" class="label-sm">kernel owns readiness monitoring</text>
+  <text x="685" y="470" text-anchor="middle" class="label-muted">no server dispatch while waiting</text>
 
-  <rect x="480" y="416" width="340" height="38" rx="6" class="p3-box-uring"/>
-  <text x="640" y="433" class="p3-label-cyan" text-anchor="middle">CQE fires: fd ready</text>
-  <text x="640" y="447" class="p3-label-muted" text-anchor="middle">eventfd wakes ntsync wait (sync) or drain (async)</text>
+  <line x1="685" y1="476" x2="685" y2="502" class="arrow-kernel"/>
 
-  <line x1="640" y1="454" x2="640" y2="480" class="p3-arrow-green"/>
+  <rect x="535" y="502" width="300" height="58" class="box-kernel"/>
+  <text x="685" y="524" text-anchor="middle" class="label-cyan">CQE / eventfd signals readiness</text>
+  <text x="685" y="541" text-anchor="middle" class="label-sm">sync wait drains via ntsync uring_fd</text>
+  <text x="685" y="554" text-anchor="middle" class="label-muted">overlapped path drains in async completion path</text>
 
-  <rect x="480" y="482" width="340" height="38" rx="6" class="p3-box-new"/>
-  <text x="640" y="499" class="p3-label-green" text-anchor="middle">try_recv(fd) -- SUCCESS</text>
-  <text x="640" y="513" class="p3-label-sm" text-anchor="middle">data available, read completes</text>
+  <line x1="685" y1="560" x2="685" y2="586" class="arrow-new"/>
 
-  <line x1="640" y1="520" x2="640" y2="546" class="p3-arrow-green"/>
+  <rect x="535" y="586" width="300" height="58" class="box-new"/>
+  <text x="685" y="608" text-anchor="middle" class="label-green">retry try_recv(fd) -> SUCCESS</text>
+  <text x="685" y="625" text-anchor="middle" class="label-sm">data is now available</text>
+  <text x="685" y="638" text-anchor="middle" class="label-muted">client issues final result once</text>
 
-  <rect x="460" y="548" width="380" height="48" rx="6" class="p3-box-new"/>
-  <text x="640" y="566" class="p3-label-green" text-anchor="middle">set_async_direct_result(SUCCESS, bytes)</text>
-  <text x="640" y="582" class="p3-label-sm" text-anchor="middle">single server call with final result</text>
-  <text x="640" y="592" class="p3-label-muted" text-anchor="middle">ALERTED state preserved -- server accepts</text>
+  <line x1="685" y1="644" x2="685" y2="670" class="arrow-new"/>
 
-  <line x1="640" y1="596" x2="640" y2="622" class="p3-arrow-blue"/>
+  <rect x="535" y="670" width="300" height="58" class="box-shared"/>
+  <text x="685" y="692" text-anchor="middle" class="label-blue">set_async_direct_result(SUCCESS, bytes)</text>
+  <text x="685" y="709" text-anchor="middle" class="label-sm">server completes async and signals event / IOCP</text>
+  <text x="685" y="722" text-anchor="middle" class="label-muted">single server call with the final completion only</text>
 
-  <rect x="480" y="624" width="340" height="38" rx="6" class="p3-box-server"/>
-  <text x="640" y="641" class="p3-label-blue" text-anchor="middle">Server: completes async</text>
-  <text x="640" y="655" class="p3-label-sm" text-anchor="middle">signals event / IOCP</text>
-
-  <rect x="490" y="672" width="300" height="24" rx="6" fill="#1a2a1a" stroke="#9ece6a" stroke-width="1.5"/>
-  <text x="640" y="689" class="p3-label-green" text-anchor="middle">1 server call (completion only)</text>
+  <text x="460" y="748" text-anchor="middle" class="footnote">Safety condition: ALERTED asyncs are already detached from server epoll; the E2 bitmap is an additional guard for poll-state recomputation.</text>
 </svg>
 </div>
 
