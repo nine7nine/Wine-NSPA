@@ -198,6 +198,80 @@ own correctness proof and gate.
 | `nspaASIO` Phase F | Shipped | Zero-latency `bufferSwitch` invoked **inside** the JACK RT callback — same-period output, no double-buffering hop |
 | Native `winealsa`/`winepulse`/`wineoss` | Drop planned | Once winejack is fully stable; not removed yet |
 
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 940 500" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .cs-bg { fill: #1a1b26; }
+    .cs-box { fill: #24283b; stroke: #7aa2f7; stroke-width: 2; rx: 8; }
+    .cs-green { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
+    .cs-gate { fill: #2a1f14; stroke: #e0af68; stroke-width: 1.8; rx: 8; }
+    .cs-wip { fill: #1f2535; stroke: #bb9af7; stroke-width: 1.8; rx: 8; }
+    .cs-label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+    .cs-small { fill: #8c92b3; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+    .cs-title { fill: #7aa2f7; font-size: 14px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .cs-tag-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .cs-tag-yellow { fill: #e0af68; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .cs-tag-violet { fill: #bb9af7; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .cs-line { stroke: #c0caf5; stroke-width: 1.3; }
+  </style>
+  <defs>
+    <marker id="csArrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="#c0caf5"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="940" height="500" class="cs-bg"/>
+  <text x="470" y="28" text-anchor="middle" class="cs-title">2026-04-28 deployment board: what is shipped, what is gated, and what is next</text>
+
+  <rect x="50" y="70" width="250" height="150" class="cs-green"/>
+  <text x="175" y="96" text-anchor="middle" class="cs-tag-green">Kernel / sync substrate</text>
+  <text x="175" y="122" text-anchor="middle" class="cs-label">NTSync 1003-1009</text>
+  <text x="175" y="140" text-anchor="middle" class="cs-small">PI waits, channel IPC, deferred EVENT_SET_PI</text>
+  <text x="175" y="164" text-anchor="middle" class="cs-label">CS-PI + condvar PI</text>
+  <text x="175" y="182" text-anchor="middle" class="cs-small">all RT paths gate on NSPA_RT_PRIO</text>
+
+  <rect x="345" y="70" width="250" height="150" class="cs-green"/>
+  <text x="470" y="96" text-anchor="middle" class="cs-tag-green">Client-side bypasses</text>
+  <text x="470" y="122" text-anchor="middle" class="cs-label">gamma channel, local-file, local timers</text>
+  <text x="470" y="140" text-anchor="middle" class="cs-small">hook cache, msg-ring v1, io_uring phase 1</text>
+  <text x="470" y="164" text-anchor="middle" class="cs-label">wineserver load already reduced</text>
+  <text x="470" y="182" text-anchor="middle" class="cs-small">many hot paths no longer need global_lock</text>
+
+  <rect x="640" y="70" width="250" height="150" class="cs-green"/>
+  <text x="765" y="96" text-anchor="middle" class="cs-tag-green">Audio stack</text>
+  <text x="765" y="122" text-anchor="middle" class="cs-label">winejack.drv</text>
+  <text x="765" y="140" text-anchor="middle" class="cs-small">MIDI + WASAPI on JACK</text>
+  <text x="765" y="164" text-anchor="middle" class="cs-label">nspaASIO Phase F</text>
+  <text x="765" y="182" text-anchor="middle" class="cs-small">bufferSwitch in JACK RT callback</text>
+
+  <rect x="50" y="270" width="250" height="140" class="cs-gate"/>
+  <text x="175" y="296" text-anchor="middle" class="cs-tag-yellow">Gated / default-OFF</text>
+  <text x="175" y="322" text-anchor="middle" class="cs-label">paint-cache fastpath</text>
+  <text x="175" y="340" text-anchor="middle" class="cs-small">one clean run done; more validation required</text>
+  <text x="175" y="364" text-anchor="middle" class="cs-label">epoll A/B switch</text>
+  <text x="175" y="382" text-anchor="middle" class="cs-small">runtime measurement, not committed direction</text>
+
+  <rect x="345" y="270" width="250" height="140" class="cs-wip"/>
+  <text x="470" y="296" text-anchor="middle" class="cs-tag-violet">Paused / queued</text>
+  <text x="470" y="322" text-anchor="middle" class="cs-label">msg-ring Phase C get_message</text>
+  <text x="470" y="340" text-anchor="middle" class="cs-small">remaining message-pump bypass piece</text>
+  <text x="470" y="364" text-anchor="middle" class="cs-label">io_uring phases 2/3</text>
+  <text x="470" y="382" text-anchor="middle" class="cs-small">file I/O and async write coverage</text>
+
+  <rect x="640" y="270" width="250" height="140" class="cs-wip"/>
+  <text x="765" y="296" text-anchor="middle" class="cs-tag-violet">Longer horizon</text>
+  <text x="765" y="322" text-anchor="middle" class="cs-label">wineserver decomposition phase 3</text>
+  <text x="765" y="340" text-anchor="middle" class="cs-small">timer split + aggregate-wait + FD polling split</text>
+  <text x="765" y="364" text-anchor="middle" class="cs-label">phase 4</text>
+  <text x="765" y="382" text-anchor="middle" class="cs-small">router/handler split + lock partitioning</text>
+
+  <line x1="175" y1="220" x2="175" y2="270" class="cs-line" marker-end="url(#csArrow)"/>
+  <line x1="470" y1="220" x2="470" y2="270" class="cs-line" marker-end="url(#csArrow)"/>
+  <line x1="765" y1="220" x2="765" y2="270" class="cs-line" marker-end="url(#csArrow)"/>
+  <text x="470" y="456" text-anchor="middle" class="cs-small">top row is production reality today; bottom row is the remaining gating and roadmap pressure on that shipped base</text>
+</svg>
+</div>
+
 ---
 
 ## 4. Validation status
@@ -209,6 +283,60 @@ own correctness proof and gate.
 - Ableton Live 12 Lite — full smoke level 4 — **two clean runs on 2026-04-28**:
   - **Run-3**: paint-cache OFF (default config). Drum-track-load-while-playing × multiple, audio clean, exit 0.
   - **Run-4**: `NSPA_ENABLE_PAINT_CACHE=1` (the historical 5-min-lockup config). Past 5-min threshold without incident, multiple drum-load cycles, audio clean, exit 0.
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 940 360" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .vp-bg { fill: #1a1b26; }
+    .vp-clean { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 2; rx: 8; }
+    .vp-gate { fill: #2a1f14; stroke: #e0af68; stroke-width: 2; rx: 8; }
+    .vp-open { fill: #1f2535; stroke: #bb9af7; stroke-width: 1.8; rx: 8; }
+    .vp-label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+    .vp-small { fill: #8c92b3; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+    .vp-title { fill: #7aa2f7; font-size: 14px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .vp-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .vp-yellow { fill: #e0af68; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .vp-violet { fill: #bb9af7; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .vp-line { stroke: #c0caf5; stroke-width: 1.4; }
+  </style>
+  <defs>
+    <marker id="vpArrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="#c0caf5"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="940" height="360" class="vp-bg"/>
+  <text x="470" y="28" text-anchor="middle" class="vp-title">Validation posture on 2026-04-28</text>
+
+  <rect x="40" y="82" width="250" height="180" class="vp-clean"/>
+  <text x="165" y="108" text-anchor="middle" class="vp-green">Clean / production-ready</text>
+  <text x="165" y="136" text-anchor="middle" class="vp-label">ntsync `A250A77651C8D5DAB719FE2`</text>
+  <text x="165" y="154" text-anchor="middle" class="vp-small">~370M ops, zero errors</text>
+  <text x="165" y="178" text-anchor="middle" class="vp-label">PE matrix 22/22 PASS</text>
+  <text x="165" y="202" text-anchor="middle" class="vp-label">Ableton run-3 PASS</text>
+  <text x="165" y="220" text-anchor="middle" class="vp-small">default config, paint-cache OFF</text>
+  <text x="165" y="244" text-anchor="middle" class="vp-label">Ableton run-4 PASS</text>
+
+  <rect x="345" y="82" width="250" height="180" class="vp-gate"/>
+  <text x="470" y="108" text-anchor="middle" class="vp-yellow">Gated after one clean confirmation</text>
+  <text x="470" y="136" text-anchor="middle" class="vp-label">paint-cache default-on flip</text>
+  <text x="470" y="154" text-anchor="middle" class="vp-small">needs second-day run + long soak + varied workload</text>
+  <text x="470" y="178" text-anchor="middle" class="vp-label">epoll vs poll posture</text>
+  <text x="470" y="196" text-anchor="middle" class="vp-small">still runtime A/B, not a settled architectural call</text>
+  <text x="470" y="228" text-anchor="middle" class="vp-small">rule: clean once does not imply default-on</text>
+
+  <rect x="650" y="82" width="250" height="180" class="vp-open"/>
+  <text x="775" y="108" text-anchor="middle" class="vp-violet">Open / not directly proven</text>
+  <text x="775" y="136" text-anchor="middle" class="vp-label">historical F5 root cause</text>
+  <text x="775" y="154" text-anchor="middle" class="vp-small">MR1 is the working hypothesis, not a trace-proven fact</text>
+  <text x="775" y="178" text-anchor="middle" class="vp-label">future bypasses</text>
+  <text x="775" y="196" text-anchor="middle" class="vp-small">resume only on top of the cleaned sync substrate</text>
+
+  <line x1="290" y1="172" x2="345" y2="172" class="vp-line" marker-end="url(#vpArrow)"/>
+  <line x1="595" y1="172" x2="650" y2="172" class="vp-line" marker-end="url(#vpArrow)"/>
+  <text x="470" y="314" text-anchor="middle" class="vp-small">the gating line is conservative by design: stable substrate first, default-on flips only after behaviour is re-proven under workload</text>
+</svg>
+</div>
 
 ### 4.2 What's gated awaiting more validation
 

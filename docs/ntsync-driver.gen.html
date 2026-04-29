@@ -187,6 +187,108 @@ Author: Jordan Johnston</p>
 
 <p>Patches 1003-1006 are feature/infrastructure work; 1007-1009 are minimal surgical fixes for specific KASAN- or trace-confirmed bugs. The distinction matters: Section 10 discusses why.</p>
 
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 940 520" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
+  <style>
+    .nt-bg { fill: #1a1b26; }
+    .nt-box { fill: #24283b; stroke: #7aa2f7; stroke-width: 2; rx: 8; }
+    .nt-kernel { fill: #1a1a2a; stroke: #bb9af7; stroke-width: 2; rx: 8; }
+    .nt-obj { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 6; }
+    .nt-fix { fill: #2a1f14; stroke: #e0af68; stroke-width: 1.6; rx: 6; }
+    .nt-label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+    .nt-small { fill: #8c92b3; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+    .nt-title { fill: #7aa2f7; font-size: 14px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .nt-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .nt-yellow { fill: #e0af68; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .nt-violet { fill: #bb9af7; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .nt-line { stroke: #c0caf5; stroke-width: 1.4; }
+    .nt-dash { stroke: #3b4261; stroke-width: 1.2; stroke-dasharray: 6,4; }
+  </style>
+  <defs>
+    <marker id="ntArrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="#c0caf5"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="940" height="520" class="nt-bg"/>
+  <text x="470" y="28" text-anchor="middle" class="nt-title">NTSync in Wine-NSPA: object families, PI paths, and patch layering</text>
+
+  <rect x="40" y="56" width="240" height="118" class="nt-box"/>
+  <text x="160" y="82" text-anchor="middle" class="nt-label">Wine callers</text>
+  <text x="70" y="108" class="nt-label">Win32 waits</text>
+  <text x="70" y="126" class="nt-small">WaitForSingleObject / WaitForMultipleObjects</text>
+  <text x="70" y="150" class="nt-label">Gamma dispatcher</text>
+  <text x="70" y="168" class="nt-small">CHANNEL_RECV / REPLY</text>
+
+  <rect x="350" y="56" width="240" height="118" class="nt-kernel"/>
+  <text x="470" y="82" text-anchor="middle" class="nt-violet">/dev/ntsync (drivers/misc/ntsync.c)</text>
+  <text x="470" y="108" text-anchor="middle" class="nt-label">shared ioctl entry</text>
+  <text x="470" y="126" text-anchor="middle" class="nt-small">per-object raw_spinlock obj->lock</text>
+  <text x="470" y="144" text-anchor="middle" class="nt-small">device rt_mutex wait_all_lock</text>
+  <text x="470" y="162" text-anchor="middle" class="nt-small">boosted-owner tracking + sched_setattr_nocheck</text>
+
+  <rect x="660" y="56" width="240" height="118" class="nt-box"/>
+  <text x="780" y="82" text-anchor="middle" class="nt-label">Linux / PREEMPT_RT substrate</text>
+  <text x="780" y="108" text-anchor="middle" class="nt-small">raw_spinlock_t stays raw on RT</text>
+  <text x="780" y="126" text-anchor="middle" class="nt-small">rt_mutex gives PI on wait_all_lock</text>
+  <text x="780" y="144" text-anchor="middle" class="nt-small">wake queues + task priority ordering</text>
+  <text x="780" y="162" text-anchor="middle" class="nt-small">KASAN / debug kernels found 1007-1009 bugs</text>
+
+  <line x1="280" y1="115" x2="350" y2="115" class="nt-line" marker-end="url(#ntArrow)"/>
+  <line x1="590" y1="115" x2="660" y2="115" class="nt-line" marker-end="url(#ntArrow)"/>
+
+  <rect x="40" y="220" width="180" height="98" class="nt-obj"/>
+  <text x="130" y="246" text-anchor="middle" class="nt-green">Mutex</text>
+  <text x="130" y="268" text-anchor="middle" class="nt-small">1003 PI baseline</text>
+  <text x="130" y="286" text-anchor="middle" class="nt-small">priority-sorted waiters</text>
+  <text x="130" y="304" text-anchor="middle" class="nt-small">owner boost / restore</text>
+
+  <rect x="245" y="220" width="180" height="98" class="nt-obj"/>
+  <text x="335" y="246" text-anchor="middle" class="nt-green">Semaphore</text>
+  <text x="335" y="268" text-anchor="middle" class="nt-small">1003 RT-safe waiter ordering</text>
+  <text x="335" y="286" text-anchor="middle" class="nt-small">wait_any / wait_all participant</text>
+
+  <rect x="450" y="220" width="180" height="98" class="nt-obj"/>
+  <text x="540" y="246" text-anchor="middle" class="nt-green">Event</text>
+  <text x="540" y="268" text-anchor="middle" class="nt-small">SET / RESET / PULSE</text>
+  <text x="540" y="286" text-anchor="middle" class="nt-small">1008 deferred EVENT_SET_PI</text>
+  <text x="540" y="304" text-anchor="middle" class="nt-small">cross-thread priority intent</text>
+
+  <rect x="655" y="220" width="245" height="98" class="nt-obj"/>
+  <text x="777" y="246" text-anchor="middle" class="nt-green">Channel</text>
+  <text x="777" y="268" text-anchor="middle" class="nt-small">1004 request/reply transport</text>
+  <text x="777" y="286" text-anchor="middle" class="nt-small">1005 RECV2 thread-token pass-through</text>
+  <text x="777" y="304" text-anchor="middle" class="nt-small">1007 exclusive recv, 1009 refcount UAF fix</text>
+
+  <line x1="470" y1="174" x2="470" y2="204" class="nt-dash"/>
+  <line x1="130" y1="204" x2="130" y2="220" class="nt-line"/>
+  <line x1="335" y1="204" x2="335" y2="220" class="nt-line"/>
+  <line x1="540" y1="204" x2="540" y2="220" class="nt-line"/>
+  <line x1="777" y1="204" x2="777" y2="220" class="nt-line"/>
+  <line x1="130" y1="204" x2="777" y2="204" class="nt-dash"/>
+
+  <rect x="70" y="364" width="240" height="100" class="nt-fix"/>
+  <text x="190" y="388" text-anchor="middle" class="nt-yellow">Feature / infrastructure phase</text>
+  <text x="190" y="412" text-anchor="middle" class="nt-label">1003 PI baseline</text>
+  <text x="190" y="430" text-anchor="middle" class="nt-label">1004 channel object</text>
+  <text x="190" y="448" text-anchor="middle" class="nt-label">1005 thread-token</text>
+  <text x="190" y="466" text-anchor="middle" class="nt-label">1006 alloc-hoist</text>
+
+  <rect x="360" y="364" width="240" height="100" class="nt-fix"/>
+  <text x="480" y="388" text-anchor="middle" class="nt-yellow">Surgical hardening phase</text>
+  <text x="480" y="412" text-anchor="middle" class="nt-label">1007 recv exclusivity</text>
+  <text x="480" y="430" text-anchor="middle" class="nt-label">1008 deferred event boost</text>
+  <text x="480" y="448" text-anchor="middle" class="nt-label">1009 channel-entry refcount</text>
+
+  <rect x="650" y="364" width="220" height="100" class="nt-box"/>
+  <text x="760" y="388" text-anchor="middle" class="nt-label">Operational result</text>
+  <text x="760" y="412" text-anchor="middle" class="nt-small">single kernel sync substrate for RT waits</text>
+  <text x="760" y="430" text-anchor="middle" class="nt-small">channel-backed wineserver transport</text>
+  <text x="760" y="448" text-anchor="middle" class="nt-small">debug-kernel bugs closed before wider rollout</text>
+</svg>
+</div>
+
+
 <hr />
 
 <h2>2. Object Types</h2>
@@ -465,6 +567,104 @@ raw_spinlock_t dev-&gt;boost_lock    device-wide, protects boosted_owners list
 </code></pre>
 
 <p>The rb-tree key is <code>(prio DESC, seq ASC)</code>: higher priority sorts first; ties break by enqueue order. <code>channel_pending_insert()</code> returns true iff the entry became the new tree minimum &ndash; i.e. it would be popped next. That return value drives the speculative-boost decision in <code>SEND_PI</code>.</p>
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 940 560" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
+  <style>
+    .ch-bg { fill: #1a1b26; }
+    .ch-lane { fill: none; stroke: #3b4261; stroke-width: 1; stroke-dasharray: 5,4; }
+    .ch-box { fill: #24283b; stroke: #7aa2f7; stroke-width: 2; rx: 7; }
+    .ch-kernel { fill: #1a1a2a; stroke: #bb9af7; stroke-width: 2; rx: 7; }
+    .ch-state { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 7; }
+    .ch-fix { fill: #2a1f14; stroke: #e0af68; stroke-width: 1.6; rx: 7; }
+    .ch-label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+    .ch-small { fill: #8c92b3; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+    .ch-title { fill: #7aa2f7; font-size: 14px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .ch-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .ch-yellow { fill: #e0af68; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .ch-violet { fill: #bb9af7; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .ch-line { stroke: #c0caf5; stroke-width: 1.4; }
+  </style>
+  <defs>
+    <marker id="chArrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="#c0caf5"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="940" height="560" class="ch-bg"/>
+  <text x="470" y="28" text-anchor="middle" class="ch-title">Channel object lifecycle: request ordering, dispatch, reply, and cleanup</text>
+
+  <text x="140" y="64" text-anchor="middle" class="ch-label">Client sender</text>
+  <text x="470" y="64" text-anchor="middle" class="ch-violet">Kernel channel object</text>
+  <text x="800" y="64" text-anchor="middle" class="ch-label">Dispatcher pthread</text>
+
+  <line x1="140" y1="78" x2="140" y2="520" class="ch-lane"/>
+  <line x1="470" y1="78" x2="470" y2="520" class="ch-lane"/>
+  <line x1="800" y1="78" x2="800" y2="520" class="ch-lane"/>
+
+  <rect x="40" y="98" width="200" height="56" class="ch-box"/>
+  <text x="140" y="122" text-anchor="middle" class="ch-label">SEND_PI</text>
+  <text x="140" y="140" text-anchor="middle" class="ch-small">payload_off, reply_off, prio</text>
+
+  <rect x="330" y="98" width="280" height="72" class="ch-state"/>
+  <text x="470" y="122" text-anchor="middle" class="ch-green">PENDING rb-tree</text>
+  <text x="470" y="140" text-anchor="middle" class="ch-small">key = (prio DESC, seq ASC)</text>
+  <text x="470" y="158" text-anchor="middle" class="ch-small">depth++, entry may become new minimum</text>
+
+  <line x1="240" y1="126" x2="330" y2="126" class="ch-line" marker-end="url(#chArrow)"/>
+
+  <rect x="670" y="98" width="260" height="56" class="ch-box"/>
+  <text x="800" y="122" text-anchor="middle" class="ch-label">RECV / RECV2 waiter</text>
+  <text x="800" y="140" text-anchor="middle" class="ch-small">blocked on recv_wq</text>
+
+  <line x1="610" y1="148" x2="670" y2="148" class="ch-line" marker-end="url(#chArrow)"/>
+  <text x="640" y="138" text-anchor="middle" class="ch-yellow">boost + wake</text>
+  <text x="640" y="154" text-anchor="middle" class="ch-small">1007 makes wake exclusive</text>
+
+  <rect x="330" y="210" width="280" height="80" class="ch-kernel"/>
+  <text x="470" y="234" text-anchor="middle" class="ch-violet">RECV pop</text>
+  <text x="470" y="252" text-anchor="middle" class="ch-small">remove rb-tree minimum</text>
+  <text x="470" y="270" text-anchor="middle" class="ch-small">mark DISPATCHED, append list, depth--</text>
+  <text x="470" y="288" text-anchor="middle" class="ch-small">1005 RECV2 adds thread_token lookup</text>
+
+  <line x1="800" y1="154" x2="800" y2="210" class="ch-line" marker-end="url(#chArrow)"/>
+  <line x1="800" y1="250" x2="610" y2="250" class="ch-line" marker-end="url(#chArrow)"/>
+
+  <rect x="670" y="326" width="260" height="80" class="ch-box"/>
+  <text x="800" y="350" text-anchor="middle" class="ch-label">handler runs in wineserver</text>
+  <text x="800" y="368" text-anchor="middle" class="ch-small">current auto-boosted to entry prio</text>
+  <text x="800" y="386" text-anchor="middle" class="ch-small">reply data written to shared memory</text>
+  <text x="800" y="404" text-anchor="middle" class="ch-small">then REPLY(entry_id)</text>
+
+  <line x1="800" y1="290" x2="800" y2="326" class="ch-line" marker-end="url(#chArrow)"/>
+
+  <rect x="330" y="326" width="280" height="80" class="ch-state"/>
+  <text x="470" y="350" text-anchor="middle" class="ch-green">DISPATCHED list</text>
+  <text x="470" y="368" text-anchor="middle" class="ch-small">lookup by entry_id at REPLY</text>
+  <text x="470" y="386" text-anchor="middle" class="ch-small">1009 refcount keeps entry alive across wake</text>
+  <text x="470" y="404" text-anchor="middle" class="ch-small">receiver drain drops handler boost</text>
+
+  <line x1="670" y1="366" x2="610" y2="366" class="ch-line" marker-end="url(#chArrow)"/>
+
+  <rect x="40" y="326" width="200" height="80" class="ch-box"/>
+  <text x="140" y="350" text-anchor="middle" class="ch-label">sender sleep</text>
+  <text x="140" y="368" text-anchor="middle" class="ch-small">wait_event on entry->wq</text>
+  <text x="140" y="386" text-anchor="middle" class="ch-small">cleanup may race with REPLY</text>
+  <text x="140" y="404" text-anchor="middle" class="ch-small">1009 closes UAF window</text>
+
+  <line x1="330" y1="366" x2="240" y2="366" class="ch-line" marker-end="url(#chArrow)"/>
+
+  <rect x="330" y="448" width="280" height="62" class="ch-fix"/>
+  <text x="470" y="472" text-anchor="middle" class="ch-yellow">Cleanup / free boundary</text>
+  <text x="470" y="490" text-anchor="middle" class="ch-small">detach from pending or dispatched state, free only at final refcount drop</text>
+
+  <line x1="140" y1="406" x2="140" y2="448" class="ch-line"/>
+  <line x1="140" y1="448" x2="330" y2="448" class="ch-line" marker-end="url(#chArrow)"/>
+
+  <text x="470" y="534" text-anchor="middle" class="ch-small">senders are ordered by priority in-kernel; per-sender ordering remains serial because each SEND_PI blocks for REPLY</text>
+</svg>
+</div>
+
 
 <h3>SEND_PI flow</h3>
 

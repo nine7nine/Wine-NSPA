@@ -1520,6 +1520,66 @@ RPC entirely.
 Uses `NSPA_SHM_RETRY_GUARD` ([§14](#14-nspa_shm_retry_guard)) inside
 the seqlock retry loop; on retry exhaustion, falls back to RPC.
 
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 940 420" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .pc-bg { fill: #1a1b26; }
+    .pc-box { fill: #24283b; stroke: #7aa2f7; stroke-width: 2; rx: 8; }
+    .pc-fast { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
+    .pc-server { fill: #2a1a1a; stroke: #f7768e; stroke-width: 1.8; rx: 8; }
+    .pc-label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+    .pc-small { fill: #8c92b3; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+    .pc-title { fill: #7aa2f7; font-size: 14px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .pc-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .pc-red { fill: #f7768e; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .pc-line { stroke: #c0caf5; stroke-width: 1.4; }
+  </style>
+  <defs>
+    <marker id="pcArrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="#c0caf5"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="940" height="420" class="pc-bg"/>
+  <text x="470" y="28" text-anchor="middle" class="pc-title">Phase B1.0 paint cache: queue-level "nothing dirty" proof before the legacy RPC</text>
+
+  <rect x="70" y="86" width="230" height="88" class="pc-box"/>
+  <text x="185" y="112" text-anchor="middle" class="pc-label">caller: `get_update_flags(hwnd)`</text>
+  <text x="185" y="138" text-anchor="middle" class="pc-small">dominant site: `erase_now()` polling loop</text>
+  <text x="185" y="156" text-anchor="middle" class="pc-small">historical cost: `get_update_region` RPC flood</text>
+
+  <rect x="355" y="66" width="230" height="128" class="pc-fast"/>
+  <text x="470" y="92" text-anchor="middle" class="pc-green">queue_shm read</text>
+  <text x="470" y="118" text-anchor="middle" class="pc-label">`get_shared_queue()` -> `wake_bits`</text>
+  <text x="470" y="136" text-anchor="middle" class="pc-small">bounded by `NSPA_SHM_RETRY_GUARD`</text>
+  <text x="470" y="160" text-anchor="middle" class="pc-label">if `QS_PAINT` clear and hwnd is local-owner</text>
+  <text x="470" y="178" text-anchor="middle" class="pc-small">return `flags = 0` locally</text>
+
+  <rect x="640" y="86" width="230" height="88" class="pc-server"/>
+  <text x="755" y="112" text-anchor="middle" class="pc-red">legacy fallback</text>
+  <text x="755" y="138" text-anchor="middle" class="pc-label">`SERVER_START_REQ(get_update_region)`</text>
+  <text x="755" y="156" text-anchor="middle" class="pc-small">taken when one queue bit is insufficient</text>
+
+  <line x1="300" y1="130" x2="355" y2="130" class="pc-line" marker-end="url(#pcArrow)"/>
+  <line x1="585" y1="130" x2="640" y2="130" class="pc-line" marker-end="url(#pcArrow)"/>
+
+  <rect x="120" y="254" width="260" height="96" class="pc-fast"/>
+  <text x="250" y="280" text-anchor="middle" class="pc-green">fastpath hit</text>
+  <text x="250" y="306" text-anchor="middle" class="pc-label">queue has no dirty paint state</text>
+  <text x="250" y="324" text-anchor="middle" class="pc-small">safe short-circuit for this queue owner</text>
+
+  <rect x="560" y="254" width="260" height="96" class="pc-server"/>
+  <text x="690" y="280" text-anchor="middle" class="pc-red">fastpath miss</text>
+  <text x="690" y="306" text-anchor="middle" class="pc-label">`QS_PAINT` set, foreign hwnd, or shm not ready</text>
+  <text x="690" y="324" text-anchor="middle" class="pc-small">RPC preserves exact per-window semantics</text>
+
+  <line x1="470" y1="194" x2="250" y2="254" class="pc-line" marker-end="url(#pcArrow)"/>
+  <line x1="470" y1="194" x2="690" y2="254" class="pc-line" marker-end="url(#pcArrow)"/>
+
+  <text x="470" y="388" text-anchor="middle" class="pc-small">the cache is intentionally coarse: it only proves the "definitely no paint" case and falls back whenever a queue-level bit cannot answer the exact per-window question</text>
+</svg>
+</div>
+
 ### 12.4 Caller-side integration
 
 `get_update_flags` (`dce.c:1692-1709`):
@@ -1651,6 +1711,68 @@ Ableton playback. Inspection candidates (from the handoff doc):
    logic.
 4. **Late-binding cases** — when the ring's bypass shm isn't
    bootstrapped yet (early in process startup).
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 940 430" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .gm-bg { fill: #1a1b26; }
+    .gm-box { fill: #24283b; stroke: #7aa2f7; stroke-width: 2; rx: 8; }
+    .gm-fast { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
+    .gm-server { fill: #2a1a1a; stroke: #f7768e; stroke-width: 1.8; rx: 8; }
+    .gm-wip { fill: #1f2535; stroke: #bb9af7; stroke-width: 1.8; rx: 8; }
+    .gm-label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+    .gm-small { fill: #8c92b3; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+    .gm-title { fill: #7aa2f7; font-size: 14px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .gm-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .gm-red { fill: #f7768e; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .gm-violet { fill: #bb9af7; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .gm-line { stroke: #c0caf5; stroke-width: 1.4; }
+  </style>
+  <defs>
+    <marker id="gmArrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="#c0caf5"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="940" height="430" class="gm-bg"/>
+  <text x="470" y="28" text-anchor="middle" class="gm-title">Phase C target: collapse the residual `get_message` traffic that still crosses wineserver</text>
+
+  <rect x="70" y="88" width="250" height="108" class="gm-fast"/>
+  <text x="195" y="114" text-anchor="middle" class="gm-green">Already bypassed</text>
+  <text x="195" y="140" text-anchor="middle" class="gm-label">cross-thread POST / SEND</text>
+  <text x="195" y="158" text-anchor="middle" class="gm-small">producer writes forward ring, receiver drains locally</text>
+  <text x="195" y="176" text-anchor="middle" class="gm-small">sync reply goes through sender's reply ring</text>
+
+  <rect x="345" y="66" width="250" height="152" class="gm-server"/>
+  <text x="470" y="92" text-anchor="middle" class="gm-red">Residual `get_message` RPC bucket</text>
+  <text x="470" y="118" text-anchor="middle" class="gm-label">server-generated `WM_PAINT` / hardware / winevent</text>
+  <text x="470" y="136" text-anchor="middle" class="gm-small">bucket B dominated Stage 1 captures</text>
+  <text x="470" y="160" text-anchor="middle" class="gm-label">self-thread + late bootstrap + cross-process edge cases</text>
+  <text x="470" y="178" text-anchor="middle" class="gm-small">smaller buckets stay on authoritative path</text>
+
+  <rect x="620" y="88" width="250" height="108" class="gm-wip"/>
+  <text x="745" y="114" text-anchor="middle" class="gm-violet">Phase C direction</text>
+  <text x="745" y="140" text-anchor="middle" class="gm-label">new server-side push category in queue shm</text>
+  <text x="745" y="158" text-anchor="middle" class="gm-small">co-locate with existing bypass region</text>
+  <text x="745" y="176" text-anchor="middle" class="gm-small">leave hard cases on RPC fallback</text>
+
+  <line x1="320" y1="142" x2="345" y2="142" class="gm-line" marker-end="url(#gmArrow)"/>
+  <line x1="595" y1="142" x2="620" y2="142" class="gm-line" marker-end="url(#gmArrow)"/>
+
+  <rect x="140" y="274" width="220" height="92" class="gm-box"/>
+  <text x="250" y="300" text-anchor="middle" class="gm-label">keep local semantics</text>
+  <text x="250" y="326" text-anchor="middle" class="gm-small">queue owner still dispatches its own messages</text>
+  <text x="250" y="344" text-anchor="middle" class="gm-small">same-process priority and wake model unchanged</text>
+
+  <rect x="580" y="274" width="220" height="92" class="gm-box"/>
+  <text x="690" y="300" text-anchor="middle" class="gm-label">shrink server default path</text>
+  <text x="690" y="326" text-anchor="middle" class="gm-small">goal is fewer `get_message` RTTs, not zero corner cases</text>
+  <text x="690" y="344" text-anchor="middle" class="gm-small">fallback remains the correctness envelope</text>
+
+  <line x1="470" y1="218" x2="250" y2="274" class="gm-line" marker-end="url(#gmArrow)"/>
+  <line x1="470" y1="218" x2="690" y2="274" class="gm-line" marker-end="url(#gmArrow)"/>
+</svg>
+</div>
 
 The Phase C Stage 1 bucketing diag (now removed) was instrumented to
 attribute `get_message` RPCs to one of these categories. Stage 1

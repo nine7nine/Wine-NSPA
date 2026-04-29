@@ -226,6 +226,71 @@ The wineserver publishes a `NSPA_INODE_BUCKETS` = 1024 bucket hash table as a me
 └───────────────────────────────────────────────┘
 ```
 
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 940 420" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .lf-bg { fill: #1a1b26; }
+    .lf-box { fill: #24283b; stroke: #7aa2f7; stroke-width: 2; rx: 8; }
+    .lf-fast { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
+    .lf-server { fill: #2a1a1a; stroke: #f7768e; stroke-width: 1.8; rx: 8; }
+    .lf-bucket { fill: #1f2535; stroke: #bb9af7; stroke-width: 1.6; rx: 8; }
+    .lf-label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+    .lf-small { fill: #8c92b3; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+    .lf-title { fill: #7aa2f7; font-size: 14px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .lf-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .lf-red { fill: #f7768e; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .lf-violet { fill: #bb9af7; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .lf-line { stroke: #c0caf5; stroke-width: 1.4; }
+  </style>
+  <defs>
+    <marker id="lfShareArrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="#c0caf5"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="940" height="420" class="lf-bg"/>
+  <text x="470" y="28" text-anchor="middle" class="lf-title">Shared inode arbitration: bypass clients and wineserver publish into one compatibility table</text>
+
+  <rect x="50" y="88" width="220" height="88" class="lf-fast"/>
+  <text x="160" y="114" text-anchor="middle" class="lf-green">Client process A</text>
+  <text x="160" y="140" text-anchor="middle" class="lf-label">stat() -> (dev, inode)</text>
+  <text x="160" y="158" text-anchor="middle" class="lf-small">check_and_publish_open</text>
+
+  <rect x="50" y="242" width="220" height="88" class="lf-fast"/>
+  <text x="160" y="268" text-anchor="middle" class="lf-green">Client process B</text>
+  <text x="160" y="294" text-anchor="middle" class="lf-label">same file, different access/share mask</text>
+  <text x="160" y="312" text-anchor="middle" class="lf-small">must see A before minting local handle</text>
+
+  <rect x="335" y="66" width="270" height="286" class="lf-bucket"/>
+  <text x="470" y="92" text-anchor="middle" class="lf-violet">memfd-backed inode table</text>
+  <rect x="365" y="120" width="210" height="62" class="lf-box"/>
+  <text x="470" y="144" text-anchor="middle" class="lf-label">bucket = hash(dev, inode) % 1024</text>
+  <text x="470" y="162" text-anchor="middle" class="lf-small">per-bucket PI mutex</text>
+  <rect x="365" y="206" width="210" height="104" class="lf-box"/>
+  <text x="470" y="230" text-anchor="middle" class="lf-label">slot[0..3]</text>
+  <text x="470" y="248" text-anchor="middle" class="lf-small">dev, inode</text>
+  <text x="470" y="266" text-anchor="middle" class="lf-small">agg_access, agg_sharing</text>
+  <text x="470" y="284" text-anchor="middle" class="lf-small">refcount</text>
+  <text x="470" y="302" text-anchor="middle" class="lf-small">overflow -> STATUS_NOT_SUPPORTED fallback</text>
+
+  <rect x="670" y="88" width="220" height="88" class="lf-server"/>
+  <text x="780" y="114" text-anchor="middle" class="lf-red">wineserver non-bypass open</text>
+  <text x="780" y="140" text-anchor="middle" class="lf-label">server-side publish hook</text>
+  <text x="780" y="158" text-anchor="middle" class="lf-small">same compatibility rule, same bucket</text>
+
+  <rect x="670" y="242" width="220" height="88" class="lf-server"/>
+  <text x="780" y="268" text-anchor="middle" class="lf-red">authoritative fallback</text>
+  <text x="780" y="294" text-anchor="middle" class="lf-label">overflow or unsupported case</text>
+  <text x="780" y="312" text-anchor="middle" class="lf-small">server create_file path remains exact</text>
+
+  <line x1="270" y1="132" x2="335" y2="132" class="lf-line" marker-end="url(#lfShareArrow)"/>
+  <line x1="270" y1="286" x2="335" y2="286" class="lf-line" marker-end="url(#lfShareArrow)"/>
+  <line x1="670" y1="132" x2="605" y2="132" class="lf-line" marker-end="url(#lfShareArrow)"/>
+  <line x1="605" y1="286" x2="670" y2="286" class="lf-line" marker-end="url(#lfShareArrow)"/>
+  <text x="470" y="386" text-anchor="middle" class="lf-small">the table is not a data path cache; it is a compatibility contract so local opens and server opens enforce one sharing model</text>
+</svg>
+</div>
+
 Bucket index = hash(dev, inode) mod 1024. Slot selection is linear within the bucket (first free or matching). If all 4 slots are full and none match, the bypass returns `STATUS_NOT_SUPPORTED` and the open falls back to the server -- this is an overflow-safety valve, not a correctness path.
 
 ### 6.2 Arbitration logic
@@ -269,6 +334,74 @@ HANDLE nspa_promote_if_local( HANDLE h );
 ```
 
 This is Phase 1A.4.a lazy-promotion. The alternative -- eagerly promoting at mint time -- was rejected because most file opens in Ableton's workload never touch a server-requiring API; they read, maybe query a position, and close. Eager promotion would cost an RPC per open; lazy promotion costs an RPC per *distinct file that escapes the read-only happy path*.
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 940 430" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .lp-bg { fill: #1a1b26; }
+    .lp-box { fill: #24283b; stroke: #7aa2f7; stroke-width: 2; rx: 8; }
+    .lp-fast { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
+    .lp-slow { fill: #2a1a1a; stroke: #f7768e; stroke-width: 1.8; rx: 8; }
+    .lp-label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+    .lp-small { fill: #8c92b3; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+    .lp-title { fill: #7aa2f7; font-size: 14px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .lp-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .lp-red { fill: #f7768e; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .lp-line { stroke: #c0caf5; stroke-width: 1.4; }
+  </style>
+  <defs>
+    <marker id="lpArrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="#c0caf5"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="940" height="430" class="lp-bg"/>
+  <text x="470" y="28" text-anchor="middle" class="lp-title">Lazy promotion: keep the read-only happy path local until an API actually needs server state</text>
+
+  <rect x="80" y="78" width="220" height="64" class="lp-fast"/>
+  <text x="190" y="104" text-anchor="middle" class="lp-green">local handle minted</text>
+  <text x="190" y="124" text-anchor="middle" class="lp-small">`server_handle = 0`, unix fd already valid</text>
+
+  <rect x="360" y="78" width="220" height="64" class="lp-box"/>
+  <text x="470" y="104" text-anchor="middle" class="lp-label">intercept site checks handle range</text>
+  <text x="470" y="124" text-anchor="middle" class="lp-small">`nspa_local_file_is_local_handle()`</text>
+
+  <rect x="640" y="78" width="220" height="64" class="lp-fast"/>
+  <text x="750" y="104" text-anchor="middle" class="lp-green">already promoted?</text>
+  <text x="750" y="124" text-anchor="middle" class="lp-small">reuse cached server handle if yes</text>
+
+  <line x1="300" y1="110" x2="360" y2="110" class="lp-line" marker-end="url(#lpArrow)"/>
+  <line x1="580" y1="110" x2="640" y2="110" class="lp-line" marker-end="url(#lpArrow)"/>
+
+  <rect x="70" y="208" width="250" height="140" class="lp-fast"/>
+  <text x="195" y="234" text-anchor="middle" class="lp-green">stays local</text>
+  <text x="195" y="260" text-anchor="middle" class="lp-label">NtReadFile / NtWriteFile</text>
+  <text x="195" y="278" text-anchor="middle" class="lp-small">server_get_unix_fd fast path</text>
+  <text x="195" y="302" text-anchor="middle" class="lp-label">basic query classes</text>
+  <text x="195" y="320" text-anchor="middle" class="lp-small">no server-visible object required</text>
+
+  <rect x="345" y="208" width="250" height="140" class="lp-slow"/>
+  <text x="470" y="234" text-anchor="middle" class="lp-red">promote now</text>
+  <text x="470" y="260" text-anchor="middle" class="lp-label">NtCreateSection / NtDuplicateObject</text>
+  <text x="470" y="278" text-anchor="middle" class="lp-small">NtQueryObject / server-side info classes</text>
+  <text x="470" y="302" text-anchor="middle" class="lp-label">CreateProcess inheritance</text>
+  <text x="470" y="320" text-anchor="middle" class="lp-small">crosses into server object model</text>
+
+  <rect x="620" y="208" width="250" height="140" class="lp-box"/>
+  <text x="745" y="234" text-anchor="middle" class="lp-label">one RPC only</text>
+  <text x="745" y="260" text-anchor="middle" class="lp-small">send fd via SCM_RIGHTS</text>
+  <text x="745" y="278" text-anchor="middle" class="lp-small">server allocates real handle</text>
+  <text x="745" y="296" text-anchor="middle" class="lp-small">cache `server_handle` in LF entry</text>
+  <text x="745" y="320" text-anchor="middle" class="lp-small">all later calls reuse it</text>
+
+  <line x1="470" y1="142" x2="195" y2="208" class="lp-line" marker-end="url(#lpArrow)"/>
+  <line x1="470" y1="142" x2="470" y2="208" class="lp-line" marker-end="url(#lpArrow)"/>
+  <line x1="750" y1="142" x2="745" y2="208" class="lp-line" marker-end="url(#lpArrow)"/>
+  <line x1="595" y1="278" x2="620" y2="278" class="lp-line" marker-end="url(#lpArrow)"/>
+
+  <text x="470" y="390" text-anchor="middle" class="lp-small">this is why lazy promotion wins on workloads like Ableton: most opens die on the left-hand path and never pay the server transition</text>
+</svg>
+</div>
 
 ### 7.1 `attributes` plumbing
 
