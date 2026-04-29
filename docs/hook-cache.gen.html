@@ -181,6 +181,66 @@ Author: Jordan Johnston</p>
 <p>Tier 2 lives in <code>nspa_queue_bypass_shm_t</code>, NSPA&rsquo;s per-queue auxiliary shmem region (one mapping per queue, separate from the main queue_shm). The chain entries are fixed-size 64-byte structs (one cache line) and the module-name strings live in a separate 4 KB pool referenced by byte offset.</p>
 
 <div class="diagram-container">
+<svg width="100%" viewBox="0 0 920 360" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
+  <style>
+    .hc-bg { fill: #1a1b26; }
+    .hc-box { fill: #24283b; stroke: #3b4261; stroke-width: 1.4; rx: 8; }
+    .hc-tier1 { fill: #1a2235; stroke: #7aa2f7; stroke-width: 1.8; rx: 8; }
+    .hc-tier2 { fill: #2a1f35; stroke: #bb9af7; stroke-width: 1.8; rx: 8; }
+    .hc-server { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
+    .hc-label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+    .hc-sm { fill: #8c92b3; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+    .hc-head { fill: #7aa2f7; font-size: 14px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .hc-blue { fill: #7aa2f7; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .hc-pur { fill: #bb9af7; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .hc-grn { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .hc-arrow-b { stroke: #7aa2f7; stroke-width: 1.8; fill: none; }
+    .hc-arrow-p { stroke: #bb9af7; stroke-width: 1.8; fill: none; }
+    .hc-arrow-g { stroke: #9ece6a; stroke-width: 1.8; fill: none; }
+  </style>
+
+  <rect x="0" y="0" width="920" height="360" class="hc-bg"/>
+  <text x="460" y="24" text-anchor="middle" class="hc-head">Hook cache publication layout</text>
+
+  <rect x="34" y="64" width="220" height="92" class="hc-server"/>
+  <text x="144" y="90" text-anchor="middle" class="hc-label">wineserver write side</text>
+  <text x="144" y="107" text-anchor="middle" class="hc-sm">add_hook / remove_hook</text>
+  <text x="144" y="121" text-anchor="middle" class="hc-sm">add_queue_hook_count()</text>
+  <text x="144" y="135" text-anchor="middle" class="hc-sm">nspa_hook_cache_rebuild()</text>
+
+  <rect x="322" y="54" width="260" height="112" class="hc-tier1"/>
+  <text x="452" y="80" text-anchor="middle" class="hc-blue">Tier 1: queue_shm->hooks_count[NB_HOOKS]</text>
+  <text x="452" y="97" text-anchor="middle" class="hc-sm">small shared array already present in queue_shm</text>
+  <text x="452" y="111" text-anchor="middle" class="hc-sm">answers "is any hook of this id installed?"</text>
+  <text x="452" y="125" text-anchor="middle" class="hc-sm">client-side reader: is_hooked()</text>
+  <text x="452" y="146" text-anchor="middle" class="hc-blue">fast negative gate, no RPC</text>
+
+  <rect x="322" y="194" width="260" height="126" class="hc-tier2"/>
+  <text x="452" y="220" text-anchor="middle" class="hc-pur">Tier 2: bypass->nspa_hook_chains[]</text>
+  <text x="452" y="237" text-anchor="middle" class="hc-sm">fixed-size chain snapshots per hook id</text>
+  <text x="452" y="251" text-anchor="middle" class="hc-sm">plus nspa_hook_module_pool[4096] for UTF-16 names</text>
+  <text x="452" y="265" text-anchor="middle" class="hc-sm">seqlock version guards readers during rebuild</text>
+  <text x="452" y="279" text-anchor="middle" class="hc-sm">client-side reader: nspa_hook_try_read_cache()</text>
+  <text x="452" y="300" text-anchor="middle" class="hc-pur">local chain walk when snapshot is valid</text>
+
+  <rect x="650" y="116" width="236" height="126" class="hc-box"/>
+  <text x="768" y="142" text-anchor="middle" class="hc-label">client dispatch side</text>
+  <text x="768" y="159" text-anchor="middle" class="hc-sm">Tier 1 count==0 -> return immediately</text>
+  <text x="768" y="173" text-anchor="middle" class="hc-sm">Tier 2 snapshot valid -> walk locally</text>
+  <text x="768" y="187" text-anchor="middle" class="hc-sm">overflow / retry exhaust / unmapped -> RPC fallback</text>
+  <text x="768" y="208" text-anchor="middle" class="hc-grn">correctness stays server-authoritative</text>
+
+  <line x1="254" y1="102" x2="322" y2="102" class="hc-arrow-g"/>
+  <line x1="254" y1="118" x2="322" y2="240" class="hc-arrow-g"/>
+  <line x1="582" y1="110" x2="650" y2="144" class="hc-arrow-b"/>
+  <line x1="582" y1="250" x2="650" y2="214" class="hc-arrow-p"/>
+</svg>
+</div>
+
+
+
+
+<div class="diagram-container">
 <svg width="100%" viewBox="0 0 920 540" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
   <rect x="0" y="0" width="920" height="540" fill="#1a1b26"/>
 

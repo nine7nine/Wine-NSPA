@@ -105,7 +105,6 @@ Author: jordan Johnston</p>
 <li><a href="#12-bug-history-and-audits">Bug History and Audits</a></li>
 <li><a href="#13-validation-and-performance">Validation and Performance</a></li>
 <li><a href="#14-references">References</a></li>
-<li><a href="#15-flow-diagram">Flow Diagram</a></li>
 </ol>
 
 
@@ -314,6 +313,92 @@ alongside the existing per-thread <code>request_shm</code> fds in the
 <code>server_call_unlocked</code> whose request fits in the per-thread shmem
 window.</p>
 
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 960 340" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
+  <style>
+    .gc-bg { fill: #1a1b26; }
+    .gc-process { fill: #24283b; stroke: #3b4261; stroke-width: 1.5; rx: 10; }
+    .gc-client { fill: #1a2235; stroke: #7aa2f7; stroke-width: 1.8; rx: 8; }
+    .gc-kernel { fill: #2a1f35; stroke: #bb9af7; stroke-width: 1.8; rx: 8; }
+    .gc-server { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
+    .gc-shmem  { fill: #2a2418; stroke: #e0af68; stroke-width: 1.5; rx: 8; }
+    .gc-label  { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+    .gc-sm     { fill: #8c92b3; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+    .gc-head   { fill: #7aa2f7; font-size: 14px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .gc-blue   { fill: #7aa2f7; font-size: 11px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .gc-pur    { fill: #bb9af7; font-size: 11px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .gc-grn    { fill: #9ece6a; font-size: 11px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .gc-yel    { fill: #e0af68; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .gc-arrow-b { stroke: #7aa2f7; stroke-width: 1.8; fill: none; }
+    .gc-arrow-p { stroke: #bb9af7; stroke-width: 1.8; fill: none; }
+    .gc-arrow-g { stroke: #9ece6a; stroke-width: 1.8; fill: none; }
+    .gc-arrow-y { stroke: #e0af68; stroke-width: 1.6; fill: none; stroke-dasharray: 5,4; }
+  </style>
+
+  <rect x="0" y="0" width="960" height="340" class="gc-bg"/>
+  <text x="480" y="24" text-anchor="middle" class="gc-head">Gamma channel topology</text>
+
+  <rect x="24" y="48" width="276" height="248" class="gc-process"/>
+  <text x="42" y="70" class="gc-blue">Client process</text>
+  <text x="42" y="84" class="gc-sm">many sender threads, one shared channel fd</text>
+
+  <rect x="44" y="104" width="108" height="54" class="gc-client"/>
+  <text x="98" y="126" text-anchor="middle" class="gc-label">sender thread A</text>
+  <text x="98" y="143" text-anchor="middle" class="gc-sm">memcpy req</text>
+
+  <rect x="168" y="104" width="108" height="54" class="gc-client"/>
+  <text x="222" y="126" text-anchor="middle" class="gc-label">sender thread B</text>
+  <text x="222" y="143" text-anchor="middle" class="gc-sm">memcpy req</text>
+
+  <rect x="44" y="186" width="232" height="62" class="gc-shmem"/>
+  <text x="160" y="208" text-anchor="middle" class="gc-yel">per-thread request_shm pages</text>
+  <text x="160" y="225" text-anchor="middle" class="gc-sm">payload and reply remain zero-copy</text>
+  <text x="160" y="239" text-anchor="middle" class="gc-sm">channel carries metadata only</text>
+
+  <rect x="74" y="264" width="172" height="22" class="gc-client"/>
+  <text x="160" y="279" text-anchor="middle" class="gc-sm">nspa_request_channel_fd</text>
+
+  <rect x="342" y="72" width="276" height="200" class="gc-process"/>
+  <text x="360" y="94" class="gc-pur">Kernel</text>
+  <text x="360" y="108" class="gc-sm">ntsync channel object</text>
+
+  <rect x="370" y="128" width="220" height="94" class="gc-kernel"/>
+  <text x="480" y="151" text-anchor="middle" class="gc-label">priority rbtree of entries</text>
+  <text x="480" y="168" text-anchor="middle" class="gc-sm">sender_tid, prio, payload_off, thread_token</text>
+  <text x="480" y="185" text-anchor="middle" class="gc-sm">SEND_PI enqueue + boost + block</text>
+  <text x="480" y="202" text-anchor="middle" class="gc-sm">RECV2 dequeue + boost dispatcher</text>
+  <text x="480" y="216" text-anchor="middle" class="gc-sm">REPLY wake sender + drain / re-boost</text>
+
+  <rect x="660" y="48" width="276" height="248" class="gc-process"/>
+  <text x="678" y="70" class="gc-grn">Wineserver process</text>
+  <text x="678" y="84" class="gc-sm">one dispatcher pthread per client process</text>
+
+  <rect x="684" y="104" width="228" height="62" class="gc-server"/>
+  <text x="798" y="126" text-anchor="middle" class="gc-label">channel_dispatcher pthread</text>
+  <text x="798" y="143" text-anchor="middle" class="gc-sm">RECV2 loop at NSPA_SRV_RT_PRIO</text>
+  <text x="798" y="157" text-anchor="middle" class="gc-sm">thread-token-aware on T1/T2/T3 kernels</text>
+
+  <rect x="684" y="194" width="228" height="70" class="gc-server"/>
+  <text x="798" y="216" text-anchor="middle" class="gc-label">existing request handlers</text>
+  <text x="798" y="233" text-anchor="middle" class="gc-sm">read_request_shm under global_lock</text>
+  <text x="798" y="247" text-anchor="middle" class="gc-sm">writes reply back into request_shm</text>
+
+  <line x1="246" y1="275" x2="370" y2="175" class="gc-arrow-p"/>
+  <text x="305" y="208" text-anchor="middle" class="gc-pur">SEND_PI / block for reply</text>
+
+  <line x1="590" y1="175" x2="684" y2="135" class="gc-arrow-g"/>
+  <text x="638" y="146" text-anchor="middle" class="gc-grn">RECV2</text>
+
+  <line x1="684" y1="228" x2="590" y2="228" class="gc-arrow-g"/>
+  <text x="638" y="220" text-anchor="middle" class="gc-grn">REPLY</text>
+
+  <line x1="160" y1="186" x2="160" y2="158" class="gc-arrow-y"/>
+  <line x1="798" y1="194" x2="798" y2="166" class="gc-arrow-y"/>
+  <text x="480" y="320" text-anchor="middle" class="gc-sm">Attach-time path: wineserver creates the channel fd and transfers it to the client with SCM_RIGHTS in init_first_thread.</text>
+</svg>
+</div>
+
+
 <h3>4.2 Per-request data flow</h3>
 
 <p>For a single request the data movement is:</p>
@@ -349,11 +434,165 @@ window.</p>
    request_shm[caller_tid]
 </code></pre>
 
-<p>Steps 2 and the unboost-and-rebooot inside the kernel REPLY handler
+<p>Steps 2 and the unboost-and-reboost inside the kernel REPLY handler
 are atomic with respect to each other under the channel&rsquo;s internal
 spinlock. There is no observable interval where the dispatcher is
 running unboosted while another high-prio entry sits ready in the
 queue.</p>
+
+<h3>4.3 End-to-end flow diagram</h3>
+
+<p>The following inline SVG shows a single request&rsquo;s lifecycle through
+gamma. Two senders are shown at differing priorities to illustrate
+the rbtree&rsquo;s strict-priority ordering and REPLY&rsquo;s automatic
+re-boost.</p>
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 980 640" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
+  <style>
+    .gd-bg     { fill: #1a1b26; }
+    .gd-client { fill: #24283b; stroke: #7aa2f7; stroke-width: 1.5; rx: 6; }
+    .gd-kernel { fill: #1a1a2a; stroke: #bb9af7; stroke-width: 2;   rx: 6; }
+    .gd-server { fill: #24283b; stroke: #9ece6a; stroke-width: 2;   rx: 6; }
+    .gd-shmem  { fill: #2a2418; stroke: #e0af68; stroke-width: 1.5; rx: 6; }
+    .gd-lane   { fill: none;    stroke: #3b4261; stroke-width: 1; stroke-dasharray: 6,4; }
+    .gd-title  { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
+    .gd-h      { fill: #c0caf5; font: bold 11px 'JetBrains Mono', monospace; }
+    .gd-l      { fill: #c0caf5; font: 10px 'JetBrains Mono', monospace; }
+    .gd-m      { fill: #8c92b3; font: 9px 'JetBrains Mono', monospace; }
+    .gd-acc    { fill: #7aa2f7; font: bold 10px 'JetBrains Mono', monospace; }
+    .gd-grn    { fill: #9ece6a; font: bold 10px 'JetBrains Mono', monospace; }
+    .gd-red    { fill: #f7768e; font: bold 10px 'JetBrains Mono', monospace; }
+    .gd-yel    { fill: #e0af68; font: bold 10px 'JetBrains Mono', monospace; }
+    .gd-pur    { fill: #bb9af7; font: bold 10px 'JetBrains Mono', monospace; }
+  </style>
+
+  <rect x="0" y="0" width="980" height="640" class="gd-bg"/>
+
+  <text x="490" y="22" text-anchor="middle" class="gd-title">Gamma channel: two senders, one dispatcher, kernel-mediated PI</text>
+
+  <!-- swim-lanes -->
+  <line x1="170" y1="40"  x2="170" y2="620" class="gd-lane"/>
+  <line x1="430" y1="40"  x2="430" y2="620" class="gd-lane"/>
+  <line x1="690" y1="40"  x2="690" y2="620" class="gd-lane"/>
+
+  <text x="85"  y="56" text-anchor="middle" class="gd-h">CLIENT THREAD A</text>
+  <text x="85"  y="70" text-anchor="middle" class="gd-m">FIFO 80 (audio)</text>
+
+  <text x="300" y="56" text-anchor="middle" class="gd-h">CLIENT THREAD B</text>
+  <text x="300" y="70" text-anchor="middle" class="gd-m">FIFO 50 (gui)</text>
+
+  <text x="560" y="56" text-anchor="middle" class="gd-h">KERNEL CHANNEL</text>
+  <text x="560" y="70" text-anchor="middle" class="gd-m">priority rbtree + PI boost</text>
+
+  <text x="830" y="56" text-anchor="middle" class="gd-h">DISPATCHER PTHREAD</text>
+  <text x="830" y="70" text-anchor="middle" class="gd-m">SCHED_FIFO base 64</text>
+
+  <!-- t0: B sends first -->
+  <rect x="220" y="92" width="160" height="32" class="gd-client"/>
+  <text x="300" y="105" text-anchor="middle" class="gd-l">memcpy req -> shmem[B]</text>
+  <text x="300" y="118" text-anchor="middle" class="gd-m">request_shm[B_tid]</text>
+
+  <line x1="380" y1="108" x2="480" y2="148" stroke="#bb9af7" stroke-width="1.5"/>
+  <text x="430" y="125" class="gd-pur" text-anchor="middle">SEND_PI(prio=50)</text>
+
+  <rect x="480" y="135" width="160" height="44" class="gd-kernel"/>
+  <text x="560" y="150" text-anchor="middle" class="gd-l">enqueue B @prio 50</text>
+  <text x="560" y="164" text-anchor="middle" class="gd-l">apply_event_pi_boost</text>
+  <text x="560" y="176" text-anchor="middle" class="gd-pur">dispatcher: 64 -> 50? NO (50&lt;64)</text>
+
+  <line x1="640" y1="156" x2="740" y2="180" stroke="#bb9af7" stroke-width="1.5"/>
+  <text x="710" y="170" class="gd-pur">wake</text>
+
+  <rect x="740" y="170" width="200" height="32" class="gd-server"/>
+  <text x="840" y="183" text-anchor="middle" class="gd-l">RECV2 -> entry B</text>
+  <text x="840" y="196" text-anchor="middle" class="gd-grn">re-boost dispatcher to 64</text>
+
+  <!-- t1: A arrives mid-handler -->
+  <rect x="20" y="228" width="160" height="32" class="gd-client"/>
+  <text x="100" y="241" text-anchor="middle" class="gd-l">memcpy req -> shmem[A]</text>
+  <text x="100" y="254" text-anchor="middle" class="gd-m">request_shm[A_tid]</text>
+
+  <line x1="180" y1="244" x2="480" y2="268" stroke="#7aa2f7" stroke-width="1.5"/>
+  <text x="330" y="258" class="gd-acc" text-anchor="middle">SEND_PI(prio=80)</text>
+
+  <rect x="480" y="258" width="160" height="60" class="gd-kernel"/>
+  <text x="560" y="273" text-anchor="middle" class="gd-l">enqueue A @prio 80</text>
+  <text x="560" y="287" text-anchor="middle" class="gd-l">apply_event_pi_boost</text>
+  <text x="560" y="300" text-anchor="middle" class="gd-acc">dispatcher: 64 -> 80 IMMEDIATE</text>
+  <text x="560" y="314" text-anchor="middle" class="gd-m">A blocks waiting for REPLY</text>
+
+  <!-- handler runs at 80 (preempted up) -->
+  <rect x="740" y="232" width="200" height="68" class="gd-server"/>
+  <text x="840" y="248" text-anchor="middle" class="gd-l">global_lock</text>
+  <text x="840" y="262" text-anchor="middle" class="gd-l">read_request_shm(B)</text>
+  <text x="840" y="276" text-anchor="middle" class="gd-acc">running @80 due to A's boost</text>
+  <text x="840" y="290" text-anchor="middle" class="gd-l">global_unlock</text>
+
+  <!-- t2: REPLY for B -->
+  <line x1="740" y1="316" x2="640" y2="350" stroke="#9ece6a" stroke-width="1.5"/>
+  <text x="690" y="332" class="gd-grn" text-anchor="middle">REPLY(B)</text>
+
+  <rect x="480" y="334" width="160" height="62" class="gd-kernel"/>
+  <text x="560" y="350" text-anchor="middle" class="gd-l">complete B.reply_done</text>
+  <text x="560" y="364" text-anchor="middle" class="gd-l">drain B's PI contribution</text>
+  <text x="560" y="378" text-anchor="middle" class="gd-acc">re-boost from queue head: 80</text>
+  <text x="560" y="392" text-anchor="middle" class="gd-m">(A is now head)</text>
+
+  <line x1="480" y1="358" x2="380" y2="402" stroke="#bb9af7" stroke-width="1.5"/>
+  <text x="430" y="382" class="gd-pur" text-anchor="middle">B wakes</text>
+
+  <rect x="220" y="394" width="160" height="32" class="gd-client"/>
+  <text x="300" y="407" text-anchor="middle" class="gd-l">memcpy reply <- shmem[B]</text>
+  <text x="300" y="420" text-anchor="middle" class="gd-m">SEND_PI returns</text>
+
+  <!-- t3: dispatcher RECV2 again -->
+  <line x1="640" y1="382" x2="740" y2="426" stroke="#9ece6a" stroke-width="1.5"/>
+  <text x="710" y="404" class="gd-grn">RECV2</text>
+
+  <rect x="740" y="418" width="200" height="32" class="gd-server"/>
+  <text x="840" y="431" text-anchor="middle" class="gd-l">RECV2 -> entry A</text>
+  <text x="840" y="444" text-anchor="middle" class="gd-acc">no re-boost: same prio 80</text>
+
+  <rect x="740" y="458" width="200" height="46" class="gd-server"/>
+  <text x="840" y="474" text-anchor="middle" class="gd-l">global_lock</text>
+  <text x="840" y="488" text-anchor="middle" class="gd-l">read_request_shm(A)</text>
+  <text x="840" y="500" text-anchor="middle" class="gd-l">global_unlock</text>
+
+  <line x1="740" y1="500" x2="640" y2="528" stroke="#9ece6a" stroke-width="1.5"/>
+  <text x="690" y="516" class="gd-grn" text-anchor="middle">REPLY(A)</text>
+
+  <rect x="480" y="510" width="160" height="44" class="gd-kernel"/>
+  <text x="560" y="524" text-anchor="middle" class="gd-l">complete A.reply_done</text>
+  <text x="560" y="538" text-anchor="middle" class="gd-l">drain A's PI</text>
+  <text x="560" y="551" text-anchor="middle" class="gd-yel">queue empty -> back to base 64</text>
+
+  <line x1="480" y1="534" x2="180" y2="572" stroke="#7aa2f7" stroke-width="1.5"/>
+  <text x="330" y="558" class="gd-acc" text-anchor="middle">A wakes</text>
+
+  <rect x="20" y="568" width="160" height="32" class="gd-client"/>
+  <text x="100" y="581" text-anchor="middle" class="gd-l">memcpy reply <- shmem[A]</text>
+  <text x="100" y="594" text-anchor="middle" class="gd-m">SEND_PI returns</text>
+
+  <!-- legend -->
+  <rect x="20" y="610" width="940" height="22" fill="#24283b" stroke="#3b4261" stroke-width="1" rx="4"/>
+  <text x="32"  y="625" class="gd-acc">A: prio 80</text>
+  <text x="120" y="625" class="gd-pur">B: prio 50</text>
+  <text x="210" y="625" class="gd-grn">REPLY = wake + drain + auto-reboost</text>
+  <text x="500" y="625" class="gd-yel">empty queue -> base prio</text>
+  <text x="700" y="625" class="gd-m">all kernel ops under channel->lock spinlock</text>
+</svg>
+</div>
+
+
+<p>The two-sender scenario shows the property that motivated gamma:
+between B&rsquo;s REPLY and the dispatcher&rsquo;s next RECV2, the dispatcher
+<strong>stays at FIFO 80</strong> because the kernel re-boosted from the new
+queue head atomically inside REPLY. The legacy v1.5 design would
+have unboosted the dispatcher to 64 at unboost-time and then
+re-boosted to 80 only when A&rsquo;s <code>sched_setscheduler</code> landed &ndash;
+which would have raced with the dispatcher&rsquo;s own RECV-side
+runqueue insertion. Gamma closes that gap by construction.</p>
 
 <hr />
 
@@ -1335,160 +1574,6 @@ unchanged: gamma improves the IPC path; CS-PI improves the in-
 process critical-section path; they coexist without interaction.</p>
 
 <hr />
-
-<h2>15. Flow Diagram</h2>
-
-<p>The following inline SVG shows a single request&rsquo;s lifecycle through
-gamma. Two senders are shown at differing priorities to illustrate
-the rbtree&rsquo;s strict-priority ordering and REPLY&rsquo;s automatic
-re-boost.</p>
-
-<div class="diagram-container">
-<svg width="100%" viewBox="0 0 980 640" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
-  <style>
-    .gd-bg     { fill: #1a1b26; }
-    .gd-client { fill: #24283b; stroke: #7aa2f7; stroke-width: 1.5; rx: 6; }
-    .gd-kernel { fill: #1a1a2a; stroke: #bb9af7; stroke-width: 2;   rx: 6; }
-    .gd-server { fill: #24283b; stroke: #9ece6a; stroke-width: 2;   rx: 6; }
-    .gd-shmem  { fill: #2a2418; stroke: #e0af68; stroke-width: 1.5; rx: 6; }
-    .gd-lane   { fill: none;    stroke: #3b4261; stroke-width: 1; stroke-dasharray: 6,4; }
-    .gd-title  { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
-    .gd-h      { fill: #c0caf5; font: bold 11px 'JetBrains Mono', monospace; }
-    .gd-l      { fill: #c0caf5; font: 10px 'JetBrains Mono', monospace; }
-    .gd-m      { fill: #8c92b3; font: 9px 'JetBrains Mono', monospace; }
-    .gd-acc    { fill: #7aa2f7; font: bold 10px 'JetBrains Mono', monospace; }
-    .gd-grn    { fill: #9ece6a; font: bold 10px 'JetBrains Mono', monospace; }
-    .gd-red    { fill: #f7768e; font: bold 10px 'JetBrains Mono', monospace; }
-    .gd-yel    { fill: #e0af68; font: bold 10px 'JetBrains Mono', monospace; }
-    .gd-pur    { fill: #bb9af7; font: bold 10px 'JetBrains Mono', monospace; }
-  </style>
-
-  <rect x="0" y="0" width="980" height="640" class="gd-bg"/>
-
-  <text x="490" y="22" text-anchor="middle" class="gd-title">Gamma channel: two senders, one dispatcher, kernel-mediated PI</text>
-
-  <!-- swim-lanes -->
-  <line x1="170" y1="40"  x2="170" y2="620" class="gd-lane"/>
-  <line x1="430" y1="40"  x2="430" y2="620" class="gd-lane"/>
-  <line x1="690" y1="40"  x2="690" y2="620" class="gd-lane"/>
-
-  <text x="85"  y="56" text-anchor="middle" class="gd-h">CLIENT THREAD A</text>
-  <text x="85"  y="70" text-anchor="middle" class="gd-m">FIFO 80 (audio)</text>
-
-  <text x="300" y="56" text-anchor="middle" class="gd-h">CLIENT THREAD B</text>
-  <text x="300" y="70" text-anchor="middle" class="gd-m">FIFO 50 (gui)</text>
-
-  <text x="560" y="56" text-anchor="middle" class="gd-h">KERNEL CHANNEL</text>
-  <text x="560" y="70" text-anchor="middle" class="gd-m">priority rbtree + PI boost</text>
-
-  <text x="830" y="56" text-anchor="middle" class="gd-h">DISPATCHER PTHREAD</text>
-  <text x="830" y="70" text-anchor="middle" class="gd-m">SCHED_FIFO base 64</text>
-
-  <!-- t0: B sends first -->
-  <rect x="220" y="92" width="160" height="32" class="gd-client"/>
-  <text x="300" y="105" text-anchor="middle" class="gd-l">memcpy req -> shmem[B]</text>
-  <text x="300" y="118" text-anchor="middle" class="gd-m">request_shm[B_tid]</text>
-
-  <line x1="380" y1="108" x2="480" y2="148" stroke="#bb9af7" stroke-width="1.5"/>
-  <text x="430" y="125" class="gd-pur" text-anchor="middle">SEND_PI(prio=50)</text>
-
-  <rect x="480" y="135" width="160" height="44" class="gd-kernel"/>
-  <text x="560" y="150" text-anchor="middle" class="gd-l">enqueue B @prio 50</text>
-  <text x="560" y="164" text-anchor="middle" class="gd-l">apply_event_pi_boost</text>
-  <text x="560" y="176" text-anchor="middle" class="gd-pur">dispatcher: 64 -&gt; 50? NO (50&lt;64)</text>
-
-  <line x1="640" y1="156" x2="740" y2="180" stroke="#bb9af7" stroke-width="1.5"/>
-  <text x="710" y="170" class="gd-pur">wake</text>
-
-  <rect x="740" y="170" width="200" height="32" class="gd-server"/>
-  <text x="840" y="183" text-anchor="middle" class="gd-l">RECV2 -&gt; entry B</text>
-  <text x="840" y="196" text-anchor="middle" class="gd-grn">re-boost dispatcher to 64</text>
-
-  <!-- t1: A arrives mid-handler -->
-  <rect x="20" y="228" width="160" height="32" class="gd-client"/>
-  <text x="100" y="241" text-anchor="middle" class="gd-l">memcpy req -> shmem[A]</text>
-  <text x="100" y="254" text-anchor="middle" class="gd-m">request_shm[A_tid]</text>
-
-  <line x1="180" y1="244" x2="480" y2="268" stroke="#7aa2f7" stroke-width="1.5"/>
-  <text x="330" y="258" class="gd-acc" text-anchor="middle">SEND_PI(prio=80)</text>
-
-  <rect x="480" y="258" width="160" height="60" class="gd-kernel"/>
-  <text x="560" y="273" text-anchor="middle" class="gd-l">enqueue A @prio 80</text>
-  <text x="560" y="287" text-anchor="middle" class="gd-l">apply_event_pi_boost</text>
-  <text x="560" y="300" text-anchor="middle" class="gd-acc">dispatcher: 64 -&gt; 80 IMMEDIATE</text>
-  <text x="560" y="314" text-anchor="middle" class="gd-m">A blocks waiting for REPLY</text>
-
-  <!-- handler runs at 80 (preempted up) -->
-  <rect x="740" y="232" width="200" height="68" class="gd-server"/>
-  <text x="840" y="248" text-anchor="middle" class="gd-l">global_lock</text>
-  <text x="840" y="262" text-anchor="middle" class="gd-l">read_request_shm(B)</text>
-  <text x="840" y="276" text-anchor="middle" class="gd-acc">running @80 due to A's boost</text>
-  <text x="840" y="290" text-anchor="middle" class="gd-l">global_unlock</text>
-
-  <!-- t2: REPLY for B -->
-  <line x1="740" y1="316" x2="640" y2="350" stroke="#9ece6a" stroke-width="1.5"/>
-  <text x="690" y="332" class="gd-grn" text-anchor="middle">REPLY(B)</text>
-
-  <rect x="480" y="334" width="160" height="62" class="gd-kernel"/>
-  <text x="560" y="350" text-anchor="middle" class="gd-l">complete B.reply_done</text>
-  <text x="560" y="364" text-anchor="middle" class="gd-l">drain B's PI contribution</text>
-  <text x="560" y="378" text-anchor="middle" class="gd-acc">re-boost from queue head: 80</text>
-  <text x="560" y="392" text-anchor="middle" class="gd-m">(A is now head)</text>
-
-  <line x1="480" y1="358" x2="380" y2="402" stroke="#bb9af7" stroke-width="1.5"/>
-  <text x="430" y="382" class="gd-pur" text-anchor="middle">B wakes</text>
-
-  <rect x="220" y="394" width="160" height="32" class="gd-client"/>
-  <text x="300" y="407" text-anchor="middle" class="gd-l">memcpy reply &lt;- shmem[B]</text>
-  <text x="300" y="420" text-anchor="middle" class="gd-m">SEND_PI returns</text>
-
-  <!-- t3: dispatcher RECV2 again -->
-  <line x1="640" y1="382" x2="740" y2="426" stroke="#9ece6a" stroke-width="1.5"/>
-  <text x="710" y="404" class="gd-grn">RECV2</text>
-
-  <rect x="740" y="418" width="200" height="32" class="gd-server"/>
-  <text x="840" y="431" text-anchor="middle" class="gd-l">RECV2 -&gt; entry A</text>
-  <text x="840" y="444" text-anchor="middle" class="gd-acc">no re-boost: same prio 80</text>
-
-  <rect x="740" y="458" width="200" height="46" class="gd-server"/>
-  <text x="840" y="474" text-anchor="middle" class="gd-l">global_lock</text>
-  <text x="840" y="488" text-anchor="middle" class="gd-l">read_request_shm(A)</text>
-  <text x="840" y="500" text-anchor="middle" class="gd-l">global_unlock</text>
-
-  <line x1="740" y1="500" x2="640" y2="528" stroke="#9ece6a" stroke-width="1.5"/>
-  <text x="690" y="516" class="gd-grn" text-anchor="middle">REPLY(A)</text>
-
-  <rect x="480" y="510" width="160" height="44" class="gd-kernel"/>
-  <text x="560" y="524" text-anchor="middle" class="gd-l">complete A.reply_done</text>
-  <text x="560" y="538" text-anchor="middle" class="gd-l">drain A's PI</text>
-  <text x="560" y="551" text-anchor="middle" class="gd-yel">queue empty -&gt; back to base 64</text>
-
-  <line x1="480" y1="534" x2="180" y2="572" stroke="#7aa2f7" stroke-width="1.5"/>
-  <text x="330" y="558" class="gd-acc" text-anchor="middle">A wakes</text>
-
-  <rect x="20" y="568" width="160" height="32" class="gd-client"/>
-  <text x="100" y="581" text-anchor="middle" class="gd-l">memcpy reply &lt;- shmem[A]</text>
-  <text x="100" y="594" text-anchor="middle" class="gd-m">SEND_PI returns</text>
-
-  <!-- legend -->
-  <rect x="20" y="610" width="940" height="22" fill="#24283b" stroke="#3b4261" stroke-width="1" rx="4"/>
-  <text x="32"  y="625" class="gd-acc">A: prio 80</text>
-  <text x="120" y="625" class="gd-pur">B: prio 50</text>
-  <text x="210" y="625" class="gd-grn">REPLY = wake + drain + auto-rebooost</text>
-  <text x="500" y="625" class="gd-yel">empty queue -> base prio</text>
-  <text x="700" y="625" class="gd-m">all kernel ops under channel-&gt;lock spinlock</text>
-</svg>
-</div>
-
-
-<p>The two-sender scenario shows the property that motivated gamma:
-between B&rsquo;s REPLY and the dispatcher&rsquo;s next RECV2, the dispatcher
-<strong>stays at FIFO 80</strong> because the kernel re-boosted from the new
-queue head atomically inside REPLY. The legacy v1.5 design would
-have unboosted the dispatcher to 64 at unboost-time and then
-re-boosted to 80 only when A&rsquo;s <code>sched_setscheduler</code> landed &ndash;
-which would have raced with the dispatcher&rsquo;s own RECV-side
-runqueue insertion. Gamma closes that gap by construction.</p>
 
 <script>
 document.addEventListener("DOMContentLoaded", function () {

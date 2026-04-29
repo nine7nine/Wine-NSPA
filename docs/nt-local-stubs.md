@@ -51,6 +51,81 @@ NT-local stubs in tree:
 | `nspa_local_timer` | `NtCreateTimer` / `NtSetTimer` / `NtCancelTimer` / `NtQueryTimer` (anonymous) | `dlls/ntdll/unix/nspa/local_timer.c` |
 | `nspa_local_wm_timer` | `NtUserSetTimer` / `NtUserSetSystemTimer` / `NtUserKillTimer` / `WM_TIMER` posting | `dlls/win32u/nspa/local_wm_timer.c` |
 
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 940 380" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .ns-bg { fill: #1a1b26; }
+    .ns-box { fill: #24283b; stroke: #3b4261; stroke-width: 1.4; rx: 8; }
+    .ns-fast { fill: #1a2235; stroke: #7aa2f7; stroke-width: 1.8; rx: 8; }
+    .ns-shared { fill: #2a1f35; stroke: #bb9af7; stroke-width: 1.8; rx: 8; }
+    .ns-server { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
+    .ns-promo { fill: #2a2418; stroke: #e0af68; stroke-width: 1.8; rx: 8; }
+    .ns-label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+    .ns-sm { fill: #8c92b3; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+    .ns-head { fill: #7aa2f7; font-size: 14px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .ns-blue { fill: #7aa2f7; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .ns-pur { fill: #bb9af7; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .ns-grn { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .ns-yel { fill: #e0af68; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .ns-arrow { stroke: #9aa5ce; stroke-width: 1.7; fill: none; }
+    .ns-arrow-b { stroke: #7aa2f7; stroke-width: 1.8; fill: none; }
+    .ns-arrow-p { stroke: #bb9af7; stroke-width: 1.8; fill: none; }
+    .ns-arrow-g { stroke: #9ece6a; stroke-width: 1.8; fill: none; }
+    .ns-arrow-y { stroke: #e0af68; stroke-width: 1.8; fill: none; stroke-dasharray: 5,4; }
+  </style>
+
+  <rect x="0" y="0" width="940" height="380" class="ns-bg"/>
+  <text x="470" y="26" text-anchor="middle" class="ns-head">NT-local stub pattern</text>
+
+  <rect x="40" y="66" width="180" height="66" class="ns-box"/>
+  <text x="130" y="92" text-anchor="middle" class="ns-label">NT API entry point</text>
+  <text x="130" y="109" text-anchor="middle" class="ns-sm">NtCreateFile / NtSetTimer / NtUserSetTimer</text>
+
+  <rect x="280" y="66" width="170" height="66" class="ns-fast"/>
+  <text x="365" y="92" text-anchor="middle" class="ns-blue">eligibility predicate</text>
+  <text x="365" y="109" text-anchor="middle" class="ns-sm">take fast path or return STATUS_NOT_SUPPORTED</text>
+
+  <rect x="510" y="48" width="190" height="84" class="ns-fast"/>
+  <text x="605" y="74" text-anchor="middle" class="ns-label">client-local state</text>
+  <text x="605" y="91" text-anchor="middle" class="ns-sm">private handle range</text>
+  <text x="605" y="105" text-anchor="middle" class="ns-sm">per-process tables, pi_mutex locks</text>
+  <text x="605" y="119" text-anchor="middle" class="ns-sm">fast-path success returns directly</text>
+
+  <rect x="510" y="168" width="190" height="84" class="ns-shared"/>
+  <text x="605" y="194" text-anchor="middle" class="ns-label">shared arbitration state</text>
+  <text x="605" y="211" text-anchor="middle" class="ns-sm">optional memfd / shmem publication</text>
+  <text x="605" y="225" text-anchor="middle" class="ns-sm">PSHARED PI mutex writers + seqlock readers</text>
+  <text x="605" y="239" text-anchor="middle" class="ns-sm">used only when cross-process state is bounded</text>
+
+  <rect x="510" y="288" width="190" height="54" class="ns-promo"/>
+  <text x="605" y="310" text-anchor="middle" class="ns-yel">lazy server-handle promotion</text>
+  <text x="605" y="327" text-anchor="middle" class="ns-sm">mint server-visible handle only on rare downstream APIs</text>
+
+  <rect x="760" y="120" width="140" height="106" class="ns-server"/>
+  <text x="830" y="146" text-anchor="middle" class="ns-grn">wineserver fallback</text>
+  <text x="830" y="163" text-anchor="middle" class="ns-sm">named objects</text>
+  <text x="830" y="177" text-anchor="middle" class="ns-sm">cross-process visibility</text>
+  <text x="830" y="191" text-anchor="middle" class="ns-sm">unsupported info classes</text>
+  <text x="830" y="205" text-anchor="middle" class="ns-sm">promotion targets</text>
+
+  <line x1="220" y1="99" x2="280" y2="99" class="ns-arrow"/>
+  <line x1="450" y1="99" x2="510" y2="90" class="ns-arrow-b"/>
+  <line x1="450" y1="99" x2="760" y2="173" class="ns-arrow-g"/>
+  <line x1="605" y1="132" x2="605" y2="168" class="ns-arrow-p"/>
+  <line x1="605" y1="252" x2="605" y2="288" class="ns-arrow-y"/>
+  <line x1="700" y1="315" x2="760" y2="200" class="ns-arrow-y"/>
+
+  <text x="474" y="82" text-anchor="middle" class="ns-blue">eligible</text>
+  <text x="615" y="154" text-anchor="middle" class="ns-pur">bounded shared state</text>
+  <text x="610" y="274" text-anchor="middle" class="ns-yel">rare server-required API</text>
+  <text x="626" y="122" text-anchor="middle" class="ns-grn">ineligible or unsupported</text>
+
+  <rect x="40" y="286" width="410" height="56" class="ns-box"/>
+  <text x="245" y="309" text-anchor="middle" class="ns-label">Shipped surfaces</text>
+  <text x="245" y="326" text-anchor="middle" class="ns-sm">nspa_local_file: client-private file handles | nspa_local_timer: anonymous NT timers | nspa_local_wm_timer: owner-process WM_TIMER dispatch</text>
+</svg>
+</div>
+
 Each stub is independent -- they do not share state, do not coordinate,
 and can be enabled or disabled independently via env vars. Together they
 form a *strategy*: shrink wineserver request-by-request, until the
