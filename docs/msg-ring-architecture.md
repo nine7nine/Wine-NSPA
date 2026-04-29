@@ -1576,7 +1576,9 @@ the seqlock retry loop; on retry exhaustion, falls back to RPC.
   <line x1="470" y1="194" x2="250" y2="254" class="pc-line" marker-end="url(#pcArrow)"/>
   <line x1="470" y1="194" x2="690" y2="254" class="pc-line" marker-end="url(#pcArrow)"/>
 
-  <text x="470" y="388" text-anchor="middle" class="pc-small">the cache is intentionally coarse: it only proves the "definitely no paint" case and falls back whenever a queue-level bit cannot answer the exact per-window question</text>
+  <text x="470" y="380" text-anchor="middle" class="pc-small">the cache is intentionally coarse: it only proves the "definitely no paint" case;</text>
+  <text x="470" y="396" text-anchor="middle" class="pc-small">falls back whenever a queue-level bit cannot answer</text>
+  <text x="470" y="412" text-anchor="middle" class="pc-small">the exact per-window question</text>
 </svg>
 </div>
 

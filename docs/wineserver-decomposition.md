@@ -394,7 +394,8 @@ These are the surfaces for which wineserver remains the source of truth and whic
   <line x1="680" y1="122" x2="610" y2="150" class="ms-line" marker-end="url(#msArrow)"/>
   <line x1="680" y1="218" x2="610" y2="222" class="ms-line" marker-end="url(#msArrow)"/>
 
-  <text x="470" y="332" text-anchor="middle" class="ms-small">design goal: the server stops being the default execution path and becomes the authoritative broker for the small set of semantics that must stay centralized</text>
+  <text x="470" y="332" text-anchor="middle" class="ms-small">design goal: the server stops being the default execution path and becomes</text>
+  <text x="470" y="348" text-anchor="middle" class="ms-small">the authoritative broker for the small set of semantics that must stay centralized</text>
 </svg>
 </div>
 

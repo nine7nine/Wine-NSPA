@@ -10,6 +10,33 @@ postprocess_one() {
     perl -0pe '
         our %seen_ids;
 
+        sub normalize_svg_block {
+            my ($svg) = @_;
+
+            $svg =~ s{
+                (\.[A-Za-z0-9_-]*?(?:small|muted|dim|footnote|caption|lbl-mut|label-mut|subtle)[A-Za-z0-9_-]*\s*\{.*?\bfill:\s*)
+                \#(?:8c92b3|565f89|545c7e)
+            }{$1 . "#a9b1d6"}egxsi;
+
+            $svg =~ s{
+                (<(?:text|tspan)\b[^>]*\bfill=")
+                \#(?:8c92b3|565f89|545c7e)
+                (")
+            }{$1 . "#a9b1d6" . $2}egxsi;
+
+            $svg =~ s{
+                <rect\b
+                (?![^>]*\brx=)
+                (?![^>]*\bry=)
+                ([^>]*?)
+                (/?)>
+            }{qq{<rect$1 rx="6"$2>}}egxsi;
+
+            return $svg;
+        }
+
+        s{(<svg\b.*?</svg>)}{ normalize_svg_block($1) }egxs;
+
         s{
             <h([1-6])>
             (.*?)
@@ -81,6 +108,25 @@ postprocess_one() {
         rm -f "$tmp"
         return 1
     fi
+
+    if perl -0ne 'exit((/<svg\b[\s\S]*?(?:\.[A-Za-z0-9_-]*?(?:small|muted|dim|footnote|caption|lbl-mut|label-mut|subtle)[A-Za-z0-9_-]*\s*\{.*?\bfill:\s*#(?:8c92b3|565f89|545c7e)|<(?:text|tspan)\b[^>]*\bfill="#(?:8c92b3|565f89|545c7e)")/si) ? 0 : 1)' "$tmp"; then
+        echo "postprocess-html: unreadable muted SVG text survived normalization in $html" >&2
+        rm -f "$tmp"
+        return 1
+    fi
+
+    perl -0ne '
+        while (/<svg\b.*?<\/svg>/sg) {
+            my $svg = $&;
+
+            while ($svg =~ /<text\b[^>]*>([^<\n]{120,})<\/text>/g) {
+                my $snippet = $1;
+                $snippet =~ s/\s+/ /g;
+                $snippet =~ s/^(.{0,110}).*$/$1.../ if length($snippet) > 110;
+                print STDERR "postprocess-html: long single-line SVG text in $ARGV: $snippet\n";
+            }
+        }
+    ' "$tmp"
 
     mv "$tmp" "$html"
 }

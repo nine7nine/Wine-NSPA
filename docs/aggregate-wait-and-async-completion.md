@@ -105,7 +105,7 @@ Architecture today (gate ON):
     .cw-main { fill: #2a1a1a; stroke: #f7768e; stroke-width: 2; rx: 8; }
     .cw-note { fill: #2a1f14; stroke: #e0af68; stroke-width: 1.8; rx: 8; }
     .cw-label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
-    .cw-small { fill: #8c92b3; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+    .cw-small { fill: #a9b1d6; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
     .cw-title { fill: #7aa2f7; font-size: 14px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .cw-red { fill: #f7768e; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .cw-yellow { fill: #e0af68; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
@@ -150,9 +150,11 @@ Architecture today (gate ON):
   <rect x="160" y="324" width="120" height="42" class="cw-box"/>
   <text x="220" y="350" text-anchor="middle" class="cw-label">reply observed</text>
 
-  <rect x="140" y="396" width="660" height="64" class="cw-note"/>
-  <text x="470" y="422" text-anchor="middle" class="cw-yellow">Problem surface</text>
-  <text x="470" y="440" text-anchor="middle" class="cw-small">submission, completion, and reply cross thread boundaries; CQE-to-reply latency is now gated by main-thread wake timing and contention rather than dispatcher availability</text>
+  <rect x="140" y="390" width="660" height="86" class="cw-note"/>
+  <text x="470" y="416" text-anchor="middle" class="cw-yellow">Problem surface</text>
+  <text x="470" y="438" text-anchor="middle" class="cw-small">submission, completion, and reply cross thread boundaries;</text>
+  <text x="470" y="454" text-anchor="middle" class="cw-small">CQE-to-reply latency is gated by main-thread wake timing and contention</text>
+  <text x="470" y="470" text-anchor="middle" class="cw-small">rather than dispatcher availability</text>
 </svg>
 </div>
 
@@ -208,7 +210,7 @@ that works under real workloads.
     .ta-fast { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 2; rx: 8; }
     .ta-wait { fill: #1f2535; stroke: #bb9af7; stroke-width: 1.8; rx: 8; }
     .ta-label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
-    .ta-small { fill: #8c92b3; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+    .ta-small { fill: #a9b1d6; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
     .ta-title { fill: #7aa2f7; font-size: 14px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .ta-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .ta-violet { fill: #bb9af7; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
@@ -245,14 +247,16 @@ that works under real workloads.
   <line x1="470" y1="148" x2="230" y2="198" class="ta-line" marker-end="url(#taArrow)"/>
   <line x1="470" y1="148" x2="710" y2="198" class="ta-line" marker-end="url(#taArrow)"/>
 
-  <rect x="230" y="390" width="480" height="74" class="ta-wait"/>
-  <text x="470" y="416" text-anchor="middle" class="ta-violet">Loop invariant</text>
-  <text x="470" y="438" text-anchor="middle" class="ta-small">the thread that receives the request is also the thread that drains the completion and signals the reply; no main-loop mediation remains in the async completion path</text>
+  <rect x="190" y="378" width="560" height="96" class="ta-wait"/>
+  <text x="470" y="404" text-anchor="middle" class="ta-violet">Loop invariant</text>
+  <text x="470" y="428" text-anchor="middle" class="ta-small">the thread that receives the request is also the thread that drains</text>
+  <text x="470" y="446" text-anchor="middle" class="ta-small">the completion and signals the reply;</text>
+  <text x="470" y="464" text-anchor="middle" class="ta-small">no main-loop mediation remains in the async completion path</text>
 
-  <line x1="230" y1="330" x2="230" y2="390" class="ta-line"/>
-  <line x1="710" y1="330" x2="710" y2="390" class="ta-line"/>
-  <line x1="230" y1="390" x2="470" y2="390" class="ta-line"/>
-  <line x1="710" y1="390" x2="470" y2="390" class="ta-line"/>
+  <line x1="230" y1="330" x2="230" y2="378" class="ta-line"/>
+  <line x1="710" y1="330" x2="710" y2="378" class="ta-line"/>
+  <line x1="230" y1="378" x2="470" y2="378" class="ta-line"/>
+  <line x1="710" y1="378" x2="470" y2="378" class="ta-line"/>
 </svg>
 </div>
 
@@ -375,7 +379,7 @@ from the start — not bolted on later.
     .aw-kernel { fill: #1f2535; stroke: #bb9af7; stroke-width: 1.8; rx: 8; }
     .aw-note { fill: #2a1f14; stroke: #e0af68; stroke-width: 1.8; rx: 8; }
     .aw-label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
-    .aw-small { fill: #8c92b3; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+    .aw-small { fill: #a9b1d6; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
     .aw-title { fill: #7aa2f7; font-size: 14px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .aw-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .aw-violet { fill: #bb9af7; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
@@ -960,7 +964,7 @@ and revertable.
     .mp-kernel { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
     .mp-risk { fill: #2a1f14; stroke: #e0af68; stroke-width: 1.8; rx: 8; }
     .mp-label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
-    .mp-small { fill: #8c92b3; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+    .mp-small { fill: #a9b1d6; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
     .mp-title { fill: #7aa2f7; font-size: 14px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .mp-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .mp-yellow { fill: #e0af68; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }

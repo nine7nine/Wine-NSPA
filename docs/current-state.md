@@ -334,7 +334,8 @@ own correctness proof and gate.
 
   <line x1="290" y1="172" x2="345" y2="172" class="vp-line" marker-end="url(#vpArrow)"/>
   <line x1="595" y1="172" x2="650" y2="172" class="vp-line" marker-end="url(#vpArrow)"/>
-  <text x="470" y="314" text-anchor="middle" class="vp-small">the gating line is conservative by design: stable substrate first, default-on flips only after behaviour is re-proven under workload</text>
+  <text x="470" y="308" text-anchor="middle" class="vp-small">the gating line is conservative by design: stable substrate first;</text>
+  <text x="470" y="324" text-anchor="middle" class="vp-small">default-on flips only after behaviour is re-proven under workload</text>
 </svg>
 </div>
 

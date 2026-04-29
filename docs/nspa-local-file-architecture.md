@@ -287,7 +287,8 @@ The wineserver publishes a `NSPA_INODE_BUCKETS` = 1024 bucket hash table as a me
   <line x1="270" y1="286" x2="335" y2="286" class="lf-line" marker-end="url(#lfShareArrow)"/>
   <line x1="670" y1="132" x2="605" y2="132" class="lf-line" marker-end="url(#lfShareArrow)"/>
   <line x1="605" y1="286" x2="670" y2="286" class="lf-line" marker-end="url(#lfShareArrow)"/>
-  <text x="470" y="386" text-anchor="middle" class="lf-small">the table is not a data path cache; it is a compatibility contract so local opens and server opens enforce one sharing model</text>
+  <text x="470" y="380" text-anchor="middle" class="lf-small">the table is not a data path cache; it is a compatibility contract</text>
+  <text x="470" y="396" text-anchor="middle" class="lf-small">so local opens and server opens enforce one sharing model</text>
 </svg>
 </div>
 
@@ -399,7 +400,8 @@ This is Phase 1A.4.a lazy-promotion. The alternative -- eagerly promoting at min
   <line x1="750" y1="142" x2="745" y2="208" class="lp-line" marker-end="url(#lpArrow)"/>
   <line x1="595" y1="278" x2="620" y2="278" class="lp-line" marker-end="url(#lpArrow)"/>
 
-  <text x="470" y="390" text-anchor="middle" class="lp-small">this is why lazy promotion wins on workloads like Ableton: most opens die on the left-hand path and never pay the server transition</text>
+  <text x="470" y="384" text-anchor="middle" class="lp-small">this is why lazy promotion wins on workloads like Ableton:</text>
+  <text x="470" y="400" text-anchor="middle" class="lp-small">most opens die on the left-hand path and never pay the server transition</text>
 </svg>
 </div>
 

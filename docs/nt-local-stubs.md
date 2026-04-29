@@ -120,9 +120,11 @@ NT-local stubs in tree:
   <text x="610" y="274" text-anchor="middle" class="ns-yel">rare server-required API</text>
   <text x="626" y="122" text-anchor="middle" class="ns-grn">ineligible or unsupported</text>
 
-  <rect x="40" y="286" width="410" height="56" class="ns-box"/>
+  <rect x="40" y="286" width="410" height="78" class="ns-box"/>
   <text x="245" y="309" text-anchor="middle" class="ns-label">Shipped surfaces</text>
-  <text x="245" y="326" text-anchor="middle" class="ns-sm">nspa_local_file: client-private file handles | nspa_local_timer: anonymous NT timers | nspa_local_wm_timer: owner-process WM_TIMER dispatch</text>
+  <text x="245" y="324" text-anchor="middle" class="ns-sm">nspa_local_file: client-private file handles</text>
+  <text x="245" y="338" text-anchor="middle" class="ns-sm">nspa_local_timer: anonymous NT timers</text>
+  <text x="245" y="352" text-anchor="middle" class="ns-sm">nspa_local_wm_timer: owner-process WM_TIMER dispatch</text>
 </svg>
 </div>
 

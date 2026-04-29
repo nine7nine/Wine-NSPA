@@ -395,7 +395,7 @@ ALERTED block *before* `set_async_direct_result` is called:
       Server: completes async, signals event/IOCP
 
 <div class="diagram-container">
-<svg width="100%" viewBox="0 0 920 760" xmlns="http://www.w3.org/2000/svg">
+<svg width="100%" viewBox="0 0 920 780" xmlns="http://www.w3.org/2000/svg">
   <style>
     .bg { fill: #1a1b26; }
     .lane-old { fill: #271a22; stroke: #f7768e; stroke-width: 1.5; }
@@ -423,7 +423,7 @@ ALERTED block *before* `set_async_direct_result` is called:
     .footnote { fill: #8c92b3; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
   </style>
 
-  <rect x="0" y="0" width="920" height="760" class="bg"/>
+  <rect x="0" y="0" width="920" height="780" class="bg"/>
   <text x="460" y="28" text-anchor="middle" class="label-yellow">Phase 2 Socket Recv: ALERTED-State Interception</text>
 
   <rect x="250" y="52" width="420" height="54" class="box-shared"/>
@@ -505,7 +505,8 @@ ALERTED block *before* `set_async_direct_result` is called:
   <text x="685" y="709" text-anchor="middle" class="label-sm">server completes async and signals event / IOCP</text>
   <text x="685" y="722" text-anchor="middle" class="label-muted">single server call with the final completion only</text>
 
-  <text x="460" y="748" text-anchor="middle" class="footnote">Safety condition: ALERTED asyncs are already detached from server epoll; the E2 bitmap is an additional guard for poll-state recomputation.</text>
+  <text x="460" y="746" text-anchor="middle" class="footnote">Safety condition: ALERTED asyncs are already detached from server epoll;</text>
+  <text x="460" y="762" text-anchor="middle" class="footnote">the E2 bitmap is an additional guard for poll-state recomputation.</text>
 </svg>
 </div>
 

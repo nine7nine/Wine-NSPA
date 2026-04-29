@@ -256,7 +256,8 @@ window.
 
   <line x1="160" y1="186" x2="160" y2="158" class="gc-arrow-y"/>
   <line x1="798" y1="194" x2="798" y2="166" class="gc-arrow-y"/>
-  <text x="480" y="320" text-anchor="middle" class="gc-sm">Attach-time path: wineserver creates the channel fd and transfers it to the client with SCM_RIGHTS in init_first_thread.</text>
+  <text x="480" y="316" text-anchor="middle" class="gc-sm">Attach-time path: wineserver creates the channel fd and transfers it</text>
+  <text x="480" y="330" text-anchor="middle" class="gc-sm">to the client with SCM_RIGHTS in `init_first_thread`.</text>
 </svg>
 </div>
 
