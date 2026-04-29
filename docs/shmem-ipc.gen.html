@@ -83,7 +83,7 @@
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/tokyo-night-dark.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
 </head><body>
-<h1>Wine-NSPA &ndash; Shmem IPC Architecture (LEGACY &ndash; superseded by gamma channel dispatcher)</h1>
+<h1 id="wine-nspa--shmem-ipc-architecture-legacy--superseded-by-gamma-channel-dispatcher">Wine-NSPA &ndash; Shmem IPC Architecture (LEGACY &ndash; superseded by gamma channel dispatcher)</h1>
 
 <blockquote><p><strong>Status: SUPERSEDED 2026-04-26.</strong></p>
 
@@ -102,7 +102,7 @@ atomic priority inheritance.</p>
 <p>Wine-NSPA 11.6 | Kernel 6.19.11-rt1-1-nspa (PREEMPT_RT) | 2026-04-15
 Author: Jordan Johnston</p>
 
-<h2>Table of Contents</h2>
+<h2 id="table-of-contents">Table of Contents</h2>
 
 <ol>
 <li><a href="#1-overview">Overview</a></li>
@@ -116,7 +116,7 @@ Author: Jordan Johnston</p>
 
 <hr />
 
-<h2>1. Overview</h2>
+<h2 id="1-overview">1. Overview</h2>
 
 <p>Upstream Wine uses a single-threaded wineserver that communicates with client processes over Unix domain sockets. Every <code>SERVER_START_REQ</code> / <code>SERVER_END_REQ</code> pair requires a full round-trip: client writes request to socket, wineserver&rsquo;s epoll loop wakes, dispatches, writes reply, client reads reply.</p>
 
@@ -128,7 +128,7 @@ Author: Jordan Johnston</p>
 
 <hr />
 
-<h2>2. Upstream vs NSPA Comparison</h2>
+<h2 id="2-upstream-vs-nspa-comparison">2. Upstream vs NSPA Comparison</h2>
 
 <div class="diagram-container">
 <svg width="100%" viewBox="0 0 900 500" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
@@ -275,7 +275,7 @@ Author: Jordan Johnston</p>
 
 <hr />
 
-<h2>3. Dispatcher Architecture</h2>
+<h2 id="3-dispatcher-architecture">3. Dispatcher Architecture</h2>
 
 <p>Each client thread that connects to the wineserver gets a dedicated <strong>dispatcher pthread</strong> on the server side. The dispatcher watches the thread&rsquo;s shmem futex and processes requests under <code>global_lock</code>.</p>
 
@@ -357,7 +357,7 @@ Author: Jordan Johnston</p>
 </div>
 
 
-<h3>Dispatcher Lifecycle</h3>
+<h3 id="dispatcher-lifecycle">Dispatcher Lifecycle</h3>
 
 <ol>
 <li>Client thread calls <code>wine_server_call()</code> with a request</li>
@@ -373,11 +373,11 @@ Author: Jordan Johnston</p>
 
 <hr />
 
-<h2>4. PI Boost Protocol (v2.5)</h2>
+<h2 id="4-pi-boost-protocol-v25">4. PI Boost Protocol (v2.5)</h2>
 
 <p>When an RT client thread (SCHED_FIFO) sends a request, it must boost the dispatcher pthread so the dispatcher runs at sufficient priority to process the request promptly. Without boosting, CFS could delay the dispatcher behind dozens of other normal-priority threads.</p>
 
-<h3>Protocol</h3>
+<h3 id="protocol">Protocol</h3>
 
 <pre><code class="code-block">Client (SCHED_FIFO:80):
   1. Write request to shmem
@@ -397,7 +397,7 @@ Client (wakes):
   13. sched_setscheduler(TID, original_policy, original_prio) -- UNBOOST
 </code></pre>
 
-<h3>Syscall Cost: v2.4 vs v2.5</h3>
+<h3 id="syscall-cost-v24-vs-v25">Syscall Cost: v2.4 vs v2.5</h3>
 
 <div class="diagram-container">
 <svg width="100%" viewBox="0 0 780 280" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
@@ -448,13 +448,13 @@ Client (wakes):
 
 <p>2 syscalls per RT request: <code>sched_setscheduler</code> (boost) + <code>sched_setscheduler</code> (unboost). Down from 4 in v2.4 (v2.5 caches the scheduler state, eliminating <code>sched_getscheduler</code> + <code>sched_getparam</code>).</p>
 
-<h3>Race Window</h3>
+<h3 id="race-window">Race Window</h3>
 
 <p>Between steps 3 and 5, another client&rsquo;s unboost could lower the dispatcher&rsquo;s priority. The window is small (~100ns on modern hardware) and the consequence is a one-request delay (the next request re-boosts). Accepted as a practical trade-off vs kernel-managed PI (see appendix).</p>
 
 <hr />
 
-<h2>5. Global Lock PI</h2>
+<h2 id="5-global-lock-pi">5. Global Lock PI</h2>
 
 <p><code>server/fd.c:global_lock</code> serializes all wineserver state access between the main epoll loop and the per-client dispatcher pthreads. Converted from <code>pthread_mutex_t</code> to <code>pi_mutex_t</code> (FUTEX_LOCK_PI), providing kernel-managed priority inheritance.</p>
 
@@ -486,15 +486,15 @@ Client (wakes):
 
 <hr />
 
-<h2>6. Appendix: Rejected FUTEX_LOCK_PI Redesign</h2>
+<h2 id="6-appendix-rejected-futex_lock_pi-redesign">6. Appendix: Rejected FUTEX_LOCK_PI Redesign</h2>
 
 <p><strong>Status: Implemented and tested 2026-04-15. REJECTED &ndash; deadlocks on SMP.</strong></p>
 
-<h3>Concept</h3>
+<h3 id="concept">Concept</h3>
 
 <p>Replace the manual <code>sched_setscheduler</code> PI boost with <code>FUTEX_LOCK_PI</code> on a shared pi_lock. The dispatcher would hold pi_lock while idle; the client&rsquo;s <code>futex_lock_pi</code> would atomically boost the dispatcher through the kernel&rsquo;s rt_mutex. Zero race window, zero <code>sched_*</code> syscalls.</p>
 
-<h3>Why It Failed</h3>
+<h3 id="why-it-failed">Why It Failed</h3>
 
 <p>The dispatcher must unlock pi_lock (to wake the client) then re-acquire it (for the next request). On SMP, if the dispatcher is faster than the client:</p>
 
@@ -509,7 +509,7 @@ Client (wakes):
 
 <p>Root cause: <code>FUTEX_LOCK_PI</code> can&rsquo;t serve as both reply notification and PI mechanism. The unlock/re-acquire has a window where ownership transfer to the client isn&rsquo;t guaranteed.</p>
 
-<h3>Conclusion</h3>
+<h3 id="conclusion">Conclusion</h3>
 
 <p>The v2.5 manual boost (2 syscalls per RT request) remains correct. A kernel-managed solution would require a combined notify+PI atomic operation that doesn&rsquo;t exist in the Linux futex API.</p>
 

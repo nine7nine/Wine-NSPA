@@ -8,6 +8,31 @@ postprocess_one() {
 
     tmp=$(mktemp)
     perl -0pe '
+        our %seen_ids;
+
+        s{
+            <h([1-6])>
+            (.*?)
+            </h\1>
+        }{
+            my ($level, $inner) = ($1, $2);
+            my $plain = $inner;
+
+            $plain =~ s/<[^>]+>//g;
+            $plain =~ s/&[^;]+;//g;
+            $plain = lc $plain;
+            $plain =~ s/[^a-z0-9 _-]//g;
+            $plain =~ s/ /-/g;
+            $plain =~ s/^-+//;
+            $plain =~ s/-+$//;
+            $plain = "section" if $plain eq q{};
+
+            my $count = ++$seen_ids{$plain};
+            my $id = $count > 1 ? "$plain-$count" : $plain;
+
+            qq{<h$level id="$id">$inner</h$level>};
+        }egxs;
+
         s{<pre><code>}{<pre><code class="code-block">}g;
         s{
             (<div\s+class="diagram-container">\s*<svg\b)

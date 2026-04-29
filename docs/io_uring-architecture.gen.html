@@ -83,14 +83,14 @@
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/tokyo-night-dark.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
 </head><body>
-<h1>Wine-NSPA &ndash; io_uring I/O Architecture</h1>
+<h1 id="wine-nspa--io_uring-io-architecture">Wine-NSPA &ndash; io_uring I/O Architecture</h1>
 
 <p><strong>Date:</strong> 2026-04-28
 <strong>Author:</strong> Jordan Johnston
 <strong>Kernel:</strong> <code>6.19.11-rt1-1-nspa</code> (PREEMPT_RT_FULL)
 <strong>Wine:</strong> 11.6 + NSPA RT patchset</p>
 
-<h2>Table of Contents</h2>
+<h2 id="table-of-contents">Table of Contents</h2>
 
 <ol>
 <li><a href="#1-status-as-of-2026-04-28">Status as of 2026-04-28</a></li>
@@ -107,7 +107,7 @@
 
 <hr />
 
-<h2>1. Status as of 2026-04-28</h2>
+<h2 id="1-status-as-of-2026-04-28">1. Status as of 2026-04-28</h2>
 
 <p>The original three-phase plan from 2026-04-15 has been re-scoped. Phase 1
 (synchronous poll replacement + async file I/O bypass) shipped default-on
@@ -121,7 +121,7 @@ interception, and the ntsync <code>uring_fd</code> extension &ndash; is settled.
 remains is socket and pipe surface area, plus retesting against the
 current kernel + ring code.</p>
 
-<h3>Phase Status Table</h3>
+<h3 id="phase-status-table">Phase Status Table</h3>
 
 <table>
 <thead>
@@ -159,7 +159,7 @@ current kernel + ring code.</p>
 </table>
 
 
-<h3>Delta from the 2026-04-15 plan</h3>
+<h3 id="delta-from-the-2026-04-15-plan">Delta from the 2026-04-15 plan</h3>
 
 <ul>
 <li>Phases 1 and 2 of the 2026-04-15 plan (sync poll replacement, async
@@ -173,7 +173,7 @@ which were previously not on the roadmap.</li>
 
 <hr />
 
-<h2>2. Overview</h2>
+<h2 id="2-overview">2. Overview</h2>
 
 <p>This document is the io_uring design and implementation reference for
 Wine-NSPA. It covers the integration boundary, per-thread ring model,
@@ -192,7 +192,7 @@ less contention for shmem dispatchers.</li>
 </ol>
 
 
-<h3>Relationship to Existing NSPA Infrastructure</h3>
+<h3 id="relationship-to-existing-nspa-infrastructure">Relationship to Existing NSPA Infrastructure</h3>
 
 <table>
 <thead>
@@ -226,7 +226,7 @@ less contention for shmem dispatchers.</li>
 </table>
 
 
-<h3>Prior art: <code>archive/iouring</code></h3>
+<h3 id="prior-art-archiveiouring">Prior art: <code>archive/iouring</code></h3>
 
 <p>Rémi Bernon&rsquo;s 2021-2022 <code>archive/iouring</code> branch attempted direct
 replacement of wineserver&rsquo;s epoll loop. That design touched core server
@@ -241,7 +241,7 @@ thin call-site conditionals in existing files.</p>
 
 <hr />
 
-<h2>3. Design Principles</h2>
+<h2 id="3-design-principles">3. Design Principles</h2>
 
 <ul>
 <li><strong>Per-thread rings.</strong> Each ntdll thread lazily initializes its own
@@ -270,7 +270,7 @@ submit path. Initialized once at ring setup.</li>
 </ul>
 
 
-<h3>Per-Thread Ring Architecture</h3>
+<h3 id="per-thread-ring-architecture">Per-Thread Ring Architecture</h3>
 
 <div class="diagram-container">
 <svg width="100%" viewBox="0 0 780 320" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
@@ -369,9 +369,9 @@ submit path. Initialized once at ring setup.</li>
 
 <hr />
 
-<h2>4. I/O Architecture: Before and After</h2>
+<h2 id="4-io-architecture-before-and-after">4. I/O Architecture: Before and After</h2>
 
-<h3>Vanilla Wine: Server-Mediated Async File I/O</h3>
+<h3 id="vanilla-wine-server-mediated-async-file-io">Vanilla Wine: Server-Mediated Async File I/O</h3>
 
 <pre><code class="code-block">Client Thread                    Wineserver
 -------------                    ----------
@@ -396,7 +396,7 @@ NtReadFile(async)
 <p><strong>Syscalls per async read:</strong> 2 server round-trips (register + get_fd) +
 epoll_wait + read = <strong>4+ kernel transitions</strong></p>
 
-<h3>Wine-NSPA with io_uring: Client-Side Async File I/O</h3>
+<h3 id="wine-nspa-with-io_uring-client-side-async-file-io">Wine-NSPA with io_uring: Client-Side Async File I/O</h3>
 
 <pre><code class="code-block">Client Thread                    Wineserver
 -------------                    ----------
@@ -421,7 +421,7 @@ NtReadFile(async)
 still handles the initial fd lookup (usually cached) and completion
 port notifications if needed.</p>
 
-<h3>Synchronous I/O: poll() Replacement</h3>
+<h3 id="synchronous-io-poll-replacement">Synchronous I/O: poll() Replacement</h3>
 
 <pre><code class="code-block">Before:                          After:
   poll(fd, POLLIN, timeout)        ntdll_io_uring_poll(fd, POLLIN, timeout)
@@ -433,12 +433,12 @@ write-watch safety. Only the poll wait is replaced.</p>
 
 <hr />
 
-<h2>5. Phase 1: File I/O Bypass (shipped)</h2>
+<h2 id="5-phase-1-file-io-bypass-shipped">5. Phase 1: File I/O Bypass (shipped)</h2>
 
 <p><strong>Status: Shipped, default-on. Single combined phase covering sync poll
 replacement and async <code>NtReadFile</code>/<code>NtWriteFile</code> bypass.</strong></p>
 
-<h3>What Changed</h3>
+<h3 id="what-changed">What Changed</h3>
 
 <p>In <code>NtReadFile</code> and <code>NtWriteFile</code>:</p>
 
@@ -456,12 +456,12 @@ with <code>ntdll_io_uring_poll()</code>.</li>
 </ul>
 
 
-<h3>fd Lifetime Safety</h3>
+<h3 id="fd-lifetime-safety">fd Lifetime Safety</h3>
 
 <p><code>dup()</code> the unix fd before submission. The duplicate is owned by the
 <code>uring_async_op</code> struct and closed on CQE completion or cancellation.</p>
 
-<h3>Completion Delivery</h3>
+<h3 id="completion-delivery">Completion Delivery</h3>
 
 <p>CQEs are drained cooperatively in <code>server_select()</code> and <code>server_wait()</code>
 entry points:</p>
@@ -488,7 +488,7 @@ by Wine&rsquo;s normal async completion path. This handles:</p>
 </ul>
 
 
-<h3>EFAULT Handling</h3>
+<h3 id="efault-handling">EFAULT Handling</h3>
 
 <p>If io_uring&rsquo;s kernel read hits EFAULT (buffer in a write-watched page),
 the CQE result is <code>-EFAULT</code>. The completion handler frees the operation;
@@ -496,7 +496,7 @@ the caller retries through the server async path, which uses
 <code>virtual_locked_read()</code> with proper page fault handling. Graceful
 fallback for an edge case that rarely occurs in practice.</p>
 
-<h3>Integration Points</h3>
+<h3 id="integration-points">Integration Points</h3>
 
 <table>
 <thead>
@@ -533,7 +533,7 @@ fallback for an edge case that rarely occurs in practice.</p>
 
 <hr />
 
-<h2>6. Phase 2: Socket I/O Bypass (pending)</h2>
+<h2 id="6-phase-2-socket-io-bypass-pending">6. Phase 2: Socket I/O Bypass (pending)</h2>
 
 <p><strong>Status: Pending revalidation. Architecture (E2 bitmap + ALERTED-state
 interception) is settled; the existing socket-io PE test path passed
@@ -542,7 +542,7 @@ re-test against the post-audit module
 (<code>srcversion A250A77651C8D5DAB719FE2</code>) and the audit §4.1 retry-loop
 hardening.</strong></p>
 
-<h3>The Challenge</h3>
+<h3 id="the-challenge">The Challenge</h3>
 
 <p>Socket I/O (<code>sock_recv</code> / <code>sock_send</code>) is tightly coupled with the
 server&rsquo;s async lifecycle:</p>
@@ -560,7 +560,7 @@ server&rsquo;s async lifecycle:</p>
 socket code has the server actively participating in the protocol
 state machine.</p>
 
-<h3>Approach: E2 Bitmap + ALERTED-State Interception</h3>
+<h3 id="approach-e2-bitmap--alerted-state-interception">Approach: E2 Bitmap + ALERTED-State Interception</h3>
 
 <table>
 <thead>
@@ -595,7 +595,7 @@ state machine.</p>
 </table>
 
 
-<h3>How It Works</h3>
+<h3 id="how-it-works">How It Works</h3>
 
 <p>The key is <strong>ALERTED-state interception</strong> &ndash; intercepting in the
 ALERTED block <em>before</em> <code>set_async_direct_result</code> is called:</p>
@@ -752,7 +752,7 @@ too late, async already restarted.</li>
 </ol>
 
 
-<h3>Sync vs Overlapped Path</h3>
+<h3 id="sync-vs-overlapped-path">Sync vs Overlapped Path</h3>
 
 <table>
 <thead>
@@ -787,7 +787,7 @@ too late, async already restarted.</li>
 </table>
 
 
-<h3>What&rsquo;s Pending</h3>
+<h3 id="whats-pending">What&rsquo;s Pending</h3>
 
 <p>The architecture and code are landed in <code>dlls/ntdll/unix/socket.c</code>,
 <code>dlls/ntdll/unix/sync.c</code>, and <code>server/sock.c</code>. What&rsquo;s pending is a
@@ -808,7 +808,7 @@ current kernel + ring code.</p>
 
 <hr />
 
-<h2>7. Phase 3: Pipes and Named Events (pending)</h2>
+<h2 id="7-phase-3-pipes-and-named-events-pending">7. Phase 3: Pipes and Named Events (pending)</h2>
 
 <p><strong>Status: Pending. Not yet designed.</strong></p>
 
@@ -835,9 +835,9 @@ of the bypass roadmap.</p>
 
 <hr />
 
-<h2>8. File Manifest</h2>
+<h2 id="8-file-manifest">8. File Manifest</h2>
 
-<h3>New Files</h3>
+<h3 id="new-files">New Files</h3>
 
 <table>
 <thead>
@@ -857,7 +857,7 @@ of the bypass roadmap.</p>
 </table>
 
 
-<h3>Modified Files</h3>
+<h3 id="modified-files">Modified Files</h3>
 
 <table>
 <thead>
@@ -917,7 +917,7 @@ of the bypass roadmap.</p>
 </table>
 
 
-<h3>Build Dependency</h3>
+<h3 id="build-dependency">Build Dependency</h3>
 
 <p><code>liburing.so.2</code> (system package). Available as <code>liburing</code> in Arch Linux
 <code>[extra]</code>. Detected at configure time via
@@ -925,7 +925,7 @@ of the bypass roadmap.</p>
 
 <hr />
 
-<h2>9. Status Summary</h2>
+<h2 id="9-status-summary">9. Status Summary</h2>
 
 <table>
 <thead>
@@ -985,7 +985,7 @@ of the bypass roadmap.</p>
 </table>
 
 
-<h3>Next Actions</h3>
+<h3 id="next-actions">Next Actions</h3>
 
 <ol>
 <li>Phase 2 revalidation session: run <code>socket-io</code> PE test under current

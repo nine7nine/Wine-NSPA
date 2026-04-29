@@ -16,6 +16,7 @@ Wine-NSPA 11.x is a **work in progress** built on top of upstream Wine 11.6. Eve
 
 | Document | Description |
 |----------|-------------|
+| [Aggregate-Wait and Async Completion](https://nine7nine.github.io/Wine-NSPA/aggregate-wait-and-async-completion.gen.html) | Plan for `NTSYNC_IOC_AGGREGATE_WAIT` plus the gamma-dispatcher async-completion restructure. Replaces the cross-thread Phase C bridge with same-thread aggregate-wait + inline CQE drain. |
 | [Architecture Overview](https://nine7nine.github.io/Wine-NSPA/architecture.gen.html) | Master overview: layered architecture, subsystem map, RT priority mapping, links into the dedicated subsystem docs below. |
 | [Audio Stack](https://nine7nine.github.io/Wine-NSPA/audio-stack.gen.html) | winejack.drv (WASAPI + MIDI via JACK), nspaASIO bridge (ASIO -> WASAPI exclusive -> winejack -> JACK), Phase F zero-latency bufferSwitch inside the JACK callback. |
 | [Critical Section PI](https://nine7nine.github.io/Wine-NSPA/cs-pi.gen.html) | FUTEX_LOCK_PI on `CRITICAL_SECTION`: fast / slow path, PI chain, gating, fallback. v2.3 stable. |

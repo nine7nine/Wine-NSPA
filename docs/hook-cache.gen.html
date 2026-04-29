@@ -83,12 +83,12 @@
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/tokyo-night-dark.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
 </head><body>
-<h1>Wine-NSPA &ndash; Two-Tier Win32 Hook Chain Cache</h1>
+<h1 id="wine-nspa--two-tier-win32-hook-chain-cache">Wine-NSPA &ndash; Two-Tier Win32 Hook Chain Cache</h1>
 
 <p>Wine 11.6 + NSPA bypass surface | shmem-published, seqlock-bound | 2026-04-25
 Author: Jordan Johnston</p>
 
-<h2>Table of Contents</h2>
+<h2 id="table-of-contents">Table of Contents</h2>
 
 <ol>
 <li><a href="#1-overview">Overview</a></li>
@@ -107,7 +107,7 @@ Author: Jordan Johnston</p>
 
 <hr />
 
-<h2>1. Overview</h2>
+<h2 id="1-overview">1. Overview</h2>
 
 <p>Win32 applications register hook procedures with <code>SetWindowsHookEx</code> to intercept window messages, keyboard input, mouse events, CBT events, and so on. The hook chain is consulted on every dispatched message: before a <code>WM_KEYDOWN</code> reaches its window proc, the <code>WH_KEYBOARD</code> chain is walked; before a <code>CallWindowProc</code> runs, <code>WH_CALLWNDPROC</code> and <code>WH_CALLWNDPROCRET</code> are walked; before a window is created/activated/destroyed, <code>WH_CBT</code> is walked; before any get/peek/translate, <code>WH_GETMESSAGE</code> is walked. In Wine, the chain itself lives in the wineserver &ndash; it is shared state across processes &ndash; so vanilla Wine performs a server RPC on every check.</p>
 
@@ -115,7 +115,7 @@ Author: Jordan Johnston</p>
 
 <p>Both tiers are server-published, client-read. The server is single-threaded for request handling, so there is never writer/writer contention; the seqlock exists purely so client readers see a consistent snapshot during the brief mutation window when <code>set_hook</code> or <code>remove_hook</code> is rebuilding.</p>
 
-<h2>2. Problem: every dispatch consults the chain</h2>
+<h2 id="2-problem-every-dispatch-consults-the-chain">2. Problem: every dispatch consults the chain</h2>
 
 <p><code>call_message_hooks</code> &ndash; the main client-side entry point &ndash; runs on every message dispatch path that supports a hook id. The first thing it does is ask &ldquo;are there any hooks for this id?&rdquo;. In vanilla Wine that question is answered by <code>is_hooked</code>, which reads <code>queue_shm-&gt;hooks_count[]</code> directly from the queue&rsquo;s shared memory mapping; that piece is shared with NSPA. The expensive part follows: if <code>is_hooked</code> returns true, the client issues <code>start_hook_chain</code>, then for each entry in the chain a <code>get_hook_info</code> to advance, then a <code>finish_hook_chain</code> at the end. Every chain walk is at least three RPCs.</p>
 
@@ -132,7 +132,7 @@ Author: Jordan Johnston</p>
 
 <p>Removing those RPCs is the goal of the hook cache.</p>
 
-<h2>3. Design at a glance</h2>
+<h2 id="3-design-at-a-glance">3. Design at a glance</h2>
 
 <p>Two cooperating publish-side data structures live in the per-queue bypass shmem region (<code>nspa_queue_bypass_shm_t</code>):</p>
 
@@ -277,7 +277,7 @@ Author: Jordan Johnston</p>
 </div>
 
 
-<h2>4. Tier 1 &ndash; the count-array gate</h2>
+<h2 id="4-tier-1--the-count-array-gate">4. Tier 1 &ndash; the count-array gate</h2>
 
 <p>The first question every hook-aware dispatch path asks is &ldquo;should I bother walking the chain at all?&rdquo;. The answer lives in <code>queue_shm-&gt;hooks_count[NB_HOOKS]</code>, a small fixed-size array of integers. Vanilla Wine already maintains this on the server side for its own scheduling logic (so the wineserver knows whether to wake threads on hook installation). NSPA reads it from the client.</p>
 
@@ -316,7 +316,7 @@ Author: Jordan Johnston</p>
 
 <p>The empirical kicker: Tier 1 alone short-circuits the vast majority of hook-aware dispatch paths because most apps install hooks on a small subset of hook ids. A DAW host with <code>WH_CBT</code> and <code>WH_CALLWNDPROC</code> installed has all <em>other</em> hook ids' counts at zero, and every <code>WH_GETMESSAGE</code> / <code>WH_KEYBOARD</code> / <code>WH_MOUSE</code> / <code>WH_FOREGROUNDIDLE</code> query lands in the count==0 short-circuit and returns immediately.</p>
 
-<h2>5. Tier 2 &ndash; the chain-snapshot iterator</h2>
+<h2 id="5-tier-2--the-chain-snapshot-iterator">5. Tier 2 &ndash; the chain-snapshot iterator</h2>
 
 <p>Tier 1 answers &ldquo;any hook?&rdquo;. Tier 2 answers &ldquo;what hooks, and what are their procs and modules?&rdquo;. When <code>is_hooked</code> returns true, the client tries Tier 2 before falling back to RPC.</p>
 
@@ -391,7 +391,7 @@ return -1;   /* retry exhausted */
 
 <p>Tier 2 is opt-out via <code>NSPA_DISABLE_HOOK_TIER2</code>; default is on. Tier 1 is opt-out via <code>NSPA_DISABLE_HOOK_TIER1</code>. Both default-on as of the 2026-04-25 ship.</p>
 
-<h3>When Tier 2 falls back</h3>
+<h3 id="when-tier-2-falls-back">When Tier 2 falls back</h3>
 
 <p>The reader returns -1 (RPC fallback) when:</p>
 
@@ -440,7 +440,7 @@ return -1;   /* retry exhausted */
 
 <p>Each of these has a corresponding RPC-path code, so falling back is always safe.</p>
 
-<h2>6. Server-side cache rebuild</h2>
+<h2 id="6-server-side-cache-rebuild">6. Server-side cache rebuild</h2>
 
 <p>The cache is rewritten only on hook <em>topology</em> changes &ndash; when a hook is added or removed &ndash; which are rare events relative to walk frequency. The rebuild lives in <code>server/nspa/hook_cache.c</code>.</p>
 
@@ -456,7 +456,7 @@ return -1;   /* retry exhausted */
 
 <p>The lifetime gymnastics in <code>remove_hook</code> deserve a second look. The hook being removed may hold the only reference to its thread (<code>hook-&gt;thread</code>); calling <code>remove_hook( hook )</code> can <code>release_object</code> that thread. So <code>remove_hook</code> (the handler) <code>grab_object</code>s the thread before calling <code>remove_hook</code> (the operation), then runs the rebuild on the still-live captured pointer, then <code>release_object</code>s it. Same pattern for the desktop pointer when the hook was global. Without these captures, the rebuild would run on a freed thread and corrupt the heap.</p>
 
-<h3>Seqlock writer protocol</h3>
+<h3 id="seqlock-writer-protocol">Seqlock writer protocol</h3>
 
 <p>The writer side is straightforward but worth spelling out. From <code>nspa_hook_cache_rebuild</code>:</p>
 
@@ -477,7 +477,7 @@ __atomic_store_n( &amp;chain-&gt;version, v + 2, __ATOMIC_RELEASE );
 
 <p>Wineserver is single-threaded for request handlers, so there are no concurrent writers ever &ndash; the seqlock exists exclusively for client/server (writer/reader) interaction, not writer/writer. This simplifies the writer protocol: no CAS on version, no winner-takes-all retry; just store-bump-fence-rewrite-fence-store-bump.</p>
 
-<h3>What goes in entries[]</h3>
+<h3 id="what-goes-in-entries">What goes in entries[]</h3>
 
 <p>Per-entry fields packed by the rebuild loop (<code>hook_cache.c:117-141</code>):</p>
 
@@ -546,7 +546,7 @@ __atomic_store_n( &amp;chain-&gt;version, v + 2, __ATOMIC_RELEASE );
 
 <p>The 64-byte size is load-bearing: each entry occupies exactly one cacheline, so a chain of length N reads N consecutive cachelines from shmem &ndash; minimal pollution of the client&rsquo;s L1.</p>
 
-<h3>Forced-overflow conditions</h3>
+<h3 id="forced-overflow-conditions">Forced-overflow conditions</h3>
 
 <p>The rebuild deliberately marks <code>overflowed = 1</code> (forcing RPC fallback) under three conditions:</p>
 
@@ -559,7 +559,7 @@ __atomic_store_n( &amp;chain-&gt;version, v + 2, __ATOMIC_RELEASE );
 
 <p>In all three cases <code>count</code> is set to 0 and <code>overflowed</code> to 1 before the version-end bump, so client readers see &ldquo;yes the cache is up to date, and it&rsquo;s telling you to use RPC&rdquo;.</p>
 
-<h2>7. Module-name pool</h2>
+<h2 id="7-module-name-pool">7. Module-name pool</h2>
 
 <p>Hooks installed with a module (<code>SetWindowsHookEx( inst, module, ... )</code>) carry a UTF-16 module name &ndash; <code>user32.dll</code>, <code>comctl32.dll</code>, plugin DLLs. Module names are variable-length (anywhere from 0 to <code>MAX_PATH = 260</code> WCHARs). Embedding them inline in <code>nspa_hook_entry_t</code> would either waste 520 bytes per entry (worst-case sized) or break the 64-byte cacheline invariant.</p>
 
@@ -600,7 +600,7 @@ if (hook-&gt;module_size &amp;&amp; hook-&gt;module &amp;&amp; e-&gt;module_offs
 
 <p>This makes pool exhaustion correct-by-construction: if the pool fills up partway through a chain rebuild, the rebuild marks the chain overflowed (clients see overflowed=1, fall back to RPC), and the server retains its authoritative chain in the legacy hook tables.</p>
 
-<h2>8. Lock and lifetime discipline</h2>
+<h2 id="8-lock-and-lifetime-discipline">8. Lock and lifetime discipline</h2>
 
 <p>Two lock-discipline invariants make the cache safe.</p>
 
@@ -621,7 +621,7 @@ if (hook-&gt;module_size &amp;&amp; hook-&gt;module &amp;&amp; e-&gt;module_offs
 
 <p>This mirrors vanilla Wine&rsquo;s existing semantics: there is always a window between &ldquo;hook is registered with the server&rdquo; and &ldquo;the next dispatch on the affected queue picks it up&rdquo;. The cache does not narrow or widen this window meaningfully; it just makes the steady-state cheaper.</p>
 
-<h2>9. Validation history</h2>
+<h2 id="9-validation-history">9. Validation history</h2>
 
 <p>Tier 1 and Tier 2 were both shipped on 2026-04-25, with the diag-pile cleanup on 2026-04-26. The relevant commits and their effects:</p>
 
@@ -707,7 +707,7 @@ if (hook-&gt;module_size &amp;&amp; hook-&gt;module &amp;&amp; e-&gt;module_offs
 
 <p>The other tested workloads (vsthost VST chains, Chromaphone instrument plugin, Ableton&rsquo;s drum-rack window with dozens of WM_PAINTs/sec) show the same pattern: Tier 1 short-circuits 99%+ of dispatches; Tier 2 serves the remaining 1% with zero RPCs.</p>
 
-<h2>10. Optional Tier 3 (future)</h2>
+<h2 id="10-optional-tier-3-future">10. Optional Tier 3 (future)</h2>
 
 <p>Two follow-on directions are queued, neither shipped.</p>
 
@@ -717,7 +717,7 @@ if (hook-&gt;module_size &amp;&amp; hook-&gt;module &amp;&amp; e-&gt;module_offs
 
 <p>Neither is on the near-term roadmap; current measured Tier 1 + Tier 2 hit rate makes both of these incremental wins on already-cheap paths.</p>
 
-<h2>11. References</h2>
+<h2 id="11-references">11. References</h2>
 
 <table>
 <thead>

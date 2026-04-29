@@ -83,7 +83,7 @@
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/tokyo-night-dark.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
 </head><body>
-<h1>Wine-NSPA &ndash; Critical Section Priority Inheritance (CS-PI)</h1>
+<h1 id="wine-nspa--critical-section-priority-inheritance-cs-pi">Wine-NSPA &ndash; Critical Section Priority Inheritance (CS-PI)</h1>
 
 <blockquote><p><strong>Status: STABLE since 2026-04-13 (v2.3).</strong>
 Validated against ~370M ops mixed-load 2026-04-28.</p></blockquote>
@@ -93,7 +93,7 @@ Validated against ~370M ops mixed-load 2026-04-28.</p></blockquote>
 <p>Wine 11.6 + NSPA RT v2.3 | Kernel 6.19.x-rt with FUTEX_LOCK_PI | 2026-04-15
 Author: Jordan Johnston</p>
 
-<h2>Table of Contents</h2>
+<h2 id="table-of-contents">Table of Contents</h2>
 
 <ol>
 <li><a href="#1-overview">Overview</a></li>
@@ -113,7 +113,7 @@ Author: Jordan Johnston</p>
 
 <hr />
 
-<h2>1. Overview</h2>
+<h2 id="1-overview">1. Overview</h2>
 
 <p><code>RTL_CRITICAL_SECTION</code> is the most contended lock primitive in Wine. Every heap allocation, loader operation, DllMain serialization, GDI call, and most application/plugin code exercises critical sections. In a typical DAW workload running 50-100 VST plugins, thousands of CS acquire/release pairs happen per audio callback period (typically 2-5 ms at 48 kHz with a 128-sample buffer).</p>
 
@@ -131,7 +131,7 @@ Author: Jordan Johnston</p>
 </ul>
 
 
-<h3>Source Files</h3>
+<h3 id="source-files">Source Files</h3>
 
 <table>
 <thead>
@@ -159,7 +159,7 @@ Author: Jordan Johnston</p>
 
 <hr />
 
-<h2>2. Upstream Wine vs NSPA Comparison</h2>
+<h2 id="2-upstream-wine-vs-nspa-comparison">2. Upstream Wine vs NSPA Comparison</h2>
 
 <p>The following diagram shows the complete acquire and release flow for both upstream Wine and NSPA CS-PI, side by side. The left column is upstream Wine&rsquo;s legacy path; the right column is NSPA&rsquo;s PI-enabled path. Both start from the same <code>RtlEnterCriticalSection</code> entry point.</p>
 
@@ -374,7 +374,7 @@ Author: Jordan Johnston</p>
 
 <hr />
 
-<h2>3. LockSemaphore Repurposing</h2>
+<h2 id="3-locksemaphore-repurposing">3. LockSemaphore Repurposing</h2>
 
 <p><code>RTL_CRITICAL_SECTION</code> has a <code>LockSemaphore</code> field typed as <code>HANDLE</code> (i.e., <code>PVOID</code> &ndash; pointer-sized). In upstream Wine, this stores a handle to a keyed event object, lazily created on first contention. The keyed event is used as the park/unpark mechanism: contended acquires call <code>NtWaitForKeyedEvent(LockSemaphore)</code>, and releases with waiters call <code>NtReleaseKeyedEvent(LockSemaphore)</code>.</p>
 
@@ -440,11 +440,11 @@ Author: Jordan Johnston</p>
 
 <hr />
 
-<h2>4. Fast Path (Uncontended)</h2>
+<h2 id="4-fast-path-uncontended">4. Fast Path (Uncontended)</h2>
 
 <p>The fast path handles the common case: the critical section is free, and the caller acquires it without contention. This executes entirely on the PE side, never crosses to Unix code, and never enters the kernel.</p>
 
-<h3>Sequence</h3>
+<h3 id="sequence">Sequence</h3>
 
 <ol>
 <li><p><strong>Get Linux TID:</strong> <code>nspa_get_unix_tid()</code> reads the cached TID from the TEB (a single memory load, ~2 ns). See <a href="#7-tid-source">Section 7</a> for details.</p></li>
@@ -453,7 +453,7 @@ Author: Jordan Johnston</p>
 </ol>
 
 
-<h3>Cost</h3>
+<h3 id="cost">Cost</h3>
 
 <table>
 <thead>
@@ -481,7 +481,7 @@ Author: Jordan Johnston</p>
 
 <p>The 5 ns overhead is the cost of the CAS on <code>LockSemaphore</code> plus the TEB memory load. This is acceptable: in a DAW running at 48 kHz / 128 samples, a single audio callback period is 2,666,667 ns. Even 10,000 CS acquire/release pairs per callback add only 50 us of overhead &ndash; under 2% of the callback budget.</p>
 
-<h3>Code Path</h3>
+<h3 id="code-path">Code Path</h3>
 
 <pre><code class="code-block">static inline BOOL nspa_cs_try_fast( RTL_CRITICAL_SECTION *crit, DWORD unix_tid )
 {
@@ -494,11 +494,11 @@ Author: Jordan Johnston</p>
 
 <hr />
 
-<h2>5. Slow Path (Contended)</h2>
+<h2 id="5-slow-path-contended">5. Slow Path (Contended)</h2>
 
 <p>When the fast-path CAS fails (the futex word is non-zero, meaning another thread holds the lock), the slow path hands control to the kernel&rsquo;s <code>rt_mutex</code> PI infrastructure.</p>
 
-<h3>Sequence</h3>
+<h3 id="sequence-2">Sequence</h3>
 
 <ol>
 <li><p><strong>Recursive check:</strong> Before going to the kernel, check if the current thread already owns this CS (by comparing <code>OwningThread</code> against the Win32 TID). If yes, bump <code>RecursionCount</code> and return. This avoids calling <code>futex_lock_pi</code> on a lock we already hold, which would return <code>EDEADLK</code>. See <a href="#9-recursive-locking">Section 9</a>.</p></li>
@@ -520,7 +520,7 @@ Author: Jordan Johnston</p>
 </ol>
 
 
-<h3>PI Chain Diagram</h3>
+<h3 id="pi-chain-diagram">PI Chain Diagram</h3>
 
 <div class="diagram-container">
 <svg width="100%" viewBox="0 0 880 380" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
@@ -612,7 +612,7 @@ Author: Jordan Johnston</p>
 </div>
 
 
-<h3>Error Handling</h3>
+<h3 id="error-handling">Error Handling</h3>
 
 <ul>
 <li><code>EINTR</code>: The <code>futex_lock_pi</code> call is wrapped in a <code>do { } while (ret == -1 &amp;&amp; errno == EINTR)</code> loop. Signal delivery restarts the wait.</li>
@@ -623,11 +623,11 @@ Author: Jordan Johnston</p>
 
 <hr />
 
-<h2>6. Release Path</h2>
+<h2 id="6-release-path">6. Release Path</h2>
 
 <p>Release is the mirror of acquire, with the same fast/slow split.</p>
 
-<h3>Final Release (RecursionCount drops to 0)</h3>
+<h3 id="final-release-recursioncount-drops-to-0">Final Release (RecursionCount drops to 0)</h3>
 
 <ol>
 <li><p><strong>Clear bookkeeping:</strong> Set <code>RecursionCount = 0</code>, <code>OwningThread = 0</code>. These must be cleared before the futex word is released, because once the futex word is zero, another thread can acquire the lock and see stale values.</p></li>
@@ -645,23 +645,23 @@ Author: Jordan Johnston</p>
 </ol>
 
 
-<h3>Recursive Release (RecursionCount > 1)</h3>
+<h3 id="recursive-release-recursioncount--1">Recursive Release (RecursionCount > 1)</h3>
 
 <p>If <code>RecursionCount &gt; 1</code>, this is not the final unlock. Just decrement <code>RecursionCount</code> and <code>LockCount</code>, then return. The futex word stays unchanged (still contains our TID).</p>
 
-<h3>Error Recovery</h3>
+<h3 id="error-recovery">Error Recovery</h3>
 
 <p>If <code>NtNspaUnlockCriticalSectionPI</code> returns <code>STATUS_NOT_SUPPORTED</code> (the extremely unlikely case where <code>FUTEX_LOCK_PI</code> worked but <code>FUTEX_UNLOCK_PI</code> returns ENOSYS), CS-PI logs an error, disables itself globally, and returns <code>STATUS_SUCCESS</code>. The futex word is stuck (contains a stale TID with <code>FUTEX_WAITERS</code> set), and future acquires on this specific CS will hang. This is accepted as a fatal diagnostic condition &ndash; it should never happen on a consistent kernel.</p>
 
 <hr />
 
-<h2>7. TID Source</h2>
+<h2 id="7-tid-source">7. TID Source</h2>
 
 <p><code>FUTEX_LOCK_PI</code> requires the owner field in the futex word to be a valid <strong>Linux kernel TID</strong> (<code>pid_t</code> from <code>SYS_gettid</code>). The kernel validates this against its task list &ndash; if the TID is invalid, <code>futex_lock_pi</code> returns <code>ESRCH</code>, and every contended acquire hangs.</p>
 
 <p>Wine&rsquo;s <code>GetCurrentThreadId()</code> returns the <strong>Win32 thread ID</strong> from <code>TEB-&gt;ClientId.UniqueThread</code>. This is a wineserver-assigned value, unrelated to the Linux kernel TID. Using it directly causes <code>ESRCH</code>.</p>
 
-<h3>Solution: Cached TID via TEB</h3>
+<h3 id="solution-cached-tid-via-teb">Solution: Cached TID via TEB</h3>
 
 <p>The Unix-side <code>ntdll_thread_data</code> struct (embedded in the TEB&rsquo;s <code>GdiTebBatch</code> region) has an <code>nspa_unix_tid</code> field. This is populated on first access via <code>syscall(SYS_gettid)</code> and cached for the thread&rsquo;s lifetime.</p>
 
@@ -694,11 +694,11 @@ static inline DWORD nspa_get_unix_tid(void)
 
 <hr />
 
-<h2>8. Gating Mechanism</h2>
+<h2 id="8-gating-mechanism">8. Gating Mechanism</h2>
 
 <p>CS-PI is gated on the <code>NSPA_RT_PRIO</code> environment variable. When the variable is unset, CS-PI is inactive and all CS functions execute the upstream Wine legacy path with zero overhead beyond a single branch on a cached state variable.</p>
 
-<h3>Tri-State Machine</h3>
+<h3 id="tri-state-machine">Tri-State Machine</h3>
 
 <pre><code class="code-block">nspa_cs_pi_state (static LONG):
   0  = uninitialized (first CS op on any thread triggers probe)
@@ -706,11 +706,11 @@ static inline DWORD nspa_get_unix_tid(void)
   -1 = inactive (NSPA_RT_PRIO unset, or kernel returned ENOSYS)
 </code></pre>
 
-<h3>Why Not RtlQueryEnvironmentVariable_U</h3>
+<h3 id="why-not-rtlqueryenvironmentvariable_u">Why Not RtlQueryEnvironmentVariable_U</h3>
 
 <p>The obvious approach &ndash; calling <code>RtlQueryEnvironmentVariable_U</code> to read the env var &ndash; causes a <strong>recursive stack overflow</strong>. That function internally acquires critical sections (the PEB lock, the process heap lock). Those CS operations re-enter <code>nspa_cs_pi_active()</code>, which re-enters <code>RtlQueryEnvironmentVariable_U</code>, and so on. This was observed as <code>err:virtual:virtual_setup_exception</code> crashes on every PE binary launch.</p>
 
-<h3>Direct PEB Scan</h3>
+<h3 id="direct-peb-scan">Direct PEB Scan</h3>
 
 <p>Instead, <code>nspa_cs_pi_active()</code> reads the PEB environment block directly:</p>
 
@@ -719,13 +719,13 @@ static inline DWORD nspa_get_unix_tid(void)
 
 <p>This is a null-separated list of <code>L"VAR=value\0"</code> strings. The function walks the list comparing against <code>L"NSPA_RT_PRIO="</code> character by character, using no Rtl functions and no locks. This mirrors how the Windows loader reads environment variables before kernel32 is loaded.</p>
 
-<h3>Race Safety</h3>
+<h3 id="race-safety">Race Safety</h3>
 
 <p>Multiple threads may call <code>nspa_cs_pi_active()</code> concurrently during the uninitialized phase. Each computes <code>new_state</code> independently, then publishes via <code>InterlockedCompareExchange(&amp;nspa_cs_pi_state, new_state, 0)</code>. The first writer wins; all subsequent readers see the published value. Since all threads observe the same PEB environment, they all compute the same answer &ndash; the race is benign.</p>
 
 <hr />
 
-<h2>9. Recursive Locking</h2>
+<h2 id="9-recursive-locking">9. Recursive Locking</h2>
 
 <p><code>RTL_CRITICAL_SECTION</code> supports recursive acquisition: the same thread can enter a CS multiple times, incrementing <code>RecursionCount</code> each time, and must leave the same number of times.</p>
 
@@ -737,17 +737,17 @@ static inline DWORD nspa_get_unix_tid(void)
 </ol>
 
 
-<h3>Why This Matters</h3>
+<h3 id="why-this-matters">Why This Matters</h3>
 
 <p>Calling <code>futex_lock_pi</code> when we already hold the futex would return <code>EDEADLK</code> (the kernel detects the self-deadlock via the rt_mutex chain). We must detect recursion in user space before the syscall. The OwningThread comparison is the canonical way &ndash; it uses the Win32 TID, matching both the legacy path&rsquo;s check and external APIs like <code>RtlIsCriticalSectionLockedByThread</code>.</p>
 
 <hr />
 
-<h2>10. Fallback Behavior</h2>
+<h2 id="10-fallback-behavior">10. Fallback Behavior</h2>
 
 <p>CS-PI is a soft dependency on kernel <code>FUTEX_LOCK_PI</code> support. If the kernel returns <code>ENOSYS</code> (function not implemented), CS-PI disables itself permanently and all subsequent CS operations use upstream Wine&rsquo;s legacy keyed-event path.</p>
 
-<h3>Trigger</h3>
+<h3 id="trigger">Trigger</h3>
 
 <p>The first <code>NtNspaLockCriticalSectionPI</code> call that receives <code>ENOSYS</code> returns <code>STATUS_NOT_SUPPORTED</code> to the PE side. The PE-side <code>nspa_cs_enter_pi</code> function:</p>
 
@@ -760,21 +760,21 @@ static inline DWORD nspa_get_unix_tid(void)
 
 <p>The calling <code>RtlEnterCriticalSection</code> sees <code>STATUS_RETRY</code> and falls through to the legacy <code>InterlockedIncrement</code> / <code>RtlpWaitForCriticalSection</code> / keyed-event path.</p>
 
-<h3>Scope</h3>
+<h3 id="scope">Scope</h3>
 
 <p>The disable is global and permanent (for the process lifetime). Once <code>nspa_cs_pi_state</code> is set to <code>-1</code>, <code>nspa_cs_pi_active()</code> returns <code>FALSE</code> on every subsequent call. All CS operations across all threads revert to upstream behavior.</p>
 
-<h3>When This Fires</h3>
+<h3 id="when-this-fires">When This Fires</h3>
 
 <p><code>FUTEX_LOCK_PI</code> has been in the Linux kernel since 2.6.18 (September 2006). Any kernel from the last 20 years supports it. On PREEMPT_RT kernels (which NSPA requires), it is always available. The fallback exists as a safety net for unusual kernel configurations (e.g., stripped embedded kernels), not as an expected code path.</p>
 
 <hr />
 
-<h2>11. SRW Lock Spin Phase</h2>
+<h2 id="11-srw-lock-spin-phase">11. SRW Lock Spin Phase</h2>
 
 <p><code>RTL_SRWLOCK</code> is the other major user-space lock in Wine, used by the process heap, loader, and application code. NSPA adds a bounded spin phase to SRW lock acquisition, complementing CS-PI. These are independent optimizations for different lock types.</p>
 
-<h3>Design</h3>
+<h3 id="design">Design</h3>
 
 <p>Windows SRW locks spin approximately 1024 iterations before parking via <code>NtWaitForAlertByThreadId</code>. Upstream Wine does zero spinning &ndash; every contended acquire immediately calls <code>RtlWaitOnAddress</code>, which translates to a futex syscall. NSPA adds 256 spin iterations for normal threads before falling through to the wait.</p>
 
@@ -785,7 +785,7 @@ static inline DWORD nspa_get_unix_tid(void)
 
 <p><strong>Single-CPU systems:</strong> Spinning is disabled on uniprocessor systems. The holder cannot make progress while the spinner runs on the same (only) core.</p>
 
-<h3>Relationship to CS-PI</h3>
+<h3 id="relationship-to-cs-pi">Relationship to CS-PI</h3>
 
 <p>SRW locks and critical sections are separate primitives with different internal architectures:</p>
 
@@ -831,11 +831,11 @@ static inline DWORD nspa_get_unix_tid(void)
 
 <hr />
 
-<h2>12. Validation</h2>
+<h2 id="12-validation">12. Validation</h2>
 
 <p>CS-PI is validated by three test programs in the NSPA RT test suite (<code>nspa_rt_test.exe</code>), run with <code>NSPA_RT_PRIO=80 NSPA_RT_POLICY=FF</code> on a <code>PREEMPT_RT</code> kernel.</p>
 
-<h3>Test: cs-contention</h3>
+<h3 id="test-cs-contention">Test: cs-contention</h3>
 
 <p><strong>Purpose:</strong> Validates that PI boost matches uncontended work time. A <code>SCHED_OTHER</code> holder does 200M-iteration busywork inside a CS (approximately 475 ms of CPU time). An RT waiter (<code>SCHED_FIFO 87</code>) blocks on the CS. Four <code>SCHED_OTHER</code> load threads compete for CPU. Under PI, the holder is boosted and the waiter&rsquo;s wait time matches the holder&rsquo;s work time. Without PI, CFS time-slices the holder against the load threads, inflating the wait.</p>
 
@@ -875,7 +875,7 @@ static inline DWORD nspa_get_unix_tid(void)
 
 <p>The wait time matches the work time to within 1 ms, confirming the holder receives full CPU time under PI boost.</p>
 
-<h3>Test: rapidmutex</h3>
+<h3 id="test-rapidmutex">Test: rapidmutex</h3>
 
 <p><strong>Purpose:</strong> Throughput stress test. Four threads (1 RT + 3 load) perform 500,000 CS acquire/release cycles each on a shared critical section. Measures throughput, per-thread max wait, and correctness (shared counter).</p>
 
@@ -921,7 +921,7 @@ static inline DWORD nspa_get_unix_tid(void)
 
 <p><strong>v4 to v5 improvement:</strong> RT throughput improved from 312K to 327K ops/s (+4.7%). RT max wait dropped from 46 us to 36 us. These gains are attributed to SIMD memcpy/memmove optimizations reducing overhead in the CS fast path.</p>
 
-<h3>Test: philosophers</h3>
+<h3 id="test-philosophers">Test: philosophers</h3>
 
 <p><strong>Purpose:</strong> Dining philosophers with 5 diners, 2 forks each. Philosopher 0 is RT (<code>SCHED_FIFO</code>), philosophers 1-4 are <code>SCHED_OTHER</code>. Four background load threads. Validates transitive PI: philosopher 0 waiting on fork A, held by philosopher 1, who is waiting on fork B, held by philosopher 2 &ndash; the PI chain propagates through the rt_mutex infrastructure.</p>
 
@@ -961,7 +961,7 @@ static inline DWORD nspa_get_unix_tid(void)
 
 <p>The RT max wait varies between runs due to CFS load placement (v4 measured 601 us, v5 measured 1301 us &ndash; both within acceptable range). The critical validation is that all meals complete without deadlock and the PI chain propagates correctly through nested lock acquisitions.</p>
 
-<h3>v4 to v5 Summary</h3>
+<h3 id="v4-to-v5-summary">v4 to v5 Summary</h3>
 
 <table>
 <thead>

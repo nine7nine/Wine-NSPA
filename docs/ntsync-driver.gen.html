@@ -83,12 +83,12 @@
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/tokyo-night-dark.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
 </head><body>
-<h1>Wine-NSPA &ndash; NTSync Kernel Driver</h1>
+<h1 id="wine-nspa--ntsync-kernel-driver">Wine-NSPA &ndash; NTSync Kernel Driver</h1>
 
 <p>Linux-NSPA 6.19.11-rt1-1 (PREEMPT_RT), CONFIG_NTSYNC=m | 2026-04-28
 Author: Jordan Johnston</p>
 
-<h2>Table of Contents</h2>
+<h2 id="table-of-contents">Table of Contents</h2>
 
 <ol>
 <li><a href="#1-overview">Overview</a></li>
@@ -109,7 +109,7 @@ Author: Jordan Johnston</p>
 
 <hr />
 
-<h2>1. Overview</h2>
+<h2 id="1-overview">1. Overview</h2>
 
 <p>NTSync is a Linux kernel driver (<code>drivers/misc/ntsync.c</code>, <code>/dev/ntsync</code>) that implements Windows NT synchronization primitives &ndash; mutexes, semaphores, and events &ndash; directly in the kernel. Upstream Wine uses it to replace the wineserver-mediated sync path for these objects, eliminating cross-process round-trips for wait/wake operations.</p>
 
@@ -121,13 +121,13 @@ Author: Jordan Johnston</p>
 
 <p>This doc covers the patch-by-patch design rationale: what each patch changes, what bug it closes (or feature it adds), how it preserves NT semantics, and how it interacts with the <code>obj_lock</code> raw_spinlock and PREEMPT_RT.</p>
 
-<h3>NSPA overlay relationship</h3>
+<h3 id="nspa-overlay-relationship">NSPA overlay relationship</h3>
 
 <p>Wine-NSPA does not fork ntsync. The patches are diffs against upstream <code>drivers/misc/ntsync.c</code> and apply cleanly in series 1003 -> 1004 -> 1005 -> 1006 -> 1007 -> 1008 -> 1009. They live in <code>wine-rt-claude/ntsync-patches/</code> as standalone unified diffs. The kernel build (<code>linux-nspa</code>) applies the stack at PKGBUILD time; the resulting <code>.ko</code> ships as part of the kernel package.</p>
 
 <p>The patch numbering (<code>1003-</code> through <code>1009-</code>) is local to NSPA. It bears no relationship to upstream NTSync revisions or any LKML series.</p>
 
-<h3>Patch series at a glance</h3>
+<h3 id="patch-series-at-a-glance">Patch series at a glance</h3>
 
 <table>
 <thead>
@@ -291,7 +291,7 @@ Author: Jordan Johnston</p>
 
 <hr />
 
-<h2>2. Object Types</h2>
+<h2 id="2-object-types">2. Object Types</h2>
 
 <p>Wine-NSPA&rsquo;s ntsync exposes four object types via <code>/dev/ntsync</code> (one character device opened once per Wine process; object creation returns FDs).</p>
 
@@ -342,7 +342,7 @@ Author: Jordan Johnston</p>
 
 <p>The channel is wholly NSPA-private. It does not map to any Win32 primitive. It is a transport for Wine-NSPA&rsquo;s wineserver request-reply fast path &ndash; a kernel-mediated alternative to the legacy futex+manual-<code>sched_setscheduler</code> shm IPC. Channels do not participate in <code>WAIT_ANY</code> / <code>WAIT_ALL</code>; they are accessed exclusively through their own ioctls.</p>
 
-<h3>is_signaled by type</h3>
+<h3 id="is_signaled-by-type">is_signaled by type</h3>
 
 <p>The driver&rsquo;s central <code>is_signaled()</code> predicate (called from <code>try_wake_any</code> / <code>try_wake_all</code>) returns differently per type:</p>
 
@@ -378,11 +378,11 @@ Author: Jordan Johnston</p>
 
 <hr />
 
-<h2>3. The 1003 PI Baseline</h2>
+<h2 id="3-the-1003-pi-baseline">3. The 1003 PI Baseline</h2>
 
 <p>The 1003 patch (originally three logical patches <code>1001</code>/<code>1002</code>/<code>1003</code>, collapsed in this section for clarity) established the RT baseline that all subsequent patches build on.</p>
 
-<h3>Locking hierarchy</h3>
+<h3 id="locking-hierarchy">Locking hierarchy</h3>
 
 <p>The driver has three locks. NSPA classifies them explicitly for PREEMPT_RT:</p>
 
@@ -397,7 +397,7 @@ raw_spinlock_t dev-&gt;boost_lock    device-wide, protects boosted_owners list
 
 <p>The <code>obj_lock()</code> fast path acquires only <code>obj-&gt;lock</code>. When <code>obj-&gt;dev_locked</code> is set (another thread is doing a wait-all on this object), <code>obj_lock()</code> falls back to acquiring <code>wait_all_lock</code> first. This avoids ABBA deadlocks between per-object and device-wide locks.</p>
 
-<h3>Priority-ordered waiter queues</h3>
+<h3 id="priority-ordered-waiter-queues">Priority-ordered waiter queues</h3>
 
 <p>Upstream ntsync uses <code>list_add_tail()</code> to append waiters: FIFO order. NSPA replaces this with <code>ntsync_insert_waiter()</code>, which performs a sorted insertion based on the kernel-internal <code>task-&gt;prio</code> (lower numeric value = higher scheduling priority).</p>
 
@@ -417,7 +417,7 @@ raw_spinlock_t dev-&gt;boost_lock    device-wide, protects boosted_owners list
 
 <p>Same-priority waiters maintain FIFO order within their priority level. <code>try_wake_any_*()</code> walks from the head, so the highest-priority satisfiable waiter wakes first. This restores NT semantics (highest-priority waiter wins) and is strictly stronger than upstream&rsquo;s FIFO.</p>
 
-<h3>Mutex owner PI boost</h3>
+<h3 id="mutex-owner-pi-boost">Mutex owner PI boost</h3>
 
 <p>When an RT thread (e.g. SCHED_FIFO prio 80) waits on a mutex held by a SCHED_OTHER thread (prio 120 in kernel terms), the holder is preempted by every running RT thread and time-sliced by CFS against every other normal thread. The RT waiter&rsquo;s bounded-latency guarantee is violated.</p>
 
@@ -455,23 +455,23 @@ raw_spinlock_t dev-&gt;boost_lock    device-wide, protects boosted_owners list
 
 <p>The <code>ntsync_pi_owner</code> struct is the unit of bookkeeping. The pool/cleanup pattern that 1006 introduces (Section 6) is the unit of RT-safe allocation for that struct.</p>
 
-<h3>EVENT_SET_PI primitive (pre-1008 design)</h3>
+<h3 id="event_set_pi-primitive-pre-1008-design">EVENT_SET_PI primitive (pre-1008 design)</h3>
 
 <p><code>EVENT_SET_PI</code> was originally introduced in 1003 as the cross-thread priority-intent primitive: an RT thread sets an event, and along with the signal it carries a <code>(policy, prio)</code> boost that the kernel applies to the event&rsquo;s first waiter. Wine-NSPA uses this for the audio-thread -> dispatcher SendMessage bypass: the audio callback sets a queue event with its own RT priority, and the dispatcher pthread is woken at that priority.</p>
 
 <p>The original design walked <code>event-&gt;any_waiters</code> under <code>obj_lock</code> at <code>EVENT_SET_PI</code> time and applied the boost to the head waiter. This had a fast-path race that 1008 closes &ndash; see Section 8.</p>
 
-<h3>Per-task tracking, conservative over-boost</h3>
+<h3 id="per-task-tracking-conservative-over-boost">Per-task tracking, conservative over-boost</h3>
 
 <p><code>ntsync_pi_owner</code> is allocated lazily on first boost and freed only when the last contributing object releases. Between the first removal and the last, the owner is conservatively over-boosted: it runs at too-high priority briefly, never too-low. That is the safe direction; under-boost would leak inversion. The lazy lifetime also means owner_task is resolved lazily on the first unlock (where <code>current</code> is the actual Win32-owning thread), since at create time <code>current</code> is the wineserver, not the eventual owner.</p>
 
 <hr />
 
-<h2>4. Patch 1004: Channel Object</h2>
+<h2 id="4-patch-1004-channel-object">4. Patch 1004: Channel Object</h2>
 
 <p><code>1004-ntsync-channel.patch</code> adds a new object type, <code>NTSYNC_TYPE_CHANNEL</code>. A channel is a bounded, kernel-side priority-ordered request/reply mailbox. It exists to replace Wine-NSPA&rsquo;s user-space futex + manual <code>sched_setscheduler</code> shm-IPC fast path between client processes and the wineserver.</p>
 
-<h3>Why a kernel object</h3>
+<h3 id="why-a-kernel-object">Why a kernel object</h3>
 
 <p>Wine&rsquo;s wineserver protocol is fundamentally a request/reply RPC. Each client thread sends a request, blocks for the reply, and resumes. The legacy fast path used a process-shared futex on a request slot plus a <code>sched_setscheduler</code> call from the sending audio thread to lift the dispatcher pthread&rsquo;s priority. That worked but had three problems:</p>
 
@@ -494,7 +494,7 @@ raw_spinlock_t dev-&gt;boost_lock    device-wide, protects boosted_owners list
 
 <p>The channel is purely a <em>transport</em>, not a <em>protocol</em>. The wineserver still drives the request/reply contract; the kernel multiplexes and priority-orders, and never reorders within a single sender (each sender blocks for reply, so per-thread ordering is preserved).</p>
 
-<h3>API</h3>
+<h3 id="api">API</h3>
 
 <p>Four ioctls, all on a channel FD obtained via <code>NTSYNC_IOC_CREATE_CHANNEL</code>:</p>
 
@@ -533,7 +533,7 @@ raw_spinlock_t dev-&gt;boost_lock    device-wide, protects boosted_owners list
 
 <p>The <code>payload_off</code> and <code>reply_off</code> fields are opaque to the kernel; conventionally they are indices into a per-process shared-memory region the client and wineserver both map. The kernel transports the cookies; user space interprets them.</p>
 
-<h3>Internal state</h3>
+<h3 id="internal-state">Internal state</h3>
 
 <p>The channel object&rsquo;s per-instance state lives in <code>obj-&gt;u.channel</code>:</p>
 
@@ -666,7 +666,7 @@ raw_spinlock_t dev-&gt;boost_lock    device-wide, protects boosted_owners list
 </div>
 
 
-<h3>SEND_PI flow</h3>
+<h3 id="send_pi-flow">SEND_PI flow</h3>
 
 <ol>
 <li>Validate <code>(policy, prio)</code>. Pre-allocate <code>e</code> and <code>new_ep</code> (the boost tracking entry) with <code>GFP_KERNEL</code> outside any lock &ndash; slab on RT cannot be called under <code>raw_spinlock_t</code>.</li>
@@ -681,7 +681,7 @@ raw_spinlock_t dev-&gt;boost_lock    device-wide, protects boosted_owners list
 
 <p>The cleanup path covers the case where the sender was interrupted (signal). The entry might still be PENDING (rb-tree) or DISPATCHED (list); we use <code>e-&gt;state</code> to dispatch correctly. <code>depth</code> is decremented only in the PENDING branch &ndash; DISPATCHED entries no longer count against <code>max_depth</code>.</p>
 
-<h3>RECV / RECV2 flow</h3>
+<h3 id="recv--recv2-flow">RECV / RECV2 flow</h3>
 
 <ol>
 <li><code>drain_event_pi_boosts(dev, current)</code> &ndash; release any boost left over from a prior RECV cycle.</li>
@@ -695,7 +695,7 @@ raw_spinlock_t dev-&gt;boost_lock    device-wide, protects boosted_owners list
 </ol>
 
 
-<h3>REPLY flow</h3>
+<h3 id="reply-flow">REPLY flow</h3>
 
 <ol>
 <li><code>obj_lock(ch)</code>. Walk <code>dispatched</code> list for <code>entry_id</code>. If not found or already replied: <code>-ENOENT</code>.</li>
@@ -708,29 +708,29 @@ raw_spinlock_t dev-&gt;boost_lock    device-wide, protects boosted_owners list
 </ol>
 
 
-<h3>Memory ordering</h3>
+<h3 id="memory-ordering">Memory ordering</h3>
 
 <p>Kernel ioctl syscall entry/exit is a full memory barrier. So payload visibility from sender -> receiver and reply visibility from receiver -> sender is naturally serialised: the sender&rsquo;s <code>copy_from_user</code> of the payload completed before SEND_PI returns from the syscall handler; the receiver&rsquo;s <code>copy_to_user</code> happens-before <code>RECV</code> returns; the receiver&rsquo;s writes to the reply region happen-before <code>REPLY</code> returns; the sender&rsquo;s <code>copy_from_user</code> of the reply happens-after SEND_PI&rsquo;s wake.</p>
 
-<h3>NT semantics</h3>
+<h3 id="nt-semantics">NT semantics</h3>
 
 <p>The kernel does not promise ordering across senders &ndash; it priority-orders, but a SCHED_OTHER sender behind a SCHED_FIFO sender will wait. Cross-thread ordering was never guaranteed under the prior per-thread dispatcher pthread shape, so this is strictly stronger semantically (no thread can starve while a higher-prio thread is waiting). Within a single sender, ordering is preserved: each <code>SEND_PI</code> blocks for reply, so back-to-back sends from the same TID are serialised.</p>
 
-<h3>Hot-path bound</h3>
+<h3 id="hot-path-bound">Hot-path bound</h3>
 
 <p><code>obj_lock</code> sections in SEND_PI / RECV / REPLY are bounded by tree height. With <code>max_depth = 1024</code>, that is 10 rb-tree comparisons. Zero allocation under lock. No memory copies under lock (the <code>copy_to_user</code> happens after <code>obj_unlock</code>).</p>
 
-<h3>Diagnostics: depth and channel emptiness</h3>
+<h3 id="diagnostics-depth-and-channel-emptiness">Diagnostics: depth and channel emptiness</h3>
 
 <p>A channel can only be freed when both <code>pending</code> and <code>dispatched</code> are empty; otherwise senders or dispatchers still hold the file open via the syscall ref. <code>ntsync_free_obj()</code> <code>WARN_ON</code>s either non-empty list at free time &ndash; a useful canary if user space ever leaks a channel FD with active entries.</p>
 
 <hr />
 
-<h2>5. Patch 1005: Thread-Token Pass-Through</h2>
+<h2 id="5-patch-1005-thread-token-pass-through">5. Patch 1005: Thread-Token Pass-Through</h2>
 
 <p>Once the channel was in production, perf 2026-04-26 showed ~10% of dispatcher CPU sitting in a userspace <code>get_thread_from_id()</code> lookup inside the gamma dispatcher&rsquo;s hot loop. Every received request needed to map <code>sender_tid</code> -> <code>struct thread *</code> to dispatch. This patch eliminates that lookup by stamping a wineserver-supplied opaque token onto each entry at RECV time.</p>
 
-<h3>Mechanism</h3>
+<h3 id="mechanism">Mechanism</h3>
 
 <p>The wineserver registers <code>(tid, token)</code> per channel via a new ioctl. The kernel stores the mapping in a 64-bucket hash on the channel (<code>hlist_head thread_regs[64]</code>, keyed by <code>tid &amp; 63</code>, protected by the existing <code>obj_lock</code>). At RECV2 time the kernel looks up the token for <code>e-&gt;sender_tid</code> and returns it in extended args.</p>
 
@@ -768,7 +768,7 @@ raw_spinlock_t dev-&gt;boost_lock    device-wide, protects boosted_owners list
 
 <p>Plus <code>NTSYNC_IOC_CHANNEL_RECV2</code> &ndash; same as <code>RECV</code> but returns an extra <code>thread_token</code> field. Old <code>RECV</code> remains for backward compat: wineserver tries <code>RECV2</code> first, falls back to <code>RECV</code> + userspace <code>get_thread_from_id</code> on <code>-ENOTTY</code> (old kernel).</p>
 
-<h3>v2 design: lookup at RECV2, not SEND_PI</h3>
+<h3 id="v2-design-lookup-at-recv2-not-send_pi">v2 design: lookup at RECV2, not SEND_PI</h3>
 
 <p>The first version of this patch did the hash lookup in <code>SEND_PI</code> and stamped <code>thread_token</code> onto the entry there. v2 moved the lookup to <code>RECV2</code>. Two reasons:</p>
 
@@ -780,7 +780,7 @@ raw_spinlock_t dev-&gt;boost_lock    device-wide, protects boosted_owners list
 
 <p>The hash bucket count is fixed at 64 (no resize, no <code>rhashtable</code>). For a typical Wine process with dozens to a few hundred threads, that gives single-digit average chain lengths &ndash; well under the rb-tree key comparison cost in SEND_PI/RECV.</p>
 
-<h3>Lifetime invariants</h3>
+<h3 id="lifetime-invariants">Lifetime invariants</h3>
 
 <p>The wineserver enforces:</p>
 
@@ -792,21 +792,21 @@ raw_spinlock_t dev-&gt;boost_lock    device-wide, protects boosted_owners list
 
 <p>Together these ensure <code>RECV2</code> always sees a non-zero token for a still-live thread. A momentarily-zero token (if registration races a fast first send) yields a userspace fallback that completes correctly &ndash; it is only a perf regression, not a correctness one.</p>
 
-<h3><code>channel_drain_thread_regs()</code> on free</h3>
+<h3 id="channel_drain_thread_regs-on-free"><code>channel_drain_thread_regs()</code> on free</h3>
 
 <p>When a channel is freed, any leftover <code>(tid, token)</code> registrations are dropped. By construction the channel is unreachable at <code>ntsync_free_obj()</code> time (no senders, no dispatchers can have an FD), so no concurrent access is possible &ndash; a single pass through the buckets, kfreeing each <code>ntsync_thread_reg</code>.</p>
 
-<h3>Backward compat</h3>
+<h3 id="backward-compat">Backward compat</h3>
 
 <p>Old <code>RECV</code> entries always carry <code>thread_token = 0</code> (initialized in <code>kzalloc</code>). Userspace that calls <code>RECV</code> instead of <code>RECV2</code> simply never sees a non-zero token and falls through to the legacy <code>get_thread_from_id</code> path. New kernel + old wineserver -> works. Old kernel + new wineserver -> works (the <code>RECV2</code> ioctl returns <code>-ENOTTY</code> and the wineserver retries with <code>RECV</code>).</p>
 
 <hr />
 
-<h2>6. Patch 1006: RT Alloc-Hoist</h2>
+<h2 id="6-patch-1006-rt-alloc-hoist">6. Patch 1006: RT Alloc-Hoist</h2>
 
 <p>This is a <strong>safety patch</strong>, not a feature: it fixes six sites in the driver where slab <code>kzalloc</code>/<code>kfree</code> was being called under <code>raw_spinlock_t</code> on PREEMPT_RT &ndash; which is illegal. The bug was latent until 2026-04-26, when an Ableton workload hard-froze the host with a clean kernel oops.</p>
 
-<h3>The kernel oops</h3>
+<h3 id="the-kernel-oops">The kernel oops</h3>
 
 <p>After installing the freshly-built thread-token <code>ntsync.ko</code> (srcversion <code>635D3C3857C859418827A5C</code>), Ableton hard-froze the host 13 minutes into a session:</p>
 
@@ -818,7 +818,7 @@ Comm: Ableton Web Con      PREEMPT_{RT,(lazy)}
 
 <p>Classic SLUB freelist corruption.</p>
 
-<h3>Root cause</h3>
+<h3 id="root-cause">Root cause</h3>
 
 <p><code>obj-&gt;lock</code> and <code>dev-&gt;boost_lock</code> are both <code>raw_spinlock_t</code>. On PREEMPT_RT, SLUB&rsquo;s per-CPU fast path uses <code>local_lock_t</code>, which is <code>spinlock_t</code> &ndash; a sleeping lock under PREEMPT_RT (confirmed in <code>include/linux/local_lock_internal.h</code>). So <code>kzalloc</code> / <code>kfree</code> under any <code>raw_spinlock_t</code> is unsafe on RT, including <code>GFP_ATOMIC</code> (the GFP flag gates reclaim, not the local_lock).</p>
 
@@ -878,7 +878,7 @@ Comm: Ableton Web Con      PREEMPT_{RT,(lazy)}
 
 <p>Sites 1-4 had been latent since the 1003 PI patch landed; 5-6 were new in 1005 (thread-token registration). The Ableton lockup was almost certainly triggered by 5 or 6: <code>T2</code> thread-token registration is always-on when channel + kernel support are present, and Ableton boot creates dozens of threads -> dozens of register/deregister calls -> poisoned freelist 13 minutes in. Sites 1-4 had likely also caused several previous unexplained host lockups (Phase B msg-ring, B1.0 paint-cache, &ldquo;in-handler instrumentation triggers host lockup&rdquo; series).</p>
 
-<h3>The pi_work pool/cleanup pattern</h3>
+<h3 id="the-pi_work-poolcleanup-pattern">The pi_work pool/cleanup pattern</h3>
 
 <p>The fix introduces a stack-resident <code>struct ntsync_pi_work</code> that the caller pre-allocates and finishes outside any raw lock:</p>
 
@@ -906,7 +906,7 @@ kfree from new_po_pool + to_free_list               (caller, no lock)
 
 <p>Empty pool is a non-fatal fallback: <code>pi_recalc</code> skips the boost (transient priority inversion until next op), matching the prior <code>GFP_ATOMIC</code> behaviour. The hot path stays one slab op per ioctl &ndash; just hoisted past the lock, so no extra latency.</p>
 
-<h3>Caller pattern</h3>
+<h3 id="caller-pattern">Caller pattern</h3>
 
 <p>Every ioctl entry that may invoke <code>pi_recalc</code> / <code>pi_drop</code> declares one of these on stack:</p>
 
@@ -922,27 +922,27 @@ ntsync_pi_work_finish(&amp;pi_work);
 
 <p>This pattern shows up in <code>try_wake_any</code>, <code>try_wake_all_obj</code>, <code>release_mutex</code>, <code>wait_any</code>, <code>wait_all</code>, <code>event_set_pi</code>, and several other entry points. Sites 5-6 (channel register/deregister) use a simpler local <code>victim</code> pointer pattern &ndash; a single removal per call doesn&rsquo;t justify the pool.</p>
 
-<h3>NT semantics preserved exactly</h3>
+<h3 id="nt-semantics-preserved-exactly">NT semantics preserved exactly</h3>
 
 <p>Only observable difference: <code>ntsync_pi_owner</code> cleanup deferred by tens of nanoseconds past <code>raw_spin_unlock</code>. Mutex ownership transfers atomically with wake (cmpxchg unchanged). PI boost levels and stacking semantics unchanged. Channel priority ordering (DESC, seq ASC) unchanged. Token registration replace-or-insert unchanged. Wait-any/all wakeup ordering unchanged.</p>
 
-<h3>Why this fix mattered for everything that came after</h3>
+<h3 id="why-this-fix-mattered-for-everything-that-came-after">Why this fix mattered for everything that came after</h3>
 
 <p>1006 is a prerequisite for honest stress-testing of the channel path. Without it, every register/deregister churn in a stress test was rolling SLUB freelist dice. With it, KASAN under PREEMPT_RT became a useful tool: any splat is now a real bug, not slab dust. That is what made 1009 (the channel_entry refcount UAF) catchable.</p>
 
-<h3>Open RT/safety items deferred from 1006</h3>
+<h3 id="open-rtsafety-items-deferred-from-1006">Open RT/safety items deferred from 1006</h3>
 
 <p><code>obj_lock()</code> between <code>prepare_to_wait</code> and <code>schedule</code> in <code>ntsync_channel_send_pi</code>: <code>rt_mutex_lock</code> inside <code>obj_lock</code> would clobber <code>TASK_INTERRUPTIBLE</code> state if <code>obj-&gt;dev_locked</code> were set. Latent only &ndash; channels never participate in <code>wait_all</code> so <code>dev_locked</code> is never set on channels. Safe today; tighten when convenient.</p>
 
 <hr />
 
-<h2>7. Patch 1007: Channel Exclusive Recv</h2>
+<h2 id="7-patch-1007-channel-exclusive-recv">7. Patch 1007: Channel Exclusive Recv</h2>
 
 <p><strong>Bug:</strong> <code>ntsync_channel_send_pi</code> speculatively boosts <code>recv_wq.head</code> to the sender&rsquo;s priority before <code>wake_up()</code>, but <code>wake_up()</code> was waking <em>all</em> non-exclusive waiters because <code>wait_event_interruptible</code> adds non-exclusive waiters by default. Non-head receivers could win the entry-pop race -> the boosted head was stranded with high priority and no work; the winner had low priority and the actual work. A real production priority inversion.</p>
 
 <p>This was the plausible root cause of unexplained gamma-dispatcher lockups previously (and incorrectly) blamed on userspace patches.</p>
 
-<h3>Three lines</h3>
+<h3 id="three-lines">Three lines</h3>
 
 <pre><code class="code-block">-  ret = wait_event_interruptible(ch-&gt;u.channel.recv_wq,
 +  /* Exclusive wait: wake_up() in SEND_PI walks the recv_wq and
@@ -957,13 +957,13 @@ ntsync_pi_work_finish(&amp;pi_work);
 
 <p>Applied in both <code>ntsync_channel_recv</code> and <code>ntsync_channel_recv2</code>.</p>
 
-<h3>Why this works</h3>
+<h3 id="why-this-works">Why this works</h3>
 
 <p><code>wake_up()</code> is already exclusive-aware: it walks the wait queue and stops at the first exclusive waiter. So once both <code>RECV</code> and <code>RECV2</code> register exclusive waiters, <code>SEND_PI</code>&rsquo;s <code>wake_up()</code> wakes exactly the head &ndash; the boost target. The boost target becomes the unique race winner.</p>
 
 <p><code>wait_event_interruptible_exclusive</code> is a kernel primitive; it takes the wait queue lock, sets the waiter&rsquo;s <code>WQ_FLAG_EXCLUSIVE</code> flag, and otherwise behaves identically to the non-exclusive variant. No new behaviour introduced; we just opted into the existing semantics.</p>
 
-<h3>Validation</h3>
+<h3 id="validation">Validation</h3>
 
 <ul>
 <li><code>test-channel-recv-exclusive</code>: 100/100 PASS (was deterministic hang before because the test was stale-coded around pre-1007 wake-all behaviour).</li>
@@ -972,17 +972,17 @@ ntsync_pi_work_finish(&amp;pi_work);
 </ul>
 
 
-<h3>Why this is the minimal correct fix</h3>
+<h3 id="why-this-is-the-minimal-correct-fix">Why this is the minimal correct fix</h3>
 
 <p>The rolled-back &ldquo;Codex 1007-1011&rdquo; patch series (Section 10) had attempted a much larger redesign of the channel path, including channel-rejection in <code>setup_wait</code>, cross-snapshot PI cleanup, and a pool/cleanup refactor of the channel allocations themselves. None of that was needed. Three lines suffice.</p>
 
 <hr />
 
-<h2>8. Patch 1008: EVENT_SET_PI Deferred Boost</h2>
+<h2 id="8-patch-1008-event_set_pi-deferred-boost">8. Patch 1008: EVENT_SET_PI Deferred Boost</h2>
 
 <p><strong>Bug:</strong> the original <code>EVENT_SET_PI</code> design (Section 3) walked <code>event-&gt;any_waiters</code> under <code>obj_lock</code> at signal time and applied the boost to the head waiter. This missed any consumer that took <code>obj_lock</code> first, saw <code>signaled=true</code> and returned without queueing &ndash; the standard wait fast-path. Result: ~4% of <code>EVENT_SET_PI</code> calls under PREEMPT_RT debug-kernel scheduling silently failed to apply the boost. A real RT-correctness hole.</p>
 
-<h3>The race</h3>
+<h3 id="the-race">The race</h3>
 
 <pre><code class="code-block">Thread A (consumer, fast path)         Thread B (signaler, EVENT_SET_PI)
 obj_lock(event)
@@ -1003,7 +1003,7 @@ obj_unlock(event)
 
 <p>This was hard to spot because most <code>EVENT_SET_PI</code> calls under PREEMPT_RT scheduling do find a queued waiter (the consumer hadn&rsquo;t reached <code>obj_lock</code> yet). Only the fast-path race &ndash; consumer arrives just before signaler &ndash; silently dropped the boost. KASAN debug-kernel testing showed it as a ~4% flake rate on the <code>test-event-set-pi</code> test.</p>
 
-<h3>Redesign: stage on event, consume at wait-return</h3>
+<h3 id="redesign-stage-on-event-consume-at-wait-return">Redesign: stage on event, consume at wait-return</h3>
 
 <p>The fix flips ownership of the boost target. Instead of the <em>signaler</em> finding the target at <code>EVENT_SET_PI</code> time, the <em>consumer</em> applies the boost to itself at wait-return.</p>
 
@@ -1029,7 +1029,7 @@ obj_unlock(event)
 
 <p>Plus a 6th rule: <code>ntsync_free_obj</code> frees any leaked staging entry on object death (no leak if the event dies unconsumed).</p>
 
-<h3>consume_event_pi_boost()</h3>
+<h3 id="consume_event_pi_boost">consume_event_pi_boost()</h3>
 
 <p>Called from <code>wait_any</code> unqueue loop on the signaled obj if it is an event:</p>
 
@@ -1062,7 +1062,7 @@ obj_unlock(event)
 
 <p>The atomic capture-and-clear under <code>obj_lock</code> is the one-shot guarantee: the first consumer wins, subsequent consumers see <code>new_ep == NULL</code> and no-op. If <code>EVENT_SET_PI</code> is called again before consumption, the prior <code>new_ep</code> is freed under the same lock and replaced.</p>
 
-<h3>EVENT_SET_PI itself, simplified</h3>
+<h3 id="event_set_pi-itself-simplified">EVENT_SET_PI itself, simplified</h3>
 
 <p>The new <code>ntsync_event_set_pi</code>:</p>
 
@@ -1095,7 +1095,7 @@ kfree(prior_new_ep);
 
 <p>No more <code>target = list_first_entry(...)</code> walk under <code>obj_lock</code>. No more <code>get_task_struct(target)</code> ref management. The signaler just sets the event; whoever consumes it boosts themselves.</p>
 
-<h3>EVENT_RESET hook</h3>
+<h3 id="event_reset-hook">EVENT_RESET hook</h3>
 
 <p>Resetting the event cancels the signal, so it must cancel any pending boost too:</p>
 
@@ -1105,7 +1105,7 @@ ntsync_unlock_obj(dev, event, all);
 kfree(prior_new_ep);
 </code></pre>
 
-<h3>ntsync_free_obj hook</h3>
+<h3 id="ntsync_free_obj-hook">ntsync_free_obj hook</h3>
 
 <p>If the event dies unconsumed, free the staging entry:</p>
 
@@ -1113,7 +1113,7 @@ kfree(prior_new_ep);
     kfree(obj-&gt;u.event.pending_pi.new_ep);
 </code></pre>
 
-<h3>wait_any consumer hook</h3>
+<h3 id="wait_any-consumer-hook">wait_any consumer hook</h3>
 
 <p>Inside the wait_any unqueue loop, after the obj is unlocked but before <code>put_obj</code>:</p>
 
@@ -1123,7 +1123,7 @@ kfree(prior_new_ep);
 
 <p>The <code>signaled</code> index identifies which obj actually woke this wait. We consume only on that obj &ndash; non-signaled objs in a multi-object wait have nothing to apply.</p>
 
-<h3>wait_all TODO</h3>
+<h3 id="wait_all-todo">wait_all TODO</h3>
 
 <p><code>ntsync_wait_all</code> cannot call <code>consume_event_pi_boost</code> because that helper takes the obj&rsquo;s wait-all lock path (via <code>ntsync_lock_obj</code>), and the unqueue loop already holds <code>wait_all_lock</code>. The audio-callback path uses <code>wait_any</code> so this gap is rare in practice; revisit if cross-event boost across <code>wait_all</code> becomes a workload concern. Comment in source:</p>
 
@@ -1135,7 +1135,7 @@ kfree(prior_new_ep);
  * if cross-event boost becomes a workload concern. */
 </code></pre>
 
-<h3>Validation</h3>
+<h3 id="validation-2">Validation</h3>
 
 <ul>
 <li><code>test-event-set-pi</code>: 100/100 PASS (was 4% flake rate).</li>
@@ -1144,17 +1144,17 @@ kfree(prior_new_ep);
 </ul>
 
 
-<h3>Cost</h3>
+<h3 id="cost">Cost</h3>
 
 <p>One extra atomic exchange under <code>obj_lock</code> per <code>EVENT_SET_PI</code> (the pending_pi store + signal flip). One extra <code>obj_lock</code>/<code>obj_unlock</code> per consume. The latter is the only new path; it runs only if the event has staged PI &ndash; so on workloads that don&rsquo;t use <code>EVENT_SET_PI</code> it is a no-op (<code>pending_pi.new_ep == NULL</code> check is one load).</p>
 
 <hr />
 
-<h2>9. Patch 1009: channel_entry Refcount UAF</h2>
+<h2 id="9-patch-1009-channel_entry-refcount-uaf">9. Patch 1009: channel_entry Refcount UAF</h2>
 
 <p><strong>Bug:</strong> KASAN-caught slab-use-after-free on <code>ntsync_channel_entry</code> under <code>test-channel-stress</code> 4x4 with thread-registration churn. REPLY&rsquo;s <code>wake_up_all</code> on <code>e-&gt;wq</code> runs outside <code>obj_lock</code> (it must &ndash; wq&rsquo;s internal lock is <code>spinlock_t</code>, becomes <code>rt_mutex</code> on PREEMPT_RT, can&rsquo;t nest under our <code>raw_spinlock_t</code>). That creates a window where SEND_PI&rsquo;s cleanup could <code>kfree(e)</code> between REPLY&rsquo;s <code>obj_unlock</code> and REPLY&rsquo;s <code>wake_up_all</code> reaching the freed wait queue.</p>
 
-<h3>The KASAN splat</h3>
+<h3 id="the-kasan-splat">The KASAN splat</h3>
 
 <pre><code class="code-block">BUG: KASAN: slab-use-after-free in do_raw_spin_lock+0x23c/0x270
 Read of size 4 at addr ffff8882e30b2564 by task test-channel-st/51072
@@ -1177,7 +1177,7 @@ Address is 100 bytes inside freed region.
 </ul>
 
 
-<h3>The race</h3>
+<h3 id="the-race-2">The race</h3>
 
 <pre><code class="code-block">Thread A (SEND_PI sleeper)              Thread B (REPLY)
                                         obj_lock(ch)
@@ -1195,7 +1195,7 @@ kfree(e)                                 wake_up_all(&amp;e-&gt;wq)  &lt;-- UAF
 
 <p>The <code>wake_up_all</code> outside <code>obj_lock</code> is necessary on PREEMPT_RT (wq&rsquo;s internal lock cannot be taken under raw_spinlock obj_lock). But that creates the window where SEND_PI&rsquo;s cleanup can free <code>e</code> between REPLY&rsquo;s <code>obj_unlock</code> and REPLY&rsquo;s <code>wake_up_all</code>.</p>
 
-<h3>The fix: refcount_t on channel_entry</h3>
+<h3 id="the-fix-refcount_t-on-channel_entry">The fix: refcount_t on channel_entry</h3>
 
 <p>Add <code>refcount_t refcnt</code> to <code>struct ntsync_channel_entry</code>. SEND_PI initializes it to 1 after queue insertion (the sleeping sender holds one ref). REPLY does <code>refcount_inc</code> under <code>obj_lock</code> before unlock, then <code>wake_up_all</code>, then <code>refcount_dec_and_test</code>+kfree-if-last. SEND_PI cleanup does <code>refcount_dec_and_test</code>+kfree-if-last. Whichever decrement reaches 0 frees.</p>
 
@@ -1223,13 +1223,13 @@ if (refcount_dec_and_test(&amp;e-&gt;refcnt))
     kfree(e);
 </code></pre>
 
-<h3>Why this is the minimal correct fix</h3>
+<h3 id="why-this-is-the-minimal-correct-fix-2">Why this is the minimal correct fix</h3>
 
 <p>There was a previous &ldquo;Codex 1007-1011&rdquo; patch series (rolled back; see Section 10) that targeted this same bug class but bundled it with a number of unrelated audit-derived changes (REPLY-fake-on-copy-fail, channel-reject in <code>setup_wait</code>, cross-boost cleanup refactor). The core fix &ndash; refcount on the entry &ndash; was correct in that series. Everything else was speculative noise that introduced its own bugs.</p>
 
 <p>This patch is just the refcount.</p>
 
-<h3>Validation</h3>
+<h3 id="validation-3">Validation</h3>
 
 <ul>
 <li><code>test-channel-stress 30s/4x4</code>: 819,803 SEND_PI = 819,803 REPLY (perfect match), 974K register ops, 0 syscall errors, 0 KASAN/KCSAN splats, refcnt=0 post-stress.</li>
@@ -1238,17 +1238,17 @@ if (refcount_dec_and_test(&amp;e-&gt;refcnt))
 </ul>
 
 
-<h3>Why this is the right shape, not the wrong shape</h3>
+<h3 id="why-this-is-the-right-shape-not-the-wrong-shape">Why this is the right shape, not the wrong shape</h3>
 
 <p>A common alternative for this class of bug is to take a sleepable lock around the wake. We can&rsquo;t &ndash; the obj_lock that protects entry membership is <code>raw_spinlock_t</code>, and we cannot promote it to <code>rt_mutex</code> without losing the bounded-CS guarantee that the rest of the driver depends on. Refcount on the entry is the textbook fix for &ldquo;object outlives its containing-collection lifetime due to async finishers&rdquo; &ndash; no lock-order changes, no protocol changes, just two <code>inc</code>s and three <code>dec_and_test</code>s in the right places.</p>
 
 <hr />
 
-<h2>10. Lessons and Audit Philosophy</h2>
+<h2 id="10-lessons-and-audit-philosophy">10. Lessons and Audit Philosophy</h2>
 
 <p>The patches in this stack divide cleanly into two categories. The boundary matters because it dictates which patches were safe to ship in a flurry and which weren&rsquo;t.</p>
 
-<h3>Mechanically verifiable correctness vs. code-review hypothesis</h3>
+<h3 id="mechanically-verifiable-correctness-vs-code-review-hypothesis">Mechanically verifiable correctness vs. code-review hypothesis</h3>
 
 <p>Patches in the <strong>mechanically verifiable</strong> category enforce a rule that has an oracle. If the rule is violated, kernel debug infra (<code>CONFIG_DEBUG_ATOMIC_SLEEP</code>, <code>LOCKDEP</code>, <code>KASAN</code>) will splat. The patch either makes the splat go away or it doesn&rsquo;t; there is no ambiguity.</p>
 
@@ -1262,7 +1262,7 @@ if (refcount_dec_and_test(&amp;e-&gt;refcnt))
 
 <p>Patches in the <strong>code-review hypothesis</strong> category encode a reviewer&rsquo;s argument that some code is buggy. There is no oracle. If the reviewer&rsquo;s argument is wrong (or the bug is somewhere else), the patch ships new bugs without fixing the original one.</p>
 
-<h3>The rolled-back Codex 1007-1011 series</h3>
+<h3 id="the-rolled-back-codex-1007-1011-series">The rolled-back Codex 1007-1011 series</h3>
 
 <p>On 2026-04-26 there was an unfound EVENT_SET_PI slab UAF (<code>___slab_alloc+0x316</code> GP-fault, <code>ntsync_obj_ioctl+0x44e</code>). KASAN was queued but not yet run. Codex&rsquo;s review surfaced three &ldquo;other issues&rdquo; (cross-snapshot PI, non-exclusive RECV, channel-accept-in-<code>setup_wait</code>), and patches 1007-1011 (5 patches in 6 hours, including a 34KB rewrite) shipped under the rationale that &ldquo;(1) ∧ (2) explains the hang.&rdquo;</p>
 
@@ -1277,7 +1277,7 @@ if (refcount_dec_and_test(&amp;e-&gt;refcnt))
 </ol>
 
 
-<h3>Operating principle</h3>
+<h3 id="operating-principle">Operating principle</h3>
 
 <p>When chasing an unidentified bug, narrow on the actual symptom (trace / KASAN / ftrace / repro) &ndash; do not pile speculative fixes from adjacent code review under the cover of &ldquo;while I was in there, I noticed&hellip;&rdquo;. Even when the audit is internally well-reasoned, the issues it surfaces are almost certainly unrelated to the observed symptom &ndash; and shipping them piles new failure modes on top of the original one.</p>
 
@@ -1287,17 +1287,17 @@ if (refcount_dec_and_test(&amp;e-&gt;refcnt))
 
 <p>This is also why 1006 was safe to ship in-flurry while the rolled-back 1007-1011 wasn&rsquo;t: 1006 has an oracle (<code>CONFIG_DEBUG_ATOMIC_SLEEP</code>), the rolled-back series had only Codex&rsquo;s argument.</p>
 
-<h3>Reference</h3>
+<h3 id="reference">Reference</h3>
 
 <p><code>feedback_dont_shotgun_audit_into_unfound_bug.md</code> in the project memory documents this lesson in operational terms.</p>
 
 <hr />
 
-<h2>11. Wine Consumer Side</h2>
+<h2 id="11-wine-consumer-side">11. Wine Consumer Side</h2>
 
 <p>The Wine-side ntsync integration lives in <code>dlls/ntdll/unix/sync.c</code>. Most of it is upstream (Wine&rsquo;s own ntsync support landed in 11.x); NSPA&rsquo;s overlay touches a handful of paths.</p>
 
-<h3>linux_wait_objs</h3>
+<h3 id="linux_wait_objs">linux_wait_objs</h3>
 
 <p>The wait wrapper is largely unchanged from upstream. NSPA&rsquo;s only addition is the <code>uring_fd</code> parameter (passed via the repurposed <code>pad</code> field) that lets a single <code>WAIT_ANY</code> call wake on either an ntsync object signal or an io_uring CQE. See <code>ntsync-driver.gen.html</code> Section 7 for the original 1003-era discussion of <code>uring_fd</code>.</p>
 
@@ -1323,7 +1323,7 @@ if (refcount_dec_and_test(&amp;e-&gt;refcnt))
 
 <p>The user-space code is deliberately oblivious to the kernel-side EVENT_SET_PI staging machinery added by 1008. Wine just calls <code>WAIT_ANY</code> / <code>WAIT_ALL</code>; the kernel handles boost consumption transparently in the unqueue loop. No Wine-side change was needed for 1008.</p>
 
-<h3>linux_set_event_obj_pi</h3>
+<h3 id="linux_set_event_obj_pi">linux_set_event_obj_pi</h3>
 
 <p>The cross-thread priority-intent setter is a thin ioctl wrapper:</p>
 
@@ -1346,7 +1346,7 @@ if (refcount_dec_and_test(&amp;e-&gt;refcnt))
 
 <p>After 1008, this path is bulletproof against the fast-path race: even if the dispatcher pthread takes <code>obj_lock</code> first and sees <code>signaled=true</code>, it consumes the staged boost in the unqueue loop on its way out. The 4% boost-miss rate disappears.</p>
 
-<h3>Channel ioctl wrappers</h3>
+<h3 id="channel-ioctl-wrappers">Channel ioctl wrappers</h3>
 
 <p>The wineserver dispatcher uses the channel ioctls directly via <code>ioctl()</code> calls; there is no portable <code>linux_channel_*</code> helper at the Wine ntdll layer because channels are wineserver-process-private (they don&rsquo;t cross the wineserver-client boundary as Win32 handles).</p>
 
@@ -1359,7 +1359,7 @@ ioctl(channel_fd, NTSYNC_IOC_CHANNEL_REPLY, &amp;args.entry_id);
 
 <p>with <code>RECV</code> as fallback if <code>RECV2</code> returns <code>-ENOTTY</code> (old kernel without 1005). The client-side <code>SEND_PI</code> is invoked from the wineserver request-marshalling fast path; the client&rsquo;s RT thread blocks in the kernel until reply.</p>
 
-<h3>alloc_client_handle</h3>
+<h3 id="alloc_client_handle">alloc_client_handle</h3>
 
 <p>Client-side ntsync object creation (mutexes / semaphores) bypasses the wineserver entirely &ndash; a 1003-era optimization. The handle pool uses <code>InterlockedDecrement(&amp;client_handle_next)</code> to allocate negative handle values that don&rsquo;t collide with server-allocated handles. Wait operations (<code>NtWaitForSingleObject</code>) resolve the handle to a cached FD via <code>inproc_wait()</code>, then call <code>linux_wait_objs()</code> which issues the kernel ioctl directly.</p>
 
@@ -1367,9 +1367,9 @@ ioctl(channel_fd, NTSYNC_IOC_CHANNEL_REPLY, &amp;args.entry_id);
 
 <hr />
 
-<h2>12. Validation</h2>
+<h2 id="12-validation">12. Validation</h2>
 
-<h3>Module srcversion lineage</h3>
+<h3 id="module-srcversion-lineage">Module srcversion lineage</h3>
 
 <table>
 <thead>
@@ -1411,7 +1411,7 @@ ioctl(channel_fd, NTSYNC_IOC_CHANNEL_REPLY, &amp;args.entry_id);
 
 <p>The current production module at <code>/lib/modules/6.19.11-rt1-1-nspa/kernel/drivers/misc/ntsync.ko</code> is <code>A250A77651C8D5DAB719FE2</code>.</p>
 
-<h3>Stress validation (debug kernel, KASAN-on)</h3>
+<h3 id="stress-validation-debug-kernel-kasan-on">Stress validation (debug kernel, KASAN-on)</h3>
 
 <table>
 <thead>
@@ -1493,7 +1493,7 @@ ioctl(channel_fd, NTSYNC_IOC_CHANNEL_REPLY, &amp;args.entry_id);
 
 <p>Cumulative debug-kernel: ~30 million operations, zero KASAN splats post-Bug 4 fix.</p>
 
-<h3>Mixed-load-stress detail</h3>
+<h3 id="mixed-load-stress-detail">Mixed-load-stress detail</h3>
 
 <p>13-thread/300s soak across every ntsync path concurrently against a single dev_fd:</p>
 
@@ -1577,7 +1577,7 @@ ioctl(channel_fd, NTSYNC_IOC_CHANNEL_REPLY, &amp;args.entry_id);
 </table>
 
 
-<h3>Production-kernel revalidation</h3>
+<h3 id="production-kernel-revalidation">Production-kernel revalidation</h3>
 
 <p>After cross-build to the production kernel <code>6.19.11-rt1-1-nspa</code> (no debug instrumentation, throughput 5x-149x higher than debug):</p>
 
@@ -1642,7 +1642,7 @@ ioctl(channel_fd, NTSYNC_IOC_CHANNEL_REPLY, &amp;args.entry_id);
 
 <p>Per the slub_debug benchmark caveat (<code>feedback_slub_debug_skews_benchmarks.md</code>), only PASS/FAIL is authoritative across debug vs production kernels; throughput numbers aren&rsquo;t directly comparable (debug-kernel <code>slub_debug=FZPU</code> + kfence + KASAN tax dominates).</p>
 
-<h3>Original 1003-era PI metrics (still valid)</h3>
+<h3 id="original-1003-era-pi-metrics-still-valid">Original 1003-era PI metrics (still valid)</h3>
 
 <p>The PI contention / priority wakeup ordering / rapid mutex throughput / philosophers tests from the original <code>ntsync-driver.gen.html</code> remain valid. None of patches 1004-1009 touched the mutex PI path; the metrics are unchanged:</p>
 
@@ -1694,9 +1694,9 @@ ioctl(channel_fd, NTSYNC_IOC_CHANNEL_REPLY, &amp;args.entry_id);
 
 <hr />
 
-<h2>13. References</h2>
+<h2 id="13-references">13. References</h2>
 
-<h3>Patches (NSPA tree)</h3>
+<h3 id="patches-nspa-tree">Patches (NSPA tree)</h3>
 
 <p>All in <code>wine-rt-claude/ntsync-patches/</code>:</p>
 
@@ -1711,7 +1711,7 @@ ioctl(channel_fd, NTSYNC_IOC_CHANNEL_REPLY, &amp;args.entry_id);
 </ul>
 
 
-<h3>Production source</h3>
+<h3 id="production-source">Production source</h3>
 
 <ul>
 <li><code>drivers/misc/ntsync.c</code> in <code>linux-nspa-6.19.11-1.src/linux-nspa/src/linux-6.19.11/</code> &ndash; 2182 lines.</li>
@@ -1721,14 +1721,14 @@ ioctl(channel_fd, NTSYNC_IOC_CHANNEL_REPLY, &amp;args.entry_id);
 </ul>
 
 
-<h3>Wine consumer</h3>
+<h3 id="wine-consumer">Wine consumer</h3>
 
 <ul>
 <li><code>dlls/ntdll/unix/sync.c</code> (Wine submodule) &ndash; <code>linux_wait_objs()</code> lines 482-549, <code>linux_set_event_obj_pi()</code> lines 411-417, semaphore/mutex/event helpers lines 380-475.</li>
 </ul>
 
 
-<h3>Tests</h3>
+<h3 id="tests">Tests</h3>
 
 <p>In <code>wine/nspa/tests/</code>:</p>
 
@@ -1743,7 +1743,7 @@ ioctl(channel_fd, NTSYNC_IOC_CHANNEL_REPLY, &amp;args.entry_id);
 </ul>
 
 
-<h3>Audit / handoff documentation</h3>
+<h3 id="audit--handoff-documentation">Audit / handoff documentation</h3>
 
 <p>In project memory (<code>/home/ninez/.claude/projects/-home-ninez-pkgbuilds-Wine-NSPA/memory/</code>):</p>
 
@@ -1758,7 +1758,7 @@ ioctl(channel_fd, NTSYNC_IOC_CHANNEL_REPLY, &amp;args.entry_id);
 </ul>
 
 
-<h3>Cross-references</h3>
+<h3 id="cross-references">Cross-references</h3>
 
 <ul>
 <li><code>cs-pi.gen.html</code> &ndash; the userspace CS-PI counterpart; together with this driver they close all priority inversion vectors in Wine&rsquo;s synchronization stack.</li>

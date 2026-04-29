@@ -83,12 +83,12 @@
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/tokyo-night-dark.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
 </head><body>
-<h1>Wine-NSPA &ndash; Local-File Bypass Architecture</h1>
+<h1 id="wine-nspa--local-file-bypass-architecture">Wine-NSPA &ndash; Local-File Bypass Architecture</h1>
 
 <p>Wine 11.6 + NSPA RT patchset | Kernel 6.19.x-rt with NTSync PI | 2026-04-23
 Author: jordan Johnston</p>
 
-<h2>Table of Contents</h2>
+<h2 id="table-of-contents">Table of Contents</h2>
 
 <ol>
 <li><a href="#1-overview">Overview</a></li>
@@ -111,7 +111,7 @@ Author: jordan Johnston</p>
 
 <hr />
 
-<h2>1. Overview</h2>
+<h2 id="1-overview">1. Overview</h2>
 
 <p>Wine-NSPA&rsquo;s <strong>local-file bypass</strong> (<code>NSPA_LOCAL_FILES=1</code>) services read-only regular-file <code>NtCreateFile</code> calls entirely within the client process. Every eligible open would otherwise cost a full wineserver round-trip: the client builds a <code>create_file</code> request, the server allocates a <code>struct file</code> + inode tracking + handle entry, returns a server-visible handle, then every subsequent <code>NtReadFile</code> / <code>NtQueryInformationFile</code> / etc fires another round-trip. For an app like Ableton Live 12 Lite that does roughly <strong>28,500 file opens in a single startup session</strong> &ndash; DLL manifests, <code>.pyc</code> files, theme resources, Live Library indexes &ndash; those round-trips dominate startup profile and show up as real latency on the main thread.</p>
 
@@ -121,7 +121,7 @@ Author: jordan Johnston</p>
 
 <hr />
 
-<h2>2. Motivation</h2>
+<h2 id="2-motivation">2. Motivation</h2>
 
 <p>Ableton&rsquo;s startup profile exposed a large population of short-lived file opens:</p>
 
@@ -167,7 +167,7 @@ Author: jordan Johnston</p>
 
 <hr />
 
-<h2>3. Design Principles</h2>
+<h2 id="3-design-principles">3. Design Principles</h2>
 
 <ul>
 <li><strong>Client-private handle range.</strong> The bypass issues handles from a fixed high range <code>[0x7FFFC000, 0x80000000)</code> that is disjoint from the server&rsquo;s normal handle allocation (low-to-mid) and from the NTSync client-handle range. Any caller that does <code>nspa_local_file_is_local_handle(h)</code> can cheaply tell whether a handle is ours.</li>
@@ -182,7 +182,7 @@ Author: jordan Johnston</p>
 
 <hr />
 
-<h2>4. Vanilla Wine vs Wine-NSPA File Open</h2>
+<h2 id="4-vanilla-wine-vs-wine-nspa-file-open">4. Vanilla Wine vs Wine-NSPA File Open</h2>
 
 <div class="diagram-container">
 <svg width="920" height="580" viewBox="0 0 920 580" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
@@ -287,9 +287,9 @@ Author: jordan Johnston</p>
 
 <hr />
 
-<h2>5. Handle Range &amp; Per-Process Table</h2>
+<h2 id="5-handle-range--per-process-table">5. Handle Range &amp; Per-Process Table</h2>
 
-<h3>5.1 Handle range</h3>
+<h3 id="51-handle-range">5.1 Handle range</h3>
 
 <p>Local handles are allocated from the fixed range <code>[NSPA_LF_HANDLE_BASE, 0x80000000)</code> where <code>NSPA_LF_HANDLE_BASE = 0x80000000 - NSPA_LF_HANDLE_CAP*4</code> with <code>NSPA_LF_HANDLE_CAP = 4096</code>. That gives an exact 16 KiB handle window disjoint from:</p>
 
@@ -302,7 +302,7 @@ Author: jordan Johnston</p>
 
 <p><code>nspa_local_file_is_local_handle(h)</code> is a constant-time range check: <code>base &lt;= h &lt; 0x80000000 &amp;&amp; h != 0x7FFFFFFF</code> (the last exclusion is for the <code>CURRENT_PROCESS</code> pseudo-handle which would otherwise land inside the range). The check is called from every NT-API intercept site to decide whether to take the bypass path or fall through.</p>
 
-<h3>5.2 Per-process table</h3>
+<h3 id="52-per-process-table">5.2 Per-process table</h3>
 
 <p><code>c
 struct nspa_local_open {
@@ -327,11 +327,11 @@ struct nspa_local_open {
 
 <hr />
 
-<h2>6. Shared Inode Table &amp; Sharing Arbitration</h2>
+<h2 id="6-shared-inode-table--sharing-arbitration">6. Shared Inode Table &amp; Sharing Arbitration</h2>
 
 <p>Windows file sharing (<code>FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE</code>) has cross-process semantics: if Process A opens <code>foo</code> with <code>sharing=0</code>, Process B&rsquo;s open of <code>foo</code> must fail with <code>STATUS_SHARING_VIOLATION</code>. Any pure-local bypass has to see what other processes have done on the same <code>(device, inode)</code>.</p>
 
-<h3>6.1 Shmem layout</h3>
+<h3 id="61-shmem-layout">6.1 Shmem layout</h3>
 
 <p>The wineserver publishes a <code>NSPA_INODE_BUCKETS</code> = 1024 bucket hash table as a memfd-backed shmem region. Each bucket has 4 slots of <code>(dev, inode, agg_access, agg_sharing, refcount)</code> + a per-bucket PI mutex. Clients map the region read-only for arbitration lookups, read-write on the mutex word for publishing their own opens.</p>
 
@@ -416,7 +416,7 @@ struct nspa_local_open {
 
 <p>Bucket index = hash(dev, inode) mod 1024. Slot selection is linear within the bucket (first free or matching). If all 4 slots are full and none match, the bypass returns <code>STATUS_NOT_SUPPORTED</code> and the open falls back to the server &ndash; this is an overflow-safety valve, not a correctness path.</p>
 
-<h3>6.2 Arbitration logic</h3>
+<h3 id="62-arbitration-logic">6.2 Arbitration logic</h3>
 
 <p><code>nspa_local_file_check_and_publish_open</code> atomically checks the existing aggregate against the new open&rsquo;s access/sharing mask, returning <code>STATUS_SHARING_VIOLATION</code> if they conflict. Matching the server&rsquo;s algorithm exactly:</p>
 
@@ -430,7 +430,7 @@ struct nspa_local_open {
 
 <hr />
 
-<h2>7. Lazy Server-Handle Promotion</h2>
+<h2 id="7-lazy-server-handle-promotion">7. Lazy Server-Handle Promotion</h2>
 
 <p>The LF table returns a local-range handle to the application. Most Nt-API intercepts can service the call from the local unix fd directly (<code>NtReadFile</code>, <code>NtWriteFile</code>, <code>NtQueryInformationFile</code> for <code>FileBasicInformation</code> / <code>FilePositionInformation</code> / etc). But some APIs <em>require</em> a server-visible handle:</p>
 
@@ -536,13 +536,13 @@ HANDLE nspa_promote_if_local( HANDLE h );</p>
 </div>
 
 
-<h3>7.1 <code>attributes</code> plumbing</h3>
+<h3 id="71-attributes-plumbing">7.1 <code>attributes</code> plumbing</h3>
 
 <p>The promote RPC forwards <code>ObjectAttributes-&gt;Attributes</code> (typically <code>OBJ_CASE_INSENSITIVE</code>, plus <code>OBJ_INHERIT</code> when <code>bInheritHandles=TRUE</code> is set on <code>CreateProcess</code>). The server&rsquo;s <code>alloc_handle_entry</code> translates <code>OBJ_INHERIT</code> to <code>RESERVED_INHERIT</code> on the handle&rsquo;s access mask, which is how Wine tracks inheritable handles for <code>copy_handle_table</code> during <code>CreateProcess</code>. Without the forwarding, inheritable local-range handles would be silently dropped by the inheritance walk.</p>
 
 <hr />
 
-<h2>8. Dispatch Flow</h2>
+<h2 id="8-dispatch-flow">8. Dispatch Flow</h2>
 
 <div class="diagram-container">
 <svg width="920" height="640" viewBox="0 0 920 640" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
@@ -629,7 +629,7 @@ HANDLE nspa_promote_if_local( HANDLE h );</p>
 
 <hr />
 
-<h2>9. Eligibility Criteria</h2>
+<h2 id="9-eligibility-criteria">9. Eligibility Criteria</h2>
 
 <p>The bypass accepts only a tightly-scoped subset. The eligibility gate in <code>file.c</code>&rsquo;s <code>NtCreateFile</code>:</p>
 
@@ -703,7 +703,7 @@ if (!loader_open &amp;&amp;
 
 <hr />
 
-<h2>10. NT API Coverage Matrix</h2>
+<h2 id="10-nt-api-coverage-matrix">10. NT API Coverage Matrix</h2>
 
 <p>Every handle-consuming NT API in ntdll/unix and server/ either:</p>
 
@@ -839,7 +839,7 @@ if (!loader_open &amp;&amp;
 
 <hr />
 
-<h2>11. File Manifest (post-reorg)</h2>
+<h2 id="11-file-manifest-post-reorg">11. File Manifest (post-reorg)</h2>
 
 <p>All NSPA-specific source lives under a <code>nspa/</code> subdirectory in each module. Upstream Wine files carry only single-line intercept hook calls, keeping rebase-against-upstream conflicts minimal.</p>
 
@@ -874,15 +874,15 @@ dlls/ntdll/unix/nspa/
 
 <hr />
 
-<h2>12. Debug Gating</h2>
+<h2 id="12-debug-gating">12. Debug Gating</h2>
 
 <p>Trace emission is both compile-time gated (<code>NSPA_DEBUG</code>, default on; pass <code>-DNSPA_DEBUG=0</code> for a release build) and runtime gated via cached env checks.</p>
 
 <p>```c</p>
 
-<h1>if NSPA_DEBUG</h1>
+<h1 id="if-nspa_debug">if NSPA_DEBUG</h1>
 
-<h1>define NSPA_TRACE_ENABLED_FN(name) \</h1>
+<h1 id="define-nspa_trace_enabled_fnname">define NSPA_TRACE_ENABLED_FN(name) \</h1>
 
 <pre><code class="code-block">static inline int nspa_trace_##name##_enabled(void) { \
     static int cache = -1; \
@@ -899,16 +899,16 @@ dlls/ntdll/unix/nspa/
 NSPA_TRACE_ENABLED_FN(LF_TRACE_SRV)
 /<em> &hellip; </em>/</p>
 
-<h1>define NSPA_TRACE(name, &hellip;) \</h1>
+<h1 id="define-nspa_tracename">define NSPA_TRACE(name, &hellip;) \</h1>
 
 <pre><code class="code-block">do { if (nspa_trace_##name##_enabled()) fprintf( stderr, __VA_ARGS__ ); } while (0)
 </code></pre>
 
-<h1>else</h1>
+<h1 id="else">else</h1>
 
-<h1>define NSPA_TRACE(name, &hellip;) ((void)0)</h1>
+<h1 id="define-nspa_tracename--void0">define NSPA_TRACE(name, &hellip;) ((void)0)</h1>
 
-<h1>endif</h1>
+<h1 id="endif">endif</h1>
 
 <p>```</p>
 
@@ -920,7 +920,7 @@ NSPA_TRACE_ENABLED_FN(LF_TRACE_SRV)
 
 <hr />
 
-<h2>13. Results &amp; Profiler Numbers</h2>
+<h2 id="13-results--profiler-numbers">13. Results &amp; Profiler Numbers</h2>
 
 <p>Ableton Live 12 Lite, 95-second playback window, <code>NSPA_PROFILE=1</code> with all prod gates. Baseline is the pre-LF fullprod run (2026-04-21); &ldquo;post-LF&rdquo; is the 2026-04-23 run after the complete stack landed.</p>
 
@@ -1010,13 +1010,13 @@ NSPA_TRACE_ENABLED_FN(LF_TRACE_SRV)
 
 <hr />
 
-<h2>14. Known Gaps &amp; Roadmap</h2>
+<h2 id="14-known-gaps--roadmap">14. Known Gaps &amp; Roadmap</h2>
 
-<h3>14.1 Cross-process <code>DuplicateHandle</code> of a local-range source</h3>
+<h3 id="141-cross-process-duplicatehandle-of-a-local-range-source">14.1 Cross-process <code>DuplicateHandle</code> of a local-range source</h3>
 
 <p>The same-process path is covered. Cross-process dup where the source lives in <em>another</em> Wine-NSPA process&rsquo;s local-range is not &ndash; the server has no access to the remote&rsquo;s LF table. Fix would require a cross-process LF promotion RPC. Rare in DAW workloads; parked.</p>
 
-<h3>14.2 <code>STARTUPINFOEX PROC_THREAD_ATTRIBUTE_HANDLE_LIST</code> local-range inheritance</h3>
+<h3 id="142-startupinfoex-proc_thread_attribute_handle_list-local-range-inheritance">14.2 <code>STARTUPINFOEX PROC_THREAD_ATTRIBUTE_HANDLE_LIST</code> local-range inheritance</h3>
 
 <p>Phase 1A.9 prong A (synchronous <code>get_or_promote</code> per handle in the explicit inheritance list) was deferred because the per-handle promote RPC on the CreateProcess-calling thread surfaced as a visible menu-content-paint delay (&ldquo;black menu flash&rdquo;). Legacy <code>bInheritHandles=TRUE</code> via prong B (<code>nspa_local_file_promote_inheritable</code>) is unaffected and covers the common case.</p>
 
@@ -1028,7 +1028,7 @@ NSPA_TRACE_ENABLED_FN(LF_TRACE_SRV)
 </ol>
 
 
-<h4>Relationship to 14.1</h4>
+<h4 id="relationship-to-141">Relationship to 14.1</h4>
 
 <p>14.1 and 14.2 share the same underlying shape &ndash; &ldquo;an LF handle must become a real server handle before it crosses a process boundary&rdquo; &ndash; but the fix surfaces differ:</p>
 
@@ -1040,7 +1040,7 @@ NSPA_TRACE_ENABLED_FN(LF_TRACE_SRV)
 
 <p>The two fixes compose: <strong>14.2&rsquo;s batched RPC is a prerequisite of 14.1.</strong> Once <code>nspa_promote_local_handles</code> exists as a handler, 14.1 can reuse it on process A, driven by a new &ldquo;remote promote&rdquo; request where process B asks the server to wake A and invoke it. 14.1&rsquo;s complexity is then the wake mechanism, not the promote itself. Ship 14.2 first; 14.1 composes on top.</p>
 
-<h3>14.3 Eligibility widening</h3>
+<h3 id="143-eligibility-widening">14.3 Eligibility widening</h3>
 
 <p>The current envelope captures the hot path. Anything outside it falls back cleanly. Worth widening only when a real workload demands:</p>
 
@@ -1056,7 +1056,7 @@ NSPA_TRACE_ENABLED_FN(LF_TRACE_SRV)
 
 <hr />
 
-<h2>15. Phase History</h2>
+<h2 id="15-phase-history">15. Phase History</h2>
 
 <table>
 <thead>

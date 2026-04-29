@@ -83,12 +83,12 @@
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/tokyo-night-dark.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
 </head><body>
-<h1>Wine-NSPA &ndash; Architecture Overview</h1>
+<h1 id="wine-nspa--architecture-overview">Wine-NSPA &ndash; Architecture Overview</h1>
 
 <p>Wine 11.6 + NSPA RT patchset | Kernel 6.19.x-rt with NTSync PI | 2026-04-28
 Author: Jordan Johnston</p>
 
-<h2>Table of Contents</h2>
+<h2 id="table-of-contents">Table of Contents</h2>
 
 <ol>
 <li><a href="#1-what-wine-nspa-is">What Wine-NSPA is</a></li>
@@ -115,7 +115,7 @@ Author: Jordan Johnston</p>
 
 <hr />
 
-<h2>1. What Wine-NSPA is</h2>
+<h2 id="1-what-wine-nspa-is">1. What Wine-NSPA is</h2>
 
 <p>Wine-NSPA is a PREEMPT_RT-tuned fork of Wine 11.x. It targets <code>PREEMPT_RT_FULL</code> Linux kernels, grafts kernel-level priority inheritance onto every Win32 sync primitive, replaces Wine&rsquo;s single-threaded wineserver event loop in the hot path with kernel-mediated channels and bounded shmem rings, and ships a custom <code>ntsync</code> kernel module that gives <code>/dev/ntsync</code> Windows-faithful priority semantics with PI boost.</p>
 
@@ -127,7 +127,7 @@ Author: Jordan Johnston</p>
 
 <hr />
 
-<h2>2. Layered architecture</h2>
+<h2 id="2-layered-architecture">2. Layered architecture</h2>
 
 <p>The architecture has three layers: a kernel layer (NTSync, io_uring, librtpi-style PI futexes, RT scheduler), a wineserver layer (gamma channel dispatcher + main loop + handler tables), and a client layer (ntdll, win32u, NT-local stubs, audio drivers, application/PE code). Most NSPA bypasses route around the wineserver layer entirely on the common case, falling back only when the bypass envelope is exceeded.</p>
 
@@ -308,11 +308,11 @@ Author: Jordan Johnston</p>
 
 <hr />
 
-<h2>3. Subsystem map</h2>
+<h2 id="3-subsystem-map">3. Subsystem map</h2>
 
 <p>Each subsection here is a one-paragraph (sometimes two) sketch of the subsystem; the deep design is in a dedicated page linked at the end of each section.</p>
 
-<h3>3.1 Synchronization and priority inheritance</h3>
+<h3 id="31-synchronization-and-priority-inheritance">3.1 Synchronization and priority inheritance</h3>
 
 <p>NSPA implements priority inheritance along four independent paths so that no Win32 sync surface is left as a priority-inversion source. CS-PI (Path A) repurposes <code>RTL_CRITICAL_SECTION::LockSemaphore</code> as a <code>FUTEX_LOCK_PI</code> futex word, giving every critical section the kernel&rsquo;s transitive PI chain semantics. NTSync direct (Path B) routes <code>NtWaitForSingleObject</code> and friends through <code>/dev/ntsync</code> ioctls, where the kernel module&rsquo;s 1003 patch implements priority-ordered waiter queues and per-task PI boost across mutex chains. Vendored librtpi (Path C) provides <code>pi_cond_wait</code> for unix-side condition variables built on <code>FUTEX_WAIT_REQUEUE_PI</code>. Win32 condvar PI (Path D) extends Path C up into the Win32 surface so <code>SleepConditionVariableCS</code> is also PI-clean.</p>
 
@@ -320,7 +320,7 @@ Author: Jordan Johnston</p>
 
 <p>All four paths are gated on <code>NSPA_RT_PRIO</code>. When unset, every PI code path short-circuits and Wine behaves byte-for-byte like upstream. <strong>Detail: see <a href="ntsync-driver.gen.html">ntsync-driver</a>, <a href="cs-pi.gen.html">cs-pi</a>, <a href="condvar-pi-requeue.gen.html">condvar-pi-requeue</a>.</strong></p>
 
-<h3>3.2 Wineserver IPC</h3>
+<h3 id="32-wineserver-ipc">3.2 Wineserver IPC</h3>
 
 <p>The classical Wine IPC architecture has every client thread <code>read()</code>/<code>write()</code> over a unix socket pair to the wineserver process, which dispatches under <code>global_lock</code>. The earlier NSPA work (Torge Matthies&rsquo;s 2022 patch, forward-ported as the v1.5 line) replaced the socket round-trip with a per-thread shmem region and a futex signal, served by a pool of pthread dispatchers inside the server. That worked but had its own pile of correctness rough edges; it has been superseded by the <strong>gamma channel dispatcher</strong>.</p>
 
@@ -328,7 +328,7 @@ Author: Jordan Johnston</p>
 
 <p><strong>Detail: see <a href="gamma-channel-dispatcher.gen.html">gamma-channel-dispatcher</a>. Historical: <a href="shmem-ipc.gen.html">shmem-ipc</a> (superseded).</strong></p>
 
-<h3>3.3 NT-local stubs</h3>
+<h3 id="33-nt-local-stubs">3.3 NT-local stubs</h3>
 
 <p>The NT-local stubs pattern moves NT-API state from wineserver-resident storage into client-resident storage. The pattern: the client maintains its own state for a class of NT objects (timers, regular-file handles, WM_TIMER tuples), processes operations locally, and lazily promotes the state back to a server-visible handle only when an API genuinely needs server-side handle semantics (<code>DuplicateHandle</code>, <code>CreateProcess</code> inheritance, <code>NtCreateSection</code> from a file handle). The stub answers the common case in shmem; the server stays the authority for the long tail.</p>
 
@@ -336,7 +336,7 @@ Author: Jordan Johnston</p>
 
 <p><strong>Detail: see <a href="nt-local-stubs.gen.html">nt-local-stubs</a>, <a href="nspa-local-file-architecture.gen.html">nspa-local-file-architecture</a>.</strong></p>
 
-<h3>3.4 Message dispatch</h3>
+<h3 id="34-message-dispatch">3.4 Message dispatch</h3>
 
 <p>The Win32 message pump is the second-hottest source of wineserver round-trips (after <code>NtCreateFile</code>, which <code>nspa_local_file</code> already drains). A typical Win32 application calls <code>GetMessage</code> / <code>PeekMessage</code> on every UI tick; cross-thread <code>PostMessage</code> and <code>SendMessage</code> go through the server even when sender and receiver are in the same process; <code>RedrawWindow</code> and <code>InvalidateRect</code> push paint flags into the server.</p>
 
@@ -346,7 +346,7 @@ Author: Jordan Johnston</p>
 
 <p><strong>Detail: see <a href="msg-ring-architecture.gen.html">msg-ring-architecture</a>.</strong></p>
 
-<h3>3.5 Hook chains</h3>
+<h3 id="35-hook-chains">3.5 Hook chains</h3>
 
 <p>Win32 hook chains (<code>WH_KEYBOARD</code>, <code>WH_MOUSE</code>, <code>WH_GETMESSAGE</code>, <code>WH_CALLWNDPROC</code>, etc.) get queried on every dispatch in vanilla Wine, even when the chain is empty. On a busy UI tick that is one server round-trip per hook type per <code>GetMessage</code> iteration, which adds up: an Ableton 165s capture showed 26,700 hook lookups across the run.</p>
 
@@ -354,7 +354,7 @@ Author: Jordan Johnston</p>
 
 <p><strong>Detail: see <a href="hook-cache.gen.html">hook-cache</a>.</strong></p>
 
-<h3>3.6 File I/O</h3>
+<h3 id="36-file-io">3.6 File I/O</h3>
 
 <p>File I/O is two related stories. The <strong>open path</strong> is owned by <code>nspa_local_file</code> (see §3.3): regular-file <code>NtCreateFile</code> calls are serviced client-side via <code>stat() + open()</code>, with sharing arbitration preserved through a server-published <code>(dev, inode) -&gt; sharing-state</code> shmem region. Only API surfaces that genuinely need a server-visible handle trigger lazy promotion.</p>
 
@@ -364,7 +364,7 @@ Author: Jordan Johnston</p>
 
 <p><strong>Detail: see <a href="io_uring-architecture.gen.html">io_uring-architecture</a>, <a href="nspa-local-file-architecture.gen.html">nspa-local-file-architecture</a>.</strong></p>
 
-<h3>3.7 Audio</h3>
+<h3 id="37-audio">3.7 Audio</h3>
 
 <p>Audio is delivered through <code>winejack.drv</code>, with Phase 1 MIDI and Phase 2 WASAPI audio both routed through JACK. <code>nspaASIO</code> layers ASIO on top of the same transport and provides Phase F: zero-latency <code>bufferSwitch</code> dispatch <strong>inside</strong> the JACK RT callback so the ASIO host and JACK callback execute on the same period boundary.</p>
 
@@ -374,7 +374,7 @@ Author: Jordan Johnston</p>
 
 <hr />
 
-<h2>4. Bypass topology</h2>
+<h2 id="4-bypass-topology">4. Bypass topology</h2>
 
 <p>Each bypass moves a specific class of NT-API state or I/O work out of wineserver and into client-local state, bounded shared memory, or kernel-mediated primitives. Every path is independently gated, validated, and revertible.</p>
 
@@ -384,7 +384,7 @@ Author: Jordan Johnston</p>
 
 <hr />
 
-<h2>5. Wineserver residual design</h2>
+<h2 id="5-wineserver-residual-design">5. Wineserver residual design</h2>
 
 <p>The decomposition plan for wineserver itself is phased: Phase 1 audits and partitions the lock surface, Phase 2 introduces the ntsync extensions needed for safe delegation, Phase 3 splits the process into subsystem threads (timer, fd-poll, aggregate-wait), and Phase 4 separates routing from handlers and further partitions the remaining lock surface.</p>
 
@@ -396,7 +396,7 @@ Author: Jordan Johnston</p>
 
 <hr />
 
-<h2>6. RT priority mapping</h2>
+<h2 id="6-rt-priority-mapping">6. RT priority mapping</h2>
 
 <p>Win32 thread priorities map to Linux <code>SCHED_FIFO</code> priorities through a single formula:</p>
 
@@ -529,7 +529,7 @@ clamped to [1..98]
 
 <hr />
 
-<h2>7. Status reference</h2>
+<h2 id="7-status-reference">7. Status reference</h2>
 
 <p>The canonical status board lives at <strong><a href="current-state.gen.html">current-state</a></strong>. It tracks shipped vs gated vs pending features, the ntsync patch stack (1003-1009), validation totals against the production kernel (~370M ops, zero errors, zero KASAN splats, two clean Ableton runs on 2026-04-28), and the active env-var matrix per subsystem.</p>
 
@@ -537,7 +537,7 @@ clamped to [1..98]
 
 <hr />
 
-<h2>8. Document index</h2>
+<h2 id="8-document-index">8. Document index</h2>
 
 <p>Master overview (this doc) plus dedicated subsystem pages.</p>
 
