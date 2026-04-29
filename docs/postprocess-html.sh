@@ -33,7 +33,25 @@ postprocess_one() {
             qq{<h$level id="$id">$inner</h$level>};
         }egxs;
 
-        s{<pre><code>}{<pre><code class="code-block">}g;
+        s{
+            (<pre><code\b)
+            ([^>]*)
+            (>)
+        }{
+            my ($head, $attrs, $tail) = ($1, $2, $3);
+
+            if ($attrs =~ /\bclass="([^"]*)"/) {
+                my $classes = $1;
+                unless ($classes =~ /\bcode-block\b/) {
+                    $attrs =~ s/\bclass="([^"]*)"/class="$1 code-block"/;
+                }
+            } else {
+                $attrs .= q{ class="code-block"};
+            }
+
+            $head . $attrs . $tail;
+        }egxs;
+
         s{
             (<div\s+class="diagram-container">\s*<svg\b)
             ([^>]*)
@@ -57,6 +75,12 @@ postprocess_one() {
             $head . $attrs . $tail;
         }egxs;
     ' "$html" > "$tmp"
+
+    if perl -0ne 'exit((/<p><code>[^<]*\n/s || /<p>`{3}/s || /`{3}<\/p>/s) ? 0 : 1)' "$tmp"; then
+        echo "postprocess-html: suspicious broken code block markup in $html" >&2
+        rm -f "$tmp"
+        return 1
+    fi
 
     mv "$tmp" "$html"
 }

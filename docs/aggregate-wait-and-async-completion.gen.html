@@ -516,43 +516,39 @@ from the start — not bolted on later.</p>
 
 <h3 id="43-abi">4.3 ABI</h3>
 
-<p>```c
-/<em> include/uapi/linux/ntsync.h additions </em>/</p>
+<pre><code class="language-c code-block">
+/* include/uapi/linux/ntsync.h additions */
 
-<p>struct ntsync_aggregate_source {
-    <strong>u32 type;              /<em> NTSYNC_AGG_OBJECT | NTSYNC_AGG_FD </em>/
-    </strong>u32 events;            /<em> if FD: POLLIN/POLLOUT/POLLERR/POLLHUP bits </em>/
-    __u64 handle_or_fd;      /<em> ntsync object handle, or unix fd </em>/
-};</p>
+struct ntsync_aggregate_source {
+    __u32 type;              /* NTSYNC_AGG_OBJECT | NTSYNC_AGG_FD */
+    __u32 events;            /* if FD: POLLIN/POLLOUT/POLLERR/POLLHUP bits */
+    __u64 handle_or_fd;      /* ntsync object handle, or unix fd */
+};
 
-<p>struct ntsync_aggregate_wait_args {
-    <strong>u32 nb_sources;        /<em> count of entries in sources[] (max 64) </em>/
-    </strong>u32 reserved;
-    <strong>u64 sources;           /<em> user pointer to ntsync_aggregate_source[] </em>/
-    struct </strong>kernel_timespec deadline;  /<em> CLOCK_MONOTONIC ABSTIME, or {0,0} </em>/
-    <strong>u32 fired_index;       /<em> OUT: index of firing source (0..nb-1), or sentinel </em>/
-    </strong>u32 fired_events;      /<em> OUT: for FD type, the POLL</em> bits that fired <em>/
-    __u32 flags;             /</em> IN: NTSYNC_AGG_FLAG_<em> (see below) </em>/
-    __u32 owner;             /<em> IN: tid for PI-aware mutex sources, 0 if none </em>/
-};</p>
+struct ntsync_aggregate_wait_args {
+    __u32 nb_sources;        /* count of entries in sources[] (max 64) */
+    __u32 reserved;
+    __u64 sources;           /* user pointer to ntsync_aggregate_source[] */
+    struct __kernel_timespec deadline;  /* CLOCK_MONOTONIC ABSTIME, or {0,0} */
+    __u32 fired_index;       /* OUT: index of firing source (0..nb-1), or sentinel */
+    __u32 fired_events;      /* OUT: for FD type, the POLL* bits that fired */
+    __u32 flags;             /* IN: NTSYNC_AGG_FLAG_* (see below) */
+    __u32 owner;             /* IN: tid for PI-aware mutex sources, 0 if none */
+};
 
-<h1 id="define-ntsync_agg_object----0x1">define NTSYNC_AGG_OBJECT    0x1</h1>
+#define NTSYNC_AGG_OBJECT    0x1
+#define NTSYNC_AGG_FD        0x2
+#define NTSYNC_AGG_MAX       64
 
-<h1 id="define-ntsync_agg_fd--------0x2">define NTSYNC_AGG_FD        0x2</h1>
+/* flags */
+#define NTSYNC_AGG_FLAG_REALTIME  0x1   /* match WAIT_ANY's NTSYNC_WAIT_REALTIME */
 
-<h1 id="define-ntsync_agg_max-------64">define NTSYNC_AGG_MAX       64</h1>
+/* fired_index sentinel for deadline expiry */
+#define NTSYNC_AGG_TIMEOUT       0xFFFFFFFFu
 
-<p>/<em> flags </em>/</p>
+#define NTSYNC_IOC_AGGREGATE_WAIT  _IOWR('N', 0x95, struct ntsync_aggregate_wait_args)
+</code></pre>
 
-<h1 id="define-ntsync_agg_flag_realtime--0x1----match-wait_anys-ntsync_wait_realtime">define NTSYNC_AGG_FLAG_REALTIME  0x1   /<em> match WAIT_ANY&rsquo;s NTSYNC_WAIT_REALTIME </em>/</h1>
-
-<p>/<em> fired_index sentinel for deadline expiry </em>/</p>
-
-<h1 id="define-ntsync_agg_timeout-------0xffffffffu">define NTSYNC_AGG_TIMEOUT       0xFFFFFFFFu</h1>
-
-<h1 id="define-ntsync_ioc_aggregate_wait--_iowrn-0x95-struct-ntsync_aggregate_wait_args">define NTSYNC_IOC_AGGREGATE_WAIT  _IOWR(&lsquo;N&rsquo;, 0x95, struct ntsync_aggregate_wait_args)</h1>
-
-<p>```</p>
 
 <p>ABI notes:
 - 64 sources max matches existing <code>NTSYNC_MAX_WAIT_COUNT</code>
@@ -621,7 +617,7 @@ requested events fire</li>
 
 <p>The wait condition (for <code>WAIT_ANY</code>-equivalent semantics):</p>
 
-<p><code>c
+<pre><code class="language-c code-block">
 for (;;) {
     set_current_state(TASK_INTERRUPTIBLE);
     /* Check object sources */
@@ -635,7 +631,8 @@ for (;;) {
     /* Deadline check via hrtimer on schedule */
     schedule();
 }
-</code></p>
+</code></pre>
+
 
 <p>Mirrors <code>ntsync_schedule()</code>&rsquo;s structure exactly; the only delta is
 multiple sources of each kind instead of one.</p>
@@ -664,7 +661,7 @@ unqueue path (<code>unqueue:</code> label in current code).</p>
 <p>In <code>programs/nspa_rt_test/main.c</code>, add <code>cmd_aggregate_wait</code>
 subcommand with sub-tests:</p>
 
-<p><code>
+<pre><code class="code-block">
 sub-test 1  basic — wait on (event, eventfd), signal each
 sub-test 2  timeout — empty sources + deadline, verify AGG_TIMEOUT
 sub-test 3  PI propagation — low-prio waiter on (channel, fd),
@@ -675,7 +672,8 @@ sub-test 5  mixed obj+fd — alternating signals, both types work,
             fired_events bits correct for fd type
 sub-test 6  cancel via signal — caller killed mid-wait, clean
             unregister + no leaked waitqueue entries (KASAN)
-</code></p>
+</code></pre>
+
 
 <p>KASAN debug kernel stress: 1M iterations of sub-tests 1+4+5
 alternating; zero splats required.  Same protocol as 2026-04-27
@@ -700,44 +698,45 @@ channel session that caught 4 latent bugs.</p>
 its eventfd, and the pending pool.  Owned by <code>shmem_channel.c</code>,
 one per gamma channel (effectively one per Wine process).</p>
 
-<p>```c
-/<em> server/nspa/uring.h — new public API </em>/</p>
+<pre><code class="language-c code-block">
+/* server/nspa/uring.h — new public API */
 
-<p>struct nspa_uring_pending;     /<em> opaque, defined in uring.c </em>/</p>
+struct nspa_uring_pending;     /* opaque, defined in uring.c */
 
-<p>typedef void (<em>nspa_uring_callback_fn)(void </em>ctx, int result);</p>
+typedef void (*nspa_uring_callback_fn)(void *ctx, int result);
 
-<p>struct nspa_uring_instance {
+struct nspa_uring_instance {
     struct io_uring             ring;
-    int                          ring_fd;       /<em> ring->ring_fd, cached </em>/
-    int                          eventfd;       /<em> registered with ring for ntsync_wait </em>/
+    int                          ring_fd;       /* ring-&gt;ring_fd, cached */
+    int                          eventfd;       /* registered with ring for ntsync_wait */
     int                          active;
-    /<em> Pending pool </em>/
-    struct nspa_uring_pending   <em>pool;          /</em> fixed array, size = NSPA_URING_RING_SIZE <em>/
-    struct nspa_uring_pending   </em>free_head;
+    /* Pending pool */
+    struct nspa_uring_pending   *pool;          /* fixed array, size = NSPA_URING_RING_SIZE */
+    struct nspa_uring_pending   *free_head;
     unsigned int                 inflight;
-};</p>
+};
 
-<p>extern int  nspa_uring_instance_init(struct nspa_uring_instance <em>u);
-extern void nspa_uring_instance_shutdown(struct nspa_uring_instance </em>u);
-extern void nspa_uring_drain(struct nspa_uring_instance <em>u);
-extern struct nspa_uring_pending </em>nspa_uring_pending_alloc(
-    struct nspa_uring_instance <em>u, nspa_uring_callback_fn cb, void </em>ctx);
-extern void nspa_uring_pending_free(struct nspa_uring_instance <em>u,
-                                     struct nspa_uring_pending </em>p);
-extern struct io_uring_sqe <em>nspa_uring_get_sqe(struct nspa_uring_instance </em>u);
-extern int  nspa_uring_submit(struct nspa_uring_instance <em>u);
-extern int  nspa_uring_get_eventfd(struct nspa_uring_instance </em>u);</p>
+extern int  nspa_uring_instance_init(struct nspa_uring_instance *u);
+extern void nspa_uring_instance_shutdown(struct nspa_uring_instance *u);
+extern void nspa_uring_drain(struct nspa_uring_instance *u);
+extern struct nspa_uring_pending *nspa_uring_pending_alloc(
+    struct nspa_uring_instance *u, nspa_uring_callback_fn cb, void *ctx);
+extern void nspa_uring_pending_free(struct nspa_uring_instance *u,
+                                     struct nspa_uring_pending *p);
+extern struct io_uring_sqe *nspa_uring_get_sqe(struct nspa_uring_instance *u);
+extern int  nspa_uring_submit(struct nspa_uring_instance *u);
+extern int  nspa_uring_get_eventfd(struct nspa_uring_instance *u);
 
-<p>/<em> Deferred reply (unchanged signature, but now invoked from dispatcher
- * pthread context with the dispatcher&rsquo;s process context) </em>/
-extern void nspa_uring_defer_reply(struct thread <em>thread);
-extern void nspa_uring_signal_reply(struct thread </em>thread,
+/* Deferred reply (unchanged signature, but now invoked from dispatcher
+ * pthread context with the dispatcher's process context) */
+extern void nspa_uring_defer_reply(struct thread *thread);
+extern void nspa_uring_signal_reply(struct thread *thread,
                                      struct request_shm *request_shm,
                                      unsigned int data_size,
                                      int channel_fd,
                                      unsigned long long entry_id);
-```</p>
+</code></pre>
+
 
 <p>The old global-state-based API (<code>nspa_uring_init()</code>,
 <code>nspa_uring_get_fd()</code>, etc.) goes away.</p>
@@ -745,7 +744,7 @@ extern void nspa_uring_signal_reply(struct thread </em>thread,
 <p><code>server/nspa/shmem_channel.c</code> holds one <code>nspa_uring_instance</code> per
 process, alongside <code>process-&gt;request_channel_fd</code>:</p>
 
-<p><code>c
+<pre><code class="language-c code-block">
 /* In server/nspa/shmem_channel.h or process.h — depending on where
  * struct process is defined. */
 struct process {
@@ -753,34 +752,34 @@ struct process {
     int                          request_channel_fd;
     struct nspa_uring_instance   nspa_uring;       /* zero-initialised; init lazily */
 };
-</code></p>
+</code></pre>
+
 
 <h3 id="52-ring-init--shutdown">5.2 Ring init / shutdown</h3>
 
 <p>Init runs from <code>nspa_shmem_channel_init</code> (after the channel is created
 but before the dispatcher pthread starts):</p>
 
-<p>```c
-void nspa_shmem_channel_init(struct process <em>process)
+<pre><code class="language-c code-block">
+void nspa_shmem_channel_init(struct process *process)
 {
-    /</em> &hellip; existing channel setup &hellip; */</p>
+    /* ... existing channel setup ... */
 
-<pre><code class="code-block">/* Initialise the per-process io_uring.  Failure is non-fatal —
- * dispatcher falls back to no-uring (legacy CHANNEL_RECV2). */
-if (nspa_uring_instance_init(&amp;process-&gt;nspa_uring) &lt; 0)
-{
-    if (debug_level)
-        fprintf(stderr, "nspa: process pid=%d uring init failed, "
-                "async-completing handlers will fall back to sync\n",
-                process-&gt;id);
+    /* Initialise the per-process io_uring.  Failure is non-fatal —
+     * dispatcher falls back to no-uring (legacy CHANNEL_RECV2). */
+    if (nspa_uring_instance_init(&amp;process-&gt;nspa_uring) &lt; 0)
+    {
+        if (debug_level)
+            fprintf(stderr, "nspa: process pid=%d uring init failed, "
+                    "async-completing handlers will fall back to sync\n",
+                    process-&gt;id);
+    }
+
+    /* Spawn dispatcher pthread (existing code). */
+    /* ... */
 }
-
-/* Spawn dispatcher pthread (existing code). */
-/* ... */
 </code></pre>
 
-<p>}
-```</p>
 
 <p><code>nspa_uring_instance_init</code>:
 1. Calls <code>io_uring_queue_init_params(64, &amp;u-&gt;ring, &amp;params)</code> with
@@ -806,167 +805,165 @@ if (nspa_uring_instance_init(&amp;process-&gt;nspa_uring) &lt; 0)
 <p>Current <code>nspa_shmem_channel_pthread</code> (verbatim from
 <code>server/nspa/shmem_channel.c</code> post-2026-04-26, lines ~120-235):</p>
 
-<p>```c
-static void <em>nspa_shmem_channel_pthread(void </em>arg)
+<pre><code class="language-c code-block">
+static void *nspa_shmem_channel_pthread(void *arg)
 {
-    struct process <em>process = arg;
-    int channel_fd = process->request_channel_fd;
-    /</em> &hellip; cached_use_token, recv2_state setup &hellip; */</p>
+    struct process *process = arg;
+    int channel_fd = process-&gt;request_channel_fd;
+    /* ... cached_use_token, recv2_state setup ... */
 
-<pre><code class="code-block">for (;;) {
-    struct ntsync_channel_recv2_args recv;
-    int ret;
+    for (;;) {
+        struct ntsync_channel_recv2_args recv;
+        int ret;
 
-    if (recv2_state == 1) {
-        ret = ioctl(channel_fd, NTSYNC_IOC_CHANNEL_RECV2, &amp;recv);
-        /* ... fallback handling ... */
-    } else {
-        /* ... legacy RECV ... */
+        if (recv2_state == 1) {
+            ret = ioctl(channel_fd, NTSYNC_IOC_CHANNEL_RECV2, &amp;recv);
+            /* ... fallback handling ... */
+        } else {
+            /* ... legacy RECV ... */
+        }
+        if (ret &lt; 0) {
+            if (errno == EBADF) break;  /* channel closed */
+            continue;
+        }
+
+        pi_mutex_lock(&amp;global_lock);
+
+        /* resolve thread, run handler, write reply */
+        /* ... */
+
+        pi_mutex_unlock(&amp;global_lock);
+
+        /* unconditional CHANNEL_REPLY (today; gated on deferred flag
+         * post-Phase-C) */
+        ioctl(channel_fd, NTSYNC_IOC_CHANNEL_REPLY, &amp;entry_id);
     }
-    if (ret &lt; 0) {
-        if (errno == EBADF) break;  /* channel closed */
-        continue;
-    }
-
-    pi_mutex_lock(&amp;global_lock);
-
-    /* resolve thread, run handler, write reply */
-    /* ... */
-
-    pi_mutex_unlock(&amp;global_lock);
-
-    /* unconditional CHANNEL_REPLY (today; gated on deferred flag
-     * post-Phase-C) */
-    ioctl(channel_fd, NTSYNC_IOC_CHANNEL_REPLY, &amp;entry_id);
+    return NULL;
 }
-return NULL;
 </code></pre>
 
-<p>}
-```</p>
 
 <p>Restructured to use aggregate-wait + separate CHANNEL_RECV2 (verbose
 to be implementable from this doc alone):</p>
 
-<p>```c
-static void <em>nspa_shmem_channel_pthread(void </em>arg)
+<pre><code class="language-c code-block">
+static void *nspa_shmem_channel_pthread(void *arg)
 {
-    struct process <em>process = arg;
+    struct process *process = arg;
     int dev_fd = get_inproc_device_fd();
-    int channel_fd = process->request_channel_fd;
-    obj_handle_t channel_handle = process->request_channel_obj_handle; /</em> see note <em>/
-    int uring_eventfd = nspa_uring_get_eventfd(&amp;process->nspa_uring);
-    int agg_supported = -1;  /</em> lazy-detect: 1=use aggregate-wait, 0=legacy fallback <em>/
-    /</em> &hellip; cached_use_token, recv2_state setup unchanged &hellip; */</p>
+    int channel_fd = process-&gt;request_channel_fd;
+    obj_handle_t channel_handle = process-&gt;request_channel_obj_handle; /* see note */
+    int uring_eventfd = nspa_uring_get_eventfd(&amp;process-&gt;nspa_uring);
+    int agg_supported = -1;  /* lazy-detect: 1=use aggregate-wait, 0=legacy fallback */
+    /* ... cached_use_token, recv2_state setup unchanged ... */
 
-<pre><code class="code-block">for (;;) {
-    struct ntsync_aggregate_wait_args agg;
-    struct ntsync_aggregate_source srcs[2];
-    struct ntsync_channel_recv2_args recv;
-    struct thread *thread = NULL;
-    int ret;
-    int channel_fired;
+    for (;;) {
+        struct ntsync_aggregate_wait_args agg;
+        struct ntsync_aggregate_source srcs[2];
+        struct ntsync_channel_recv2_args recv;
+        struct thread *thread = NULL;
+        int ret;
+        int channel_fired;
 
-    if (agg_supported != 0 &amp;&amp; uring_eventfd &gt;= 0) {
-        /* Aggregate-wait path: wait atomically on (channel, uring) */
-        srcs[0].type         = NTSYNC_AGG_OBJECT;
-        srcs[0].events       = 0;
-        srcs[0].handle_or_fd = channel_handle;
-        srcs[1].type         = NTSYNC_AGG_FD;
-        srcs[1].events       = POLLIN;
-        srcs[1].handle_or_fd = uring_eventfd;
+        if (agg_supported != 0 &amp;&amp; uring_eventfd &gt;= 0) {
+            /* Aggregate-wait path: wait atomically on (channel, uring) */
+            srcs[0].type         = NTSYNC_AGG_OBJECT;
+            srcs[0].events       = 0;
+            srcs[0].handle_or_fd = channel_handle;
+            srcs[1].type         = NTSYNC_AGG_FD;
+            srcs[1].events       = POLLIN;
+            srcs[1].handle_or_fd = uring_eventfd;
 
-        memset(&amp;agg, 0, sizeof(agg));
-        agg.nb_sources = 2;
-        agg.sources    = (uintptr_t)srcs;
-        agg.flags      = NTSYNC_AGG_FLAG_REALTIME;
-        agg.owner      = gettid();   /* for PI propagation target */
+            memset(&amp;agg, 0, sizeof(agg));
+            agg.nb_sources = 2;
+            agg.sources    = (uintptr_t)srcs;
+            agg.flags      = NTSYNC_AGG_FLAG_REALTIME;
+            agg.owner      = gettid();   /* for PI propagation target */
 
-        ret = ioctl(dev_fd, NTSYNC_IOC_AGGREGATE_WAIT, &amp;agg);
-        if (ret &lt; 0 &amp;&amp; errno == ENOTTY) {
-            /* Pre-1010 kernel — fall back to legacy CHANNEL_RECV2
-             * (no uring integration; Phase C handlers won't work). */
-            agg_supported = 0;
-            continue;
+            ret = ioctl(dev_fd, NTSYNC_IOC_AGGREGATE_WAIT, &amp;agg);
+            if (ret &lt; 0 &amp;&amp; errno == ENOTTY) {
+                /* Pre-1010 kernel — fall back to legacy CHANNEL_RECV2
+                 * (no uring integration; Phase C handlers won't work). */
+                agg_supported = 0;
+                continue;
+            }
+            if (ret &lt; 0) {
+                if (errno == EBADF || errno == EINTR) break;
+                continue;
+            }
+
+            channel_fired = (agg.fired_index == 0);
+
+            /* ====== Uring CQE source fired — drain inline ====== */
+            if (!channel_fired) {
+                /* Drain the eventfd to disarm POLLIN, then drain CQEs */
+                uint64_t evfd_val;
+                read(uring_eventfd, &amp;evfd_val, sizeof(evfd_val));
+                pi_mutex_lock(&amp;global_lock);
+                nspa_uring_drain(&amp;process-&gt;nspa_uring);
+                pi_mutex_unlock(&amp;global_lock);
+                continue;
+            }
+
+            /* Channel source fired — fall through to RECV2 below */
         }
+
+        /* RECV the actual channel entry.  Same code as today; the
+         * preceding aggregate-wait just told us the channel is non-empty. */
+        if (recv2_state == 1) {
+            ret = ioctl(channel_fd, NTSYNC_IOC_CHANNEL_RECV2, &amp;recv);
+            /* ... existing fallback to legacy RECV ... */
+        } else {
+            /* legacy RECV path — unchanged */
+            ret = ioctl(channel_fd, NTSYNC_IOC_CHANNEL_RECV, &amp;recv1);
+            /* ... copy recv1 → recv (existing fallback shape) ... */
+        }
+
         if (ret &lt; 0) {
-            if (errno == EBADF || errno == EINTR) break;
+            /* Race: aggregate-wait said channel-fired but RECV2 is
+             * empty (another consumer raced — shouldn't happen with
+             * one dispatcher pthread, but defensive). */
+            if (errno == EAGAIN) continue;
+            if (errno == EBADF) break;
             continue;
         }
 
-        channel_fired = (agg.fired_index == 0);
+        /* ====== Normal channel entry ====== */
+        pi_mutex_lock(&amp;global_lock);
 
-        /* ====== Uring CQE source fired — drain inline ====== */
-        if (!channel_fired) {
-            /* Drain the eventfd to disarm POLLIN, then drain CQEs */
-            uint64_t evfd_val;
-            read(uring_eventfd, &amp;evfd_val, sizeof(evfd_val));
-            pi_mutex_lock(&amp;global_lock);
-            nspa_uring_drain(&amp;process-&gt;nspa_uring);
+        /* Resolve thread (existing thread_token / get_thread_from_id
+         * dance — unchanged) */
+        /* ... */
+
+        if (thread &amp;&amp; thread-&gt;process-&gt;request_channel_fd == channel_fd
+            &amp;&amp; thread-&gt;request_shm) {
+            /* Stash entry_id for async handler use (existing pattern) */
+            thread-&gt;nspa_channel_entry_id = recv.entry_id;
+            __atomic_thread_fence(__ATOMIC_SEQ_CST);
+            read_request_shm(thread, (struct request_shm *)thread-&gt;request_shm);
+            __atomic_thread_fence(__ATOMIC_SEQ_CST);
+        }
+
+        /* Defer-reply check (existing pattern from c7edac9c3d7) */
+        {
+            int deferred = (thread &amp;&amp; thread-&gt;nspa_async_reply_deferred);
             pi_mutex_unlock(&amp;global_lock);
-            continue;
+
+            if (!deferred) {
+                __u64 entry_id = recv.entry_id;
+                ioctl(channel_fd, NTSYNC_IOC_CHANNEL_REPLY, &amp;entry_id);
+            }
+            /* If deferred, the CQE callback will signal CHANNEL_REPLY
+             * when the async op completes — during a later
+             * aggregate-wait wake on this same dispatcher thread. */
         }
 
-        /* Channel source fired — fall through to RECV2 below */
+        if (poll_generation != generation) force_exit_poll();
     }
-
-    /* RECV the actual channel entry.  Same code as today; the
-     * preceding aggregate-wait just told us the channel is non-empty. */
-    if (recv2_state == 1) {
-        ret = ioctl(channel_fd, NTSYNC_IOC_CHANNEL_RECV2, &amp;recv);
-        /* ... existing fallback to legacy RECV ... */
-    } else {
-        /* legacy RECV path — unchanged */
-        ret = ioctl(channel_fd, NTSYNC_IOC_CHANNEL_RECV, &amp;recv1);
-        /* ... copy recv1 → recv (existing fallback shape) ... */
-    }
-
-    if (ret &lt; 0) {
-        /* Race: aggregate-wait said channel-fired but RECV2 is
-         * empty (another consumer raced — shouldn't happen with
-         * one dispatcher pthread, but defensive). */
-        if (errno == EAGAIN) continue;
-        if (errno == EBADF) break;
-        continue;
-    }
-
-    /* ====== Normal channel entry ====== */
-    pi_mutex_lock(&amp;global_lock);
-
-    /* Resolve thread (existing thread_token / get_thread_from_id
-     * dance — unchanged) */
-    /* ... */
-
-    if (thread &amp;&amp; thread-&gt;process-&gt;request_channel_fd == channel_fd
-        &amp;&amp; thread-&gt;request_shm) {
-        /* Stash entry_id for async handler use (existing pattern) */
-        thread-&gt;nspa_channel_entry_id = recv.entry_id;
-        __atomic_thread_fence(__ATOMIC_SEQ_CST);
-        read_request_shm(thread, (struct request_shm *)thread-&gt;request_shm);
-        __atomic_thread_fence(__ATOMIC_SEQ_CST);
-    }
-
-    /* Defer-reply check (existing pattern from c7edac9c3d7) */
-    {
-        int deferred = (thread &amp;&amp; thread-&gt;nspa_async_reply_deferred);
-        pi_mutex_unlock(&amp;global_lock);
-
-        if (!deferred) {
-            __u64 entry_id = recv.entry_id;
-            ioctl(channel_fd, NTSYNC_IOC_CHANNEL_REPLY, &amp;entry_id);
-        }
-        /* If deferred, the CQE callback will signal CHANNEL_REPLY
-         * when the async op completes — during a later
-         * aggregate-wait wake on this same dispatcher thread. */
-    }
-
-    if (poll_generation != generation) force_exit_poll();
+    return NULL;
 }
-return NULL;
 </code></pre>
 
-<p>}
-```</p>
 
 <p>Note about <code>channel_handle</code>: the gamma channel is created via
 <code>NTSYNC_IOC_CREATE_CHANNEL</code> (returns a fd, currently
@@ -1158,11 +1155,13 @@ plus the unrelated file-path fixes that remain correct on their own.</p>
 - <code>ntsync-patches/1010-ntsync-aggregate-wait.patch</code> — patch file
   in tree</p>
 
-<p>Build: per <code>reference_ableton_rt_test_recipe.md</code>:
-<code>bash
+<p>Build: per <code>reference_ableton_rt_test_recipe.md</code>:</p>
+
+<pre><code class="language-bash code-block">
 cd /home/ninez/pkgbuilds/Linux-NSPA-pkgbuild/linux-nspa-debug
 makepkg -s   # or module-only build per existing recipe
-</code></p>
+</code></pre>
+
 
 <p>Validate (KASAN debug kernel — see §7.1):
 - <code>nspa_rt_test ntsync</code> existing tests PASS (no regression)
@@ -1238,16 +1237,14 @@ ring/pool reference changes from global to per-process.</p>
 
 <p>Same protocol as before but now under correct architecture:</p>
 
-<p>```bash
+<pre><code class="language-bash code-block">
 sudo make install
 /tmp/start-wineserver.sh on   # gate ON
-sudo /tmp/midi-trace.sh        # capture</p>
+sudo /tmp/midi-trace.sh        # capture
+# Launch Ableton, full workload (boot → demo → drum-track-load-while-
+# playing for ≥10 minutes)
+</code></pre>
 
-<h1 id="launch-ableton-full-workload-boot--demo--drum-track-load-while">Launch Ableton, full workload (boot → demo → drum-track-load-while-</h1>
-
-<h1 id="playing-for-10-minutes">playing for ≥10 minutes)</h1>
-
-<p>```</p>
 
 <p>Pass criterion (the bug-class we couldn&rsquo;t crack with cross-thread):
 - No &ldquo;Failed to access Undo history file&rdquo; dialog
@@ -1302,26 +1299,23 @@ the instrumentation.</p>
 
 <p><strong>Setup:</strong></p>
 
-<p>```bash</p>
+<pre><code class="language-bash code-block">
+# Reference path: linux-nspa-debug build (per project_linux_nspa_debug_handoff.md)
+cd /home/ninez/pkgbuilds/Linux-NSPA-pkgbuild/linux-nspa-debug
+# Build kernel (or pull existing build if still on disk)
+makepkg -s
+sudo pacman -U linux-nspa-debug-*.pkg.tar.zst
+# Reboot into debug kernel
+</code></pre>
 
-<h1 id="reference-path-linux-nspa-debug-build-per-project_linux_nspa_debug_handoffmd">Reference path: linux-nspa-debug build (per project_linux_nspa_debug_handoff.md)</h1>
 
-<p>cd /home/ninez/pkgbuilds/Linux-NSPA-pkgbuild/linux-nspa-debug</p>
+<p><strong>Verify KASAN active before testing:</strong></p>
 
-<h1 id="build-kernel-or-pull-existing-build-if-still-on-disk">Build kernel (or pull existing build if still on disk)</h1>
-
-<p>makepkg -s
-sudo pacman -U linux-nspa-debug-*.pkg.tar.zst</p>
-
-<h1 id="reboot-into-debug-kernel">Reboot into debug kernel</h1>
-
-<p>```</p>
-
-<p><strong>Verify KASAN active before testing:</strong>
-<code>bash
+<pre><code class="language-bash code-block">
 zgrep CONFIG_KASAN /proc/config.gz   # CONFIG_KASAN=y
 dmesg | grep -i kasan | head         # KASAN initialization line
-</code></p>
+</code></pre>
+
 
 <p><strong>Validation runs under KASAN:</strong>
 - All native ntsync sub-tests (existing 4-test suite + new

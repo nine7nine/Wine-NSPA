@@ -100,6 +100,52 @@ document.addEventListener("DOMContentLoaded", function () {
 });
 </script>'
 
+preprocess_markdown() {
+    local md="$1"
+
+    perl -ne '
+        BEGIN {
+            $in_fence = 0;
+            $lang = q{};
+            @fence_lines = ();
+        }
+
+        if (!$in_fence && /^```([A-Za-z0-9_+-]*)\s*$/) {
+            $in_fence = 1;
+            $lang = $1;
+            @fence_lines = ();
+            next;
+        }
+
+        if ($in_fence) {
+            if (/^```\s*$/) {
+                my $class = $lang ne q{} ? qq{ class="language-$lang"} : q{};
+                print "\n<pre><code$class>\n";
+                for my $line (@fence_lines) {
+                    $line =~ s/&/&amp;/g;
+                    $line =~ s/</&lt;/g;
+                    $line =~ s/>/&gt;/g;
+                    print $line;
+                }
+                print "</code></pre>\n\n";
+                $in_fence = 0;
+                $lang = q{};
+                @fence_lines = ();
+                next;
+            }
+
+            push @fence_lines, $_;
+            next;
+        }
+
+        print;
+
+        END {
+            die "unterminated fenced code block\n" if $in_fence;
+        }
+    ' "$md"
+}
+
 convert_one() {
     local md="$1"
     local html="${md%.md}.gen.html"  # .gen.html to avoid clobbering hand-crafted HTML
@@ -118,7 +164,7 @@ convert_one() {
         echo "$CSS"
         echo "$HIGHLIGHT_HEAD"
         echo "</head><body>"
-        markdown "$md"
+        preprocess_markdown "$md" | markdown
         echo "$HIGHLIGHT_TAIL"
         echo "</body></html>"
     } > "$html"
