@@ -2,6 +2,9 @@
 
 Linux-NSPA 6.19.11-rt1-1 (PREEMPT_RT), CONFIG_NTSYNC=m | 2026-04-29
 Author: Jordan Johnston
+Status: production kernel-driver reference; patch stack 1003-1010 plus post-1010 PI follow-ups is the shipped baseline.
+
+This page is the patch-by-patch architecture and implementation guide for the Wine-NSPA ntsync overlay, including the gamma transport work and the landed aggregate-wait primitive.
 
 ## Table of Contents
 

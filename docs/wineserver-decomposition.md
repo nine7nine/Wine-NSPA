@@ -1,7 +1,10 @@
 # Wine-NSPA -- Wineserver Decomposition: The Long-Horizon Plan
 
 Wine 11.6 + NSPA RT patchset | Kernel 6.19.x-rt with NTSync PI | 2026-04-28
-Author: jordan Johnston
+Author: Jordan Johnston
+Status: long-horizon architecture plan; aggregate-wait is already a shipped slice, while the broader timer/fd-poll splits remain future work.
+
+This page explains the residual wineserver architecture problem after the existing bypasses, which decomposition slices have already landed, and which ones are still roadmap material.
 
 ## Table of Contents
 

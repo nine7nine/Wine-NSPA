@@ -2,6 +2,9 @@
 
 Wine 11.6 + NSPA | JACK 1.x / PipeWire-JACK | PREEMPT_RT kernel | 2026-04-27
 Author: Jordan Johnston
+Status: current audio-stack reference for the shipped JACK/WASAPI/nspaASIO path, including the low-latency Phase F route.
+
+This page explains how Wine-NSPA moves Windows audio through winejack, how nspaASIO fits into that stack, and which timing-critical work stays inside the JACK callback.
 
 ## Table of Contents
 

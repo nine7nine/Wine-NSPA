@@ -6,6 +6,23 @@
 **ntsync module:** `srcversion CFF56DE1EF28D693BB597CD`
 **Wine submodule HEAD:** `b72419fc953` (Wine 11.6 + NSPA fork)
 **Superproject HEAD:** `94eda70`
+**Status:** production state board as of 2026-04-29; includes aggregate-wait / gamma Phase 3 and intentionally excludes the still-WIP async `create_file` port.
+
+This page is the project snapshot for what is actually shipped: kernel patch state, userspace feature state, validation totals, configuration knobs, and the remaining open work.
+
+---
+
+## Table of Contents
+
+1. [Where we are](#where-we-are)
+2. [Kernel state](#1-kernel-state)
+3. [Wine state](#2-wine-state)
+4. [Active features](#3-active-features)
+5. [Validation status](#4-validation-status)
+6. [Open work, in priority order](#5-open-work-in-priority-order)
+7. [Recent investigation arc](#6-recent-investigation-arc-2026-04-26-to-2026-04-28)
+8. [Configuration reference](#7-configuration-reference)
+9. [Doc index](#8-doc-index)
 
 ---
 
@@ -412,7 +429,7 @@ worth banking:
 
 ---
 
-## 6. Recent investigation arc — 2026-04-26 → 2026-04-28
+## 6. Recent investigation arc (2026-04-26 to 2026-04-28)
 
 The three-day arc is worth recording in one place because it
 illustrates how Wine-NSPA's failure modes cross the kernel/userspace

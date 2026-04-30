@@ -4,6 +4,9 @@
 **Author:** Jordan Johnston
 **Kernel:** `6.19.11-rt1-1-nspa` (PREEMPT_RT_FULL)
 **Wine:** 11.6 + NSPA RT patchset
+**Status:** design reference; Phase 1 is shipped, while the remaining socket and pipe sections describe pending follow-on work.
+
+This page explains where `io_uring` fits in Wine-NSPA, what has already landed for file I/O, and which architectural pieces carry forward into the still-pending socket and pipe work.
 
 ## Table of Contents
 

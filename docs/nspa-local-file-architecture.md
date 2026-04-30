@@ -1,7 +1,10 @@
 # Wine-NSPA -- Local-File Bypass Architecture
 
 Wine 11.6 + NSPA RT patchset | Kernel 6.19.x-rt with NTSync PI | 2026-04-23
-Author: jordan Johnston
+Author: Jordan Johnston
+Status: design and implementation reference for the shipped read-only regular-file local-open bypass.
+
+This page covers the `NtCreateFile` local-fast-path itself, the local handle table and inode-sharing rules behind it, and the lazy-promotion path back into wineserver when server-owned state becomes necessary.
 
 ## Table of Contents
 

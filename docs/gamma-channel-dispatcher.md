@@ -1,23 +1,26 @@
 # Wine-NSPA -- Gamma Channel-Based Wineserver Dispatcher
 
 Wine 11.6 + NSPA RT patchset | Kernel 6.19.x-rt with NTSync channels + aggregate-wait | 2026-04-29
-Author: jordan Johnston
+Author: Jordan Johnston
+Status: production dispatcher architecture; aggregate-wait Phase 3 is shipped and default-on as of 2026-04-29.
+
+This page explains the current wineserver request path for a Wine process: how requests enter the gamma channel, how the dispatcher owns the reply path, and how the post-1010 aggregate-wait loop fits into that design.
 
 ## Table of Contents
 
 1. [Overview](#1-overview)
-2. [Predecessors and Their Failure Modes](#2-predecessors-and-their-failure-modes)
+2. [Architecture](#2-architecture)
 3. [Design Goals](#3-design-goals)
-4. [Architecture](#4-architecture)
-5. [Kernel Channel Object and ioctls](#5-kernel-channel-object-and-ioctls)
-6. [Sender State Machine](#6-sender-state-machine)
-7. [Dispatcher State Machine](#7-dispatcher-state-machine)
-8. [Priority-Inheritance Semantics](#8-priority-inheritance-semantics)
-9. [Phase B Lock-Drop Integration](#9-phase-b-lock-drop-integration)
-10. [Thread-Token Pass-Through (T1/T2/T3)](#10-thread-token-pass-through-t1t2t3)
-11. [NT Semantics Preservation](#11-nt-semantics-preservation)
-12. [Bug History and Audits](#12-bug-history-and-audits)
-13. [Validation and Performance](#13-validation-and-performance)
+4. [Kernel Channel Object and ioctls](#4-kernel-channel-object-and-ioctls)
+5. [Sender State Machine](#5-sender-state-machine)
+6. [Dispatcher State Machine](#6-dispatcher-state-machine)
+7. [Priority-Inheritance Semantics](#7-priority-inheritance-semantics)
+8. [Phase B Lock-Drop Integration](#8-phase-b-lock-drop-integration)
+9. [Thread-Token Pass-Through (T1/T2/T3)](#9-thread-token-pass-through-t1t2t3)
+10. [NT Semantics Preservation](#10-nt-semantics-preservation)
+11. [Validation and Performance](#11-validation-and-performance)
+12. [Predecessors and Their Failure Modes](#12-predecessors-and-their-failure-modes)
+13. [Bug History and Audits](#13-bug-history-and-audits)
 14. [References](#14-references)
 
 ---
@@ -68,109 +71,9 @@ dispatcher loop is the architecture in production today.
 
 ---
 
-## 2. Predecessors and Their Failure Modes
+## 2. Architecture
 
-### 2.1 Alpha (v1.5) -- per-thread pthread + userspace `sched_setscheduler`
-
-The original Torge Matthies forward-port spawned **one dispatcher
-pthread per client thread**. Each pthread owned a thread-private
-`request_shm` page and watched a futex word inside it. When the client
-wrote a request, it raised the word and `FUTEX_WAKE`-ed the dispatcher;
-the dispatcher locked `global_lock`, ran the handler, wrote the reply,
-and lowered the word so the client's `FUTEX_WAIT` returned.
-
-Priority inheritance was bolted on in userspace. Before sending, the
-client did `sched_setscheduler(dispatcher_tid, RT_POLICY, our_prio)`
-to boost the dispatcher to the caller's level. After reply, the
-dispatcher reset its own scheduler attrs.
-
-The pain points:
-
-- **N dispatchers per process** all waking on the same `global_lock`.
-  A 60-thread DAW had 60 dispatcher pthreads contending for one mutex.
-- **TID race window.** The client read `dispatcher_tid` from a shared
-  field, then called `sched_setscheduler`. Between the read and the
-  syscall the dispatcher could exit and another thread could be
-  assigned the same tid by the kernel; the boost would land on a
-  random thread. We never observed this in production but it was a
-  real correctness hole.
-- **Capability churn.** Boost / unboost cycles forced
-  `cap_sys_nice`-bearing syscalls on every request.
-- **Userspace PI accounting.** The wineserver maintained its own
-  "current boost level" cache so that overlapping senders did not
-  trample each other's boost. Hand-rolled PI is brittle; under stress
-  we hit unboost-too-early bugs.
-
-### 2.2 Beta (v2.4) -- cached-CAS + manual prio cache
-
-v2.4 narrowed the steady-state cost: senders cached their RT prio in
-`ntdll_thread_data`, did a CAS on a request-state word, did a single
-`FUTEX_WAKE`, and only fell back to `sched_setscheduler` when the
-cached dispatcher prio was below ours. This eliminated four syscalls
-per request on the steady-state hot path but left every architectural
-problem of v1.5 in place: still one dispatcher per thread, still
-userspace TID-read-vs-setscheduler racing, still hand-rolled PI
-arithmetic. The "cache" added a third place where boost state could
-desync.
-
-### 2.3 The case for moving boost into the kernel
-
-Once NTSync gained an event PI primitive (patch 1006, eventually
-deferred-boost in 1008), it was clear that PI for IPC could ride the
-same machinery. The legacy machinery had three structural problems no
-amount of userspace engineering could fix:
-
-| Structural problem | Gamma resolution |
-|---|---|
-| N pthreads per process contending on `global_lock` | One dispatcher per process; contention is O(1) per process |
-| TID-read vs `sched_setscheduler` race window | Kernel boosts dispatcher inside the same syscall that enqueues |
-| Userspace PI accounting drift | Kernel owns the boost state; userspace never reads or writes it |
-
-Gamma is the smallest design that closes all three.
-
----
-
-## 3. Design Goals
-
-The gamma redesign was scoped tightly:
-
-- **One dispatcher pthread per client process.** Not per thread; not
-  router/handler split (deferred to a later phase, see
-  `project_gamma_dispatcher_audit_and_split_plan.md`). Just one
-  pthread that drains the channel sequentially.
-- **Single ioctl per request on the sender side.** Enqueue + boost +
-  block-for-reply must be one syscall, not three. Anything less leaks
-  PI gaps.
-- **Single ioctl per reply on the dispatcher side.** Wake-sender +
-  drain-our-boost must be atomic. Otherwise a higher-prio sender that
-  arrived during our handler would be unboosted before the dispatcher
-  picks them up.
-- **Zero-copy payloads.** Reuse the v1.5 per-thread `request_shm` page
-  exactly as-is. The channel only carries metadata (TID + priority),
-  never request data.
-- **Behavioural neutrality vs upstream.** Per-thread request ordering
-  must be preserved; cross-thread ordering can become priority-ordered
-  (strictly stronger, never weaker, than the legacy "first-to-wake"
-  shape).
-- **Graceful fallback.** If the kernel lacks the channel ioctls, the
-  client must transparently fall back to the upstream socket path.
-  Same for senders that arrive before their dispatcher pthread has
-  managed to spawn.
-
-The gating env vars on the current production path are:
-
-- `NSPA_DISPATCHER_USE_TOKEN=0` -- A/B for T3 thread-token consumption
-- `NSPA_AGG_WAIT=0` -- opt out of the post-1010 aggregate-wait loop and
-  force the old direct `CHANNEL_RECV2` path for that dispatcher
-
-Gamma itself remains the default transport whenever the channel ioctls
-are present.
-
----
-
-## 4. Architecture
-
-### 4.1 Component diagram
+### 2.1 Component diagram
 
 The gamma path involves four cooperating components:
 
@@ -277,7 +180,7 @@ shmem window.
 </svg>
 </div>
 
-### 4.2 Aggregate-wait topology
+### 2.2 Aggregate-wait topology
 
 Post-1010 gamma is no longer just a blocking `RECV2` loop. The
 dispatcher waits on three sources and selects the work type from the
@@ -345,39 +248,80 @@ aggregate-wait result.
 </svg>
 </div>
 
-### 4.3 Per-request data flow
+### 2.3 Per-request data flow
 
-For a single request the data movement is:
+For one request, the payload stays in `request_shm` while the channel
+only carries scheduling metadata and reply ownership:
 
-    Client                          Kernel channel             Dispatcher
-    ------                          --------------             ----------
-    1. memcpy req hdr+data ->
-       request_shm[caller_tid]
-    2. ioctl SEND_PI ---------->    enqueue (prio,
-                                    payload_off=tid,
-                                    thread_token)
-                                    apply PI boost to
-                                    dispatcher
-                                    block sender
-                                                          <--- ioctl RECV2
-                                    dequeue highest-prio
-                                    boost dispatcher to
-                                    entry's prio
-                                    return entry, token
-                                                               3. global_lock
-                                                                  read_request_shm
-                                                                  (writes reply
-                                                                   into shmem)
-                                                                  global_unlock
-                                                          <--- ioctl REPLY(entry_id)
-                                    wake sender
-                                    drain dispatcher's
-                                    boost from this entry
-                                    re-boost to next
-                                    entry's prio if any
-    4. SEND_PI returns
-    5. memcpy reply hdr+data <-
-       request_shm[caller_tid]
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 980 430" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .gr-bg { fill: #1a1b26; }
+    .gr-client { fill: #1a2235; stroke: #7aa2f7; stroke-width: 1.8; rx: 8; }
+    .gr-shmem { fill: #2a2418; stroke: #e0af68; stroke-width: 1.8; rx: 8; }
+    .gr-kernel { fill: #1f2535; stroke: #bb9af7; stroke-width: 1.8; rx: 8; }
+    .gr-server { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
+    .gr-note { fill: #24283b; stroke: #7dcfff; stroke-width: 1.6; rx: 8; }
+    .gr-h { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
+    .gr-t { fill: #c0caf5; font: 11px 'JetBrains Mono', monospace; }
+    .gr-s { fill: #a9b1d6; font: 9px 'JetBrains Mono', monospace; }
+    .gr-b { fill: #7aa2f7; font: bold 10px 'JetBrains Mono', monospace; }
+    .gr-g { fill: #9ece6a; font: bold 10px 'JetBrains Mono', monospace; }
+    .gr-v { fill: #bb9af7; font: bold 10px 'JetBrains Mono', monospace; }
+    .gr-y { fill: #e0af68; font: bold 10px 'JetBrains Mono', monospace; }
+    .gr-line { stroke: #c0caf5; stroke-width: 1.5; fill: none; }
+  </style>
+  <defs>
+    <marker id="grArrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="#c0caf5"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="980" height="430" class="gr-bg"/>
+  <text x="490" y="28" text-anchor="middle" class="gr-h">Single-request sequence</text>
+
+  <rect x="40" y="88" width="170" height="92" class="gr-client"/>
+  <text x="125" y="114" text-anchor="middle" class="gr-t">sender thread</text>
+  <text x="125" y="136" text-anchor="middle" class="gr-s">build request header</text>
+  <text x="125" y="154" text-anchor="middle" class="gr-s">own RT priority already known</text>
+
+  <rect x="250" y="88" width="200" height="92" class="gr-shmem"/>
+  <text x="350" y="114" text-anchor="middle" class="gr-y">per-thread `request_shm`</text>
+  <text x="350" y="136" text-anchor="middle" class="gr-s">request payload and reply payload</text>
+  <text x="350" y="154" text-anchor="middle" class="gr-s">zero-copy data plane</text>
+
+  <rect x="490" y="88" width="200" height="92" class="gr-kernel"/>
+  <text x="590" y="114" text-anchor="middle" class="gr-v">kernel channel object</text>
+  <text x="590" y="136" text-anchor="middle" class="gr-s">enqueue entry: tid, prio, token</text>
+  <text x="590" y="154" text-anchor="middle" class="gr-s">boost dispatcher and block sender</text>
+
+  <rect x="730" y="88" width="210" height="92" class="gr-server"/>
+  <text x="835" y="114" text-anchor="middle" class="gr-t">dispatcher thread</text>
+  <text x="835" y="136" text-anchor="middle" class="gr-s">`RECV2`, handler dispatch, `REPLY`</text>
+  <text x="835" y="154" text-anchor="middle" class="gr-s">same thread owns completion + reply</text>
+
+  <path d="M210 118 L250 118" class="gr-line" marker-end="url(#grArrow)"/>
+  <text x="230" y="110" text-anchor="middle" class="gr-b">1. write request</text>
+
+  <path d="M125 180 C125 232, 590 232, 590 180" class="gr-line" marker-end="url(#grArrow)"/>
+  <text x="360" y="224" text-anchor="middle" class="gr-v">2. `SEND_PI` enqueues metadata and blocks</text>
+
+  <path d="M690 118 L730 118" class="gr-line" marker-end="url(#grArrow)"/>
+  <text x="710" y="110" text-anchor="middle" class="gr-g">3. `RECV2` dequeues highest priority</text>
+
+  <path d="M835 180 C835 248, 350 248, 350 180" class="gr-line" marker-end="url(#grArrow)"/>
+  <text x="592" y="266" text-anchor="middle" class="gr-y">4. handler reads request and writes reply in `request_shm`</text>
+
+  <path d="M730 150 C690 150, 690 318, 590 318 C490 318, 490 180, 490 150" class="gr-line" marker-end="url(#grArrow)"/>
+  <text x="612" y="334" text-anchor="middle" class="gr-g">5. `REPLY(entry_id)` wakes sender and drains / re-applies PI</text>
+
+  <path d="M490 336 C370 336, 250 336, 125 336 C125 336, 125 180, 125 180" class="gr-line" marker-end="url(#grArrow)"/>
+  <text x="304" y="354" text-anchor="middle" class="gr-b">6. `SEND_PI` returns; sender copies reply locally</text>
+
+  <rect x="170" y="372" width="640" height="34" class="gr-note"/>
+  <text x="490" y="394" text-anchor="middle" class="gr-s">Control plane = channel entry and PI ownership. Data plane = request/reply bytes in the sender's `request_shm` page.</text>
+</svg>
+</div>
 
 Steps 2 and the unboost-and-reboost inside the kernel REPLY handler
 are atomic with respect to each other under the channel's internal
@@ -385,7 +329,7 @@ spinlock. There is no observable interval where the dispatcher is
 running unboosted while another high-prio entry sits ready in the
 queue.
 
-### 4.4 End-to-end flow diagram
+### 2.4 End-to-end flow diagram
 
 The following inline SVG shows a single request's lifecycle through
 gamma. Two senders are shown at differing priorities to illustrate
@@ -540,7 +484,45 @@ runqueue insertion. Gamma closes that gap by construction.
 
 ---
 
-## 5. Kernel Channel Object and ioctls
+## 3. Design Goals
+
+The gamma redesign was scoped tightly:
+
+- **One dispatcher pthread per client process.** Not per thread; not
+  router/handler split (deferred to a later phase, see
+  `project_gamma_dispatcher_audit_and_split_plan.md`). Just one
+  pthread that drains the channel sequentially.
+- **Single ioctl per request on the sender side.** Enqueue + boost +
+  block-for-reply must be one syscall, not three. Anything less leaks
+  PI gaps.
+- **Single ioctl per reply on the dispatcher side.** Wake-sender +
+  drain-our-boost must be atomic. Otherwise a higher-prio sender that
+  arrived during our handler would be unboosted before the dispatcher
+  picks them up.
+- **Zero-copy payloads.** Reuse the v1.5 per-thread `request_shm` page
+  exactly as-is. The channel only carries metadata (TID + priority),
+  never request data.
+- **Behavioural neutrality vs upstream.** Per-thread request ordering
+  must be preserved; cross-thread ordering can become priority-ordered
+  (strictly stronger, never weaker, than the legacy "first-to-wake"
+  shape).
+- **Graceful fallback.** If the kernel lacks the channel ioctls, the
+  client must transparently fall back to the upstream socket path.
+  Same for senders that arrive before their dispatcher pthread has
+  managed to spawn.
+
+The gating env vars on the current production path are:
+
+- `NSPA_DISPATCHER_USE_TOKEN=0` -- A/B for T3 thread-token consumption
+- `NSPA_AGG_WAIT=0` -- opt out of the post-1010 aggregate-wait loop and
+  force the old direct `CHANNEL_RECV2` path for that dispatcher
+
+Gamma itself remains the default transport whenever the channel ioctls
+are present.
+
+---
+
+## 4. Kernel Channel Object and ioctls
 
 The kernel side lives in `drivers/misc/ntsync.c` (Linux-NSPA tree at
 `/home/ninez/pkgbuilds/Linux-NSPA-pkgbuild/linux-nspa-6.19.11-1.src/linux-nspa/src/linux-6.19.11/drivers/misc/ntsync.c`,
@@ -596,7 +578,7 @@ the bottom of the tree.
 
 ---
 
-## 6. Sender State Machine
+## 5. Sender State Machine
 
 The client-side entry point is `nspa_send_request_channel` in
 `dlls/ntdll/unix/server.c:349`. The function is invoked from
@@ -665,7 +647,7 @@ gamma is cheaper than v1.5.
 
 ---
 
-## 7. Dispatcher State Machine
+## 6. Dispatcher State Machine
 
 The dispatcher pthread is still born detached with explicit
 `SCHED_FIFO` attrs when `NSPA_SRV_RT_PRIO > 0`, but the runtime loop is
@@ -742,7 +724,7 @@ required.
 
 ---
 
-## 8. Priority-Inheritance Semantics
+## 7. Priority-Inheritance Semantics
 
 Gamma's PI guarantee is the most important property of the design.
 The promise is:
@@ -763,7 +745,7 @@ be visible to the channel's SEND_PI wake/boost logic. The production
 exactly that reason; without it, aggregate-wait would have reintroduced
 a priority gap on the receive side.
 
-### 8.1 SEND_PI atomically boosts the dispatcher
+### 7.1 SEND_PI atomically boosts the dispatcher
 
 When SEND_PI fires, the kernel acquires `channel->lock`, inserts the
 entry into the rbtree, and -- under the same spinlock -- compares the
@@ -774,7 +756,7 @@ underlying `task_struct`. The boost happens before SEND_PI sleeps the
 sender, so by the time the sender is blocked the dispatcher is
 already running at (at least) the sender's prio.
 
-### 8.2 RECV2 re-boosts to the popped entry's prio
+### 7.2 RECV2 re-boosts to the popped entry's prio
 
 When the dispatcher pops the highest-prio entry, the kernel
 recalculates the boost cap from the new queue head and the popped
@@ -784,7 +766,7 @@ while the handler runs, it does not raise the dispatcher's prio; if
 a higher-prio sender arrives, it does (`apply_event_pi_boost` is
 re-entrant in the safe direction).
 
-### 8.3 REPLY drains the popped entry's contribution and re-boosts
+### 7.3 REPLY drains the popped entry's contribution and re-boosts
 
 `NTSYNC_IOC_CHANNEL_REPLY` is the most subtle ioctl. In one critical
 section under `channel->lock` it:
@@ -804,7 +786,7 @@ to the next inside the same ioctl that wakes the previous sender.
 This is the **deferred-boost** mechanism introduced in ntsync patch
 1008; gamma was redesigned mid-2026-04 to require it.
 
-### 8.4 Why kernel-atomic PI is strictly better than userspace PI
+### 7.4 Why kernel-atomic PI is strictly better than userspace PI
 
 The legacy v1.5/v2.4 design had three orthogonal hand-rolled pieces:
 the boost call itself (`sched_setscheduler`), the bookkeeping cache
@@ -827,13 +809,13 @@ the channel landed.
 
 ---
 
-## 9. Phase B Lock-Drop Integration
+## 8. Phase B Lock-Drop Integration
 
 Phase B is the second-most important integration consumer of gamma.
 It lives in `server/nspa/fd_lockdrop.c` and reshapes how the
 dispatcher cooperates with slow filesystem syscalls.
 
-### 9.1 The problem
+### 8.1 The problem
 
 The wineserver's `create_file` handler ultimately does an
 `openat()` syscall against the host filesystem. On a cold-cache
@@ -848,7 +830,7 @@ a futex syscall lookup is now stuck behind the GUI thread's
 multi-millisecond `LoadLibrary` chain. That is a reliable xrun on
 drum-track-load-while-playing.
 
-### 9.2 The Phase B fix
+### 8.2 The Phase B fix
 
 `nspa_openat_lockdrop` (line 47) reorganises the openat critical
 section into a "drop, syscall, re-acquire" pattern:
@@ -892,7 +874,7 @@ the lock lets us *also* be IO-blocked, at which point the audio
 thread can preempt us via the kernel scheduler. The dispatcher is
 still single-threaded with respect to gamma's own queue.
 
-### 9.3 Save/restore discipline
+### 8.3 Save/restore discipline
 
 Several pieces of per-request state are global-ish and must be
 preserved across the lock-drop window:
@@ -908,7 +890,7 @@ preserved across the lock-drop window:
 The restore order is the inverse: re-lock, restore `current`,
 restore `current->error`, drop refs.
 
-### 9.4 Gating
+### 8.4 Gating
 
 Phase B is **default-on as of 2026-04-26**, gated by
 `NSPA_OPENFD_LOCKDROP=0` for A/B testing or as a panic switch.
@@ -926,13 +908,13 @@ The cached env-var read at lines 67-79 follows the same one-shot
 
 ---
 
-## 10. Thread-Token Pass-Through (T1/T2/T3)
+## 9. Thread-Token Pass-Through (T1/T2/T3)
 
 The thread-token mechanism is a steady-state CPU optimisation
 introduced by ntsync patch 1005 and consumed by the dispatcher. It
 removes a hash-table lookup on the dispatcher's hot path.
 
-### 10.1 The bottleneck
+### 9.1 The bottleneck
 
 Pre-token, the dispatcher mapped `payload_off` (which is the
 sender's Wine `thread_id_t`) to a `struct thread *` via
@@ -941,7 +923,7 @@ sender's Wine `thread_id_t`) to a `struct thread *` via
 **~10% of dispatcher CPU** in mixed-load steady state. Eliminating
 it is worth the kernel-side complexity.
 
-### 10.2 The protocol
+### 9.2 The protocol
 
 The optimisation is split across three deployment phases:
 
@@ -957,7 +939,7 @@ the dispatcher to consume them and is gated `NSPA_DISPATCHER_USE_TOKEN`
 (default on, set to `0` to fall back to the legacy
 `get_thread_from_id` lookup for A/B testing).
 
-### 10.3 Lifetime safety
+### 9.3 Lifetime safety
 
 The token is `(struct thread *)` cast to `__u64`. Dereferencing it
 in the dispatcher requires the registration to happen **before** any
@@ -987,7 +969,7 @@ pre-init traffic, or a build against an old kernel without 1005),
 identical to the pre-token behaviour and is exercised every time
 RECV2 returns ENOTTY (line 161-166).
 
-### 10.4 Performance
+### 9.4 Performance
 
 Per the 2026-04-26 perf run, with T3 enabled:
 
@@ -998,12 +980,12 @@ Per the 2026-04-26 perf run, with T3 enabled:
 
 ---
 
-## 11. NT Semantics Preservation
+## 10. NT Semantics Preservation
 
 A redesign of the IPC fast path must not change observable Win32
 semantics. Two ordering guarantees must be preserved:
 
-### 11.1 Per-thread request ordering
+### 10.1 Per-thread request ordering
 
 Win32 guarantees that within a single thread, request `k` is
 serialised before request `k+1`. Gamma preserves this trivially
@@ -1013,7 +995,7 @@ have request `k+1` outstanding while `k` is still in flight; the
 kernel-side rbtree never holds two entries from the same thread
 simultaneously.
 
-### 11.2 Cross-thread ordering
+### 10.2 Cross-thread ordering
 
 Win32 is silent on cross-thread request ordering -- threads race the
 wineserver, and whichever request reaches the server first wins. The
@@ -1033,7 +1015,7 @@ those primitives also flow through the wineserver and are subject to
 the same ordering -- a high-prio thread's signal arrives at the
 wineserver in priority order along with everyone else's traffic.
 
-### 11.3 Reply data shape
+### 10.3 Reply data shape
 
 The reply is byte-identical to the upstream socket reply. Same
 `reply_header.error` codes, same payload layout, same handle
@@ -1042,81 +1024,9 @@ but Wine's own conformance tests do) see the same values.
 
 ---
 
-## 12. Bug History and Audits
+## 11. Validation and Performance
 
-Gamma has been validated under sustained stress and through several
-KASAN-caught bugs. Tracking them here for completeness.
-
-### 12.1 The 2026-04-26 read-only audit (Wine commit 75a3c534d5f)
-
-A static audit of `server/nspa/shmem_channel.c` found **no latent
-correctness bugs** after the `baf088c290f` refcount + process-
-membership patch. The handler runs under `global_lock` exactly as
-v1.5 did, so handler-internal correctness is inherited from upstream
-Wine. The dispatcher loop has no spin-loops, no missing locks, and
-no lifetime races. The full audit lives at
-`wine/nspa/docs/gamma-dispatcher-audit-and-split-plan.md`.
-
-### 12.2 ntsync patch 1007 -- channel exclusive recv (priority inversion)
-
-Pre-1007, the channel's RECV path used a non-exclusive
-`wake_up_interruptible_all` on enqueue, which woke every waiter and
-let the kernel pick one. Under multiple-dispatcher scenarios (which
-gamma does not actually use, but the test-channel-stress harness does)
-the wake-all caused a real priority inversion: a low-prio waiter
-could win the race and delay the high-prio waiter behind a sleep.
-Patch 1007 narrowed RECV to `wait_event_interruptible_exclusive` +
-`wake_up_interruptible`. Audit doc at `wine/nspa/docs/ntsync-rt-audit.md`.
-
-### 12.3 ntsync patch 1008 -- EVENT_SET_PI deferred boost
-
-The pre-1008 `EVENT_SET_PI` boost was applied immediately under
-`raw_spinlock_t`, which blocked other RT operations. 1008 deferred
-the boost to a per-CPU `pi_work` pool drained outside the spinlock.
-Gamma channel REPLY uses the same machinery via
-`consume_event_pi_boost` / `apply_event_pi_boost` -- the deferred-
-boost queue is what makes "drain previous, re-boost from new head"
-atomic-feeling without holding the raw spinlock through the actual
-`task_struct` boost call.
-
-### 12.4 ntsync patch 1009 -- channel_entry refcount UAF
-
-KASAN caught a use-after-free on `struct ntsync_channel_entry` in
-`test-channel-stress`: a REPLY's `wake_up_all` raced with SEND_PI's
-`kfree(entry)`. Same bug class as the rolled-back 1008/1009 wave.
-The clean fix was a `refcount_t refs` on `ntsync_channel_entry`,
-incremented on enqueue and decremented at REPLY completion and at
-sender wakeup; ~15 LOC. Patch 1009 in tree. No production user has
-ever observed this bug (gamma has only one dispatcher per channel,
-which keeps the path single-consumer); but the channel UAPI is
-shared with other potential consumers and the fix is unconditional.
-
-### 12.5 The lockup audit (2026-04-27)
-
-After the ~370M-ops ntsync validation proved the kernel sound, the
-lockup investigation moved to wine-NSPA userspace. The audit doc at
-`wine/nspa/docs/wine-nspa-lockup-audit-20260427.md` covers F1-F9
-wineserver-side findings and MR1-MR8 msg_ring findings; gamma
-itself was scored clean. The shipped fixes (MR1 reply-slot ABA, MR2
-FUTEX_PRIVATE on shared memfd, MR4 POST wake-loss) are all in
-`dlls/win32u/nspa/msg_ring.c` and orthogonal to gamma.
-
-### 12.6 Don't-shotgun-the-audit feedback
-
-A separate behavioural-feedback note
-(`feedback_dont_shotgun_audit_into_unfound_bug`) documents that
-ntsync patches 1007-1011 originally shipped five patches as "audit
-findings" without ever tracing the original `EVENT_SET_PI` slab
-UAF; they were rolled back, reduced to the four genuinely-needed
-fixes (1006/1007/1008/1009), and re-shipped. The lesson: KASAN /
-trace first, audit second. Gamma's design is small enough that
-this discipline applies to its own future evolution as well.
-
----
-
-## 13. Validation and Performance
-
-### 13.1 Functional
+### 11.1 Functional
 
 - `test-aggregate-wait`: **9/9 PASS**, including the channel-notify
   and channel-PI propagation sub-tests added for the Phase 3 path.
@@ -1129,7 +1039,7 @@ this discipline applies to its own future evolution as well.
 - Phase 3 default-on (`NSPA_AGG_WAIT` unset): same Ableton workload
   PASS, which is what justified the 2026-04-29 default-on flip.
 
-### 13.2 Performance
+### 11.2 Performance
 
 | Metric | v1.5/v2.4 | Gamma before 1010 | Gamma on post-1010 kernels |
 |---|---|---|---|
@@ -1147,7 +1057,7 @@ main-thread bridge pushed CQE-to-reply timing onto a different thread
 queue. The shipped path keeps that interval under the dispatcher's RT
 scheduling and cache locality instead.
 
-### 13.3 Configuration validated for production
+### 11.3 Configuration validated for production
 
 For the 2026-04-29 production validation:
 
@@ -1157,6 +1067,140 @@ For the 2026-04-29 production validation:
 - `NSPA_DISPATCHER_USE_TOKEN` unset -> default ON
 - `NSPA_AGG_WAIT` unset -> default ON
 - `NSPA_ENABLE_ASYNC_CREATE_FILE` unset -> default OFF
+
+---
+
+## 12. Predecessors and Their Failure Modes
+
+### 12.1 Alpha (v1.5) -- per-thread pthread + userspace `sched_setscheduler`
+
+The original Torge Matthies forward-port spawned **one dispatcher
+pthread per client thread**. Each pthread owned a thread-private
+`request_shm` page and watched a futex word inside it. When the client
+wrote a request, it raised the word and `FUTEX_WAKE`-ed the dispatcher;
+the dispatcher locked `global_lock`, ran the handler, wrote the reply,
+and lowered the word so the client's `FUTEX_WAIT` returned.
+
+Priority inheritance was bolted on in userspace. Before sending, the
+client did `sched_setscheduler(dispatcher_tid, RT_POLICY, our_prio)`
+to boost the dispatcher to the caller's level. After reply, the
+dispatcher reset its own scheduler attrs.
+
+The pain points:
+
+- **N dispatchers per process** all waking on the same `global_lock`.
+  A 60-thread DAW had 60 dispatcher pthreads contending for one mutex.
+- **TID race window.** The client read `dispatcher_tid` from a shared
+  field, then called `sched_setscheduler`. Between the read and the
+  syscall the dispatcher could exit and another thread could be
+  assigned the same tid by the kernel; the boost would land on a
+  random thread. We never observed this in production but it was a
+  real correctness hole.
+- **Capability churn.** Boost / unboost cycles forced
+  `cap_sys_nice`-bearing syscalls on every request.
+- **Userspace PI accounting.** The wineserver maintained its own
+  "current boost level" cache so that overlapping senders did not
+  trample each other's boost. Hand-rolled PI is brittle; under stress
+  we hit unboost-too-early bugs.
+
+### 12.2 Beta (v2.4) -- cached-CAS + manual prio cache
+
+v2.4 narrowed the steady-state cost: senders cached their RT prio in
+`ntdll_thread_data`, did a CAS on a request-state word, did a single
+`FUTEX_WAKE`, and only fell back to `sched_setscheduler` when the
+cached dispatcher prio was below ours. This eliminated four syscalls
+per request on the steady-state hot path but left every architectural
+problem of v1.5 in place: still one dispatcher per thread, still
+userspace TID-read-vs-setscheduler racing, still hand-rolled PI
+arithmetic. The "cache" added a third place where boost state could
+desync.
+
+### 12.3 The case for moving boost into the kernel
+
+Once NTSync gained an event PI primitive (patch 1006, eventually
+deferred-boost in 1008), it was clear that PI for IPC could ride the
+same machinery. The legacy machinery had three structural problems no
+amount of userspace engineering could fix:
+
+| Structural problem | Gamma resolution |
+|---|---|
+| N pthreads per process contending on `global_lock` | One dispatcher per process; contention is O(1) per process |
+| TID-read vs `sched_setscheduler` race window | Kernel boosts dispatcher inside the same syscall that enqueues |
+| Userspace PI accounting drift | Kernel owns the boost state; userspace never reads or writes it |
+
+Gamma is the smallest design that closes all three.
+
+---
+
+## 13. Bug History and Audits
+
+Gamma has been validated under sustained stress and through several
+KASAN-caught bugs. Tracking them here for completeness.
+
+### 13.1 The 2026-04-26 read-only audit (Wine commit 75a3c534d5f)
+
+A static audit of `server/nspa/shmem_channel.c` found **no latent
+correctness bugs** after the `baf088c290f` refcount + process-
+membership patch. The handler runs under `global_lock` exactly as
+v1.5 did, so handler-internal correctness is inherited from upstream
+Wine. The dispatcher loop has no spin-loops, no missing locks, and
+no lifetime races. The full audit lives at
+`wine/nspa/docs/gamma-dispatcher-audit-and-split-plan.md`.
+
+### 13.2 ntsync patch 1007 -- channel exclusive recv (priority inversion)
+
+Pre-1007, the channel's RECV path used a non-exclusive
+`wake_up_interruptible_all` on enqueue, which woke every waiter and
+let the kernel pick one. Under multiple-dispatcher scenarios (which
+gamma does not actually use, but the test-channel-stress harness does)
+the wake-all caused a real priority inversion: a low-prio waiter
+could win the race and delay the high-prio waiter behind a sleep.
+Patch 1007 narrowed RECV to `wait_event_interruptible_exclusive` +
+`wake_up_interruptible`. Audit doc at `wine/nspa/docs/ntsync-rt-audit.md`.
+
+### 13.3 ntsync patch 1008 -- EVENT_SET_PI deferred boost
+
+The pre-1008 `EVENT_SET_PI` boost was applied immediately under
+`raw_spinlock_t`, which blocked other RT operations. 1008 deferred
+the boost to a per-CPU `pi_work` pool drained outside the spinlock.
+Gamma channel REPLY uses the same machinery via
+`consume_event_pi_boost` / `apply_event_pi_boost` -- the deferred-
+boost queue is what makes "drain previous, re-boost from new head"
+atomic-feeling without holding the raw spinlock through the actual
+`task_struct` boost call.
+
+### 13.4 ntsync patch 1009 -- channel_entry refcount UAF
+
+KASAN caught a use-after-free on `struct ntsync_channel_entry` in
+`test-channel-stress`: a REPLY's `wake_up_all` raced with SEND_PI's
+`kfree(entry)`. Same bug class as the rolled-back 1008/1009 wave.
+The clean fix was a `refcount_t refs` on `ntsync_channel_entry`,
+incremented on enqueue and decremented at REPLY completion and at
+sender wakeup; ~15 LOC. Patch 1009 in tree. No production user has
+ever observed this bug (gamma has only one dispatcher per channel,
+which keeps the path single-consumer); but the channel UAPI is
+shared with other potential consumers and the fix is unconditional.
+
+### 13.5 The lockup audit (2026-04-27)
+
+After the ~370M-ops ntsync validation proved the kernel sound, the
+lockup investigation moved to wine-NSPA userspace. The audit doc at
+`wine/nspa/docs/wine-nspa-lockup-audit-20260427.md` covers F1-F9
+wineserver-side findings and MR1-MR8 msg_ring findings; gamma
+itself was scored clean. The shipped fixes (MR1 reply-slot ABA, MR2
+FUTEX_PRIVATE on shared memfd, MR4 POST wake-loss) are all in
+`dlls/win32u/nspa/msg_ring.c` and orthogonal to gamma.
+
+### 13.6 Don't-shotgun-the-audit feedback
+
+A separate behavioural-feedback note
+(`feedback_dont_shotgun_audit_into_unfound_bug`) documents that
+ntsync patches 1007-1011 originally shipped five patches as "audit
+findings" without ever tracing the original `EVENT_SET_PI` slab
+UAF; they were rolled back, reduced to the four genuinely-needed
+fixes (1006/1007/1008/1009), and re-shipped. The lesson: KASAN /
+trace first, audit second. Gamma's design is small enough that
+this discipline applies to its own future evolution as well.
 
 ---
 

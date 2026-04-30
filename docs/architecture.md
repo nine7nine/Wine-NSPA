@@ -1,7 +1,10 @@
 # Wine-NSPA -- Architecture Overview
 
-Wine 11.6 + NSPA RT patchset | Kernel 6.19.x-rt with NTSync PI | 2026-04-28
+Wine 11.6 + NSPA RT patchset | Kernel 6.19.x-rt with NTSync PI | 2026-04-29
 Author: Jordan Johnston
+Status: top-level architecture reference; reflects the shipped aggregate-wait + gamma Phase 3 path as of 2026-04-29.
+
+This page is the system map for Wine-NSPA. Use it to understand the major layers, where each bypass sits, and which responsibilities still remain in wineserver.
 
 ## Table of Contents
 
@@ -113,20 +116,20 @@ The architecture has three layers: a kernel layer (NTSync, io_uring, librtpi-sty
 
   <!-- Wineserver layer -->
   <rect x="20" y="220" width="940" height="130" class="layer-s"/>
-  <text x="40" y="240" class="lbl-pur">WINESERVER (single-threaded supervisor)</text>
-  <text x="40" y="254" class="lbl-mut">handle table, cross-process naming, lifecycle, NT path resolution</text>
+  <text x="40" y="240" class="lbl-pur">WINESERVER (RT request plane + residual supervisor)</text>
+  <text x="40" y="254" class="lbl-mut">gamma dispatcher, handler tables, lifecycle, cross-process authority</text>
 
   <rect x="40"  y="265" width="180" height="70" class="box-hot"/>
-  <text x="130" y="283" text-anchor="middle" class="lbl-yel">gamma channel dispatcher</text>
-  <text x="130" y="297" text-anchor="middle" class="lbl-mut">per-process kernel-mediated</text>
-  <text x="130" y="311" text-anchor="middle" class="lbl-mut">request/reply via ntsync 1004</text>
-  <text x="130" y="325" text-anchor="middle" class="lbl-cy">replaces legacy shmem dispatcher</text>
+  <text x="130" y="283" text-anchor="middle" class="lbl-yel">gamma aggregate-wait dispatcher</text>
+  <text x="130" y="297" text-anchor="middle" class="lbl-mut">per-process channel + uring</text>
+  <text x="130" y="311" text-anchor="middle" class="lbl-mut">AGG_WAIT -&gt; CHANNEL_RECV2</text>
+  <text x="130" y="325" text-anchor="middle" class="lbl-cy">same-thread CQE drain + REPLY</text>
 
   <rect x="240" y="265" width="180" height="70" class="box"/>
-  <text x="330" y="283" text-anchor="middle" class="lbl-sm">main_loop / poll() / epoll</text>
-  <text x="330" y="297" text-anchor="middle" class="lbl-mut">global_lock (PI-aware)</text>
-  <text x="330" y="311" text-anchor="middle" class="lbl-mut">FIFO at NSPA_RT_PRIO-16</text>
-  <text x="330" y="325" text-anchor="middle" class="lbl-mut">openat lock-drop (Phase B)</text>
+  <text x="330" y="283" text-anchor="middle" class="lbl-sm">main loop / epoll / timers</text>
+  <text x="330" y="297" text-anchor="middle" class="lbl-mut">residual fd + timeout work</text>
+  <text x="330" y="311" text-anchor="middle" class="lbl-mut">global_lock (PI-aware)</text>
+  <text x="330" y="325" text-anchor="middle" class="lbl-mut">openat lock-drop shipped</text>
 
   <rect x="440" y="265" width="180" height="70" class="box"/>
   <text x="530" y="283" text-anchor="middle" class="lbl-sm">handler tables</text>
@@ -153,11 +156,11 @@ The architecture has three layers: a kernel layer (NTSync, io_uring, librtpi-sty
   <rect x="40"  y="415" width="200" height="120" class="box-hot"/>
   <text x="140" y="434" text-anchor="middle" class="lbl-yel">ntsync.ko</text>
   <text x="140" y="450" text-anchor="middle" class="lbl-mut">NT sync object driver</text>
-  <text x="140" y="464" text-anchor="middle" class="lbl-cy">1003 priority inheritance</text>
-  <text x="140" y="478" text-anchor="middle" class="lbl-cy">1004 channels (gamma)</text>
-  <text x="140" y="492" text-anchor="middle" class="lbl-cy">1005 thread-token</text>
-  <text x="140" y="506" text-anchor="middle" class="lbl-cy">1006 RT alloc-hoist</text>
-  <text x="140" y="520" text-anchor="middle" class="lbl-cy">1007 channel exclusive recv</text>
+  <text x="140" y="464" text-anchor="middle" class="lbl-cy">1003 PI baseline</text>
+  <text x="140" y="478" text-anchor="middle" class="lbl-cy">1004-1009 gamma transport</text>
+  <text x="140" y="492" text-anchor="middle" class="lbl-cy">1010 aggregate-wait</text>
+  <text x="140" y="506" text-anchor="middle" class="lbl-cy">channel notify-only source</text>
+  <text x="140" y="520" text-anchor="middle" class="lbl-cy">post-1010 PI follow-ups</text>
 
   <rect x="260" y="415" width="200" height="120" class="box"/>
   <text x="360" y="434" text-anchor="middle" class="lbl-sm">PI futex layer</text>
@@ -170,10 +173,10 @@ The architecture has three layers: a kernel layer (NTSync, io_uring, librtpi-sty
   <rect x="480" y="415" width="200" height="120" class="box"/>
   <text x="580" y="434" text-anchor="middle" class="lbl-sm">io_uring</text>
   <text x="580" y="452" text-anchor="middle" class="lbl-mut">Phase 1: regular file I/O</text>
-  <text x="580" y="468" text-anchor="middle" class="lbl-mut">SINGLE_ISSUER + COOP_TASKRUN</text>
-  <text x="580" y="484" text-anchor="middle" class="lbl-mut">ALERTED-state interception</text>
-  <text x="580" y="500" text-anchor="middle" class="lbl-mut">ntsync uring_fd extension</text>
-  <text x="580" y="518" text-anchor="middle" class="lbl-cy">Phase 2/3 pending</text>
+  <text x="580" y="468" text-anchor="middle" class="lbl-mut">Phase 2: per-process dispatcher ring</text>
+  <text x="580" y="484" text-anchor="middle" class="lbl-mut">SINGLE_ISSUER + COOP_TASKRUN</text>
+  <text x="580" y="500" text-anchor="middle" class="lbl-mut">ALERTED-state interception</text>
+  <text x="580" y="518" text-anchor="middle" class="lbl-cy">same-thread CQE drain shipped</text>
 
   <rect x="700" y="415" width="240" height="120" class="box"/>
   <text x="820" y="434" text-anchor="middle" class="lbl-sm">RT scheduler (PREEMPT_RT_FULL)</text>
@@ -197,6 +200,7 @@ The architecture has three layers: a kernel layer (NTSync, io_uring, librtpi-sty
 
   <!-- Server -> kernel -->
   <line x1="130" y1="335" x2="140" y2="415" class="ln"/>
+  <line x1="170" y1="335" x2="580" y2="415" class="ln"/>
   <line x1="330" y1="335" x2="360" y2="415" class="ln"/>
 
   <!-- Legend -->

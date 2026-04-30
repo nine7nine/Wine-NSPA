@@ -8,10 +8,13 @@
 `wine/server/protocol.def` (slot definitions, lines 1020-1214),
 `wine/server/nspa/redraw_ring.c` (87 LOC server drain),
 `wine/dlls/win32u/dce.c` (paint cache fastpath).
+**Status:** design and implementation reference for the same-process message-ring family, including shipped POST/SEND/REPLY paths and later hardening work.
+
+This page explains how the message rings replace same-process wineserver message traffic, how the reply and paint-cache pieces fit into the same substrate, and where the paused `get_message` work sits.
 
 ---
 
-## Table of contents
+## Table of Contents
 
  1. [Abstract](#1-abstract)
  2. [Architecture overview](#2-architecture-overview)

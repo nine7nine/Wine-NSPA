@@ -101,7 +101,7 @@ Author: Jordan Johnston</p>
 
 <hr />
 
-<h2 id="table-of-contents">Table of contents</h2>
+<h2 id="table-of-contents">Table of Contents</h2>
 
 <ol>
 <li><a href="#1-overview">Overview</a></li>
@@ -118,12 +118,17 @@ Author: Jordan Johnston</p>
 
 <h2 id="1-overview">1. Overview</h2>
 
-<p>The aggregate-wait slice closes a specific architectural gap in the gamma dispatcher.</p>
+<p>Aggregate-wait is the kernel-side wait primitive that lets the gamma
+dispatcher block on request traffic, deferred-completion wakeups, and
+teardown wakeups in one place while keeping receive, CQE drain, and
+reply signaling on the same RT thread.</p>
 
-<p>Gamma already gave Wine-NSPA the correct <strong>request-side</strong> priority inheritance story:
-client threads do <code>CHANNEL_SEND_PI</code>, the kernel enqueues by priority, and the wineserver
-dispatcher runs the handler at the right effective priority. What gamma lacked was a
-correct <strong>async completion-side</strong> wait primitive.</p>
+<p>That is the architectural role of patch 1010 plus the dispatcher Phase
+2/3 userspace work. Gamma already gave Wine-NSPA the correct
+<strong>request-side</strong> priority inheritance story: client threads do
+<code>CHANNEL_SEND_PI</code>, the kernel enqueues by priority, and the wineserver
+dispatcher runs the handler at the right effective priority. What gamma
+lacked was the matching <strong>async completion-side</strong> wait primitive.</p>
 
 <p>The first async-completion prototype used the wineserver main thread as the CQE drain
 site. That proved the basic mechanism but broke the more important invariant: the thread
@@ -526,20 +531,22 @@ struct nspa_dispatcher_ctx {
 </ul>
 
 
-<p>That gives a clean compatibility ladder:</p>
+<p>That logic is runtime feature detection, not a release ladder:</p>
 
 <div class="diagram-container">
-<svg width="100%" viewBox="0 0 980 330" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
+<svg width="100%" viewBox="0 0 980 430" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
   <style>
     .bg { fill: #1a1b26; }
     .done { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
     .curr { fill: #1f2535; stroke: #bb9af7; stroke-width: 2; rx: 8; }
     .note { fill: #24283b; stroke: #7aa2f7; stroke-width: 2; rx: 8; }
+    .warn { fill: #2a2418; stroke: #e0af68; stroke-width: 1.8; rx: 8; }
     .t { fill: #c0caf5; font: 11px 'JetBrains Mono', monospace; }
     .s { fill: #a9b1d6; font: 9px 'JetBrains Mono', monospace; }
     .h { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
     .g { fill: #9ece6a; font: bold 10px 'JetBrains Mono', monospace; }
     .v { fill: #bb9af7; font: bold 10px 'JetBrains Mono', monospace; }
+    .y { fill: #e0af68; font: bold 10px 'JetBrains Mono', monospace; }
     .line { stroke: #c0caf5; stroke-width: 1.4; fill: none; }
   </style>
   <defs>
@@ -548,33 +555,49 @@ struct nspa_dispatcher_ctx {
     </marker>
   </defs>
 
-  <rect x="0" y="0" width="980" height="330" class="bg" rx="6"/>
-  <text x="490" y="26" text-anchor="middle" class="h">Landing sequence</text>
+  <rect x="0" y="0" width="980" height="430" class="bg" rx="6"/>
+  <text x="490" y="26" text-anchor="middle" class="h">Dispatcher compatibility decisions</text>
 
-  <rect x="40" y="104" width="180" height="86" class="done" rx="6"/>
-  <text x="130" y="130" text-anchor="middle" class="g">1004-1009 base</text>
-  <text x="130" y="152" text-anchor="middle" class="s">channel + thread-token + hardening</text>
-  <text x="130" y="170" text-anchor="middle" class="s">legacy direct `CHANNEL_RECV2` loop</text>
+  <rect x="330" y="62" width="320" height="70" class="curr" rx="6"/>
+  <text x="490" y="88" text-anchor="middle" class="v">dispatcher startup / first wait</text>
+  <text x="490" y="108" text-anchor="middle" class="s">probe once, then cache the supported receive shape in the dispatcher context</text>
 
-  <rect x="280" y="104" width="180" height="86" class="done" rx="6"/>
-  <text x="370" y="130" text-anchor="middle" class="g">1010 kernel</text>
-  <text x="370" y="152" text-anchor="middle" class="s">aggregate-wait + channel notify-only</text>
-  <text x="370" y="170" text-anchor="middle" class="s">plus 072bfee PI follow-ups</text>
+  <rect x="70" y="178" width="260" height="92" class="done" rx="6"/>
+  <text x="200" y="204" text-anchor="middle" class="g">1. try `NTSYNC_IOC_AGGREGATE_WAIT`</text>
+  <text x="200" y="224" text-anchor="middle" class="s">channel object + uring eventfd + shutdown eventfd</text>
+  <text x="200" y="242" text-anchor="middle" class="s">production path on post-1010 kernels</text>
 
-  <rect x="520" y="104" width="180" height="86" class="done" rx="6"/>
-  <text x="610" y="130" text-anchor="middle" class="g">Phase 2</text>
-  <text x="610" y="152" text-anchor="middle" class="s">per-process ring + eventfd</text>
-  <text x="610" y="170" text-anchor="middle" class="s">dispatcher-owned uring lifetime</text>
+  <rect x="390" y="178" width="200" height="92" class="note" rx="6"/>
+  <text x="490" y="204" text-anchor="middle" class="t">if `-ENOTTY`</text>
+  <text x="490" y="224" text-anchor="middle" class="s">kernel lacks patch 1010</text>
+  <text x="490" y="242" text-anchor="middle" class="s">disable aggregate-wait for this dispatcher</text>
 
-  <rect x="760" y="92" width="180" height="110" class="curr" rx="6"/>
-  <text x="850" y="120" text-anchor="middle" class="v">Phase 3</text>
-  <text x="850" y="144" text-anchor="middle" class="t">aggregate-wait dispatcher</text>
-  <text x="850" y="162" text-anchor="middle" class="s">same-thread CQE drain</text>
-  <text x="850" y="180" text-anchor="middle" class="s">default-on: `NSPA_AGG_WAIT`</text>
+  <rect x="650" y="178" width="260" height="92" class="done" rx="6"/>
+  <text x="780" y="204" text-anchor="middle" class="g">2. use direct `CHANNEL_RECV2` loop</text>
+  <text x="780" y="224" text-anchor="middle" class="s">channel transport still intact</text>
+  <text x="780" y="242" text-anchor="middle" class="s">legacy pre-1010 dispatcher wait shape</text>
 
-  <path d="M220 147 L280 147" class="line" marker-end="url(#rollArrow)"/>
-  <path d="M460 147 L520 147" class="line" marker-end="url(#rollArrow)"/>
-  <path d="M700 147 L760 147" class="line" marker-end="url(#rollArrow)"/>
+  <rect x="390" y="300" width="200" height="92" class="note" rx="6"/>
+  <text x="490" y="326" text-anchor="middle" class="t">if `CHANNEL_RECV2` returns `-ENOTTY`</text>
+  <text x="490" y="346" text-anchor="middle" class="s">kernel lacks patch 1005 thread-token support</text>
+  <text x="490" y="364" text-anchor="middle" class="s">disable `RECV2` for this dispatcher</text>
+
+  <rect x="650" y="300" width="260" height="92" class="warn" rx="6"/>
+  <text x="780" y="326" text-anchor="middle" class="y">3. fall back to `CHANNEL_RECV`</text>
+  <text x="780" y="346" text-anchor="middle" class="s">oldest supported channel shape</text>
+  <text x="780" y="364" text-anchor="middle" class="s">no thread-token carried in the receive result</text>
+
+  <path d="M490 132 L200 178" class="line" marker-end="url(#rollArrow)"/>
+  <path d="M490 132 L780 178" class="line" marker-end="url(#rollArrow)"/>
+  <path d="M330 224 L390 224" class="line" marker-end="url(#rollArrow)"/>
+  <path d="M590 224 L650 224" class="line" marker-end="url(#rollArrow)"/>
+  <path d="M780 270 L780 300" class="line" marker-end="url(#rollArrow)"/>
+  <path d="M590 346 L650 346" class="line" marker-end="url(#rollArrow)"/>
+
+  <rect x="70" y="300" width="260" height="92" class="curr" rx="6"/>
+  <text x="200" y="326" text-anchor="middle" class="v">steady-state production loop</text>
+  <text x="200" y="346" text-anchor="middle" class="s">aggregate-wait blocks once on channel, uring, and shutdown</text>
+  <text x="200" y="364" text-anchor="middle" class="s">same thread receives, drains CQEs, and replies</text>
 </svg>
 </div>
 
