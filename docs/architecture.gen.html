@@ -324,7 +324,7 @@ Author: Jordan Johnston</p>
 
 <p>The classical Wine IPC architecture has every client thread <code>read()</code>/<code>write()</code> over a unix socket pair to the wineserver process, which dispatches under <code>global_lock</code>. The earlier NSPA work (Torge Matthies&rsquo;s 2022 patch, forward-ported as the v1.5 line) replaced the socket round-trip with a per-thread shmem region and a futex signal, served by a pool of pthread dispatchers inside the server. That worked but had its own pile of correctness rough edges; it has been superseded by the <strong>gamma channel dispatcher</strong>.</p>
 
-<p>The gamma dispatcher uses the ntsync 1004 channel object to deliver a per-process kernel-mediated request/reply queue. The client thread <code>ioctl(NTSYNC_CHANNEL_SEND, request)</code>; the wineserver dispatcher thread <code>ioctl(NTSYNC_CHANNEL_RECV)</code>s the request, runs the handler, and <code>ioctl(NTSYNC_CHANNEL_REPLY)</code>s the result. The channel object carries a 1005 thread-token so the kernel knows which client thread sent the request (used to drive 2026-era PI boost decisions on the dispatcher). T1+T2+T3 thread-token consumption is shipped default-on. The legacy shmem-IPC path (<code>shmem-ipc.gen.html</code>) is <strong>historical and superseded</strong> and retained as reference material only.</p>
+<p>The gamma dispatcher uses the ntsync channel object to deliver a per-process kernel-mediated request/reply queue. The client thread issues <code>NTSYNC_IOC_CHANNEL_SEND_PI</code>; the wineserver dispatcher receives via <code>CHANNEL_RECV2</code> and replies via <code>CHANNEL_REPLY</code>. On post-1010 kernels the dispatcher blocks in <code>NTSYNC_IOC_AGGREGATE_WAIT</code> over the channel plus its per-process uring eventfd and shutdown eventfd, so the same RT thread can receive the request, drain deferred completions, and signal the reply. The channel object carries a 1005 thread-token so the kernel knows which client thread sent the request, and T1+T2+T3 thread-token consumption is shipped default-on. The legacy shmem-IPC path (<code>shmem-ipc.gen.html</code>) is <strong>historical and superseded</strong> and retained as reference material only.</p>
 
 <p><strong>Detail: see <a href="gamma-channel-dispatcher.gen.html">gamma-channel-dispatcher</a>. Historical: <a href="shmem-ipc.gen.html">shmem-ipc</a> (superseded).</strong></p>
 
@@ -386,7 +386,7 @@ Author: Jordan Johnston</p>
 
 <h2 id="5-wineserver-residual-design">5. Wineserver residual design</h2>
 
-<p>The decomposition plan for wineserver itself is phased: Phase 1 audits and partitions the lock surface, Phase 2 introduces the ntsync extensions needed for safe delegation, Phase 3 splits the process into subsystem threads (timer, fd-poll, aggregate-wait), and Phase 4 separates routing from handlers and further partitions the remaining lock surface.</p>
+<p>The decomposition plan for wineserver itself is phased: Phase 1 audits and partitions the lock surface, Phase 2 introduces the ntsync extensions needed for safe delegation, the aggregate-wait kernel/userspace slice is now already landed in production, and the remaining Phase &frac34; work is how timer, fd-poll, routing, and lock-partitioning layers compose around that shipped base.</p>
 
 <p>Phase 3 depends on prior client-side migration. Timer splitting becomes tractable after <code>nspa_local_timer</code> reduces server ownership. fd-poll splitting becomes tractable after io_uring absorbs the regular-file and socket surfaces. Lock partitioning becomes tractable only after the residual lock holders are a small, auditable set.</p>
 
@@ -531,7 +531,7 @@ clamped to [1..98]
 
 <h2 id="7-status-reference">7. Status reference</h2>
 
-<p>The canonical status board lives at <strong><a href="current-state.gen.html">current-state</a></strong>. It tracks shipped vs gated vs pending features, the ntsync patch stack (1003-1009), validation totals against the production kernel (~370M ops, zero errors, zero KASAN splats, two clean Ableton runs on 2026-04-28), and the active env-var matrix per subsystem.</p>
+<p>The canonical status board lives at <strong><a href="current-state.gen.html">current-state</a></strong>. It tracks shipped vs gated vs pending features, the ntsync patch stack through 1010 aggregate-wait, the current production module / validation posture, and the active env-var matrix per subsystem.</p>
 
 <p>This document describes system structure. <code>current-state.md</code> records current validation and default polarity.</p>
 
@@ -556,6 +556,10 @@ clamped to [1..98]
 <tr>
 <td> <code>current-state.gen.html</code> </td>
 <td> Live state board &ndash; what&rsquo;s shipped, what&rsquo;s pending, validation totals, recent arc </td>
+</tr>
+<tr>
+<td> <code>aggregate-wait-and-async-completion.gen.html</code> </td>
+<td> Kernel 1010 + dispatcher Phase 2/3 aggregate-wait architecture </td>
 </tr>
 <tr>
 <td> <code>wineserver-decomposition.gen.html</code> </td>
@@ -583,7 +587,7 @@ clamped to [1..98]
 </tr>
 <tr>
 <td> <code>ntsync-driver.gen.html</code> </td>
-<td> NTSync kernel driver, patch stack 1003-1009 </td>
+<td> NTSync kernel driver, patch stack through 1010 aggregate-wait </td>
 </tr>
 <tr>
 <td> <code>cs-pi.gen.html</code> </td>
@@ -625,7 +629,7 @@ clamped to [1..98]
 
 <hr />
 
-<p><em>Master overview generated 2026-04-28. Wine submodule <code>ac823311aba</code>, ntsync <code>srcversion A250A77651C8D5DAB719FE2</code>, kernel <code>6.19.11-rt1-1-nspa</code>. Per-subsystem detail in the dedicated pages linked above; live state in <code>current-state.gen.html</code>.</em></p>
+<p><em>Master overview generated 2026-04-29. Wine submodule <code>b72419fc953</code>, ntsync <code>srcversion CFF56DE1EF28D693BB597CD</code>, kernel <code>6.19.11-rt1-1-nspa</code>. Per-subsystem detail in the dedicated pages linked above; live state in <code>current-state.gen.html</code>.</em></p>
 
 <script>
 document.addEventListener("DOMContentLoaded", function () {

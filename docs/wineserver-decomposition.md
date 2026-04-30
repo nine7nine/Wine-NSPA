@@ -11,7 +11,7 @@ Author: jordan Johnston
     - 3.1 [Priority inheritance across the splits](#31-priority-inheritance-across-the-splits)
 4. [NTSync extension proposals](#4-ntsync-extension-proposals)
     - 4.1 [Thread-token pass-through (shipped)](#41-thread-token-pass-through-shipped)
-    - 4.2 [Aggregate-wait primitive (proposed)](#42-aggregate-wait-primitive-proposed)
+    - 4.2 [Aggregate-wait primitive (shipped slice)](#42-aggregate-wait-primitive-shipped-slice)
 5. [Decomposition path proposals](#5-decomposition-path-proposals)
     - 5.1 [Timer thread split](#51-timer-thread-split)
     - 5.2 [Router / handler split](#52-router--handler-split)
@@ -39,7 +39,7 @@ A few framing notes before getting into the details:
 
 - This is not a rewrite plan. The premise is that wineserver as a process continues to exist and continues to be the source of truth for a small set of irreducibly-cross-process semantics (process and thread lifecycle, named-object directories, handle inheritance). What changes is what's *inside* it.
 - This is not a "kill the global_lock" plan in isolation. Lock partitioning is a late-stage step, not the opening move. Each earlier step is independently valuable and reduces the audit surface for later lock work.
-- This is not chronological reading. Phase 1 and Phase 2 are already shipped (`open_fd` lock-drop default-on, NTSync §2.1 thread-token pass-through default-on). Phases 3 and 4 are the road ahead. The phase table in section 7 is the canonical status; the body sections describe each component split in isolation.
+- This is not chronological reading. Phase 1 and Phase 2 are already shipped (`open_fd` lock-drop default-on, NTSync §2.1 thread-token pass-through default-on), and one kernel/userspace slice that used to live under Phase 3 is now also shipped: NTSync aggregate-wait plus the gamma dispatcher consumer. The phase table in section 7 is the canonical status; the body sections describe each component split in isolation.
 - This is not a one-author plan. Several pieces (the gamma dispatcher itself, NTSync's PI machinery, the open_fd lock-drop framing) emerged from the kernel + wineserver co-design sessions and have been shaped over many iterations under real-workload validation. The road map here reflects what those iterations have converged on, not a top-down architectural mandate.
 
 The audience this doc is written for: a developer who has read the bypass overview, has skimmed the gamma-channel-dispatcher and ntsync-driver docs, and wants to understand the architectural arc that the bypass work *enables*. If you're implementing a single bypass and want a checklist, read the bypass detail doc for that bypass; if you're implementing a single phase from this road map, read the in-tree handoff doc (`wine/nspa/docs/wineserver-decomposition-plan.md`) which has line-level kernel landmarks. This doc is the why, not the how.
@@ -201,7 +201,7 @@ This is also why the aggregate-wait extension matters strategically. With aggreg
 
 ## 4. NTSync extension proposals
 
-NTSync is the kernel module NSPA owns and extends (`ntsync-patches/`, `ntsync-driver.gen.html`). Two extensions are relevant to wineserver decomposition. The first is shipped; the second is proposed.
+NTSync is the kernel module NSPA owns and extends (`ntsync-patches/`, `ntsync-driver.gen.html`). Two extensions are relevant to wineserver decomposition. The first is shipped; the second now exists as a shipped kernel/userspace slice with broader decomposition consumers still ahead.
 
 ### 4.1 Thread-token pass-through (shipped)
 
@@ -215,15 +215,15 @@ Why it lives in this doc: it's the first NTSync extension specifically targeted 
 
 The trust model -- which generalizes to 4.2 -- is "wineserver is trusted by the kernel because wineserver provided the registration; the client cannot influence what's stored." That's the right design for kernel objects whose userspace owner is privileged in the relevant sense (the wineserver process, which runs as the same UID as its clients but is the source of truth for the cross-process semantics layered on top of NTSync).
 
-### 4.2 Aggregate-wait primitive (proposed)
+### 4.2 Aggregate-wait primitive (shipped slice)
 
-Status: **proposed**. Not yet implemented. Probably ships alongside Phase 3 of the decomposition (timer thread split + FD poll thread split), since the three pieces are co-designed.
+Status: **kernel primitive + first userspace consumer shipped 2026-04-29**. The broader decomposition consumers (timer-thread split + FD poll thread split) remain queued, but `NTSYNC_IOC_AGGREGATE_WAIT` itself is no longer hypothetical and is already default-on in the gamma dispatcher via `NSPA_AGG_WAIT`.
 
 The problem: wineserver's main loop today waits via `poll()` / `epoll_wait()` over wineserver fds. It does *not* compose with NTSync object waits. The dispatcher pthread waits via `NTSYNC_IOC_CHANNEL_RECV` (futex-backed); it does *not* compose with fd readiness or NT timer deadlines. Each thread has exactly one wait primitive and one shape of wakeup, and the two shapes can't merge into a single waiter.
 
 That fragmentation is workable today because wineserver is not yet thread-decomposed. The main loop doesn't *need* to wait on NTSync objects; the dispatcher doesn't *need* to wait on fds. Once we move toward "single RT thread does everything except FD polling" (Phase 3) the unification matters: the RT thread needs to wait on the gamma channel, on a poll-set of wineserver fds, and on the next NT timer deadline, all in one syscall, with PI propagation from the channel sender.
 
-The proposal: a new ioctl `NTSYNC_IOC_AGGREGATE_WAIT` that takes a heterogeneous source set:
+The landed ioctl is `NTSYNC_IOC_AGGREGATE_WAIT`, which takes a heterogeneous source set:
 
 - N NTSync objects (events, mutexes, channels)
 - M file descriptors (with poll-style readiness flags)
@@ -237,7 +237,7 @@ The cost is moderate:
 - UAPI: new ioctl + struct definitions. Standard NTSync UAPI patterns apply.
 - Userspace: replace `main_loop_epoll` body and dispatcher RECV loop. Mechanical once the kernel side is in.
 
-The win is moderate-large but bounded by the lock. Even with one unified waiter, every handler still serialises on `global_lock`. The aggregate-wait shines once we have *also* dissolved or partitioned the lock (5.4). Before then, it removes a class of waiter fragmentation but doesn't directly reduce contention. Honest accounting: ship it co-designed with the thread splits; don't ship it as a standalone optimization.
+The win is moderate-large but bounded by the lock. Even with one unified waiter, every handler still serialises on `global_lock`. That honest accounting did not change when the primitive shipped: aggregate-wait is useful today because it fixes the gamma async-completion ownership problem, but it becomes strategically larger once the timer and fd-poll splits also compose with it.
 
 A separate consideration is the PREEMPT_RT epoll question. The runtime gate `NSPA_DISABLE_EPOLL` lets us A/B plain `poll()` against `epoll_wait()` on PREEMPT_RT. If epoll behaves cleanly under the workload (no priority inversions on its internal RT-mutex-converted locks), the urgency on the FD polling thread split (5.3) drops, and aggregate-wait may be the right unification anyway -- but for the right reasons (composition with NTSync, not avoiding epoll). The decision belongs in the same session that designs the aggregate-wait API.
 
@@ -413,7 +413,7 @@ The single canonical phase table for the decomposition arc. This table covers th
 |---|---|---|
 | 1 | Phase B `open_fd` lock-drop | shipped default-on |
 | 2 | NTSync §2.1 thread-token pass-through (T1/T2/T3) | shipped default-on |
-| 3 | Timer thread split (5.1) + NTSync §2.2 aggregate-wait (4.2) + FD poll thread split (5.3) | queued |
+| 3 | Timer thread split (5.1) + FD poll thread split (5.3), composed around shipped aggregate-wait (4.2) | queued |
 | 4 | Router/handler split (5.2) + lock partitioning (5.4) | long horizon |
 
 Each phase ships discrete, testable, revertible wins. The architecture direction stays clear (less wineserver, less `global_lock`, more event-driven RT primitives) but every phase is independently valuable.
@@ -422,7 +422,7 @@ A few notes about the ordering:
 
 - Phase 1 (open_fd lock-drop) was a surgical fix targeted at one specific lock-holder pattern (long syscalls under `global_lock`). It's not a "decomposition" in the architectural sense; it's a targeted release of the lock around a known-slow critical section. Listed as Phase 1 because it was the first piece of decomposition-direction work to ship, and because the pattern it establishes (NSPA-side lock-discipline patches inside server handlers) generalizes to other long lock-holders we may identify later.
 - Phase 2 is the thread-token pass-through, shipped 2026-04-26 as T1+T2+T3 and flipped default-on after the post-1006 ntsync stabilization. It's a kernel + userspace co-design and the prototype for the kernel-side primitives that Phase 3 will need.
-- Phase 3 is co-designed: timer split, aggregate-wait, and FD poll split are three pieces of the same restructuring. The final shape is one RT handler thread (running aggregate-wait over the gamma channel + the FD-event queue + the timer queue), one non-RT FD polling thread, and one timer thread. They can ship in any order but the design has to be coherent across all three.
+- Phase 3 is still co-designed even though aggregate-wait itself already shipped. The remaining shape is one RT handler thread (running aggregate-wait over the gamma channel + the FD-event queue + the timer queue), one non-RT FD polling thread, and one timer thread. The syscall and the gamma consumer are now proven; the unresolved work is how the rest of wineserver composes around them.
 - Phase 4 is the long horizon. Router/handler split pays as more bypasses ship; lock partitioning pays at the end. Don't start either until the bypass arc has materially shrunk the surface area.
 
 Most importantly: each phase ships independently. There is no big-bang. If Phase 3 stalls, Phase 4 doesn't unblock anything that Phase 1+2 didn't already unblock; the bypasses keep shipping in parallel. The decomposition-arc and the bypass-arc are independently progressing, with each sometimes accelerating the other but neither blocking it.
@@ -451,7 +451,7 @@ A constraint that runs through the whole arc: each phase has to pass real-worklo
 
 This discipline has caught real bugs. The post-1006 ntsync work re-validated several "shipped" bypasses against a kernel module that finally didn't lock the host; the validation found that some of the lockup attribution had been wrong (Phase B `open_fd` was blamed for a lockup that turned out to be an unrelated NTSync slab corruption). Without re-validation under stable conditions, the wrong bypass would have stayed gated.
 
-The implication for Phase 3: every component split needs its own gate (`NSPA_TIMER_THREAD_SPLIT=1`, `NSPA_AGG_WAIT=1`, `NSPA_FD_POLL_THREAD=1` or similar), its own validation plan, and independent combination testing. The all-three-on configuration is the eventual default, but each piece ships with the gate first and flips after validation.
+The implication for Phase 3: every component split needs its own gate (`NSPA_TIMER_THREAD_SPLIT=1`, `NSPA_FD_POLL_THREAD=1`, and so on), its own validation plan, and independent combination testing. `NSPA_AGG_WAIT` already followed that path and flipped default-on after validation; the remaining pieces should be held to the same discipline.
 
 ---
 

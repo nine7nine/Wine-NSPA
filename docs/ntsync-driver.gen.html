@@ -85,7 +85,7 @@
 </head><body>
 <h1 id="wine-nspa--ntsync-kernel-driver">Wine-NSPA &ndash; NTSync Kernel Driver</h1>
 
-<p>Linux-NSPA 6.19.11-rt1-1 (PREEMPT_RT), CONFIG_NTSYNC=m | 2026-04-28
+<p>Linux-NSPA 6.19.11-rt1-1 (PREEMPT_RT), CONFIG_NTSYNC=m | 2026-04-29
 Author: Jordan Johnston</p>
 
 <h2 id="table-of-contents">Table of Contents</h2>
@@ -100,10 +100,11 @@ Author: Jordan Johnston</p>
 <li><a href="#7-patch-1007-channel-exclusive-recv">Patch 1007: Channel Exclusive Recv</a></li>
 <li><a href="#8-patch-1008-event_set_pi-deferred-boost">Patch 1008: EVENT_SET_PI Deferred Boost</a></li>
 <li><a href="#9-patch-1009-channel_entry-refcount-uaf">Patch 1009: channel_entry Refcount UAF</a></li>
-<li><a href="#10-lessons-and-audit-philosophy">Lessons and Audit Philosophy</a></li>
-<li><a href="#11-wine-consumer-side">Wine Consumer Side</a></li>
-<li><a href="#12-validation">Validation</a></li>
-<li><a href="#13-references">References</a></li>
+<li><a href="#10-patch-1010-aggregate-wait">Patch 1010: Aggregate-Wait</a></li>
+<li><a href="#11-lessons-and-audit-philosophy">Lessons and Audit Philosophy</a></li>
+<li><a href="#12-wine-consumer-side">Wine Consumer Side</a></li>
+<li><a href="#13-validation">Validation</a></li>
+<li><a href="#14-references">References</a></li>
 </ol>
 
 
@@ -115,15 +116,32 @@ Author: Jordan Johnston</p>
 
 <p>For Wine-NSPA, upstream ntsync is necessary but insufficient. The upstream driver uses FIFO waiter queues, has no priority inheritance, and uses <code>spinlock_t</code> for the per-object lock &ndash; which becomes a sleeping <code>rt_mutex</code> on PREEMPT_RT. None of those characteristics is acceptable for an RT audio workload where the audio callback must wait deterministically on Wine&rsquo;s primitives without inheriting unbounded inversion latency.</p>
 
-<p>Wine-NSPA carries a stack of seven kernel patches on top of upstream <code>ntsync.c</code>. The first (1003) was the original PI series shipped 2026-04-13: raw spinlocks, priority-ordered queues, mutex-owner PI boost. The next six (1004-1009) added a new object type for kernel-mediated request/reply IPC and then progressively closed real correctness bugs found by stress-testing and KASAN. Three of those bugs (1007, 1008, 1009) were caught only after PREEMPT_RT debug-kernel testing; one (1006) was caught when an Ableton workload hard-froze the host with a clean SLUB freelist-corruption oops.</p>
+<p>Wine-NSPA now carries a stack of <strong>eight</strong> kernel patches on top of
+upstream <code>ntsync.c</code>. The first (1003) was the original PI series
+shipped 2026-04-13: raw spinlocks, priority-ordered queues,
+mutex-owner PI boost. Patches 1004-1009 added the channel transport,
+thread-token path, and the hardening fixes needed to make that path
+production-safe on PREEMPT_RT. Patch <strong>1010</strong> then added
+<code>NTSYNC_IOC_AGGREGATE_WAIT</code>, which is the missing heterogeneous wait
+primitive the gamma dispatcher needed for same-thread async completion.</p>
 
-<p>Module srcversion <code>A250A77651C8D5DAB719FE2</code> is the production module on prod kernel <code>6.19.11-rt1-1-nspa</code>. It carries all seven patches. ~370M operations of mixed-load stress (events SET / RESET / PULSE / SET_PI; mutex acquire+release; semaphore release+acquire; channel SEND_PI / RECV / REPLY; thread register/deregister; multi-object wait_all / wait_any) have run against this module under KASAN with zero memory-corruption splats.</p>
+<p>Module srcversion <code>CFF56DE1EF28D693BB597CD</code> is the current production
+module on prod kernel <code>6.19.11-rt1-1-nspa</code>. It carries 1003-1010 plus
+the post-1010 PI follow-up ordering fixes. The earlier
+<code>A250A77651C8D5DAB719FE2</code> module remains the post-1009 baseline that
+was validated to ~370M mixed operations; the current production module
+adds dedicated aggregate-wait validation on top of that base.</p>
 
 <p>This doc covers the patch-by-patch design rationale: what each patch changes, what bug it closes (or feature it adds), how it preserves NT semantics, and how it interacts with the <code>obj_lock</code> raw_spinlock and PREEMPT_RT.</p>
 
 <h3 id="nspa-overlay-relationship">NSPA overlay relationship</h3>
 
-<p>Wine-NSPA does not fork ntsync. The patches are diffs against upstream <code>drivers/misc/ntsync.c</code> and apply cleanly in series 1003 -> 1004 -> 1005 -> 1006 -> 1007 -> 1008 -> 1009. They live in <code>wine-rt-claude/ntsync-patches/</code> as standalone unified diffs. The kernel build (<code>linux-nspa</code>) applies the stack at PKGBUILD time; the resulting <code>.ko</code> ships as part of the kernel package.</p>
+<p>Wine-NSPA does not fork ntsync. The patches are diffs against upstream
+<code>drivers/misc/ntsync.c</code> and apply cleanly in series
+1003 -> 1004 -> 1005 -> 1006 -> 1007 -> 1008 -> 1009 -> 1010. They
+live in <code>wine-rt-claude/ntsync-patches/</code> as standalone unified diffs.
+The kernel build (<code>linux-nspa</code>) applies the stack at PKGBUILD time; the
+resulting <code>.ko</code> ships as part of the kernel package.</p>
 
 <p>The patch numbering (<code>1003-</code> through <code>1009-</code>) is local to NSPA. It bears no relationship to upstream NTSync revisions or any LKML series.</p>
 
@@ -181,11 +199,19 @@ Author: Jordan Johnston</p>
 <td> KASAN-caught REPLY-vs-SEND_PI cleanup race; refcount_t on <code>ntsync_channel_entry</code>              </td>
 <td> ~15     </td>
 </tr>
+<tr>
+<td> 1010 </td>
+<td> Aggregate-wait                        </td>
+<td> <code>NTSYNC_IOC_AGGREGATE_WAIT</code>: heterogeneous object+fd wait, channel notify-only support         </td>
+<td> ~400    </td>
+</tr>
 </tbody>
 </table>
 
 
-<p>Patches 1003-1006 are feature/infrastructure work; 1007-1009 are minimal surgical fixes for specific KASAN- or trace-confirmed bugs. The distinction matters: Section 10 discusses why.</p>
+<p>Patches 1003-1006 and 1010 are feature/infrastructure work; 1007-1009
+are minimal surgical fixes for specific KASAN- or trace-confirmed bugs.
+The distinction matters: Section 11 discusses why.</p>
 
 <div class="diagram-container">
 <svg width="100%" viewBox="0 0 940 520" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
@@ -340,7 +366,13 @@ Author: Jordan Johnston</p>
 
 <p>Mutex / semaphore / event are upstream concepts; their semantics map 1:1 to Win32. The mutex tracks an owner TID for <code>WAIT_ABANDONED</code> semantics and abandoned-recovery; the semaphore is a counted resource pool; the event has both manual-reset and auto-reset variants plus the NSPA-private <code>EVENT_SET_PI</code> for cross-thread priority intent.</p>
 
-<p>The channel is wholly NSPA-private. It does not map to any Win32 primitive. It is a transport for Wine-NSPA&rsquo;s wineserver request-reply fast path &ndash; a kernel-mediated alternative to the legacy futex+manual-<code>sched_setscheduler</code> shm IPC. Channels do not participate in <code>WAIT_ANY</code> / <code>WAIT_ALL</code>; they are accessed exclusively through their own ioctls.</p>
+<p>The channel is wholly NSPA-private. It does not map to any Win32
+primitive. It is a transport for Wine-NSPA&rsquo;s wineserver request-reply
+fast path &ndash; a kernel-mediated alternative to the legacy
+futex+manual-<code>sched_setscheduler</code> shm IPC. Channels do not participate
+in generic <code>WAIT_ANY</code> / <code>WAIT_ALL</code>; they are accessed through their own
+ioctls, and patch 1010 adds a <strong>separate aggregate-wait registration
+path</strong> that can observe channel readiness without consuming the entry.</p>
 
 <h3 id="is_signaled-by-type">is_signaled by type</h3>
 
@@ -374,7 +406,13 @@ Author: Jordan Johnston</p>
 </table>
 
 
-<p>The channel case in <code>is_signaled()</code> is a deliberate hard-<code>false</code>: any caller that arrives via <code>WAIT_ANY/ALL</code> with a channel FD is misusing the API and the wait will time out. Channels are accessed only through <code>CHANNEL_RECV</code> / <code>CHANNEL_RECV2</code>.</p>
+<p>The channel case in <code>is_signaled()</code> is a deliberate hard-<code>false</code>: any
+caller that arrives via <code>WAIT_ANY/ALL</code> with a channel FD is misusing
+the API and the wait will time out. That remains true after 1010. The
+aggregate-wait path is different: it registers the channel as a
+<strong>notify-only source</strong> and returns &ldquo;channel fired&rdquo; to userspace, after
+which userspace follows with <code>CHANNEL_RECV2</code> to consume the actual
+entry.</p>
 
 <hr />
 
@@ -1244,7 +1282,132 @@ if (refcount_dec_and_test(&amp;e-&gt;refcnt))
 
 <hr />
 
-<h2 id="10-lessons-and-audit-philosophy">10. Lessons and Audit Philosophy</h2>
+<h2 id="10-patch-1010-aggregate-wait">10. Patch 1010: Aggregate-Wait</h2>
+
+<p>Patch 1010 adds the heterogeneous wait primitive that the rest of the
+NSPA stack had been designing around: <code>NTSYNC_IOC_AGGREGATE_WAIT</code>.</p>
+
+<p>The immediate consumer is the post-1010 gamma dispatcher. Instead of
+blocking in direct <code>CHANNEL_RECV2</code> forever, the dispatcher can now wait
+on:</p>
+
+<ul>
+<li>the gamma channel object</li>
+<li>the per-process uring eventfd</li>
+<li>an explicit shutdown eventfd</li>
+</ul>
+
+
+<p>in one syscall, while still keeping channel PI visible.</p>
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 940 360" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
+  <style>
+    .ag-bg { fill: #1a1b26; }
+    .ag-obj { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
+    .ag-fd { fill: #24283b; stroke: #7aa2f7; stroke-width: 2; rx: 8; }
+    .ag-mid { fill: #1f2535; stroke: #bb9af7; stroke-width: 2; rx: 8; }
+    .ag-note { fill: #2a2418; stroke: #e0af68; stroke-width: 1.8; rx: 8; }
+    .ag-t { fill: #c0caf5; font: 11px 'JetBrains Mono', monospace; }
+    .ag-s { fill: #a9b1d6; font: 9px 'JetBrains Mono', monospace; }
+    .ag-h { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
+    .ag-v { fill: #bb9af7; font: bold 10px 'JetBrains Mono', monospace; }
+    .ag-line { stroke: #c0caf5; stroke-width: 1.4; fill: none; }
+  </style>
+  <defs>
+    <marker id="agArrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="#c0caf5"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="940" height="360" class="ag-bg" rx="6"/>
+  <text x="470" y="28" text-anchor="middle" class="ag-h">1010 aggregate-wait: the dispatcher-facing kernel surface</text>
+
+  <rect x="40" y="92" width="220" height="100" class="ag-obj" rx="6"/>
+  <text x="150" y="118" text-anchor="middle" class="ag-t">NTSync object sources</text>
+  <text x="150" y="142" text-anchor="middle" class="ag-s">events / semaphores / mutexes</text>
+  <text x="150" y="160" text-anchor="middle" class="ag-s">channel notify-only registration</text>
+
+  <rect x="360" y="74" width="220" height="136" class="ag-mid" rx="6"/>
+  <text x="470" y="102" text-anchor="middle" class="ag-v">`NTSYNC_IOC_AGGREGATE_WAIT`</text>
+  <text x="470" y="126" text-anchor="middle" class="ag-t">copy source array</text>
+  <text x="470" y="144" text-anchor="middle" class="ag-t">register object waits + poll waits</text>
+  <text x="470" y="162" text-anchor="middle" class="ag-t">sleep once</text>
+  <text x="470" y="180" text-anchor="middle" class="ag-s">return `fired_index` + `fired_events`</text>
+  <text x="470" y="198" text-anchor="middle" class="ag-s">timeout sentinel on deadline expiry</text>
+
+  <rect x="680" y="92" width="220" height="100" class="ag-fd" rx="6"/>
+  <text x="790" y="118" text-anchor="middle" class="ag-t">FD sources</text>
+  <text x="790" y="142" text-anchor="middle" class="ag-s">uring eventfd</text>
+  <text x="790" y="160" text-anchor="middle" class="ag-s">future fd-poll / timer wake sources</text>
+
+  <path d="M260 142 L360 142" class="ag-line" marker-end="url(#agArrow)"/>
+  <path d="M680 142 L580 142" class="ag-line" marker-end="url(#agArrow)"/>
+
+  <rect x="140" y="254" width="660" height="62" class="ag-note" rx="6"/>
+  <text x="470" y="278" text-anchor="middle" class="ag-t">Load-bearing follow-up in production</text>
+  <text x="470" y="296" text-anchor="middle" class="ag-s">the installed production module also carries SEND_PI any-waiters fallback</text>
+  <text x="470" y="310" text-anchor="middle" class="ag-s">and wake-after-boost ordering fixes so aggregate-waiting dispatchers inherit priority correctly</text>
+</svg>
+</div>
+
+
+<h3 id="uapi-shape">UAPI shape</h3>
+
+<pre><code class="language-c code-block">
+struct ntsync_aggregate_source {
+    __u32 type;
+    __u32 events;
+    __u64 handle_or_fd;
+};
+
+struct ntsync_aggregate_wait_args {
+    __u32 nb_sources;
+    __u32 reserved;
+    __u64 sources;
+    struct __kernel_timespec deadline;
+    __u32 fired_index;
+    __u32 fired_events;
+    __u32 flags;
+    __u32 owner;
+};
+</code></pre>
+
+
+<h3 id="why-it-is-architecturally-different-from-wait_any">Why it is architecturally different from <code>WAIT_ANY</code></h3>
+
+<ul>
+<li><code>WAIT_ANY</code> and <code>WAIT_ALL</code> remain NT-object waits.</li>
+<li>1010 is a <strong>heterogeneous</strong> wait: object sources plus fd sources in
+one registration.</li>
+<li>Channels are still not generic <code>WAIT_ANY</code> participants; 1010 adds a
+separate notify-only path for them.</li>
+<li>Userspace is expected to follow a channel fire with <code>CHANNEL_RECV2</code>,
+which preserves the existing channel ownership and PI semantics.</li>
+</ul>
+
+
+<h3 id="validation-surface">Validation surface</h3>
+
+<p>1010 was not treated as a paper design or a future placeholder. It was
+validated with a dedicated native aggregate-wait suite:</p>
+
+<ul>
+<li>aggregate-wait core behavior</li>
+<li>fd wake behavior</li>
+<li>timeout behavior</li>
+<li>channel notify-only behavior</li>
+<li>channel-PI propagation while blocked in aggregate-wait</li>
+</ul>
+
+
+<p>The production result is the module srcversion
+<code>CFF56DE1EF28D693BB597CD</code>, which is the post-1009 base plus 1010 and
+its PI-ordering follow-ups.</p>
+
+<hr />
+
+<h2 id="11-lessons-and-audit-philosophy">11. Lessons and Audit Philosophy</h2>
 
 <p>The patches in this stack divide cleanly into two categories. The boundary matters because it dictates which patches were safe to ship in a flurry and which weren&rsquo;t.</p>
 
@@ -1293,7 +1456,7 @@ if (refcount_dec_and_test(&amp;e-&gt;refcnt))
 
 <hr />
 
-<h2 id="11-wine-consumer-side">11. Wine Consumer Side</h2>
+<h2 id="12-wine-consumer-side">12. Wine Consumer Side</h2>
 
 <p>The Wine-side ntsync integration lives in <code>dlls/ntdll/unix/sync.c</code>. Most of it is upstream (Wine&rsquo;s own ntsync support landed in 11.x); NSPA&rsquo;s overlay touches a handful of paths.</p>
 
@@ -1367,7 +1530,7 @@ ioctl(channel_fd, NTSYNC_IOC_CHANNEL_REPLY, &amp;args.entry_id);
 
 <hr />
 
-<h2 id="12-validation">12. Validation</h2>
+<h2 id="13-validation">13. Validation</h2>
 
 <h3 id="module-srcversion-lineage">Module srcversion lineage</h3>
 
@@ -1398,7 +1561,12 @@ ioctl(channel_fd, NTSYNC_IOC_CHANNEL_REPLY, &amp;args.entry_id);
 <tr>
 <td> <code>A250A77651C8D5DAB719FE2</code>   </td>
 <td> + Bug 4 fix (1009)              </td>
-<td> channel_entry refcount UAF closed; <strong>CURRENT PRODUCTION</strong>          </td>
+<td> post-1009 production baseline; ~370M mixed ops validated          </td>
+</tr>
+<tr>
+<td> <code>CFF56DE1EF28D693BB597CD</code>   </td>
+<td> + 1010 + post-1010 PI follow-ups</td>
+<td> aggregate-wait production module; dispatcher Phase 3 default-on   </td>
 </tr>
 <tr>
 <td> <code>BD93BECF70D336DC1A80337</code>   </td>
@@ -1409,7 +1577,7 @@ ioctl(channel_fd, NTSYNC_IOC_CHANNEL_REPLY, &amp;args.entry_id);
 </table>
 
 
-<p>The current production module at <code>/lib/modules/6.19.11-rt1-1-nspa/kernel/drivers/misc/ntsync.ko</code> is <code>A250A77651C8D5DAB719FE2</code>.</p>
+<p>The current production module at <code>/lib/modules/6.19.11-rt1-1-nspa/kernel/drivers/misc/ntsync.ko</code> is <code>CFF56DE1EF28D693BB597CD</code>.</p>
 
 <h3 id="stress-validation-debug-kernel-kasan-on">Stress validation (debug kernel, KASAN-on)</h3>
 
@@ -1487,11 +1655,51 @@ ioctl(channel_fd, NTSYNC_IOC_CHANNEL_REPLY, &amp;args.entry_id);
 <td> 0   </td>
 <td> PASS            </td>
 </tr>
+<tr>
+<td> test-aggregate-wait 9/9           </td>
+<td> <code>CFF56DE...</code>  </td>
+<td> functional + PI sub-tests </td>
+<td> n/a </td>
+<td> PASS         </td>
+</tr>
+<tr>
+<td> aggregate-wait 1k mixed stress    </td>
+<td> <code>CFF56DE...</code>  </td>
+<td> 1k iterations      </td>
+<td> 0     </td>
+<td> PASS            </td>
+</tr>
+<tr>
+<td> aggregate-wait 30k + native suite </td>
+<td> <code>CFF56DE...</code>  </td>
+<td> long stress + full suite </td>
+<td> 0 </td>
+<td> PASS       </td>
+</tr>
 </tbody>
 </table>
 
 
 <p>Cumulative debug-kernel: ~30 million operations, zero KASAN splats post-Bug 4 fix.</p>
+
+<h3 id="production-validation-after-1010">Production validation after 1010</h3>
+
+<p>The aggregate-wait consumer path was validated on the production
+kernel/userspace pair rather than only in isolation:</p>
+
+<ul>
+<li><code>test-aggregate-wait</code> 9/9 PASS</li>
+<li>channel notify-only wake path PASS</li>
+<li>channel PI propagation while blocked in aggregate-wait PASS</li>
+<li>Phase 3 gamma dispatcher default-on under Ableton PASS</li>
+<li>dmesg clean after 30k stress + native suite</li>
+</ul>
+
+
+<p>This matters because 1010 is load-bearing only when the userspace
+dispatcher is actually blocked inside it. The production module result
+therefore includes both the syscall itself and the post-1010 wake/boost
+ordering fixes.</p>
 
 <h3 id="mixed-load-stress-detail">Mixed-load-stress detail</h3>
 
@@ -1694,7 +1902,7 @@ ioctl(channel_fd, NTSYNC_IOC_CHANNEL_REPLY, &amp;args.entry_id);
 
 <hr />
 
-<h2 id="13-references">13. References</h2>
+<h2 id="14-references">14. References</h2>
 
 <h3 id="patches-nspa-tree">Patches (NSPA tree)</h3>
 

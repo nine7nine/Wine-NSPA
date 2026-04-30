@@ -1,6 +1,6 @@
 # Wine-NSPA -- Gamma Channel-Based Wineserver Dispatcher
 
-Wine 11.6 + NSPA RT patchset | Kernel 6.19.x-rt with NTSync channels (1004+1005) | 2026-04-27
+Wine 11.6 + NSPA RT patchset | Kernel 6.19.x-rt with NTSync channels + aggregate-wait | 2026-04-29
 Author: jordan Johnston
 
 ## Table of Contents
@@ -35,12 +35,23 @@ wineserver during process attach and shipped to the client via
 `SCM_RIGHTS` in the `init_first_thread` reply. Client threads issue
 `NTSYNC_IOC_CHANNEL_SEND_PI` to atomically enqueue a request, boost the
 dispatcher pthread to the sender's priority, and block for reply, all
-in one syscall. The wineserver runs one dispatcher pthread per client
-process which loops on `NTSYNC_IOC_CHANNEL_RECV2` (or `RECV` if the
-kernel predates patch 1005), runs the existing `read_request_shm`
-handler under `global_lock`, and finally calls
-`NTSYNC_IOC_CHANNEL_REPLY` to wake the originator and drain its PI
-boost.
+in one syscall.
+
+The wineserver now runs one **dispatcher context** per client process,
+not just one bare receive loop. That context owns:
+
+- the process channel fd
+- a shutdown eventfd used to wake teardown cleanly
+- a per-process `nspa_uring_instance`
+
+On post-1010 kernels the dispatcher blocks in
+`NTSYNC_IOC_AGGREGATE_WAIT` over `(channel object, uring eventfd if
+active, shutdown eventfd)`, follows a channel wake with
+`NTSYNC_IOC_CHANNEL_RECV2`, runs the existing `read_request_shm`
+handler under `global_lock`, and calls `NTSYNC_IOC_CHANNEL_REPLY` to
+wake the originator and drain its PI boost. On pre-1010 kernels it
+falls back permanently to the legacy direct `CHANNEL_RECV2` / `RECV`
+loop for that dispatcher.
 
 The key win over the legacy designs: priority inheritance is now
 **kernel-atomic**. There is no userspace TID-read-vs-`sched_setscheduler`
@@ -52,8 +63,8 @@ deferred-boost) handles all of it inside the same lock that orders the
 queue.
 
 The published `shmem-ipc.gen.html` describes v1.5 and v2.4. That
-document is **superseded** by this one. Gamma is the architecture in
-production today.
+document is **superseded** by this one. Gamma plus the aggregate-wait
+dispatcher loop is the architecture in production today.
 
 ---
 
@@ -146,9 +157,14 @@ The gamma redesign was scoped tightly:
   Same for senders that arrive before their dispatcher pthread has
   managed to spawn.
 
-The gating env var `NSPA_DISPATCHER_USE_TOKEN=0` gives an A/B handle
-for the T3 thread-token optimisation but does not gate gamma itself --
-gamma is unconditional when the kernel ioctls are present.
+The gating env vars on the current production path are:
+
+- `NSPA_DISPATCHER_USE_TOKEN=0` -- A/B for T3 thread-token consumption
+- `NSPA_AGG_WAIT=0` -- opt out of the post-1010 aggregate-wait loop and
+  force the old direct `CHANNEL_RECV2` path for that dispatcher
+
+Gamma itself remains the default transport whenever the channel ioctls
+are present.
 
 ---
 
@@ -160,20 +176,20 @@ The gamma path involves four cooperating components:
 
 | Component | Location | Role |
 |---|---|---|
-| Kernel channel object | `drivers/misc/ntsync.c` lines 1190-1494 | Priority rbtree of pending entries; PI boost machinery |
-| Sender shim | `dlls/ntdll/unix/server.c` lines 311-436 | `nspa_send_request_channel`: copy header, ioctl, copy reply |
-| Dispatcher pthread | `server/nspa/shmem_channel.c` lines 134-242 | `channel_dispatcher`: RECV2 loop, handler under `global_lock`, REPLY |
+| Kernel channel object | `drivers/misc/ntsync.c` | Priority rbtree of pending entries; SEND_PI / RECV2 / REPLY PI machinery |
+| Aggregate-wait primitive | `drivers/misc/ntsync.c` + patch 1010 | Heterogeneous wait over channel object + fd sources |
+| Sender shim | `dlls/ntdll/unix/server.c` | `nspa_send_request_channel`: copy header, `SEND_PI`, copy reply |
+| Dispatcher context | `server/nspa/shmem_channel.c` | channel fd + shutdown eventfd + per-process `nspa_uring_instance` |
 | Per-thread shmem | unchanged from v1.5 | Holds request payload and reply payload (zero-copy) |
 
-The channel fd is created in process attach
-(`nspa_shmem_channel_init`, `server/nspa/shmem_channel.c:244`), spawned
-detached as a pthread with explicit RT scheduler attrs when
-`NSPA_SRV_RT_PRIO > 0`, and shipped to the client over `SCM_RIGHTS`
-alongside the existing per-thread `request_shm` fds in the
-`init_first_thread` reply. The client stashes it in
-`nspa_request_channel_fd` and from then on uses it for every
-`server_call_unlocked` whose request fits in the per-thread shmem
-window.
+The channel fd is created in process attach, the dispatcher context is
+allocated alongside it, the detached pthread is spawned with explicit RT
+scheduler attrs when `NSPA_SRV_RT_PRIO > 0`, and the channel fd is
+shipped to the client over `SCM_RIGHTS` alongside the existing
+per-thread `request_shm` fds in the `init_first_thread` reply. The
+client stashes it in `nspa_request_channel_fd` and from then on uses it
+for every `server_call_unlocked` whose request fits in the per-thread
+shmem window.
 
 <div class="diagram-container">
 <svg width="100%" viewBox="0 0 960 340" xmlns="http://www.w3.org/2000/svg">
@@ -237,8 +253,8 @@ window.
 
   <rect x="684" y="104" width="228" height="62" class="gc-server"/>
   <text x="798" y="126" text-anchor="middle" class="gc-label">channel_dispatcher pthread</text>
-  <text x="798" y="143" text-anchor="middle" class="gc-sm">RECV2 loop at NSPA_SRV_RT_PRIO</text>
-  <text x="798" y="157" text-anchor="middle" class="gc-sm">thread-token-aware on T1/T2/T3 kernels</text>
+  <text x="798" y="143" text-anchor="middle" class="gc-sm">aggregate-wait loop at NSPA_SRV_RT_PRIO</text>
+  <text x="798" y="157" text-anchor="middle" class="gc-sm">thread-token-aware; RECV2 / uring / shutdown aware</text>
 
   <rect x="684" y="194" width="228" height="70" class="gc-server"/>
   <text x="798" y="216" text-anchor="middle" class="gc-label">existing request handlers</text>
@@ -261,7 +277,75 @@ window.
 </svg>
 </div>
 
-### 4.2 Per-request data flow
+### 4.2 Aggregate-wait topology
+
+Post-1010 gamma is no longer just a blocking `RECV2` loop. The
+dispatcher waits on three sources and selects the work type from the
+aggregate-wait result.
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 980 520" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .ga-bg { fill: #1a1b26; }
+    .ga-box { fill: #24283b; stroke: #7aa2f7; stroke-width: 2; rx: 8; }
+    .ga-fast { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 2; rx: 8; }
+    .ga-wait { fill: #1f2535; stroke: #bb9af7; stroke-width: 2; rx: 8; }
+    .ga-note { fill: #2a2418; stroke: #e0af68; stroke-width: 1.8; rx: 8; }
+    .ga-t { fill: #c0caf5; font: 11px 'JetBrains Mono', monospace; }
+    .ga-s { fill: #a9b1d6; font: 9px 'JetBrains Mono', monospace; }
+    .ga-h { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
+    .ga-g { fill: #9ece6a; font: bold 10px 'JetBrains Mono', monospace; }
+    .ga-v { fill: #bb9af7; font: bold 10px 'JetBrains Mono', monospace; }
+    .ga-y { fill: #e0af68; font: bold 10px 'JetBrains Mono', monospace; }
+    .ga-line { stroke: #c0caf5; stroke-width: 1.4; fill: none; }
+  </style>
+  <defs>
+    <marker id="gaArrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="#c0caf5"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="980" height="520" class="ga-bg"/>
+  <text x="490" y="28" text-anchor="middle" class="ga-h">Gamma dispatcher on post-1010 kernels</text>
+
+  <rect x="250" y="70" width="480" height="84" class="ga-wait"/>
+  <text x="490" y="98" text-anchor="middle" class="ga-v">`NTSYNC_IOC_AGGREGATE_WAIT`</text>
+  <text x="490" y="122" text-anchor="middle" class="ga-t">sources = { channel object, uring eventfd if active, shutdown eventfd }</text>
+  <text x="490" y="140" text-anchor="middle" class="ga-s">one waiter, same dispatcher thread, same process-owned ring</text>
+
+  <rect x="70" y="210" width="250" height="132" class="ga-box"/>
+  <text x="195" y="236" text-anchor="middle" class="ga-t">channel source fired</text>
+  <text x="195" y="260" text-anchor="middle" class="ga-s">follow with `CHANNEL_RECV2`</text>
+  <text x="195" y="278" text-anchor="middle" class="ga-s">run handler under `global_lock`</text>
+  <text x="195" y="296" text-anchor="middle" class="ga-s">sync handler replies immediately</text>
+  <text x="195" y="314" text-anchor="middle" class="ga-s">async-capable handler may submit SQE and return to wait</text>
+
+  <rect x="365" y="210" width="250" height="132" class="ga-fast"/>
+  <text x="490" y="236" text-anchor="middle" class="ga-g">uring eventfd fired</text>
+  <text x="490" y="260" text-anchor="middle" class="ga-s">drain eventfd counter</text>
+  <text x="490" y="278" text-anchor="middle" class="ga-s">`nspa_uring_drain()` runs inline</text>
+  <text x="490" y="296" text-anchor="middle" class="ga-s">CQE callback finishes deferred work</text>
+  <text x="490" y="314" text-anchor="middle" class="ga-s">`CHANNEL_REPLY` issued from this same RT thread</text>
+
+  <rect x="660" y="210" width="250" height="132" class="ga-box"/>
+  <text x="785" y="236" text-anchor="middle" class="ga-t">shutdown eventfd fired</text>
+  <text x="785" y="260" text-anchor="middle" class="ga-s">destroy path wrote `1`</text>
+  <text x="785" y="278" text-anchor="middle" class="ga-s">aggregate wait returns</text>
+  <text x="785" y="296" text-anchor="middle" class="ga-s">dispatcher closes ring state</text>
+  <text x="785" y="314" text-anchor="middle" class="ga-s">dispatcher frees its own context and exits</text>
+
+  <path d="M490 154 L195 210" class="ga-line" marker-end="url(#gaArrow)"/>
+  <path d="M490 154 L490 210" class="ga-line" marker-end="url(#gaArrow)"/>
+  <path d="M490 154 L785 210" class="ga-line" marker-end="url(#gaArrow)"/>
+
+  <rect x="180" y="390" width="620" height="80" class="ga-note"/>
+  <text x="490" y="416" text-anchor="middle" class="ga-y">Load-bearing invariant</text>
+  <text x="490" y="438" text-anchor="middle" class="ga-s">the thread that receives the request is also the thread that drains the completion and signals the reply</text>
+  <text x="490" y="456" text-anchor="middle" class="ga-s">`NSPA_AGG_WAIT=0` or `-ENOTTY` at first aggregate-wait call falls back to the legacy direct receive loop</text>
+</svg>
+</div>
+
+### 4.3 Per-request data flow
 
 For a single request the data movement is:
 
@@ -301,7 +385,7 @@ spinlock. There is no observable interval where the dispatcher is
 running unboosted while another high-prio entry sits ready in the
 queue.
 
-### 4.3 End-to-end flow diagram
+### 4.4 End-to-end flow diagram
 
 The following inline SVG shows a single request's lifecycle through
 gamma. Two senders are shown at differing priorities to illustrate
@@ -583,88 +667,78 @@ gamma is cheaper than v1.5.
 
 ## 7. Dispatcher State Machine
 
-The dispatcher pthread is `channel_dispatcher` in
-`server/nspa/shmem_channel.c:134`. It is spawned detached with
-explicit `SCHED_FIFO` attrs when `NSPA_SRV_RT_PRIO > 0` (lines
-261-270) so it is born RT and bypasses any inherited capability
-reset-on-fork.
+The dispatcher pthread is still born detached with explicit
+`SCHED_FIFO` attrs when `NSPA_SRV_RT_PRIO > 0`, but the runtime loop is
+now selected in layers:
 
-Its loop is:
+1. prefer aggregate-wait if patch 1010 is present and `NSPA_AGG_WAIT`
+   is not set to `0`
+2. if aggregate-wait returns `-ENOTTY`, permanently fall back to the
+   legacy direct receive loop for this dispatcher
+3. inside that loop, prefer `CHANNEL_RECV2`; if the kernel predates
+   1005, permanently fall back to `CHANNEL_RECV`
+
+The post-1010 loop is structurally:
 
     for (;;) {
-        if (recv2_state == 1) {
-            ret = ioctl CHANNEL_RECV2 -> recv;
-            if (ret < 0 && errno == ENOTTY) {
-                /* Old kernel without 1005 -- fall back permanently. */
-                recv2_state = 0;
-                continue;
-            }
-        } else {
-            ret = ioctl CHANNEL_RECV  -> recv1;
-            recv = lift(recv1, thread_token = 0);
+        build sources[] from:
+            channel object
+            uring eventfd (if ring active)
+            shutdown eventfd
+
+        ret = ioctl(dev_fd, NTSYNC_IOC_AGGREGATE_WAIT, &agg);
+        if (ret < 0 && errno == ENOTTY) {
+            agg_supported = 0;
+            continue;   /* use legacy path on next iteration */
         }
         if (ret < 0) {
             if (errno == EINTR) continue;
-            break;                      /* EBADF on close = exit */
+            break;
         }
 
-        pi_mutex_lock(&global_lock);
-        generation = poll_generation;
+        if (source == shutdown_efd)
+            break;
 
-        if (recv.thread_token)
-            thread = (struct thread *)(uintptr_t)recv.thread_token;
-        else
-            thread = get_thread_from_id((thread_id_t)recv.payload_off);
-
-        if (thread &&
-            thread->process->request_channel_fd == channel_fd &&
-            thread->request_shm)
-        {
-            __atomic_thread_fence(__ATOMIC_SEQ_CST);
-            read_request_shm(thread, thread->request_shm);
-            __atomic_thread_fence(__ATOMIC_SEQ_CST);
+        if (source == uring_efd) {
+            drain eventfd counter;
+            pi_mutex_lock(&global_lock);
+            nspa_uring_drain(&ctx->uring);
+            pi_mutex_unlock(&global_lock);
+            continue;
         }
-        if (thread && !recv.thread_token)
-            release_object(thread);
 
-        pi_mutex_unlock(&global_lock);
-
-        ioctl CHANNEL_REPLY(recv.entry_id);    /* atomic wake + boost-drain */
-
-        if (poll_generation != generation)
-            force_exit_poll();
+        /* source == channel */
+        ret = ioctl(channel_fd, NTSYNC_IOC_CHANNEL_RECV2, &recv);
+        if (ret < 0 && errno == ENOTTY)
+            recv2_state = 0;
+        dispatch request;
     }
+
+The legacy fallback path is still the old direct `RECV2` / `RECV`
+receive loop. That is now compatibility logic, not the preferred
+production shape.
 
 Key invariants:
 
-- **`global_lock` is the only lock the dispatcher takes.** No
-  per-thread futex, no per-thread state. `read_request_shm` reuses
-  the v1.5 handler exactly as-is and is unaware that it is being
-  invoked from a channel rather than a per-thread pthread.
-- **Sequential consistency fences around `read_request_shm`.** The
-  client's ioctl boundary and the kernel-mediated wake are full
-  barriers in principle, but the explicit fences make the ordering
-  unambiguous when read by a human auditor and cost essentially
-  nothing on x86-64.
-- **Process-membership check before dispatching.** Line 210 verifies
-  `thread->process->request_channel_fd == channel_fd` and
-  `thread->request_shm` is set. The channel is per-process so a
-  payload that resolves to a thread elsewhere is either client
-  tampering or a logic bug; running the handler against the wrong
-  process would corrupt unrelated state. This check was added in
-  Wine commit `baf088c290f` (gamma audit fix) along with a refcount
-  leak fix.
-- **`poll_generation` re-arming.** Many request handlers can change
-  the wait conditions of other threads (signaling events, releasing
-  mutexes). The dispatcher snapshots `poll_generation` before the
-  handler and calls `force_exit_poll` after if the handler bumped
-  it. The relaxed read outside the lock is intentional -- worst case
-  is one missed or one spurious nudge, both benign.
+- **Same-thread completion.** The same RT dispatcher thread receives
+  the request, drains the CQE, and issues `CHANNEL_REPLY`.
+- **`global_lock` remains the only server lock the dispatcher takes.**
+  Phase 3 changes the wait primitive and completion ownership; it does
+  not change handler locking discipline.
+- **The process-membership check stays.** A received thread token or
+  payload TID must still resolve to a thread that belongs to the
+  dispatcher's process and has a live `request_shm` mapping.
+- **Shutdown is explicit in the aggregate-wait era.** Closing the
+  channel fd alone is not a reliable wake source once the kernel holds
+  its own reference during aggregate-wait registration, so the
+  dispatcher also waits on `shutdown_efd`.
+- **Fallback is sticky per dispatcher.** After the first `-ENOTTY` on
+  aggregate-wait or `RECV2`, that dispatcher stays on the older path
+  for the rest of its lifetime.
 
-The dispatcher exits on `EBADF` from RECV/RECV2, which fires when
-`nspa_shmem_channel_destroy` (`server/nspa/shmem_channel.c:291`)
-closes the channel fd during process teardown. Because the pthread
-is detached at spawn time, no join is needed.
+The detached-thread exit property remains the same: destroy wakes the
+dispatcher, the dispatcher cleans up its own context, and no join is
+required.
 
 ---
 
@@ -681,6 +755,13 @@ The promise is:
 
 This holds because of three kernel-side properties of
 `NTSYNC_TYPE_CHANNEL`:
+
+On post-1010 kernels there is one extra requirement: a dispatcher
+blocked in `NTSYNC_IOC_AGGREGATE_WAIT` on the channel source must still
+be visible to the channel's SEND_PI wake/boost logic. The production
+1010 follow-up (`072bfee`) is part of gamma's correctness story for
+exactly that reason; without it, aggregate-wait would have reintroduced
+a priority gap on the receive side.
 
 ### 8.1 SEND_PI atomically boosts the dispatcher
 
@@ -1037,51 +1118,45 @@ this discipline applies to its own future evolution as well.
 
 ### 13.1 Functional
 
-- `run-rt-suite native` (4 native tests + 22 PE matrix entries):
-  10/10 iterations pass against the canonical post-1006 module
-  `srcversion 2C3B9BE710704D550141CAA`.
-- 5-minute mixed-load soak across all paths (events
-  SET/RESET/PI/PULSE + mutex + sem + chan + wait_all): ~10M ops, 0
-  KASAN, 0 leaks; cumulative ~30M ops since the 2026-04-27 session
-  start.
-- Ableton Live 12 Lite: clean cold-start through plugin scan,
-  drum-track-load-while-playing, and 5-min sustained playback.
+- `test-aggregate-wait`: **9/9 PASS**, including the channel-notify
+  and channel-PI propagation sub-tests added for the Phase 3 path.
+- 1k mixed-concurrency stress: PASS.
+- 30k stress + full native ntsync suite: PASS, dmesg clean, no PI or
+  wake-loss regressions observed on the production module
+  `CFF56DE1EF28D693BB597CD`.
+- Ableton Live 12 Lite with `NSPA_AGG_WAIT=1`: clean cold-start,
+  plugin scan, drum-track-load-while-playing, and clean shutdown.
+- Phase 3 default-on (`NSPA_AGG_WAIT` unset): same Ableton workload
+  PASS, which is what justified the 2026-04-29 default-on flip.
 
 ### 13.2 Performance
 
-| Metric | v1.5/v2.4 | Gamma | Source |
+| Metric | v1.5/v2.4 | Gamma before 1010 | Gamma on post-1010 kernels |
 |---|---|---|---|
-| Dispatcher pthreads per process | N (~60 for a busy DAW) | 1 | Architectural |
-| Sender syscalls per request (RT) | 4-5 (CAS + futex_wake + futex_wait + setscheduler*2) | 1 (SEND_PI) | `dlls/ntdll/unix/server.c:403` |
-| Dispatcher syscalls per request | 1-2 (futex_wait + sometimes setscheduler) | 2 (RECV2 + REPLY) | `server/nspa/shmem_channel.c:160,231` |
-| `get_ptid_entry` dispatcher CPU | ~10% | ~0% (T3 enabled) | perf 2026-04-26 |
-| TID-race PI window | Real (TID-read vs setscheduler) | Closed (kernel-atomic) | Architectural |
-| Priority gaps between adjacent requests | Possible (between unboost and next boost) | Closed (REPLY re-boosts atomically) | ntsync 1008 |
+| Dispatcher pthreads per process | N (~60 for a busy DAW) | 1 | 1 |
+| Sender syscalls per request (RT) | 4-5 | 1 (`SEND_PI`) | 1 (`SEND_PI`) |
+| Wait primitive for dispatcher | futex / pthread wake mix | direct `RECV2` / `RECV` | aggregate-wait over channel + uring eventfd + shutdown eventfd |
+| `get_ptid_entry` dispatcher CPU | ~10% | ~0% with T3 | ~0% with T3 |
+| Completion ownership | n/a | request-side only | request-side and completion-side both on dispatcher |
+| TID-race PI window | Real | Closed | Closed |
+| Cross-thread CQE-to-reply variance | n/a | possible in the rejected bridge | removed by same-thread drain |
 
-The dispatcher syscall count went **up** (from ~1 futex to 2
-ioctls) but each ioctl does substantially more work atomically and
-the userspace path has no userspace PI bookkeeping at all. End-to-
-end latency for a typical small request (`get_thread_info`,
-`get_handle_info`) is comparable.
-
-The deeper win is **tail latency under mixed load**. With v1.5, a
-high-prio audio-thread request could be queued behind a GUI-thread
-request whose dispatcher pthread had not yet been scheduled. With
-gamma, the kernel rbtree guarantees the audio thread's entry is
-popped first, regardless of arrival order. Empirically this shows
-up as fewer xruns under burst workloads (Ableton drum-track-load-
-while-playing), which is exactly the workload Phase B targets.
+The most important improvement from the 1010/Phase 3 slice is not raw
+syscall count; it is **ownership of completion latency**. The rejected
+main-thread bridge pushed CQE-to-reply timing onto a different thread
+queue. The shipped path keeps that interval under the dispatcher's RT
+scheduling and cache locality instead.
 
 ### 13.3 Configuration validated for production
 
-For Ableton run-3 (2026-04-27):
+For the 2026-04-29 production validation:
 
-- Module: `A250A77651C8D5DAB719FE2` (loaded on prod kernel
-  6.19.11-rt1-1-nspa)
-- `NSPA_RT_POLICY=FF` (in `/etc/environment`)
-- `NSPA_ENABLE_PAINT_CACHE` unset -> default OFF (B1.0 reverted)
-- `NSPA_OPENFD_LOCKDROP` unset -> default ON (Phase B post-1006)
-- `NSPA_DISPATCHER_USE_TOKEN` unset -> default ON (gamma T3)
+- Module: `CFF56DE1EF28D693BB597CD`
+- `NSPA_RT_POLICY=FF`
+- `NSPA_OPENFD_LOCKDROP` unset -> default ON
+- `NSPA_DISPATCHER_USE_TOKEN` unset -> default ON
+- `NSPA_AGG_WAIT` unset -> default ON
+- `NSPA_ENABLE_ASYNC_CREATE_FILE` unset -> default OFF
 
 ---
 
@@ -1093,11 +1168,11 @@ For Ableton run-3 (2026-04-27):
 |---|---|---|
 | `wine/dlls/ntdll/unix/server.c` | 311-436 | Sender shim `nspa_send_request_channel` + UAPI fallback |
 | `wine/dlls/ntdll/unix/server.c` | 442-461 | `server_call_unlocked` gating logic |
-| `wine/server/nspa/shmem_channel.c` | 60-107 | UAPI fallback for pre-1004 / pre-1005 kernel headers |
-| `wine/server/nspa/shmem_channel.c` | 134-242 | `channel_dispatcher` pthread loop |
-| `wine/server/nspa/shmem_channel.c` | 244-289 | `nspa_shmem_channel_init` -- create + spawn dispatcher |
-| `wine/server/nspa/shmem_channel.c` | 291-299 | `nspa_shmem_channel_destroy` -- close fd, dispatcher exits via EBADF |
+| `wine/server/nspa/shmem_channel.c` | 60-139 | UAPI fallback for pre-1005 / pre-1010 kernel headers |
+| `wine/server/nspa/shmem_channel.c` | 158-390 | dispatcher context + aggregate-wait loop + legacy fallback loop |
+| `wine/server/nspa/shmem_channel.c` | 474-581 | dispatcher create/destroy path, shutdown eventfd lifetime |
 | `wine/server/nspa/shmem_channel.c` | 310-340 | T2 thread-token register/deregister |
+| `wine/server/nspa/uring.h` | -- | per-process `nspa_uring_instance` API consumed by Phase 2 / Phase 3 |
 | `wine/server/nspa/shmem_channel.h` | 1-48 | Public header |
 | `wine/server/nspa/fd_lockdrop.c` | 47-125 | Phase B `nspa_openat_lockdrop` -- lock-drop integration |
 | `wine/nspa/docs/gamma-dispatcher-audit-and-split-plan.md` | -- | Audit + future router/handler split plan |
@@ -1108,13 +1183,14 @@ For Ableton run-3 (2026-04-27):
 
 | File | Lines | Role |
 |---|---|---|
-| `drivers/misc/ntsync.c` | 1190-1494 | Channel object: rbtree, send/recv/reply, registration |
+| `drivers/misc/ntsync.c` | -- | Channel object plus aggregate-wait registration / wake path |
 | `ntsync-patches/1004-ntsync-channel.patch` | -- | Channel object + core ioctls |
 | `ntsync-patches/1005-ntsync-channel-thread-token.patch` | -- | RECV2 + REGISTER_THREAD + DEREGISTER_THREAD |
 | `ntsync-patches/1006-ntsync-rt-alloc-hoist.patch` | -- | kfree-under-raw_spinlock fix; unblocked Phase B default-on |
 | `ntsync-patches/1007-ntsync-channel-exclusive-recv.patch` | -- | Channel exclusive recv -- priority inversion fix |
 | `ntsync-patches/1008-ntsync-event-set-pi-deferred-boost.patch` | -- | Deferred boost machinery (consumed by REPLY) |
 | `ntsync-patches/1009-ntsync-channel-entry-refcount.patch` | -- | refcount_t on `ntsync_channel_entry` (KASAN UAF fix) |
+| `ntsync-patches/1010-ntsync-aggregate-wait.patch` | -- | heterogeneous wait primitive used by the post-1010 dispatcher |
 
 ### 14.3 Memory / handoff documents
 

@@ -1,34 +1,27 @@
 # Wine-NSPA — State of The Art
 
-**Date:** 2026-04-28
+**Date:** 2026-04-29
 **Author:** Jordan Johnston
 **Kernel:** `6.19.11-rt1-1-nspa` (PREEMPT_RT_FULL, production)
-**ntsync module:** `srcversion A250A77651C8D5DAB719FE2`
-**Wine submodule HEAD:** `ac823311aba` (Wine 11.6 + NSPA fork)
-**Superproject HEAD:** `c4ecdf9`
+**ntsync module:** `srcversion CFF56DE1EF28D693BB597CD`
+**Wine submodule HEAD:** `b72419fc953` (Wine 11.6 + NSPA fork)
+**Superproject HEAD:** `94eda70`
 
 ---
 
 ## Where we are
 
-Wine-NSPA closed a major audit-and-fix cycle on 2026-04-28. The arc that
-opened with a 5-minute Ableton lockup under the new paint-cache bypass
-(2026-04-25) ran through a KASAN-armed kernel session that turned up
-four ntsync bugs, then a focused 1576-LOC walk of the wine-userspace
-ring code that turned up three more pre-existing bugs of the
-silent-contract-violation class. All seven are shipped. Two clean
-Ableton runs followed: run-3 with the historical config (paint-cache
-OFF) and run-4 with the previously-locking config (`NSPA_ENABLE_PAINT_CACHE=1`)
-past the 5-minute threshold, both clean end-to-end.
+Wine-NSPA moved beyond the post-1009 hardening baseline on 2026-04-29.
+The kernel now ships patch 1010 (`NTSYNC_IOC_AGGREGATE_WAIT`) plus its
+post-1010 PI-ordering fixes, and the wineserver side ships the Phase 2
+per-process dispatcher-owned `io_uring` infrastructure plus the Phase 3
+aggregate-wait dispatcher loop. That path is validated and default-on.
 
-The investigation halted feature velocity for a stretch, but the bugs
-fixed sat on the critical RT-sync path that every remaining bypass
-calls into — so paying that bill now on a contained surface beats
-paying it mid-feature-rollout. The kernel is solid (~370M ops zero
-errors across native + stress + soak + PE matrix), the userspace
-fix-pack is shipped, and Phase C get_message bypass — paused
-mid-development to investigate the lockup — is the obvious resume
-target for the next session.
+The important distinction for the state board is that the stable public
+story now includes the **dispatcher async-completion architecture**
+itself, not just the prerequisite channel and PI stack. The still-WIP
+async `create_file` handler port stays outside this snapshot; it is
+default-off and not part of the production status reported here.
 
 What the project looks like today: one small kernel module
 (~3kLOC) plus a Wine fork that increasingly bypasses wineserver
@@ -47,7 +40,7 @@ when the gate is off.
 | Kernel | `6.19.11-rt1-1-nspa` |
 | Scheduler | `PREEMPT_RT_FULL` |
 | ntsync `.ko` | `/lib/modules/6.19.11-rt1-1-nspa/kernel/drivers/misc/ntsync.ko` |
-| ntsync srcversion | `A250A77651C8D5DAB719FE2` |
+| ntsync srcversion | `CFF56DE1EF28D693BB597CD` |
 | Module ref count | 0 idle |
 | Sources | `/home/ninez/pkgbuilds/Linux-NSPA-pkgbuild/linux-nspa-6.19.11-1.src/linux-nspa/src/linux-6.19.11/drivers/misc/ntsync.{c,h}` |
 
@@ -62,12 +55,13 @@ when the gate is off.
 | 1007 | Channel exclusive recv | `wait_event_interruptible_exclusive` + `wake_up_interruptible` — closes thundering-herd on channel waiter wake | Shipped |
 | 1008 | EVENT_SET_PI deferred boost | Stage boost decision under `obj_lock`, apply inline at wait-return — no worker thread, no timer | Shipped |
 | 1009 | channel_entry refcount | `refcount_t` on `ntsync_channel_entry`; closes REPLY-vs-cleanup UAF caught by KASAN in `test-channel-stress` | Shipped |
+| 1010 | Aggregate-wait | Heterogeneous object+fd wait; channel notify-only path used by the gamma dispatcher | Shipped |
 
 The full plan from the 2026-04-26 hardening session is at
 `/home/ninez/pkgbuilds/Wine-NSPA/wine-rt-claude/wine/nspa/docs/ntsync-rt-audit.md`
 and validation totals at `project_ntsync_prod_kernel_validation_20260427`.
 
-### 1.3 Validation totals against `A250A77651C8D5DAB719FE2`
+### 1.3 Validation totals against `CFF56DE1EF28D693BB597CD`
 
 | Layer | Run | Result | Ops | Errors |
 |---|---|---|---|---|
@@ -76,12 +70,16 @@ and validation totals at `project_ntsync_prod_kernel_validation_20260427`.
 | Native stress | `mutex-pi 30s 8h+4mtx` | PASS | ~12M | 0 |
 | Native stress | `channel 30s 4x4` | PASS, SEND=REPLY perfect | ~52M | 0 |
 | Native stress | `mixed-load 300s 13 workers` | PASS, all paths | ~145M | 0 |
+| Native aggregate | `test-aggregate-wait` | 9/9 PASS | n/a | 0 |
+| Native aggregate | `aggregate-wait 30k + suite` | PASS, dmesg clean | long soak | 0 |
 | PE matrix | `nspa_rt_test.exe baseline+rt` | 22/22 PASS | n/a | 0 |
 | Ableton run-3 | smoke level 4, paint-cache OFF | PASS | n/a | 0 |
 | Ableton run-4 | smoke level 4 + 5-min soak, paint-cache ON | PASS | n/a | 0 |
+| Ableton run-5 | Phase 3 default-on (`NSPA_AGG_WAIT` unset) | PASS | n/a | 0 |
 
-**Cumulative: ~370M ops, zero syscall errors, zero dmesg splats,
-refcnt=0 post-soak.**
+**Cumulative: post-1009 baseline ~370M ops, plus dedicated aggregate-wait
+and Phase 3 validation on the current production module, zero syscall
+errors, zero dmesg splats, refcnt=0 post-soak.**
 
 The four bugs fixed in this cycle were:
 
@@ -101,8 +99,8 @@ Wine-NSPA fork on top of Wine 11.6.
 | Type | Ref |
 |---|---|
 | Submodule | `wine-rt-claude/wine` |
-| HEAD | `ac823311aba` |
-| Tip series | msg_ring v2 fix-pack (2026-04-27) |
+| HEAD | `b72419fc953` |
+| Tip series | aggregate-wait + dispatcher Phase 2/3 landed (2026-04-29) |
 
 ### 2.2 Recent fix pack — 2026-04-27 wine userspace audit
 
@@ -131,15 +129,15 @@ Bugs left as-is per audit (perf cliff or by-design):
 
 ### 2.3 Recent commits at the tip
 
+    b72419fc953  nspa docs: session handoff 2026-04-29 — Phase 2/3/4 + regression note
+    fc7466d1945  nspa Phase 3: default-on AGGREGATE_WAIT (Ableton-validated)
+    7f7253e4deb  nspa Phase 3: dispatcher restructure (AGGREGATE_WAIT, default-off first)
+    98615b36ed3  nspa Phase 2: per-process server-side io_uring infrastructure
+    8b22da6f949  nspa tests: aggregate-wait — add channel-PI propagation sub-test 8
+    670a19db18d  nspa tests: aggregate-wait — fix kitchen-sink hang, add channel-notify sub-test
+    e4cdba79332  nspa tests: aggregate-wait native test + KASAN stress driver
     ac823311aba  nspa docs: wine-NSPA lockup audit 2026-04-27
     9b4172e2bbc  nspa msg_ring v2: MR1 ABA + MR2 cross-process futex + MR4 POST wake-loss
-    d7d7ec9d1ca  nspa tests: extend mixed-load to full driver coverage (sem + wait_all + pulse)
-    dcc2d0c0f97  nspa tests: mixed-load stress — concurrent events + mutexes + channels
-    eddf67d7587  nspa tests: mutex-pi-stress + channel-stress (catch the channel_entry UAF)
-    05e689e4a18  nspa tests: ntsync Bug 1 fix + EVENT_SET_PI stress + suite skip-list
-    9b13a757860  nspa_rt_test: seqlock-bound add Subtest B (queue-bits via GetQueueStatus)
-    9e51ed5f907  nspa: harden retry loops at SCHED_FIFO callsites (audit §4.1)
-    4f2c29bb1b2  nspa msg-ring v2 B1.0: revert paint-cache default to OFF
     b5e8dcab3eb  nspa gamma T3: flip dispatcher token consumption default ON
     9b6e2a108e1  nspa Phase B: flip openat lock-drop default ON post-1006
 
@@ -171,7 +169,7 @@ own correctness proof and gate.
 
 | Subsystem | Status | Default | Brief | Doc |
 |---|---|---|---|---|
-| **Gamma channel dispatcher** | Shipped | ON | Per-process kernel-mediated channel via ntsync 1004; T1+T2+T3 thread-token consumed; replaces legacy per-thread shmem pthread dispatcher | `gamma-channel-dispatcher.gen.html` (TBD) |
+| **Gamma channel dispatcher** | Shipped | ON | Per-process kernel-mediated channel via ntsync 1004/1005, with post-1010 aggregate-wait over channel + uring eventfd + shutdown eventfd. T1+T2+T3 thread-token consumption and same-thread CQE drain both shipped default-on. | `gamma-channel-dispatcher.gen.html` |
 | **Phase A — `open_fd` refactor** | Shipped | ON | `fchdir+open` → `openat`; first step toward holding `global_lock` for less of the open path | `open-fd-phases.gen.html` (TBD) |
 | **Phase B — `openat` lock-drop** | Shipped | ON | Release `global_lock` around `openat()` so audio thread requests aren't blocked by slow file syscalls during drum-load. Post-1006 default-on flip. | same as above |
 | **Hook tier 1+2 cache** | Shipped | ON | Server-side cache rebuild + client cache reader; 26.7k/26.7k cache hit on Ableton 165s, `server_dispatch=0` | `hook-cache.gen.html` (TBD) |
@@ -185,7 +183,8 @@ own correctness proof and gate.
 | **msg-ring v2 B1.0 paint-cache** | Shipped | **OFF** (gated) | Cross-process redraw cache for `WM_PAINT` fast-path; passed run-4 with paint-cache=1 past 5-min threshold; needs second validation run + long-soak before flipping default-on | `msg-ring-architecture.gen.html` |
 | **msg-ring v2 Phase C get_message** | **WIP, paused** | n/a | Last bypass piece for window-message path; design notes at `wine/nspa/docs/msg-ring-v2-phase-bc-handoff.md`. After C lands, window messages are fully out of wineserver | (handoff doc only) |
 | **io_uring Phase 1 (socket I/O)** | Shipped | ON when `NSPA_RT_PRIO` set | ALERTED-state interception; ntsync `uring_fd` extension (kernel patch 1004 in old numbering) | `io_uring-architecture.gen.html` |
-| **io_uring Phase 2/3** | Pending | n/a | File I/O / async write coverage; not started | (no doc) |
+| **Dispatcher Phase 2/3 (`NSPA_AGG_WAIT`)** | Shipped | ON | Per-process server-side `io_uring` infrastructure plus aggregate-wait dispatcher loop. Same RT thread receives requests, drains CQEs, and signals replies. | `aggregate-wait-and-async-completion.gen.html` |
+| **io_uring Phase 2/3** | Pending | n/a | File I/O / async write coverage beyond the dispatcher-owned ring plumbing; handler ports still queued | `aggregate-wait-and-async-completion.gen.html` |
 | **Wineserver `global_lock` PI** | Shipped | ON when `NSPA_RT_PRIO` set | `pthread_mutex` → `pi_mutex` on `server/fd.c:global_lock`; CFS holders boost via PI chain when v2.4-boosted dispatcher contends | `cs-pi.gen.html` §wineserver |
 | **vDSO preloader (Jinoh Kang port)** | Shipped | ON | Full 13-patch port (01–07, 09, 11–13); EHDR unmap (06) intentionally omitted on static-pie x86_64 | (within preloader.c) |
 | **NSPA priority mapping** | Shipped | ON when `NSPA_RT_PRIO` set | `fifo_prio = nspa_rt_prio_base - (31 - nt_band)`, clamped `[1..98]`; TIME_CRITICAL pinned to ceiling | `current-state.gen.html` (this doc, §4) |
@@ -221,19 +220,19 @@ own correctness proof and gate.
   </defs>
 
   <rect x="0" y="0" width="940" height="500" class="cs-bg"/>
-  <text x="470" y="28" text-anchor="middle" class="cs-title">2026-04-28 deployment board: what is shipped, what is gated, and what is next</text>
+  <text x="470" y="28" text-anchor="middle" class="cs-title">2026-04-29 deployment board: what is shipped, what is gated, and what is next</text>
 
   <rect x="50" y="70" width="250" height="150" class="cs-green"/>
   <text x="175" y="96" text-anchor="middle" class="cs-tag-green">Kernel / sync substrate</text>
-  <text x="175" y="122" text-anchor="middle" class="cs-label">NTSync 1003-1009</text>
-  <text x="175" y="140" text-anchor="middle" class="cs-small">PI waits, channel IPC, deferred EVENT_SET_PI</text>
+  <text x="175" y="122" text-anchor="middle" class="cs-label">NTSync 1003-1010</text>
+  <text x="175" y="140" text-anchor="middle" class="cs-small">PI waits, channel IPC, aggregate-wait</text>
   <text x="175" y="164" text-anchor="middle" class="cs-label">CS-PI + condvar PI</text>
   <text x="175" y="182" text-anchor="middle" class="cs-small">all RT paths gate on NSPA_RT_PRIO</text>
 
   <rect x="345" y="70" width="250" height="150" class="cs-green"/>
   <text x="470" y="96" text-anchor="middle" class="cs-tag-green">Client-side bypasses</text>
-  <text x="470" y="122" text-anchor="middle" class="cs-label">gamma channel, local-file, local timers</text>
-  <text x="470" y="140" text-anchor="middle" class="cs-small">hook cache, msg-ring v1, io_uring phase 1</text>
+  <text x="470" y="122" text-anchor="middle" class="cs-label">gamma channel + dispatcher Phase 3</text>
+  <text x="470" y="140" text-anchor="middle" class="cs-small">local-file, local timers, hook cache, msg-ring v1</text>
   <text x="470" y="164" text-anchor="middle" class="cs-label">wineserver load already reduced</text>
   <text x="470" y="182" text-anchor="middle" class="cs-small">many hot paths no longer need global_lock</text>
 
@@ -260,8 +259,8 @@ own correctness proof and gate.
 
   <rect x="640" y="270" width="250" height="140" class="cs-wip"/>
   <text x="765" y="296" text-anchor="middle" class="cs-tag-violet">Longer horizon</text>
-  <text x="765" y="322" text-anchor="middle" class="cs-label">wineserver decomposition phase 3</text>
-  <text x="765" y="340" text-anchor="middle" class="cs-small">timer split + aggregate-wait + FD polling split</text>
+  <text x="765" y="322" text-anchor="middle" class="cs-label">wineserver decomposition remainder</text>
+  <text x="765" y="340" text-anchor="middle" class="cs-small">timer split + FD polling split around shipped aggregate-wait</text>
   <text x="765" y="364" text-anchor="middle" class="cs-label">phase 4</text>
   <text x="765" y="382" text-anchor="middle" class="cs-small">router/handler split + lock partitioning</text>
 
@@ -278,11 +277,13 @@ own correctness proof and gate.
 
 ### 4.1 What's clean
 
-- ntsync module `A250A77651C8D5DAB719FE2` against prod kernel `6.19.11-rt1-1-nspa`: 370M ops, 0 errors, 0 KASAN splats (debug-tree validation), 0 lockdep splats.
+- ntsync module `CFF56DE1EF28D693BB597CD` against prod kernel `6.19.11-rt1-1-nspa`: post-1009 baseline retained, aggregate-wait added, 0 reported syscall errors, 0 dmesg splats on the current production validation path.
+- `test-aggregate-wait` 9/9 PASS, including the channel-notify and channel-PI propagation checks needed for the dispatcher Phase 3 loop.
 - nspa_rt_test PE matrix: 22/22 PASS (baseline + RT).
 - Ableton Live 12 Lite — full smoke level 4 — **two clean runs on 2026-04-28**:
   - **Run-3**: paint-cache OFF (default config). Drum-track-load-while-playing × multiple, audio clean, exit 0.
   - **Run-4**: `NSPA_ENABLE_PAINT_CACHE=1` (the historical 5-min-lockup config). Past 5-min threshold without incident, multiple drum-load cycles, audio clean, exit 0.
+- Ableton Live 12 Lite — **Phase 3 dispatcher default-on** (2026-04-29): aggregate-wait path clean under the same workload, clean shutdown.
 
 <div class="diagram-container">
 <svg width="100%" viewBox="0 0 940 360" xmlns="http://www.w3.org/2000/svg">
@@ -306,12 +307,12 @@ own correctness proof and gate.
   </defs>
 
   <rect x="0" y="0" width="940" height="360" class="vp-bg"/>
-  <text x="470" y="28" text-anchor="middle" class="vp-title">Validation posture on 2026-04-28</text>
+  <text x="470" y="28" text-anchor="middle" class="vp-title">Validation posture on 2026-04-29</text>
 
   <rect x="40" y="82" width="250" height="180" class="vp-clean"/>
   <text x="165" y="108" text-anchor="middle" class="vp-green">Clean / production-ready</text>
-  <text x="165" y="136" text-anchor="middle" class="vp-label">ntsync `A250A77651C8D5DAB719FE2`</text>
-  <text x="165" y="154" text-anchor="middle" class="vp-small">~370M ops, zero errors</text>
+  <text x="165" y="136" text-anchor="middle" class="vp-label">ntsync `CFF56DE1EF28D693BB597CD`</text>
+  <text x="165" y="154" text-anchor="middle" class="vp-small">post-1009 baseline + aggregate-wait clean</text>
   <text x="165" y="178" text-anchor="middle" class="vp-label">PE matrix 22/22 PASS</text>
   <text x="165" y="202" text-anchor="middle" class="vp-label">Ableton run-3 PASS</text>
   <text x="165" y="220" text-anchor="middle" class="vp-small">default config, paint-cache OFF</text>
@@ -397,11 +398,10 @@ worth banking:
 4. **`wine_sechost_service` device-IRP poll** — ~530 polls/s, 63k
    `get_next_device_request` per Ableton run; audit Q2
    (payload-distribution) is the gate before any bypass design.
-5. **Wineserver decomposition Phase 3** — timer thread + aggregate-wait
-   + FD poll thread splits. Plan at
-   `wine/nspa/docs/wineserver-decomposition-plan.md`. Followed
-   sequentially after enough state migrates out via bypasses (Phase
-   C makes the decomposition cheaper).
+5. **Wineserver decomposition remainder** — timer thread + FD poll
+   thread splits still queued. The aggregate-wait kernel/userspace
+   slice is already shipped; the remaining design work is how the rest
+   of wineserver composes around it.
 6. **MR3 GC pass** — peer-cache slot leak under thread churn;
    ~30 LOC; perf cliff, not lockup. Defer until somebody hits it.
 7. **CS DYNAMIC_SPIN substitution** — `RTL_CRITICAL_SECTION_FLAG_DYNAMIC_SPIN`
@@ -481,6 +481,7 @@ operating principle going forward.
 | `NSPA_RT_POLICY=FF` | SCHED_FIFO (vs RR). Same-prio RR quantum-slices the audio thread; FIFO eliminates. |
 | `NSPA_OPENFD_LOCKDROP=1` | Phase B `openat` lock-drop. **Default ON post-1006.** |
 | `NSPA_DISPATCHER_USE_TOKEN=1` | Gamma T3 thread-token consumption in dispatcher. **Default ON.** |
+| `NSPA_AGG_WAIT=1` | Phase 3 aggregate-wait dispatcher loop. **Default ON post-1010 validation.** Set `0` to force the legacy direct receive loop. |
 | `NSPA_ENABLE_PAINT_CACHE=1` | msg-ring v2 B1.0 paint-cache. **Default OFF.** Awaiting second validation run. |
 | `NSPA_DISABLE_EPOLL=1` | A/B PREEMPT_RT poll vs epoll on wineserver main loop. Default upstream (epoll). |
 | `WINEPRELOADREMAPVDSO=force\|skip\|on-conflict` | vDSO preloader behaviour. Default `on-conflict`. |
@@ -512,10 +513,12 @@ State boards and architecture deep-dives produced by the project:
 
 | Doc | Subject |
 |---|---|
-| `current-state.md` | This document — state of the art on 2026-04-28 |
+| `current-state.md` | This document — state of the art on 2026-04-29 |
 | `cs-pi.gen.html` | Critical Section Priority Inheritance (CS-PI v2.3) — twelve-section deep dive |
 | `condvar-pi-requeue.gen.html` | `RtlSleepConditionVariableCS` `FUTEX_WAIT_REQUEUE_PI` slow path |
-| `ntsync-driver.gen.html` | NTSync kernel driver patch stack (1003–1006 era; 1007+ pending update) |
+| `aggregate-wait-and-async-completion.gen.html` | Landed kernel 1010 + dispatcher Phase 2/3 aggregate-wait architecture |
+| `gamma-channel-dispatcher.gen.html` | Gamma request/reply transport plus post-1010 aggregate-wait dispatcher loop |
+| `ntsync-driver.gen.html` | NTSync kernel driver patch stack through 1010 aggregate-wait |
 | `io_uring-architecture.gen.html` | io_uring Phase 1 socket-I/O ALERTED-state interception |
 | `msg-ring-architecture.gen.html` | msg-ring v1 + v2 design notes |
 | `nspa-local-file-architecture.gen.html` | NT-local file bypass (`NtCreateFile` short-circuit) |
@@ -525,13 +528,11 @@ State boards and architecture deep-dives produced by the project:
 | `decoration-loop-investigation.gen.html` | Wine 11.6 X11 windowing decoration-loop bug 57955 |
 | `sync-primitives-research.gen.html` | Background research on sync primitive selection |
 
-Several subsystems shipped since the Apr 16 doc generation are not yet
-documented: gamma channel dispatcher, Phase A+B `open_fd`, hook tier
-1+2 cache, NT-local timer / WM timer, the msg-ring v2 paint-cache fix
-arc. These will follow in the same doc-sweep that produced this
-state board.
+The architecture-heavy pieces added through 2026-04-29 are now covered
+in the public docs set, including the gamma dispatcher, aggregate-wait,
+hook cache, local-file, msg-ring, and the decomposition notes.
 
 ---
 
-*Generated 2026-04-28. Wine submodule `ac823311aba`, ntsync
-`A250A77651C8D5DAB719FE2`, kernel `6.19.11-rt1-1-nspa`.*
+*Generated 2026-04-29. Wine submodule `b72419fc953`, ntsync
+`CFF56DE1EF28D693BB597CD`, kernel `6.19.11-rt1-1-nspa`.*
