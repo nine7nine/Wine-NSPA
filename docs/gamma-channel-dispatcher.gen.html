@@ -85,9 +85,9 @@
 </head><body>
 <h1 id="wine-nspa--gamma-channel-based-wineserver-dispatcher">Wine-NSPA &ndash; Gamma Channel-Based Wineserver Dispatcher</h1>
 
-<p>Wine 11.6 + NSPA RT patchset | Kernel 6.19.x-rt with NTSync channels + aggregate-wait | 2026-04-29
+<p>Wine 11.6 + NSPA RT patchset | Kernel 6.19.x-rt with NTSync channels + aggregate-wait + TRY_RECV2 | 2026-04-30
 Author: Jordan Johnston
-Status: production dispatcher architecture; aggregate-wait Phase 3 is shipped and default-on as of 2026-04-29.</p>
+Status: production dispatcher architecture; aggregate-wait Phase 3 is default-on, and post-1011 TRY_RECV2 burst-drain is default-on when the kernel exposes it.</p>
 
 <p>This page explains the current wineserver request path for a Wine process: how requests enter the gamma channel, how the dispatcher owns the reply path, and how the post-1010 aggregate-wait loop fits into that design.</p>
 
@@ -143,9 +143,13 @@ not just one bare receive loop. That context owns:</p>
 active, shutdown eventfd)</code>, follows a channel wake with
 <code>NTSYNC_IOC_CHANNEL_RECV2</code>, runs the existing <code>read_request_shm</code>
 handler under <code>global_lock</code>, and calls <code>NTSYNC_IOC_CHANNEL_REPLY</code> to
-wake the originator and drain its PI boost. On pre-1010 kernels it
+wake the originator and drain its PI boost. On 1011 kernels, if
+<code>NSPA_TRY_RECV2</code> is left at its default-on setting, the dispatcher
+then issues <code>NTSYNC_IOC_CHANNEL_TRY_RECV2</code> in a tight loop to drain any
+additional ready entries from the same wake. On pre-1010 kernels it
 falls back permanently to the legacy direct <code>CHANNEL_RECV2</code> / <code>RECV</code>
-loop for that dispatcher.</p>
+loop for that dispatcher, and on pre-1011 kernels the burst-drain
+feature gates itself off via <code>-ENOTTY</code>.</p>
 
 <p>The key win over the legacy designs: priority inheritance is now
 <strong>kernel-atomic</strong>. There is no userspace TID-read-vs-<code>sched_setscheduler</code>
@@ -342,7 +346,7 @@ aggregate-wait result.</p>
   <text x="195" y="236" text-anchor="middle" class="ga-t">channel source fired</text>
   <text x="195" y="260" text-anchor="middle" class="ga-s">follow with `CHANNEL_RECV2`</text>
   <text x="195" y="278" text-anchor="middle" class="ga-s">run handler under `global_lock`</text>
-  <text x="195" y="296" text-anchor="middle" class="ga-s">sync handler replies immediately</text>
+  <text x="195" y="296" text-anchor="middle" class="ga-s">reply, then TRY_RECV2-drain while ready (1011 + gate)</text>
   <text x="195" y="314" text-anchor="middle" class="ga-s">async-capable handler may submit SQE and return to wait</text>
 
   <rect x="365" y="210" width="250" height="132" class="ga-fast" rx="6"/>
@@ -363,10 +367,11 @@ aggregate-wait result.</p>
   <path d="M490 154 L490 210" class="ga-line" marker-end="url(#gaArrow)"/>
   <path d="M490 154 L785 210" class="ga-line" marker-end="url(#gaArrow)"/>
 
-  <rect x="180" y="390" width="620" height="80" class="ga-note" rx="6"/>
+  <rect x="180" y="390" width="620" height="90" class="ga-note" rx="6"/>
   <text x="490" y="416" text-anchor="middle" class="ga-y">Load-bearing invariant</text>
   <text x="490" y="438" text-anchor="middle" class="ga-s">the thread that receives the request is also the thread that drains the completion and signals the reply</text>
   <text x="490" y="456" text-anchor="middle" class="ga-s">`NSPA_AGG_WAIT=0` or `-ENOTTY` at first aggregate-wait call falls back to the legacy direct receive loop</text>
+  <text x="490" y="472" text-anchor="middle" class="ga-s">`NSPA_TRY_RECV2=0` or `-ENOTTY` keeps one dequeue per wake</text>
 </svg>
 </div>
 
@@ -840,6 +845,9 @@ is not set to <code>0</code></li>
 legacy direct receive loop for this dispatcher</li>
 <li>inside that loop, prefer <code>CHANNEL_RECV2</code>; if the kernel predates
 1005, permanently fall back to <code>CHANNEL_RECV</code></li>
+<li>after each successful dispatch, if patch 1011 is present and
+<code>NSPA_TRY_RECV2</code> is not set to <code>0</code>, issue non-blocking <code>TRY_RECV2</code>
+until the channel is empty</li>
 </ol>
 
 
@@ -877,6 +885,16 @@ legacy direct receive loop for this dispatcher</li>
     if (ret &lt; 0 &amp;&amp; errno == ENOTTY)
         recv2_state = 0;
     dispatch request;
+    while (try_recv2_state) {
+        ret = ioctl(channel_fd, NTSYNC_IOC_CHANNEL_TRY_RECV2, &amp;recv);
+        if (ret == 0) {
+            dispatch request;
+            continue;
+        }
+        if (errno == ENOTTY)
+            try_recv2_state = 0;
+        break;
+    }
 }
 </code></pre>
 
@@ -900,8 +918,8 @@ channel fd alone is not a reliable wake source once the kernel holds
 its own reference during aggregate-wait registration, so the
 dispatcher also waits on <code>shutdown_efd</code>.</li>
 <li><strong>Fallback is sticky per dispatcher.</strong> After the first <code>-ENOTTY</code> on
-aggregate-wait or <code>RECV2</code>, that dispatcher stays on the older path
-for the rest of its lifetime.</li>
+aggregate-wait, <code>RECV2</code>, or <code>TRY_RECV2</code>, that dispatcher stays on
+the older compatible path for the rest of its lifetime.</li>
 </ul>
 
 
@@ -1293,94 +1311,132 @@ but Wine&rsquo;s own conformance tests do) see the same values.</p>
 <h3 id="111-functional">11.1 Functional</h3>
 
 <ul>
+<li>Native ntsync suite: <strong>3 PASS / 0 FAIL</strong> (<code>test-event-set-pi</code>,
+<code>test-channel-recv-exclusive</code>, <code>test-aggregate-wait</code>).</li>
 <li><code>test-aggregate-wait</code>: <strong>9/9 PASS</strong>, including the channel-notify
-and channel-PI propagation sub-tests added for the Phase 3 path.</li>
-<li>1k mixed-concurrency stress: PASS.</li>
-<li>30k stress + full native ntsync suite: PASS, dmesg clean, no PI or
-wake-loss regressions observed on the production module
-<code>CFF56DE1EF28D693BB597CD</code>.</li>
-<li>Ableton Live 12 Lite with <code>NSPA_AGG_WAIT=1</code>: clean cold-start,
-plugin scan, drum-track-load-while-playing, and clean shutdown.</li>
-<li>Phase 3 default-on (<code>NSPA_AGG_WAIT</code> unset): same Ableton workload
-PASS, which is what justified the 2026-04-29 default-on flip.</li>
+and channel-PI propagation sub-tests added for the Phase 3 path, and
+the kitchen-sink path with <strong>86,528 wakes / 0 timeouts / 0 errors</strong>.</li>
+<li>PE matrix: <strong>24 PASS / 0 FAIL / 0 TIMEOUT</strong> after adding
+<code>dispatcher-burst</code> to the baseline + RT runner.</li>
+<li><code>dispatcher-burst</code> matters because the rest of the PE matrix mostly
+goes through <code>inproc_wait</code> -> ntsync ioctls directly and does not hit
+the dispatcher hot path.</li>
+<li>On pre-1011 kernels the <code>TRY_RECV2</code> loop gates itself off via
+<code>-ENOTTY</code>; the dispatcher remains functionally correct and simply
+consumes one entry per wake.</li>
+<li>Ableton Live 12 Lite with <code>NSPA_AGG_WAIT=1</code>, default-on
+<code>NSPA_TRY_RECV2</code>, and default-on async <code>create_file</code>: clean
+cold-start, plugin scan, drum-track-load-while-playing, and clean
+shutdown.</li>
 </ul>
 
 
 <h3 id="112-performance">11.2 Performance</h3>
 
+<h4 id="ableton-30s-busy-capture">Ableton 30s busy capture</h4>
+
 <table>
 <thead>
 <tr>
-<th> Metric </th>
-<th> v1.5/v2.4 </th>
-<th> Gamma before 1010 </th>
-<th> Gamma on post-1010 kernels </th>
+<th> Symbol (wineserver-relative) </th>
+<th style="text-align:right;"> Before </th>
+<th style="text-align:right;"> After </th>
+<th style="text-align:right;"> Delta </th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td> Dispatcher pthreads per process </td>
-<td> N (~60 for a busy DAW) </td>
-<td> 1 </td>
-<td> 1 </td>
+<td> <code>channel_dispatcher</code> </td>
+<td style="text-align:right;"> 14.51% </td>
+<td style="text-align:right;"> 0.70% </td>
+<td style="text-align:right;"> −13.81pp / −95% </td>
 </tr>
 <tr>
-<td> Sender syscalls per request (RT) </td>
-<td> 4-5 </td>
-<td> 1 (<code>SEND_PI</code>) </td>
-<td> 1 (<code>SEND_PI</code>) </td>
+<td> <code>main_loop_epoll</code> </td>
+<td style="text-align:right;"> 7.24% </td>
+<td style="text-align:right;"> 2.68% </td>
+<td style="text-align:right;"> −4.56pp </td>
 </tr>
 <tr>
-<td> Wait primitive for dispatcher </td>
-<td> futex / pthread wake mix </td>
-<td> direct <code>RECV2</code> / <code>RECV</code> </td>
-<td> aggregate-wait over channel + uring eventfd + shutdown eventfd </td>
+<td> <code>nspa_queue_bypass_shm</code> </td>
+<td style="text-align:right;"> 2.77% </td>
+<td style="text-align:right;"> absent </td>
+<td style="text-align:right;"> inlined into call sites </td>
 </tr>
 <tr>
-<td> <code>get_ptid_entry</code> dispatcher CPU </td>
-<td> ~10% </td>
-<td> ~0% with T3 </td>
-<td> ~0% with T3 </td>
+<td> <code>req_get_update_region</code> </td>
+<td style="text-align:right;"> 4.92% </td>
+<td style="text-align:right;"> absent </td>
+<td style="text-align:right;"> gone from top symbols </td>
 </tr>
 <tr>
-<td> Completion ownership </td>
-<td> n/a </td>
-<td> request-side only </td>
-<td> request-side and completion-side both on dispatcher </td>
-</tr>
-<tr>
-<td> TID-race PI window </td>
-<td> Real </td>
-<td> Closed </td>
-<td> Closed </td>
-</tr>
-<tr>
-<td> Cross-thread CQE-to-reply variance </td>
-<td> n/a </td>
-<td> possible in the rejected bridge </td>
-<td> removed by same-thread drain </td>
+<td> <code>nspa_redraw_ring_drain</code> </td>
+<td style="text-align:right;"> 2.88% </td>
+<td style="text-align:right;"> absent </td>
+<td style="text-align:right;"> gone from top symbols </td>
 </tr>
 </tbody>
 </table>
 
 
-<p>The most important improvement from the 1010/Phase 3 slice is not raw
-syscall count; it is <strong>ownership of completion latency</strong>. The rejected
-main-thread bridge pushed CQE-to-reply timing onto a different thread
-queue. The shipped path keeps that interval under the dispatcher&rsquo;s RT
-scheduling and cache locality instead.</p>
+<p>System-wide samples: 38,588 -> 19,415 per 30s.</p>
+
+<p>This profile shift is the combined effect of
+<a href="https://github.com/nine7nine/Wine-NSPA/commit/1d85c558"><code>1d85c558</code></a>
+(dispatcher ACQ_REL fences + inline accessor) and
+<a href="https://github.com/nine7nine/Wine-NSPA/commit/01d528f5"><code>01d528f5</code></a>
+(TRY_RECV2 burst-drain) on top of the 1011 kernel primitive.</p>
+
+<h4 id="pe-side-dispatcher-burst-ab">PE-side <code>dispatcher-burst</code> A/B</h4>
+
+<table>
+<thead>
+<tr>
+<th> Metric </th>
+<th style="text-align:right;"> TRY_RECV2 on </th>
+<th style="text-align:right;"> TRY_RECV2 off </th>
+<th style="text-align:right;"> Delta </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> burst ops/sec (wall) </td>
+<td style="text-align:right;"> 841,765 </td>
+<td style="text-align:right;"> 555,567 </td>
+<td style="text-align:right;"> +34% / 1.5x </td>
+</tr>
+<tr>
+<td> burst worst max ns </td>
+<td style="text-align:right;"> 23,014,325 </td>
+<td style="text-align:right;"> 31,843,082 </td>
+<td style="text-align:right;"> −28% </td>
+</tr>
+<tr>
+<td> steady avg ns </td>
+<td style="text-align:right;"> 35,202 </td>
+<td style="text-align:right;"> 33,405 </td>
+<td style="text-align:right;"> flat (no burst) </td>
+</tr>
+</tbody>
+</table>
+
+
+<p>Steady-state is flat both ways, exactly as designed. The win is
+concentrated in burst load where the dispatcher can drain N queued
+entries per <code>AGG_WAIT</code> wake instead of paying N round-trips.</p>
 
 <h3 id="113-configuration-validated-for-production">11.3 Configuration validated for production</h3>
 
-<p>For the 2026-04-29 production validation:</p>
+<p>For the 2026-04-30 production validation:</p>
 
 <ul>
-<li>Module: <code>CFF56DE1EF28D693BB597CD</code></li>
+<li>Module: <code>10124FB81FDC76797EF1F91</code></li>
 <li><code>NSPA_RT_POLICY=FF</code></li>
 <li><code>NSPA_OPENFD_LOCKDROP</code> unset -> default ON</li>
 <li><code>NSPA_DISPATCHER_USE_TOKEN</code> unset -> default ON</li>
 <li><code>NSPA_AGG_WAIT</code> unset -> default ON</li>
-<li><code>NSPA_ENABLE_ASYNC_CREATE_FILE</code> unset -> default OFF</li>
+<li><code>NSPA_TRY_RECV2</code> unset -> default ON</li>
+<li><code>NSPA_ENABLE_ASYNC_CREATE_FILE</code> unset -> default ON</li>
 </ul>
 
 

@@ -1,6 +1,6 @@
 # Wine-NSPA -- NT-local stubs
 
-Wine 11.6 + NSPA RT patchset | Kernel 6.19.x-rt with NTSync PI | 2026-04-27
+Wine 11.6 + NSPA RT patchset | Kernel 6.19.x-rt with NTSync PI | 2026-04-30
 Author: Jordan Johnston
 Status: architectural pattern reference for shipped client-local NT bypasses and their fallback discipline.
 
@@ -655,6 +655,13 @@ issue any wineserver RPC.
 
 **Feature gate:** `NSPA_DISABLE_LOCAL_WM_TIMERS` (default-on; gate
 disables the bypass).
+
+**2026-04-30 follow-up:** [`78947c1`](https://github.com/nine7nine/Wine-NSPA/commit/78947c1)
+tightened the eligibility predicate so `TIMERPROC` and cross-thread
+`SetTimer` cases now refuse the stub and defer to the server. That is
+the correct NT-local-stub shape: keep the cheap owner-thread path local,
+and route anything with ambiguous ownership or callback semantics back
+to the authoritative server path.
 
 ---
 

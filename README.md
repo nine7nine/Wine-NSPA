@@ -16,17 +16,17 @@ Wine-NSPA 11.x is a **work in progress** built on top of upstream Wine 11.6. Eve
 
 | Document | Description |
 |----------|-------------|
-| [Aggregate-Wait and Async Completion](https://nine7nine.github.io/Wine-NSPA/aggregate-wait-and-async-completion.gen.html) | Landed kernel 1010 + dispatcher Phase 2/3 architecture: `NTSYNC_IOC_AGGREGATE_WAIT`, per-process dispatcher-owned `io_uring`, and same-thread CQE drain / reply. |
+| [Aggregate-Wait and Async Completion](https://nine7nine.github.io/Wine-NSPA/aggregate-wait-and-async-completion.gen.html) | Landed kernel 1010 + dispatcher Phase 2/3 architecture: `NTSYNC_IOC_AGGREGATE_WAIT`, per-process dispatcher-owned `io_uring`, and same-thread CQE drain / reply. The 2026-04-30 Phase 4 / 1011 follow-ons build on this base. |
 | [Architecture Overview](https://nine7nine.github.io/Wine-NSPA/architecture.gen.html) | Master overview: layered architecture, subsystem map, RT priority mapping, links into the dedicated subsystem docs below. |
 | [Audio Stack](https://nine7nine.github.io/Wine-NSPA/audio-stack.gen.html) | winejack.drv (WASAPI + MIDI via JACK), nspaASIO bridge (ASIO -> WASAPI exclusive -> winejack -> JACK), Phase F zero-latency bufferSwitch inside the JACK callback. |
 | [Critical Section PI](https://nine7nine.github.io/Wine-NSPA/cs-pi.gen.html) | FUTEX_LOCK_PI on `CRITICAL_SECTION`: fast / slow path, PI chain, gating, fallback. v2.3 stable. |
-| [Gamma Channel-Based Wineserver Dispatcher](https://nine7nine.github.io/Wine-NSPA/gamma-channel-dispatcher.gen.html) | Single per-process kernel-mediated wineserver IPC channel via NTSync. SEND_PI / RECV2 / REPLY plus post-1010 aggregate-wait over channel + uring eventfd + shutdown eventfd. Replaces the legacy per-thread shmem-pthread dispatcher. |
+| [Gamma Channel-Based Wineserver Dispatcher](https://nine7nine.github.io/Wine-NSPA/gamma-channel-dispatcher.gen.html) | Single per-process kernel-mediated wineserver IPC channel via NTSync. SEND_PI / RECV2 / REPLY plus post-1010 aggregate-wait over channel + uring eventfd + shutdown eventfd, and post-1011 TRY_RECV2 burst drain. |
 | [Hook Cache](https://nine7nine.github.io/Wine-NSPA/hook-cache.gen.html) | Two-tier Win32 hook chain cache. Tier 1 server-side count rebuild + Tier 2 full chain snapshot in queue_shm; clients walk the chain locally without RPC. |
-| [io_uring I/O Architecture](https://nine7nine.github.io/Wine-NSPA/io_uring-architecture.gen.html) | Phase 1 file I/O bypass (shipped). Phase 2 sockets and Phase 3 pipes / named events queued. ntsync `uring_fd` integration. |
+| [io_uring I/O Architecture](https://nine7nine.github.io/Wine-NSPA/io_uring-architecture.gen.html) | Phase 1 file I/O bypass and Phase 4 dispatcher-owned async `CreateFile` are shipped. Phase 2 sockets and Phase 3 pipes / named events remain queued. ntsync `uring_fd` integration. |
 | [Local-File Bypass Architecture](https://nine7nine.github.io/Wine-NSPA/nspa-local-file-architecture.gen.html) | NtCreateFile bypass for read-only regular files: client-private handle range, per-process table, shared inode-aggregation shmem with seqlock + PSHARED PI mutex bucket lock. ~28,500 file opens offloaded per Ableton startup. |
 | [Message Ring Architecture](https://nine7nine.github.io/Wine-NSPA/msg-ring-architecture.gen.html) | Cross-thread PostMessage / SendMessage via per-queue memfd rings. Includes Phase A redraw-window push ring, Phase B1.0 paint-cache fastpath, Phase C get_message bypass (paused), and the MR1 / MR2 / MR4 audit fix-pack. |
 | [NT Local Stubs](https://nine7nine.github.io/Wine-NSPA/nt-local-stubs.gen.html) | The architectural pattern of client-side stubs that satisfy NT-API calls without crossing into wineserver. Currently shipped: `nspa_local_file`, `nspa_local_timer`, `nspa_local_wm_timer`. |
-| [NTSync PI Kernel Driver](https://nine7nine.github.io/Wine-NSPA/ntsync-driver.gen.html) | Patch series 1003-1010: PI primitives, channel object, thread-token pass-through, RT alloc-hoist, hardening fixes, and `NTSYNC_IOC_AGGREGATE_WAIT`. Post-1009 baseline plus aggregate-wait validation documented. |
+| [NTSync PI Kernel Driver](https://nine7nine.github.io/Wine-NSPA/ntsync-driver.gen.html) | Patch series 1003-1011: PI primitives, channel object, thread-token pass-through, RT alloc-hoist, hardening fixes, `NTSYNC_IOC_AGGREGATE_WAIT`, and `NTSYNC_IOC_CHANNEL_TRY_RECV2`. |
 | [Win32 Condvar PI (Requeue-PI)](https://nine7nine.github.io/Wine-NSPA/condvar-pi-requeue.gen.html) | FUTEX_WAIT_REQUEUE_PI for RtlSleepConditionVariableCS: condvar-to-mutex mapping, three new syscalls, zero-gap PI. |
 | [Wineserver Decomposition Plan](https://nine7nine.github.io/Wine-NSPA/wineserver-decomposition.gen.html) | Long-horizon plan to decompose wineserver after enough state migrates out via the bypass trajectories. Phases 1-2 shipped; aggregate-wait kernel/userspace slice landed; timer/fd-poll remainder still queued. |
 
@@ -34,8 +34,8 @@ Wine-NSPA 11.x is a **work in progress** built on top of upstream Wine 11.6. Eve
 
 | Document | Description |
 |----------|-------------|
-| [State of The Art](https://nine7nine.github.io/Wine-NSPA/current-state.gen.html) | Live state board: kernel + module versions, PI coverage, bypass status, validation totals, open work. |
-| [RT Test Harness](https://nine7nine.github.io/Wine-NSPA/nspa-rt-test.gen.html) | Layer 1 native ntsync stress suite + Layer 2 PE matrix. Subcommands, runner, watchdog, benchmarks. |
+| [State of The Art](https://nine7nine.github.io/Wine-NSPA/current-state.gen.html) | Live state board: shipped defaults, kernel + module versions, exact validation totals, dispatcher-burst A/B, flush-throttle gains, and open work. |
+| [RT Test Harness](https://nine7nine.github.io/Wine-NSPA/nspa-rt-test.gen.html) | Layer 1 native ntsync stress suite + Layer 2 PE matrix, now including `dispatcher-burst` for gamma / TRY_RECV2 coverage. |
 | [Test Suite Comparison](https://nine7nine.github.io/Wine-NSPA/nspa-test-comparison.gen.html) | v3 -> v7 timeline. Per-thread metrics, latency data, and the principle that PASS / FAIL + KASAN-clean is authoritative across versions. |
 
 ### Historical / Superseded
@@ -50,15 +50,15 @@ Wine-NSPA 11.x is a **work in progress** built on top of upstream Wine 11.6. Eve
 
 ## Status
 
-**WIP.** The 11.x tree passes its validation suite (Layer 1 native ntsync stress + Layer 2 PE matrix 22/22 baseline + RT) and is used for day-to-day development. The investigation arc through 2026-04-26 -> 2026-04-28 closed major debt: 4 ntsync kernel-driver bugs fixed under KASAN-armed stress, 3 wine-userspace bugs fixed in the message ring (MR1 reply-slot ABA, MR2 cross-process futex, MR4 POST wake-loss), and 2 clean Ableton runs (paint-cache off + paint-cache on past the historical 5-min lockup threshold).
+**WIP.** The 11.x tree passes its validation suite (Layer 1 native ntsync 3 PASS / 0 FAIL + Layer 2 PE matrix 24 PASS / 0 FAIL / 0 TIMEOUT) and is used for day-to-day development. The 2026-04-30 session added three default-on user-facing features: `NSPA_FLUSH_THROTTLE_MS=8`, `NSPA_ENABLE_ASYNC_CREATE_FILE=1`, and `NSPA_TRY_RECV2=1`.
 
 This is an active research branch -- code is not released and the architecture is still evolving.
 
 Key areas under active work:
 
 - **5 PI coverage paths**: CS-PI, NTSync PI, pi_cond requeue-PI, Win32 condvar PI, kernel-atomic IPC PI via gamma channels
-- **Bypass trajectories**: most shipped default-on; paint-cache validating; Phase C `get_message` bypass paused mid-development; sechost device-IRP poll and io_uring 2/3 queued
-- **NTSync kernel driver**: patch series 1003-1010 in production; current module `CFF56DE1EF28D693BB597CD`
+- **Bypass trajectories**: most shipped default-on; paint-cache validating; Phase C `get_message` bypass paused mid-development; sechost device-IRP poll and io_uring socket/pipe follow-on queued
+- **NTSync kernel driver**: patch series 1003-1011 in production; current module `10124FB81FDC76797EF1F91`
 - **Wineserver decomposition**: long-horizon plan with bypass-trajectories-as-prereqs; Phases 1-2 shipped, aggregate-wait slice landed, timer/fd-poll remainder queued
 - **Application compatibility**: Ableton Live 12 + VST hosts; PE-only Wine-NSPA build matrix (x86_64 + Wow64 i386)
 

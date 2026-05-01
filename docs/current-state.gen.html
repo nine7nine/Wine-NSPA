@@ -85,13 +85,13 @@
 </head><body>
 <h1 id="wine-nspa--state-of-the-art">Wine-NSPA — State of The Art</h1>
 
-<p><strong>Date:</strong> 2026-04-29
+<p><strong>Date:</strong> 2026-04-30
 <strong>Author:</strong> Jordan Johnston
 <strong>Kernel:</strong> <code>6.19.11-rt1-1-nspa</code> (PREEMPT_RT_FULL, production)
-<strong>ntsync module:</strong> <code>srcversion CFF56DE1EF28D693BB597CD</code>
-<strong>Wine submodule HEAD:</strong> <code>b72419fc953</code> (Wine 11.6 + NSPA fork)
-<strong>Superproject HEAD:</strong> <code>94eda70</code>
-<strong>Status:</strong> production state board as of 2026-04-29; includes aggregate-wait / gamma Phase 3 and intentionally excludes the still-WIP async <code>create_file</code> port.</p>
+<strong>ntsync module:</strong> <code>srcversion 10124FB81FDC76797EF1F91</code>
+<strong>Wine submodule HEAD:</strong> <code>d06b732fc2c3</code> (Wine 11.6 + NSPA fork)
+<strong>Superproject HEAD:</strong> <code>b2a4fdb</code>
+<strong>Status:</strong> production state board as of 2026-04-30; aggregate-wait Phase 3, post-1011 TRY_RECV2 burst-drain, flush throttle, and Phase 4 async <code>create_file</code> are all in the shipped public set.</p>
 
 <p>This page is the project snapshot for what is actually shipped: kernel patch state, userspace feature state, validation totals, configuration knobs, and the remaining open work.</p>
 
@@ -106,7 +106,7 @@
 <li><a href="#3-active-features">Active features</a></li>
 <li><a href="#4-validation-status">Validation status</a></li>
 <li><a href="#5-open-work-in-priority-order">Open work, in priority order</a></li>
-<li><a href="#6-recent-investigation-arc-2026-04-26-to-2026-04-28">Recent investigation arc</a></li>
+<li><a href="#6-recent-investigation-arc-2026-04-26-to-2026-04-30">Recent investigation arc</a></li>
 <li><a href="#7-configuration-reference">Configuration reference</a></li>
 <li><a href="#8-doc-index">Doc index</a></li>
 </ol>
@@ -116,17 +116,24 @@
 
 <h2 id="where-we-are">Where we are</h2>
 
-<p>Wine-NSPA moved beyond the post-1009 hardening baseline on 2026-04-29.
-The kernel now ships patch 1010 (<code>NTSYNC_IOC_AGGREGATE_WAIT</code>) plus its
-post-1010 PI-ordering fixes, and the wineserver side ships the Phase 2
-per-process dispatcher-owned <code>io_uring</code> infrastructure plus the Phase 3
-aggregate-wait dispatcher loop. That path is validated and default-on.</p>
+<p>Wine-NSPA moved beyond the post-1010 aggregate-wait baseline on
+2026-04-30. The kernel now ships patch 1011
+(<code>NTSYNC_IOC_CHANNEL_TRY_RECV2</code>) on top of the 1003-1011 stack, and the
+wineserver side ships three default-on follow-ons built on that base:</p>
 
-<p>The important distinction for the state board is that the stable public
-story now includes the <strong>dispatcher async-completion architecture</strong>
-itself, not just the prerequisite channel and PI stack. The still-WIP
-async <code>create_file</code> handler port stays outside this snapshot; it is
-default-off and not part of the production status reported here.</p>
+<ul>
+<li><code>NSPA_FLUSH_THROTTLE_MS=8</code> on <code>x11drv</code> MainThread flushes</li>
+<li><code>NSPA_ENABLE_ASYNC_CREATE_FILE=1</code> for Phase 4 <code>CreateFile</code> through the
+per-process dispatcher-owned <code>io_uring</code> ring</li>
+<li><code>NSPA_TRY_RECV2=1</code> for post-dispatch burst drain on 1011 kernels</li>
+</ul>
+
+
+<p>The important distinction for this state board is that the stable
+public story now includes the <strong>dispatcher async-completion
+architecture</strong>, the <strong>Phase 4 async <code>create_file</code> consumer</strong>, and the
+<strong>1011 burst-drain follow-on</strong>, not just the prerequisite channel and PI
+stack.</p>
 
 <p>What the project looks like today: one small kernel module
 (~3kLOC) plus a Wine fork that increasingly bypasses wineserver
@@ -162,7 +169,7 @@ when the gate is off.</p>
 </tr>
 <tr>
 <td> ntsync srcversion </td>
-<td> <code>CFF56DE1EF28D693BB597CD</code> </td>
+<td> <code>10124FB81FDC76797EF1F91</code> </td>
 </tr>
 <tr>
 <td> Module ref count </td>
@@ -236,6 +243,12 @@ when the gate is off.</p>
 <td> Heterogeneous object+fd wait; channel notify-only path used by the gamma dispatcher </td>
 <td> Shipped </td>
 </tr>
+<tr>
+<td> 1011 </td>
+<td> Channel TRY_RECV2 </td>
+<td> <code>NTSYNC_IOC_CHANNEL_TRY_RECV2</code>: non-blocking <code>RECV2</code> for post-dispatch burst drain </td>
+<td> Shipped </td>
+</tr>
 </tbody>
 </table>
 
@@ -244,7 +257,7 @@ when the gate is off.</p>
 <code>/home/ninez/pkgbuilds/Wine-NSPA/wine-rt-claude/wine/nspa/docs/ntsync-rt-audit.md</code>
 and validation totals at <code>project_ntsync_prod_kernel_validation_20260427</code>.</p>
 
-<h3 id="13-validation-totals-against-cff56de1ef28d693bb597cd">1.3 Validation totals against <code>CFF56DE1EF28D693BB597CD</code></h3>
+<h3 id="13-validation-totals-against-10124fb81fdc76797ef1f91">1.3 Validation totals against <code>10124FB81FDC76797EF1F91</code></h3>
 
 <table>
 <thead>
@@ -258,89 +271,47 @@ and validation totals at <code>project_ntsync_prod_kernel_validation_20260427</c
 </thead>
 <tbody>
 <tr>
-<td> Native sanity </td>
+<td> Native suite </td>
 <td> <code>run-rt-suite.sh native</code> </td>
-<td> 2/2 PASS </td>
-<td> small </td>
-<td> 0 </td>
-</tr>
-<tr>
-<td> Native stress </td>
-<td> <code>event-set-pi 60s 8x8</code> </td>
-<td> PASS </td>
-<td> ~158M </td>
-<td> 0 </td>
-</tr>
-<tr>
-<td> Native stress </td>
-<td> <code>mutex-pi 30s 8h+4mtx</code> </td>
-<td> PASS </td>
-<td> ~12M </td>
-<td> 0 </td>
-</tr>
-<tr>
-<td> Native stress </td>
-<td> <code>channel 30s 4x4</code> </td>
-<td> PASS, SEND=REPLY perfect </td>
-<td> ~52M </td>
-<td> 0 </td>
-</tr>
-<tr>
-<td> Native stress </td>
-<td> <code>mixed-load 300s 13 workers</code> </td>
-<td> PASS, all paths </td>
-<td> ~145M </td>
+<td> 3 PASS / 0 FAIL </td>
+<td> <code>test-event-set-pi</code>, <code>test-channel-recv-exclusive</code>, <code>test-aggregate-wait</code> </td>
 <td> 0 </td>
 </tr>
 <tr>
 <td> Native aggregate </td>
 <td> <code>test-aggregate-wait</code> </td>
 <td> 9/9 PASS </td>
-<td> n/a </td>
-<td> 0 </td>
-</tr>
-<tr>
-<td> Native aggregate </td>
-<td> <code>aggregate-wait 30k + suite</code> </td>
-<td> PASS, dmesg clean </td>
-<td> long soak </td>
+<td> kitchen-sink: 86,528 wakes / 0 timeouts / 0 errors </td>
 <td> 0 </td>
 </tr>
 <tr>
 <td> PE matrix </td>
 <td> <code>nspa_rt_test.exe baseline+rt</code> </td>
-<td> 22/22 PASS </td>
-<td> n/a </td>
+<td> 24 PASS / 0 FAIL / 0 TIMEOUT </td>
+<td> baseline + RT </td>
 <td> 0 </td>
 </tr>
 <tr>
-<td> Ableton run-3 </td>
-<td> smoke level 4, paint-cache OFF </td>
-<td> PASS </td>
-<td> n/a </td>
+<td> PE dispatcher A/B </td>
+<td> <code>dispatcher-burst</code> </td>
+<td> PASS in matrix </td>
+<td> steady-state 100k iters; burst 8 × 1000 × 64 = 512k ops </td>
 <td> 0 </td>
 </tr>
 <tr>
-<td> Ableton run-4 </td>
-<td> smoke level 4 + 5-min soak, paint-cache ON </td>
+<td> Busy-workload perf </td>
+<td> Ableton 30s busy capture </td>
 <td> PASS </td>
-<td> n/a </td>
-<td> 0 </td>
-</tr>
-<tr>
-<td> Ableton run-5 </td>
-<td> Phase 3 default-on (<code>NSPA_AGG_WAIT</code> unset) </td>
-<td> PASS </td>
-<td> n/a </td>
+<td> <code>channel_dispatcher</code> 14.51% -> 0.70%; samples 38,588 -> 19,415 </td>
 <td> 0 </td>
 </tr>
 </tbody>
 </table>
 
 
-<p><strong>Cumulative: post-1009 baseline ~370M ops, plus dedicated aggregate-wait
-and Phase 3 validation on the current production module, zero syscall
-errors, zero dmesg splats, refcnt=0 post-soak.</strong></p>
+<p><strong>Layer 1 totals: 3 PASS / 0 FAIL. Layer 2 totals: 24 PASS / 0 FAIL /
+0 TIMEOUT. Module <code>10124FB81FDC76797EF1F91</code> was loaded live and
+verified while these results were collected.</strong></p>
 
 <p>The four bugs fixed in this cycle were:</p>
 
@@ -374,11 +345,11 @@ errors, zero dmesg splats, refcnt=0 post-soak.</strong></p>
 </tr>
 <tr>
 <td> HEAD </td>
-<td> <code>b72419fc953</code> </td>
+<td> <code>d06b732fc2c3</code> </td>
 </tr>
 <tr>
 <td> Tip series </td>
-<td> aggregate-wait + dispatcher Phase 2/3 landed (2026-04-29) </td>
+<td> flush throttle default 8 + Phase 4 async <code>create_file</code> + TRY_RECV2 burst-drain + <code>dispatcher-burst</code> harness (2026-04-30) </td>
 </tr>
 </tbody>
 </table>
@@ -436,17 +407,17 @@ clean of the same bug class.</p>
 
 <h3 id="23-recent-commits-at-the-tip">2.3 Recent commits at the tip</h3>
 
-<pre><code class="code-block">b72419fc953  nspa docs: session handoff 2026-04-29 — Phase 2/3/4 + regression note
-fc7466d1945  nspa Phase 3: default-on AGGREGATE_WAIT (Ableton-validated)
-7f7253e4deb  nspa Phase 3: dispatcher restructure (AGGREGATE_WAIT, default-off first)
-98615b36ed3  nspa Phase 2: per-process server-side io_uring infrastructure
-8b22da6f949  nspa tests: aggregate-wait — add channel-PI propagation sub-test 8
-670a19db18d  nspa tests: aggregate-wait — fix kitchen-sink hang, add channel-notify sub-test
-e4cdba79332  nspa tests: aggregate-wait native test + KASAN stress driver
-ac823311aba  nspa docs: wine-NSPA lockup audit 2026-04-27
-9b4172e2bbc  nspa msg_ring v2: MR1 ABA + MR2 cross-process futex + MR4 POST wake-loss
-b5e8dcab3eb  nspa gamma T3: flip dispatcher token consumption default ON
-9b6e2a108e1  nspa Phase B: flip openat lock-drop default ON post-1006
+<pre><code class="code-block">d06b732fc2c  nspa docs: session results 2026-04-30 (full session payload)
+343d7ac2815  nspa rt-test runner: include dispatcher-burst in matrix
+f087a265e83  nspa rt-test: add dispatcher-burst subcommand for gamma channel A/B
+01d528f5700  nspa shmem_channel: TRY_RECV2 burst-drain after dispatch
+1d85c558ceb  nspa dispatcher: ACQ_REL fences + inline nspa_queue_bypass_shm
+b0041e3f8ed  nspa Phase 4: flip NSPA_ENABLE_ASYNC_CREATE_FILE default ON
+e0338516802  nspa win32u/dce: flip flush throttle default-on at 8ms
+78947c18850  nspa local_wm_timer: tighten eligibility (TIMERPROC + cross-thread)
+2160e061aa1  nspa LF: arbitrate FILE_MAPPING_WRITE in shared-inode check (sync-parity)
+ef4e04902fc  nspa LF: reject FILE_NON_DIRECTORY_FILE on dir bypass (sync-parity)
+97a42162abb  nspa LF: populate fd-&gt;nt_name on dir-bypass promote (sync-parity)
 </code></pre>
 
 <hr />
@@ -499,7 +470,82 @@ active when <code>NSPA_RT_PRIO</code> is set:</p>
 <p>When <code>NSPA_RT_PRIO</code> is unset, every code path is byte-identical to
 upstream Wine. Zero overhead.</p>
 
-<h3 id="32-bypass-and-infrastructure-subsystems">3.2 Bypass and infrastructure subsystems</h3>
+<h3 id="32-session-feature-flips--2026-04-30">3.2 Session feature flips &ndash; 2026-04-30</h3>
+
+<h4 id="env-controlled-features-now-default-on">Env-controlled features now default-on</h4>
+
+<table>
+<thead>
+<tr>
+<th> Feature </th>
+<th> Default </th>
+<th> Override </th>
+<th> Commit </th>
+<th> User-visible result </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> <code>NSPA_FLUSH_THROTTLE_MS</code> </td>
+<td> <code>8</code> </td>
+<td> <code>NSPA_FLUSH_THROTTLE_MS=N</code>; <code>=0</code> disables </td>
+<td> <a href="https://github.com/nine7nine/Wine-NSPA/commit/e0338516"><code>e0338516</code></a> </td>
+<td> <code>x11drv_surface_flush</code>: 8.23% -> 4.74% (−43%); <code>copy_rect_32</code> memmove: 4.38% -> 2.49% (−43%); MainThread CPU recovered: ~5.4 percentage points </td>
+</tr>
+<tr>
+<td> <code>NSPA_ENABLE_ASYNC_CREATE_FILE</code> </td>
+<td> <code>1</code> </td>
+<td> <code>NSPA_ENABLE_ASYNC_CREATE_FILE=0</code> </td>
+<td> <a href="https://github.com/nine7nine/Wine-NSPA/commit/b0041e3f"><code>b0041e3f</code></a> </td>
+<td> Phase 4 routes <code>CreateFile</code> through the per-process <code>io_uring</code> ring, removing the <code>open()</code> lock-drop CS from the audio xrun path </td>
+</tr>
+<tr>
+<td> <code>NSPA_TRY_RECV2</code> </td>
+<td> <code>1</code> </td>
+<td> <code>NSPA_TRY_RECV2=0</code> </td>
+<td> <a href="https://github.com/nine7nine/Wine-NSPA/commit/01d528f5"><code>01d528f5</code></a> </td>
+<td> On ntsync 1011 kernels, drains multiple channel entries per <code>AGG_WAIT</code> instead of N round-trips </td>
+</tr>
+</tbody>
+</table>
+
+
+<h4 id="correctness-fixes-shipped-in-the-same-session">Correctness fixes shipped in the same session</h4>
+
+<table>
+<thead>
+<tr>
+<th> Fix </th>
+<th> Commit </th>
+<th> Effect </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> LF dir-bypass <code>fd-&gt;nt_name</code> populated on promote </td>
+<td> <a href="https://github.com/nine7nine/Wine-NSPA/commit/97a4216"><code>97a4216</code></a> </td>
+<td> fixes <code>start.exe</code> NULL-Name crash </td>
+</tr>
+<tr>
+<td> LF rejects <code>FILE_NON_DIRECTORY_FILE</code> on dir bypass </td>
+<td> <a href="https://github.com/nine7nine/Wine-NSPA/commit/ef4e049"><code>ef4e049</code></a> </td>
+<td> restores sync parity for directory opens </td>
+</tr>
+<tr>
+<td> LF <code>check_sharing</code> arbitrates <code>FILE_MAPPING_WRITE</code> </td>
+<td> <a href="https://github.com/nine7nine/Wine-NSPA/commit/2160e06"><code>2160e06</code></a> </td>
+<td> mirrors <code>server/fd.c::check_sharing</code> </td>
+</tr>
+<tr>
+<td> <code>local_wm_timer</code> eligibility tightening </td>
+<td> <a href="https://github.com/nine7nine/Wine-NSPA/commit/78947c1"><code>78947c1</code></a> </td>
+<td> <code>TIMERPROC</code> + cross-thread <code>SetTimer</code> cases defer to the server </td>
+</tr>
+</tbody>
+</table>
+
+
+<h3 id="33-bypass-and-infrastructure-subsystems">3.3 Bypass and infrastructure subsystems</h3>
 
 <p>The dominant architectural change over the last six months has been
 moving state out of the single-threaded wineserver event loop into
@@ -521,7 +567,7 @@ own correctness proof and gate.</p>
 <td> <strong>Gamma channel dispatcher</strong> </td>
 <td> Shipped </td>
 <td> ON </td>
-<td> Per-process kernel-mediated channel via ntsync 1004/1005, with post-1010 aggregate-wait over channel + uring eventfd + shutdown eventfd. T1+T2+T3 thread-token consumption and same-thread CQE drain both shipped default-on. </td>
+<td> Per-process kernel-mediated channel via ntsync 1004/1005/1011, with post-1010 aggregate-wait over channel + uring eventfd + shutdown eventfd and post-dispatch TRY_RECV2 burst drain on 1011 kernels. </td>
 <td> <code>gamma-channel-dispatcher.gen.html</code> </td>
 </tr>
 <tr>
@@ -570,7 +616,7 @@ own correctness proof and gate.</p>
 <td> <strong>NT-local file</strong> (<code>nspa_local_file</code>) </td>
 <td> Shipped </td>
 <td> ON </td>
-<td> <code>NtCreateFile</code> bypass for unix-name-resolvable paths; check_and_publish_open + bucket_lock seqlock </td>
+<td> <code>NtCreateFile</code> bypass for unix-name-resolvable paths; check_and_publish_open + bucket_lock seqlock, with 2026-04-30 sync-parity fixes for directory promotion and <code>FILE_MAPPING_WRITE</code> sharing </td>
 <td> <code>nspa-local-file-architecture.gen.html</code> </td>
 </tr>
 <tr>
@@ -584,7 +630,7 @@ own correctness proof and gate.</p>
 <td> <strong>NT-local WM timer</strong> (<code>nspa_local_wm_timer</code>) </td>
 <td> Shipped </td>
 <td> ON </td>
-<td> <code>SetTimer</code> userspace path; <code>(win, id, msg)</code> tuple as built-in ABA discriminator </td>
+<td> <code>SetTimer</code> userspace path; <code>(win, id, msg)</code> tuple as built-in ABA discriminator. <code>TIMERPROC</code> + cross-thread cases now explicitly defer to the server. </td>
 <td> (within local_wm_timer.c) </td>
 </tr>
 <tr>
@@ -619,15 +665,22 @@ own correctness proof and gate.</p>
 <td> <strong>Dispatcher Phase 2/3 (<code>NSPA_AGG_WAIT</code>)</strong> </td>
 <td> Shipped </td>
 <td> ON </td>
-<td> Per-process server-side <code>io_uring</code> infrastructure plus aggregate-wait dispatcher loop. Same RT thread receives requests, drains CQEs, and signals replies. </td>
+<td> Per-process server-side <code>io_uring</code> infrastructure plus aggregate-wait dispatcher loop. Same RT thread receives requests, drains CQEs, signals replies, and on 1011 kernels can burst-drain ready entries. </td>
 <td> <code>aggregate-wait-and-async-completion.gen.html</code> </td>
 </tr>
 <tr>
-<td> <strong>io_uring Phase 2/3</strong> </td>
+<td> <strong>Async <code>CreateFile</code> (Phase 4)</strong> </td>
+<td> Shipped </td>
+<td> ON </td>
+<td> <code>NSPA_ENABLE_ASYNC_CREATE_FILE=1</code> routes <code>CreateFile</code> through the dispatcher-owned ring and removes the <code>open()</code> lock-drop critical section from the audio xrun path. </td>
+<td> <code>io_uring-architecture.gen.html</code> </td>
+</tr>
+<tr>
+<td> <strong>io_uring socket/pipe follow-on</strong> </td>
 <td> Pending </td>
 <td> n/a </td>
-<td> File I/O / async write coverage beyond the dispatcher-owned ring plumbing; handler ports still queued </td>
-<td> <code>aggregate-wait-and-async-completion.gen.html</code> </td>
+<td> Socket and pipe coverage beyond the shipped dispatcher-owned ring consumer; sync socket work remains a separate revalidation thread. </td>
+<td> <code>io_uring-architecture.gen.html</code> </td>
 </tr>
 <tr>
 <td> <strong>Wineserver <code>global_lock</code> PI</strong> </td>
@@ -654,7 +707,7 @@ own correctness proof and gate.</p>
 </table>
 
 
-<h3 id="33-audio-stack">3.3 Audio stack</h3>
+<h3 id="34-audio-stack">3.4 Audio stack</h3>
 
 <table>
 <thead>
@@ -707,20 +760,20 @@ own correctness proof and gate.</p>
   </defs>
 
   <rect x="0" y="0" width="940" height="500" class="cs-bg" rx="6"/>
-  <text x="470" y="28" text-anchor="middle" class="cs-title">2026-04-29 deployment board: what is shipped, what is gated, and what is next</text>
+  <text x="470" y="28" text-anchor="middle" class="cs-title">2026-04-30 deployment board: what is shipped, what is gated, and what is next</text>
 
   <rect x="50" y="70" width="250" height="150" class="cs-green" rx="6"/>
   <text x="175" y="96" text-anchor="middle" class="cs-tag-green">Kernel / sync substrate</text>
-  <text x="175" y="122" text-anchor="middle" class="cs-label">NTSync 1003-1010</text>
-  <text x="175" y="140" text-anchor="middle" class="cs-small">PI waits, channel IPC, aggregate-wait</text>
+  <text x="175" y="122" text-anchor="middle" class="cs-label">NTSync 1003-1011</text>
+  <text x="175" y="140" text-anchor="middle" class="cs-small">PI waits, channel IPC, aggregate-wait, TRY_RECV2</text>
   <text x="175" y="164" text-anchor="middle" class="cs-label">CS-PI + condvar PI</text>
   <text x="175" y="182" text-anchor="middle" class="cs-small">all RT paths gate on NSPA_RT_PRIO</text>
 
   <rect x="345" y="70" width="250" height="150" class="cs-green" rx="6"/>
   <text x="470" y="96" text-anchor="middle" class="cs-tag-green">Client-side bypasses</text>
-  <text x="470" y="122" text-anchor="middle" class="cs-label">gamma channel + dispatcher Phase 3</text>
+  <text x="470" y="122" text-anchor="middle" class="cs-label">gamma + Phase 4 async create_file</text>
   <text x="470" y="140" text-anchor="middle" class="cs-small">local-file, local timers, hook cache, msg-ring v1</text>
-  <text x="470" y="164" text-anchor="middle" class="cs-label">wineserver load already reduced</text>
+  <text x="470" y="164" text-anchor="middle" class="cs-label">TRY_RECV2 + flush throttle shipped</text>
   <text x="470" y="182" text-anchor="middle" class="cs-small">many hot paths no longer need global_lock</text>
 
   <rect x="640" y="70" width="250" height="150" class="cs-green" rx="6"/>
@@ -741,8 +794,8 @@ own correctness proof and gate.</p>
   <text x="470" y="296" text-anchor="middle" class="cs-tag-violet">Paused / queued</text>
   <text x="470" y="322" text-anchor="middle" class="cs-label">msg-ring Phase C get_message</text>
   <text x="470" y="340" text-anchor="middle" class="cs-small">remaining message-pump bypass piece</text>
-  <text x="470" y="364" text-anchor="middle" class="cs-label">io_uring phases 2/3</text>
-  <text x="470" y="382" text-anchor="middle" class="cs-small">file I/O and async write coverage</text>
+  <text x="470" y="364" text-anchor="middle" class="cs-label">io_uring sockets + pipes</text>
+  <text x="470" y="382" text-anchor="middle" class="cs-small">follow-on surfaces beyond the shipped ring consumer</text>
 
   <rect x="640" y="270" width="250" height="140" class="cs-wip" rx="6"/>
   <text x="765" y="296" text-anchor="middle" class="cs-tag-violet">Longer horizon</text>
@@ -766,9 +819,11 @@ own correctness proof and gate.</p>
 <h3 id="41-whats-clean">4.1 What&rsquo;s clean</h3>
 
 <ul>
-<li>ntsync module <code>CFF56DE1EF28D693BB597CD</code> against prod kernel <code>6.19.11-rt1-1-nspa</code>: post-1009 baseline retained, aggregate-wait added, 0 reported syscall errors, 0 dmesg splats on the current production validation path.</li>
-<li><code>test-aggregate-wait</code> 9/9 PASS, including the channel-notify and channel-PI propagation checks needed for the dispatcher Phase 3 loop.</li>
-<li>nspa_rt_test PE matrix: 22/22 PASS (baseline + RT).</li>
+<li>ntsync module <code>10124FB81FDC76797EF1F91</code> against prod kernel <code>6.19.11-rt1-1-nspa</code>: 1003-1011 live, loaded, and verified clean.</li>
+<li>Native suite: <strong>3 PASS / 0 FAIL</strong> (<code>test-event-set-pi</code>, <code>test-channel-recv-exclusive</code>, <code>test-aggregate-wait</code>).</li>
+<li><code>test-aggregate-wait</code>: <strong>9/9 PASS</strong>, including kitchen-sink <code>86,528 wakes / 0 timeouts / 0 errors</code>.</li>
+<li>nspa_rt_test PE matrix: <strong>24 PASS / 0 FAIL / 0 TIMEOUT</strong> (baseline + RT).</li>
+<li><code>dispatcher-burst</code> is now in the PE matrix and is the first PE-side harness that actually covers <code>channel_dispatcher</code> / <code>dispatch_channel_entry</code> / the TRY_RECV2 drain loop.</li>
 <li>Ableton Live 12 Lite — full smoke level 4 — <strong>two clean runs on 2026-04-28</strong>:
 
 <ul>
@@ -776,7 +831,7 @@ own correctness proof and gate.</p>
 <li><strong>Run-4</strong>: <code>NSPA_ENABLE_PAINT_CACHE=1</code> (the historical 5-min-lockup config). Past 5-min threshold without incident, multiple drum-load cycles, audio clean, exit 0.</li>
 </ul>
 </li>
-<li>Ableton Live 12 Lite — <strong>Phase 3 dispatcher default-on</strong> (2026-04-29): aggregate-wait path clean under the same workload, clean shutdown.</li>
+<li>Ableton Live 12 Lite — <strong>Phase 3 dispatcher + TRY_RECV2 + Phase 4 create_file</strong> (2026-04-30): clean under the same workload, with the dispatcher re-profiled under a 30s busy capture.</li>
 </ul>
 
 
@@ -802,29 +857,29 @@ own correctness proof and gate.</p>
   </defs>
 
   <rect x="0" y="0" width="940" height="360" class="vp-bg" rx="6"/>
-  <text x="470" y="28" text-anchor="middle" class="vp-title">Validation posture on 2026-04-29</text>
+  <text x="470" y="28" text-anchor="middle" class="vp-title">Validation posture on 2026-04-30</text>
 
   <rect x="40" y="82" width="250" height="180" class="vp-clean" rx="6"/>
   <text x="165" y="108" text-anchor="middle" class="vp-green">Clean / production-ready</text>
-  <text x="165" y="136" text-anchor="middle" class="vp-label">ntsync `CFF56DE1EF28D693BB597CD`</text>
-  <text x="165" y="154" text-anchor="middle" class="vp-small">post-1009 baseline + aggregate-wait clean</text>
-  <text x="165" y="178" text-anchor="middle" class="vp-label">PE matrix 22/22 PASS</text>
-  <text x="165" y="202" text-anchor="middle" class="vp-label">Ableton run-3 PASS</text>
-  <text x="165" y="220" text-anchor="middle" class="vp-small">default config, paint-cache OFF</text>
-  <text x="165" y="244" text-anchor="middle" class="vp-label">Ableton run-4 PASS</text>
+  <text x="165" y="136" text-anchor="middle" class="vp-label">ntsync `10124FB81FDC76797EF1F91`</text>
+  <text x="165" y="154" text-anchor="middle" class="vp-small">1003-1011 live; aggregate-wait + TRY_RECV2 clean</text>
+  <text x="165" y="178" text-anchor="middle" class="vp-label">PE matrix 24 PASS / 0 FAIL / 0 TIMEOUT</text>
+  <text x="165" y="202" text-anchor="middle" class="vp-label">Layer 1 3 PASS / 0 FAIL</text>
+  <text x="165" y="220" text-anchor="middle" class="vp-small">aggregate-wait kitchen-sink: 86,528 wakes / 0 timeouts / 0 errors</text>
+  <text x="165" y="244" text-anchor="middle" class="vp-label">Dispatcher busy capture re-profiled</text>
 
   <rect x="345" y="82" width="250" height="180" class="vp-gate" rx="6"/>
   <text x="470" y="108" text-anchor="middle" class="vp-yellow">Gated after one clean confirmation</text>
   <text x="470" y="136" text-anchor="middle" class="vp-label">paint-cache default-on flip</text>
-  <text x="470" y="154" text-anchor="middle" class="vp-small">needs second-day run + long soak + varied workload</text>
-  <text x="470" y="178" text-anchor="middle" class="vp-label">epoll vs poll posture</text>
-  <text x="470" y="196" text-anchor="middle" class="vp-small">still runtime A/B, not a settled architectural call</text>
-  <text x="470" y="228" text-anchor="middle" class="vp-small">rule: clean once does not imply default-on</text>
+  <text x="470" y="154" text-anchor="middle" class="vp-small">still wants second-day run + long soak + varied workload</text>
+  <text x="470" y="178" text-anchor="middle" class="vp-label">Phase 4 + TRY_RECV2 long-soak</text>
+  <text x="470" y="196" text-anchor="middle" class="vp-small">current data is clean; hours-long default-on soak is still useful</text>
+  <text x="470" y="228" text-anchor="middle" class="vp-small">throttle=16 A/B belongs here too before any wider default change</text>
 
   <rect x="650" y="82" width="250" height="180" class="vp-open" rx="6"/>
   <text x="775" y="108" text-anchor="middle" class="vp-violet">Open / not directly proven</text>
   <text x="775" y="136" text-anchor="middle" class="vp-label">historical F5 root cause</text>
-  <text x="775" y="154" text-anchor="middle" class="vp-small">MR1 is the working hypothesis, not a trace-proven fact</text>
+  <text x="775" y="154" text-anchor="middle" class="vp-small">MR1 is still the working hypothesis, not a trace-proven fact</text>
   <text x="775" y="178" text-anchor="middle" class="vp-label">future bypasses</text>
   <text x="775" y="196" text-anchor="middle" class="vp-small">resume only on top of the cleaned sync substrate</text>
 
@@ -836,7 +891,159 @@ own correctness proof and gate.</p>
 </div>
 
 
-<h3 id="42-whats-gated-awaiting-more-validation">4.2 What&rsquo;s gated awaiting more validation</h3>
+<h3 id="42-headline-performance">4.2 Headline performance</h3>
+
+<h4 id="dispatcher-tuning-under-ableton-busy-workload">Dispatcher tuning under Ableton busy workload</h4>
+
+<table>
+<thead>
+<tr>
+<th> Symbol </th>
+<th style="text-align:right;"> Before </th>
+<th style="text-align:right;"> After </th>
+<th style="text-align:right;"> Delta </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> <code>channel_dispatcher</code> </td>
+<td style="text-align:right;"> 14.51% </td>
+<td style="text-align:right;"> 0.70% </td>
+<td style="text-align:right;"> −13.81pp / −95% </td>
+</tr>
+<tr>
+<td> <code>main_loop_epoll</code> </td>
+<td style="text-align:right;"> 7.24% </td>
+<td style="text-align:right;"> 2.68% </td>
+<td style="text-align:right;"> −4.56pp </td>
+</tr>
+<tr>
+<td> <code>nspa_queue_bypass_shm</code> </td>
+<td style="text-align:right;"> 2.77% </td>
+<td style="text-align:right;"> absent </td>
+<td style="text-align:right;"> inlined into call sites </td>
+</tr>
+<tr>
+<td> <code>req_get_update_region</code> </td>
+<td style="text-align:right;"> 4.92% </td>
+<td style="text-align:right;"> absent </td>
+<td style="text-align:right;"> gone from top symbols </td>
+</tr>
+<tr>
+<td> <code>nspa_redraw_ring_drain</code> </td>
+<td style="text-align:right;"> 2.88% </td>
+<td style="text-align:right;"> absent </td>
+<td style="text-align:right;"> gone from top symbols </td>
+</tr>
+</tbody>
+</table>
+
+
+<p>System-wide samples: 38,588 -> 19,415 per 30s.</p>
+
+<h4 id="pe-side-dispatcher-burst-ab">PE-side <code>dispatcher-burst</code> A/B</h4>
+
+<table>
+<thead>
+<tr>
+<th> Metric </th>
+<th style="text-align:right;"> TRY_RECV2 on </th>
+<th style="text-align:right;"> TRY_RECV2 off </th>
+<th style="text-align:right;"> Delta </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> burst ops/sec (wall) </td>
+<td style="text-align:right;"> 841,765 </td>
+<td style="text-align:right;"> 555,567 </td>
+<td style="text-align:right;"> +34% / 1.5x </td>
+</tr>
+<tr>
+<td> burst worst max ns </td>
+<td style="text-align:right;"> 23,014,325 </td>
+<td style="text-align:right;"> 31,843,082 </td>
+<td style="text-align:right;"> −28% </td>
+</tr>
+<tr>
+<td> steady avg ns </td>
+<td style="text-align:right;"> 35,202 </td>
+<td style="text-align:right;"> 33,405 </td>
+<td style="text-align:right;"> flat (no burst) </td>
+</tr>
+</tbody>
+</table>
+
+
+<h4 id="flush-throttle-impact">Flush throttle impact</h4>
+
+<table>
+<thead>
+<tr>
+<th> Symbol </th>
+<th style="text-align:right;"> Before throttle </th>
+<th style="text-align:right;"> After throttle=8ms </th>
+<th style="text-align:right;"> Delta </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> <code>x11drv_surface_flush</code> </td>
+<td style="text-align:right;"> 8.23% </td>
+<td style="text-align:right;"> 4.74% </td>
+<td style="text-align:right;"> −43% </td>
+</tr>
+<tr>
+<td> <code>copy_rect_32</code> memmove </td>
+<td style="text-align:right;"> 4.38% </td>
+<td style="text-align:right;"> 2.49% </td>
+<td style="text-align:right;"> −43% </td>
+</tr>
+<tr>
+<td> MainThread CPU recovered </td>
+<td style="text-align:right;"> — </td>
+<td style="text-align:right;"> — </td>
+<td style="text-align:right;"> ~5.4 percentage points </td>
+</tr>
+</tbody>
+</table>
+
+
+<h4 id="pe-suite-comparison-vs-2026-04-26">PE-suite comparison vs 2026-04-26</h4>
+
+<table>
+<thead>
+<tr>
+<th> Metric </th>
+<th style="text-align:right;"> 2026-04-26 </th>
+<th style="text-align:right;"> 2026-04-30 </th>
+<th style="text-align:right;"> Delta </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> rapidmutex RT max_wait </td>
+<td style="text-align:right;"> 44us </td>
+<td style="text-align:right;"> 38us </td>
+<td style="text-align:right;"> −14% </td>
+</tr>
+<tr>
+<td> rapidmutex RT elapsed </td>
+<td style="text-align:right;"> 1950ms </td>
+<td style="text-align:right;"> 1924ms </td>
+<td style="text-align:right;"> −1.3% </td>
+</tr>
+<tr>
+<td> ntsync-d12 PI chain depth-12 </td>
+<td style="text-align:right;"> 236ms </td>
+<td style="text-align:right;"> 237ms </td>
+<td style="text-align:right;"> ≈0 </td>
+</tr>
+</tbody>
+</table>
+
+
+<h3 id="43-whats-gated-awaiting-more-validation">4.3 What&rsquo;s gated awaiting more validation</h3>
 
 <ul>
 <li><strong><code>NSPA_ENABLE_PAINT_CACHE=1</code></strong> — one clean run is necessary but
@@ -853,7 +1060,7 @@ before flipping default-on:
 </ul>
 
 
-<h3 id="43-what-cant-be-definitively-confirmed">4.3 What can&rsquo;t be definitively confirmed</h3>
+<h3 id="44-what-cant-be-definitively-confirmed">4.4 What can&rsquo;t be definitively confirmed</h3>
 
 <ul>
 <li><strong>F5 paint-cache 5-min lockup</strong> — historically reproducible with
@@ -868,7 +1075,7 @@ fix set and the clean post-fix validation run.</li>
 </ul>
 
 
-<h3 id="44-observations-from-run-4">4.4 Observations from run-4</h3>
+<h3 id="45-observations-from-run-4">4.5 Observations from run-4</h3>
 
 <p>The user surfaced two architectural signals during run-4 that are
 worth banking:</p>
@@ -900,15 +1107,20 @@ wineserver decomposition plan when it&rsquo;s time to circle back.</li>
 <h2 id="5-open-work-in-priority-order">5. Open work, in priority order</h2>
 
 <ol>
+<li><strong>Phase 4 + TRY_RECV2 long-soak</strong> — extended Ableton session under
+default-on settings to validate stability over hours.</li>
+<li><strong>Throttle=16 A/B</strong> — see whether the throttle curve keeps paying
+past 8ms before changing the default.</li>
+<li><strong>WM_TIMER MR2 fix</strong> — cache queue ntsync sync fd at <code>SetTimer</code>
+time so dispatcher wake semantics close the remaining idle-wake gap.</li>
 <li><strong>Second paint-cache validation run</strong> — different day / cold start
 plus long-soak (>30 min) plus workload variation. Closes the F5
 chapter. After that, flip <code>NSPA_ENABLE_PAINT_CACHE</code> default-on.</li>
 <li><strong>msg-ring v2 Phase C get_message bypass</strong> — paused mid-development.
 Design notes in <code>wine/nspa/docs/msg-ring-v2-phase-bc-handoff.md</code>.
 After C lands, window messages are fully out of wineserver.</li>
-<li><strong>io_uring Phase 2 + 3</strong> — file I/O and async write coverage
-on top of the Phase 1 socket-I/O ALERTED-state interception. Phase
-1 has been shipped and stable for months.</li>
+<li><strong>io_uring socket + pipe follow-on</strong> — sync socket revalidation plus
+pipe/named-event surface work on top of the shipped ring consumer.</li>
 <li><strong><code>wine_sechost_service</code> device-IRP poll</strong> — ~530 polls/s, 63k
 <code>get_next_device_request</code> per Ableton run; audit Q2
 (payload-distribution) is the gate before any bypass design.</li>
@@ -928,7 +1140,7 @@ for 32-bit VST plugins and older games. Medium priority.</li>
 
 <hr />
 
-<h2 id="6-recent-investigation-arc-2026-04-26-to-2026-04-28">6. Recent investigation arc (2026-04-26 to 2026-04-28)</h2>
+<h2 id="6-recent-investigation-arc-2026-04-26-to-2026-04-30">6. Recent investigation arc (2026-04-26 to 2026-04-30)</h2>
 
 <p>The three-day arc is worth recording in one place because it
 illustrates how Wine-NSPA&rsquo;s failure modes cross the kernel/userspace
@@ -976,6 +1188,19 @@ Closed the lockup investigation. Then run-4 with
 <code>NSPA_ENABLE_PAINT_CACHE=1</code> PASS, past the historical 5-min threshold,
 likely incidentally fixing F5 via MR1.</p>
 
+<p><strong>2026-04-29</strong> — kernel 1010 + gamma Phase 2/3 shipped as the first
+landed aggregate-wait consumer. The dispatcher now waits on <code>(channel,
+uring eventfd, shutdown eventfd)</code>, drains CQEs inline on the same RT
+thread, and signals replies from that same thread.</p>
+
+<p><strong>2026-04-30</strong> — three compounding default-on follow-ons landed on top
+of that base: flush throttle at 8ms, Phase 4 async <code>create_file</code>, and
+1011 TRY_RECV2 burst drain. <code>dispatcher-burst</code> was added to the PE
+matrix specifically because the existing PE suite did not exercise the
+dispatcher hot path. The Ableton 30s busy capture then confirmed the
+full-stack result: <code>channel_dispatcher</code> 14.51% -> 0.70%, with
+system-wide samples 38,588 -> 19,415 per 30s.</p>
+
 <p><strong>The takeaway</strong> — the bugs found were all on the critical RT-sync
 path that every remaining bypass (Phase C, io_uring 2/3, sechost)
 calls into. They would have surfaced regardless, just attributed to
@@ -1018,6 +1243,18 @@ operating principle going forward.</p>
 <tr>
 <td> <code>NSPA_AGG_WAIT=1</code> </td>
 <td> Phase 3 aggregate-wait dispatcher loop. <strong>Default ON post-1010 validation.</strong> Set <code>0</code> to force the legacy direct receive loop. </td>
+</tr>
+<tr>
+<td> <code>NSPA_TRY_RECV2=1</code> </td>
+<td> Post-dispatch burst-drain on ntsync 1011 kernels. <strong>Default ON.</strong> Set <code>0</code> to force one <code>AGG_WAIT</code> round-trip per dequeued entry. </td>
+</tr>
+<tr>
+<td> <code>NSPA_ENABLE_ASYNC_CREATE_FILE=1</code> </td>
+<td> Phase 4 async <code>CreateFile</code> through the dispatcher-owned ring. <strong>Default ON.</strong> Set <code>0</code> to stay on the older sync handler path. </td>
+</tr>
+<tr>
+<td> <code>NSPA_FLUSH_THROTTLE_MS=8</code> </td>
+<td> <code>flush_window_surfaces</code> throttle on <code>x11drv</code> MainThread. <strong>Default ON at 8.</strong> Set <code>N</code> to retune; <code>0</code> disables. </td>
 </tr>
 <tr>
 <td> <code>NSPA_ENABLE_PAINT_CACHE=1</code> </td>
@@ -1121,7 +1358,7 @@ REALTIME-class priorities scale linearly below it.</p>
 <tbody>
 <tr>
 <td> <code>current-state.md</code> </td>
-<td> This document — state of the art on 2026-04-29 </td>
+<td> This document — state of the art on 2026-04-30 </td>
 </tr>
 <tr>
 <td> <code>cs-pi.gen.html</code> </td>
@@ -1179,14 +1416,14 @@ REALTIME-class priorities scale linearly below it.</p>
 </table>
 
 
-<p>The architecture-heavy pieces added through 2026-04-29 are now covered
+<p>The architecture-heavy pieces added through 2026-04-30 are now covered
 in the public docs set, including the gamma dispatcher, aggregate-wait,
 hook cache, local-file, msg-ring, and the decomposition notes.</p>
 
 <hr />
 
-<p><em>Generated 2026-04-29. Wine submodule <code>b72419fc953</code>, ntsync
-<code>CFF56DE1EF28D693BB597CD</code>, kernel <code>6.19.11-rt1-1-nspa</code>.</em></p>
+<p><em>Generated 2026-04-30. Wine submodule <code>d06b732fc2c3</code>, ntsync
+<code>10124FB81FDC76797EF1F91</code>, kernel <code>6.19.11-rt1-1-nspa</code>.</em></p>
 
 <script>
 document.addEventListener("DOMContentLoaded", function () {

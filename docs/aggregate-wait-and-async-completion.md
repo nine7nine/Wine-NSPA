@@ -1,6 +1,6 @@
 # Wine-NSPA -- Aggregate-Wait and Async Completion
 
-Wine 11.6 + NSPA RT patchset | Kernel patch 1010 + Gamma dispatcher Phase 2/3 | 2026-04-29
+Wine 11.6 + NSPA RT patchset | Kernel patch 1010 + Gamma dispatcher Phase 2/3 | 2026-04-30
 Author: Jordan Johnston
 
 This page documents the **landed** aggregate-wait work in Wine-NSPA:
@@ -9,7 +9,7 @@ This page documents the **landed** aggregate-wait work in Wine-NSPA:
 - userspace **Phase 2**: per-process dispatcher-owned `io_uring`
 - userspace **Phase 3**: gamma dispatcher waits on channel + uring eventfd + shutdown eventfd and drains CQEs inline on the same RT thread
 
-**Status:** shipped and validated. `NSPA_AGG_WAIT` is **default-on** as of 2026-04-29. The still-WIP async `create_file` port is intentionally excluded here.
+**Status:** shipped and validated. `NSPA_AGG_WAIT` is **default-on** as of 2026-04-29. The 2026-04-30 follow-ons (`NSPA_ENABLE_ASYNC_CREATE_FILE=1` and, on 1011 kernels, `NSPA_TRY_RECV2=1`) now ship on top of this same foundation.
 
 ---
 
@@ -65,8 +65,11 @@ The same RT thread handles the full lifecycle.
 
 ### What did not ship here
 
-The first async `create_file` handler port is still WIP and currently default-off. That
-work uses the same infrastructure, but it is not part of the stable public story yet.
+This page stays focused on the 1010 / Phase 2 / Phase 3 slice itself.
+The later follow-ons -- Phase 4 async `create_file` and the 1011
+TRY_RECV2 burst-drain -- use this same infrastructure but are documented
+in their own current-state / gamma / io_uring pages rather than being
+re-explained in detail here.
 
 ---
 
@@ -446,11 +449,11 @@ That logic is runtime feature detection, not a release ladder:
 
 | Item | Value |
 |---|---|
-| Kernel module srcversion | `CFF56DE1EF28D693BB597CD` |
-| Wine userspace state | Phase 2 + Phase 3 landed |
+| Kernel module srcversion | `10124FB81FDC76797EF1F91` |
+| Wine userspace state | Phase 2 + Phase 3 landed; Phase 4 `create_file` now uses the same ring |
 | Default gate | `NSPA_AGG_WAIT=1` |
 | Opt-out | `NSPA_AGG_WAIT=0` |
-| WIP exclusion | `NSPA_ENABLE_ASYNC_CREATE_FILE` remains default-off and is not covered here |
+| Follow-on gates on top of this base | `NSPA_ENABLE_ASYNC_CREATE_FILE=1`; `NSPA_TRY_RECV2=1` on 1011 kernels |
 
 ### Validation results
 
@@ -460,6 +463,7 @@ That logic is runtime feature detection, not a release ladder:
 | channel-PI propagation sub-test | PASS |
 | 1k mixed-concurrency stress | PASS |
 | 30k stress + full native ntsync suite | PASS, dmesg clean |
+| PE matrix | 24 PASS / 0 FAIL / 0 TIMEOUT, including `dispatcher-burst` |
 | Ableton level 2/3 with `NSPA_AGG_WAIT=1` | PASS |
 | Phase 3 default-on under Ableton | PASS |
 

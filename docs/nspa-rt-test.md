@@ -1,10 +1,11 @@
 # Wine-NSPA RT Test Harness
 
-**Date:** 2026-04-28
+**Date:** 2026-04-30
 **Author:** Jordan Johnston
 **Kernel:** `6.19.11-rt1-1-nspa` (PREEMPT_RT_FULL)
-**ntsync module:** `srcversion A250A77651C8D5DAB719FE2`
+**ntsync module:** `srcversion 10124FB81FDC76797EF1F91`
 **Wine:** 11.6 + NSPA RT patchset
+**Status:** public test-harness reference; Layer 1 native suite is 3 PASS / 0 FAIL and Layer 2 PE matrix is 24 PASS / 0 FAIL / 0 TIMEOUT as of 2026-04-30.
 
 ## Table of Contents
 
@@ -38,6 +39,13 @@ The combined runner `wine/nspa/tests/run-rt-suite.sh` drives both layers
 and reports per-layer pass/fail. The Layer 2 PE matrix continues to be
 driven by the existing `nspa/run_rt_tests.sh` runner.
 
+As of 2026-04-30 the PE side has one new critical harness:
+`dispatcher-burst`. It exists because the rest of the PE matrix mostly
+exercises `inproc_wait` -> ntsync ioctls directly and does **not** hit
+`channel_dispatcher` / `dispatch_channel_entry` / the TRY_RECV2 drain
+loop. `dispatcher-burst` is the first PE-side workload in the published
+matrix that covers that path.
+
 The PE binary runs in two modes:
 
 - **Baseline mode** (`WINEDEBUG=-all` only) -- no RT promotion, all
@@ -47,15 +55,14 @@ The PE binary runs in two modes:
   TIME_CRITICAL threads become SCHED_FIFO, PI boost is active, the
   vDSO is remapped for RT-safe clock access.
 
-### Validation Totals (2026-04-28)
+### Validation Totals (2026-04-30)
 
-- **Layer 1 native suite:** ~370M ops on prod kernel against module
-  `A250A77651C8D5DAB719FE2`, zero syscall errors, zero KASAN/dmesg
-  splats. Includes ~30M ops from a focused KASAN-armed debug-kernel
-  session that fixed four ntsync bugs and a ~10M-op 5-min mixed-load
-  soak across all driver paths.
-- **Layer 2 PE matrix:** 22/22 PASS (11 tests x baseline + RT) against
-  current build.
+- **Layer 1 native suite:** 3 PASS / 0 FAIL against module
+  `10124FB81FDC76797EF1F91` (`test-event-set-pi`,
+  `test-channel-recv-exclusive`, `test-aggregate-wait` 9/9 including
+  kitchen-sink 86,528 wakes / 0 timeouts / 0 errors).
+- **Layer 2 PE matrix:** 24 PASS / 0 FAIL / 0 TIMEOUT (12 tests x
+  baseline + RT), including `dispatcher-burst`.
 
 ### Build
 
@@ -116,7 +123,7 @@ of the Wine-NSPA stack. Each PE subcommand targets specific components.
 
   <rect x="50" y="62" width="150" height="62" rx="6" class="rt-box-pe"/>
   <text x="125" y="80" class="rt-label-grn" text-anchor="middle">nspa_rt_test.exe</text>
-  <text x="125" y="94" class="rt-label-sm" text-anchor="middle">12 subcommands</text>
+  <text x="125" y="94" class="rt-label-sm" text-anchor="middle">13 subcommands</text>
   <text x="125" y="107" class="rt-label-sm" text-anchor="middle">mingw PE static</text>
 
   <rect x="230" y="62" width="120" height="62" rx="6" class="rt-box"/>
@@ -138,10 +145,10 @@ of the Wine-NSPA stack. Each PE subcommand targets specific components.
   <text x="570" y="116" class="rt-label-sm" text-anchor="middle">fork-mutex</text>
 
   <rect x="650" y="62" width="120" height="62" rx="6" class="rt-box"/>
-  <text x="710" y="78" class="rt-label-cyn" text-anchor="middle">io_uring</text>
+  <text x="710" y="78" class="rt-label-cyn" text-anchor="middle">io_uring + gamma</text>
   <text x="710" y="92" class="rt-label-sm" text-anchor="middle">socket-io</text>
-  <text x="710" y="104" class="rt-label-sm" text-anchor="middle">Phase A: immediate</text>
-  <text x="710" y="116" class="rt-label-sm" text-anchor="middle">Phase B: deferred</text>
+  <text x="710" y="104" class="rt-label-sm" text-anchor="middle">dispatcher-burst</text>
+  <text x="710" y="116" class="rt-label-sm" text-anchor="middle">Phase 4 create_file</text>
 
   <rect x="30" y="160" width="820" height="130" class="rt-region"/>
   <text x="50" y="178" class="rt-label-blu">Wine ntdll Unix layer</text>
@@ -185,8 +192,8 @@ of the Wine-NSPA stack. Each PE subcommand targets specific components.
   <text x="50" y="328" class="rt-label-pur">wineserver</text>
 
   <rect x="50" y="335" width="240" height="45" rx="6" class="rt-box-wine"/>
-  <text x="170" y="352" class="rt-label-pur" text-anchor="middle">wineserver (global_lock PI)</text>
-  <text x="170" y="366" class="rt-label-sm" text-anchor="middle">epoll dispatch | process registration | mapping</text>
+  <text x="170" y="352" class="rt-label-pur" text-anchor="middle">wineserver + gamma dispatcher</text>
+  <text x="170" y="366" class="rt-label-sm" text-anchor="middle">AGG_WAIT | TRY_RECV2 | process registration | mapping</text>
 
   <rect x="330" y="310" width="520" height="80" class="rt-region"/>
   <text x="350" y="328" class="rt-label-red">Linux kernel (6.19.x-rt)</text>
@@ -270,6 +277,7 @@ Each PE subcommand targets a specific cross-section of the stack:
 | rapidmutex | sync.c (CS fast path) | futex_lock_pi | Throughput collapse, RT max_wait unbounded |
 | philosophers | sync.c (transitive PI) | futex_lock_pi | Deadlock or starvation in PI chain |
 | ntsync | ntsync client | /dev/ntsync | PI not firing, wrong wakeup order |
+| dispatcher-burst | gamma dispatcher + server-side io_uring | `/dev/ntsync` channel + aggregate-wait + TRY_RECV2 | dispatcher hot path regresses with no PE-side coverage |
 | socket-io | io_uring.c | io_uring | Async recv latency regression |
 | signal-recursion | virtual.c | segv_handler | Deadlock in recursive mutex path |
 | large-pages | virtual.c | hugetlbfs | Silent fallback to 4KB pages |
@@ -294,8 +302,9 @@ Each PE subcommand targets a specific cross-section of the stack:
 | 8 | `ntsync` | 5 sub-tests: rapid mutex, PI, prio, chain, WFMO | per-sub PASS/FAIL, wait times | /dev/ntsync driver |
 | 9 | `socket-io` | TCP loopback: immediate + deferred recv | latency (us) p50/p95/p99/max, msgs/sec | io_uring (Phase 2 surface) |
 | 10 | `srw-bench` | SRW lock contention benchmark | acquire latency (ns) p50/p99/max, ops/sec | sync.c SRW |
-| 11 | `child-quickexit` | Internal helper for fork-mutex | exit code 42 | (internal) |
-| 12 | `help` | Usage display | -- | -- |
+| 11 | `dispatcher-burst` | Gamma dispatcher A/B harness (`CreateFile` / `CloseHandle` on `NUL`) | burst ops/sec, worst max ns, steady avg ns | gamma dispatcher + Phase 4 `create_file` |
+| 12 | `child-quickexit` | Internal helper for fork-mutex | exit code 42 | (internal) |
+| 13 | `help` | Usage display | -- | -- |
 
 ### 3.1 `priority` -- RT Priority Mapping
 
@@ -409,7 +418,22 @@ N threads acquire/release a shared SRWLOCK in exclusive mode in a
 tight loop. Per-thread metrics: avg, p50, p99, max acquire latency
 (ns), ops/sec.
 
-### 3.11 / 3.12 -- internal `child-quickexit` and `help`
+### 3.11 `dispatcher-burst` -- Gamma Dispatcher A/B Harness
+
+Two sub-tests hammer `CreateFile` / `CloseHandle` on `NUL` specifically
+to cover the gamma dispatcher hot path:
+
+- **steady-state:** 1 thread, 100k iters, single open+close
+- **burst:** 8 threads × 1000 outer × 64-handle fanout = 512k ops
+
+The verdict is failure-count only; latency is observational. That
+keeps the test deterministic enough to live in the default matrix while
+still giving a reproducible A/B for `NSPA_TRY_RECV2`. The subcommand
+landed in [`f087a265`](https://github.com/nine7nine/Wine-NSPA/commit/f087a265)
+and was wired into the default PE matrix by
+[`343d7ac2`](https://github.com/nine7nine/Wine-NSPA/commit/343d7ac2).
+
+### 3.12 / 3.13 -- internal `child-quickexit` and `help`
 
 ---
 
@@ -455,10 +479,11 @@ the source around documents what we tried and why it was reverted.
     ./run-rt-suite.sh wine       # Layer 2 only
     ./run-rt-suite.sh all        # both (default)
 
-### Validation Totals (2026-04-28)
+### Validation Totals (2026-04-30)
 
-The current ntsync module (`srcversion A250A77651C8D5DAB719FE2`) has
-all four post-debug-kernel bugs fixed:
+The current ntsync module (`srcversion 10124FB81FDC76797EF1F91`) keeps
+all four post-debug-kernel bugs fixed and adds the 1011
+`CHANNEL_TRY_RECV2` follow-on:
 
 - Bug 1: test cleanup asymmetry stranding R1 in
   `test-channel-recv-exclusive` (test-side, fixed)
@@ -469,15 +494,20 @@ all four post-debug-kernel bugs fixed:
 - Bug 4: channel_entry refcount UAF caught by KASAN in
   `test-channel-stress` (1009 patch)
 
-Cumulative ops since the audit session opened: ~370M on prod kernel
-across native + stress + 5-min mixed-load soak + Layer 2 PE matrix,
-zero syscall errors, zero KASAN/dmesg splats, ready for Ableton.
+Cumulative public result for 2026-04-30:
+
+- Layer 1 native suite: 3 PASS / 0 FAIL
+- Layer 2 PE matrix: 24 PASS / 0 FAIL / 0 TIMEOUT
+- `test-aggregate-wait`: 9/9 PASS with kitchen-sink 86,528 wakes / 0
+  timeouts / 0 errors
+- zero syscall errors, zero KASAN/dmesg splats
 
 ### Layer 2 PE Matrix
 
-The PE matrix (`nspa_rt_test.exe` baseline + RT) is unchanged in scope
-from the 2026-04-15 doc and continues to pass 22/22 (11 tests x 2
-modes) on the current build.
+The PE matrix (`nspa_rt_test.exe` baseline + RT) now passes
+24 PASS / 0 FAIL / 0 TIMEOUT (12 tests x 2 modes) on the current
+build. The new row is `dispatcher-burst`, which is the first PE-side
+matrix test that actually covers the dispatcher hot path.
 
 ---
 
@@ -521,6 +551,7 @@ The runner script defines the test list as an array. Each entry is:
         "ntsync-d12 ntsync 12 8 50000 3 16"
         "socket-io socket-io"
         "srw-bench srw-bench 4 500000"
+        "dispatcher-burst dispatcher-burst"
     )
 
 The `priority` subcommand is included only when `INCLUDE_PRIORITY=1`.
@@ -749,6 +780,7 @@ on next invocation if the source is newer than the binary.
 | Requirement | Check | Purpose |
 |-------------|-------|---------|
 | `ntsync` module loaded | `sudo modprobe ntsync` | Required for ntsync sub-tests + Layer 1 |
+| ntsync 1011 loaded | module srcversion `10124FB81FDC76797EF1F91` | Required for `NSPA_TRY_RECV2=1` to do anything in `dispatcher-burst` |
 | Hugepages reserved | `/proc/meminfo` HugePages_Total > 0 | Required for `large-pages` test |
 | RT-capable kernel | `uname -r` shows `-rt` | Required for SCHED_FIFO promotion |
 | CAP_SYS_NICE or root | `ulimit -r` | Required for RT scheduling |

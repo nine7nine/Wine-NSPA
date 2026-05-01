@@ -1,10 +1,10 @@
 # Wine-NSPA -- NTSync Kernel Driver
 
-Linux-NSPA 6.19.11-rt1-1 (PREEMPT_RT), CONFIG_NTSYNC=m | 2026-04-29
+Linux-NSPA 6.19.11-rt1-1 (PREEMPT_RT), CONFIG_NTSYNC=m | 2026-04-30
 Author: Jordan Johnston
-Status: production kernel-driver reference; patch stack 1003-1010 plus post-1010 PI follow-ups is the shipped baseline.
+Status: production kernel-driver reference; patch stack 1003-1011 plus the post-1010 PI follow-ups is the shipped baseline.
 
-This page is the patch-by-patch architecture and implementation guide for the Wine-NSPA ntsync overlay, including the gamma transport work and the landed aggregate-wait primitive.
+This page is the patch-by-patch architecture and implementation guide for the Wine-NSPA ntsync overlay, including the gamma transport work, the landed aggregate-wait primitive, and the 1011 burst-drain follow-on.
 
 ## Table of Contents
 
@@ -31,7 +31,7 @@ NTSync is a Linux kernel driver (`drivers/misc/ntsync.c`, `/dev/ntsync`) that im
 
 For Wine-NSPA, upstream ntsync is necessary but insufficient. The upstream driver uses FIFO waiter queues, has no priority inheritance, and uses `spinlock_t` for the per-object lock -- which becomes a sleeping `rt_mutex` on PREEMPT_RT. None of those characteristics is acceptable for an RT audio workload where the audio callback must wait deterministically on Wine's primitives without inheriting unbounded inversion latency.
 
-Wine-NSPA now carries a stack of **eight** kernel patches on top of
+Wine-NSPA now carries a stack of **nine** kernel patches on top of
 upstream `ntsync.c`. The first (1003) was the original PI series
 shipped 2026-04-13: raw spinlocks, priority-ordered queues,
 mutex-owner PI boost. Patches 1004-1009 added the channel transport,
@@ -39,13 +39,17 @@ thread-token path, and the hardening fixes needed to make that path
 production-safe on PREEMPT_RT. Patch **1010** then added
 `NTSYNC_IOC_AGGREGATE_WAIT`, which is the missing heterogeneous wait
 primitive the gamma dispatcher needed for same-thread async completion.
+Patch **1011** then added `NTSYNC_IOC_CHANNEL_TRY_RECV2`, the
+non-blocking channel dequeue used for post-dispatch burst drain on top
+of the 1010 wait surface.
 
-Module srcversion `CFF56DE1EF28D693BB597CD` is the current production
-module on prod kernel `6.19.11-rt1-1-nspa`. It carries 1003-1010 plus
+Module srcversion `10124FB81FDC76797EF1F91` is the current production
+module on prod kernel `6.19.11-rt1-1-nspa`. It carries 1003-1011 plus
 the post-1010 PI follow-up ordering fixes. The earlier
+`CFF56DE1EF28D693BB597CD` module remains the post-1010 production
+baseline that first validated aggregate-wait; the earlier
 `A250A77651C8D5DAB719FE2` module remains the post-1009 baseline that
-was validated to ~370M mixed operations; the current production module
-adds dedicated aggregate-wait validation on top of that base.
+was validated to ~370M mixed operations.
 
 This doc covers the patch-by-patch design rationale: what each patch changes, what bug it closes (or feature it adds), how it preserves NT semantics, and how it interacts with the `obj_lock` raw_spinlock and PREEMPT_RT.
 
@@ -53,12 +57,12 @@ This doc covers the patch-by-patch design rationale: what each patch changes, wh
 
 Wine-NSPA does not fork ntsync. The patches are diffs against upstream
 `drivers/misc/ntsync.c` and apply cleanly in series
-1003 -> 1004 -> 1005 -> 1006 -> 1007 -> 1008 -> 1009 -> 1010. They
+1003 -> 1004 -> 1005 -> 1006 -> 1007 -> 1008 -> 1009 -> 1010 -> 1011. They
 live in `wine-rt-claude/ntsync-patches/` as standalone unified diffs.
 The kernel build (`linux-nspa`) applies the stack at PKGBUILD time; the
 resulting `.ko` ships as part of the kernel package.
 
-The patch numbering (`1003-` through `1009-`) is local to NSPA. It bears no relationship to upstream NTSync revisions or any LKML series.
+The patch numbering (`1003-` through `1011-`) is local to NSPA. It bears no relationship to upstream NTSync revisions or any LKML series.
 
 ### Patch series at a glance
 
@@ -72,8 +76,9 @@ The patch numbering (`1003-` through `1009-`) is local to NSPA. It bears no rela
 | 1008 | EVENT_SET_PI deferred boost           | Closes fast-path race where consumer takes obj_lock first, sees signaled, returns unboosted   | ~80     |
 | 1009 | channel_entry refcount UAF            | KASAN-caught REPLY-vs-SEND_PI cleanup race; refcount_t on `ntsync_channel_entry`              | ~15     |
 | 1010 | Aggregate-wait                        | `NTSYNC_IOC_AGGREGATE_WAIT`: heterogeneous object+fd wait, channel notify-only support         | ~400    |
+| 1011 | Channel TRY_RECV2                     | `NTSYNC_IOC_CHANNEL_TRY_RECV2`: non-blocking `RECV2` for post-dispatch burst drain            | ~30     |
 
-Patches 1003-1006 and 1010 are feature/infrastructure work; 1007-1009
+Patches 1003-1006, 1010, and 1011 are feature/infrastructure work; 1007-1009
 are minimal surgical fixes for specific KASAN- or trace-confirmed bugs.
 The distinction matters: Section 11 discusses why.
 
@@ -173,8 +178,8 @@ The distinction matters: Section 11 discusses why.
   <rect x="650" y="364" width="220" height="100" class="nt-box"/>
   <text x="760" y="388" text-anchor="middle" class="nt-label">Operational result</text>
   <text x="760" y="412" text-anchor="middle" class="nt-small">single kernel sync substrate for RT waits</text>
-  <text x="760" y="430" text-anchor="middle" class="nt-small">channel-backed wineserver transport</text>
-  <text x="760" y="448" text-anchor="middle" class="nt-small">debug-kernel bugs closed before wider rollout</text>
+  <text x="760" y="430" text-anchor="middle" class="nt-small">channel-backed wineserver transport + aggregate-wait</text>
+  <text x="760" y="448" text-anchor="middle" class="nt-small">1011 then adds burst-drain on top of that shipped base</text>
 </svg>
 </div>
 
@@ -987,7 +992,7 @@ in one syscall, while still keeping channel PI visible.
   <rect x="140" y="254" width="660" height="62" class="ag-note"/>
   <text x="470" y="278" text-anchor="middle" class="ag-t">Load-bearing follow-up in production</text>
   <text x="470" y="296" text-anchor="middle" class="ag-s">the installed production module also carries SEND_PI any-waiters fallback</text>
-  <text x="470" y="310" text-anchor="middle" class="ag-s">and wake-after-boost ordering fixes so aggregate-waiting dispatchers inherit priority correctly</text>
+  <text x="470" y="310" text-anchor="middle" class="ag-s">and 1011 then layers TRY_RECV2 burst drain on top of this wait surface</text>
 </svg>
 </div>
 
@@ -1033,9 +1038,29 @@ validated with a dedicated native aggregate-wait suite:
 - channel notify-only behavior
 - channel-PI propagation while blocked in aggregate-wait
 
-The production result is the module srcversion
+The first production result was module srcversion
 `CFF56DE1EF28D693BB597CD`, which is the post-1009 base plus 1010 and
-its PI-ordering follow-ups.
+its PI-ordering follow-ups. The current production module
+`10124FB81FDC76797EF1F91` then carries 1011 on top.
+
+### 10.1 Patch 1011: Channel TRY_RECV2
+
+1011 adds `NTSYNC_IOC_CHANNEL_TRY_RECV2`, a non-blocking companion to
+`CHANNEL_RECV2`. It does not replace aggregate-wait; it is the follow-on
+that lets a woken dispatcher keep draining the ready list without paying
+one more `AGG_WAIT` round-trip per queued entry.
+
+That is a small kernel change, but it is exactly the shape the gamma
+dispatcher needs under bursty server-bound RPC load:
+
+- block once in aggregate-wait
+- dequeue one ready entry with `CHANNEL_RECV2`
+- dispatch and reply
+- then issue `TRY_RECV2` until the channel is empty
+
+The ioctl is purely additive. On older kernels userspace sees
+`-ENOTTY`, disables the feature gate for that dispatcher, and remains
+functionally correct on the one-entry-per-wake path.
 
 ---
 
@@ -1164,9 +1189,10 @@ Currently enabled for mutexes and semaphores. Event objects are client-capable a
 | `00C857BD7E51AB4F006B0BB`   | + Bug 3 fix (1008)              | EVENT_SET_PI deferred boost; 100% pass on event-set-pi (was 4% flake) |
 | `A250A77651C8D5DAB719FE2`   | + Bug 4 fix (1009)              | post-1009 production baseline; ~370M mixed ops validated          |
 | `CFF56DE1EF28D693BB597CD`   | + 1010 + post-1010 PI follow-ups| aggregate-wait production module; dispatcher Phase 3 default-on   |
+| `10124FB81FDC76797EF1F91`   | + 1011                          | current production module; TRY_RECV2 available for burst drain    |
 | `BD93BECF70D336DC1A80337`   | (rolled-back Codex 1007-1011)   | Historical only; do not load                                       |
 
-The current production module at `/lib/modules/6.19.11-rt1-1-nspa/kernel/drivers/misc/ntsync.ko` is `CFF56DE1EF28D693BB597CD`.
+The current production module at `/lib/modules/6.19.11-rt1-1-nspa/kernel/drivers/misc/ntsync.ko` is `10124FB81FDC76797EF1F91`.
 
 ### Stress validation (debug kernel, KASAN-on)
 
@@ -1187,15 +1213,21 @@ The current production module at `/lib/modules/6.19.11-rt1-1-nspa/kernel/drivers
 
 Cumulative debug-kernel: ~30 million operations, zero KASAN splats post-Bug 4 fix.
 
-### Production validation after 1010
+### Production validation after 1010 / 1011
 
 The aggregate-wait consumer path was validated on the production
 kernel/userspace pair rather than only in isolation:
 
+- native suite: 3 PASS / 0 FAIL
 - `test-aggregate-wait` 9/9 PASS
+- aggregate-wait kitchen-sink: 86,528 wakes / 0 timeouts / 0 errors
 - channel notify-only wake path PASS
 - channel PI propagation while blocked in aggregate-wait PASS
+- `dispatcher-burst` in the PE matrix gives a reproducible A/B for the
+  dispatcher path itself; burst ops/sec is 841,765 with TRY_RECV2 on vs
+  555,567 with TRY_RECV2 off (+34% / 1.5x)
 - Phase 3 gamma dispatcher default-on under Ableton PASS
+- Phase 4 async `create_file` + TRY_RECV2 under Ableton PASS
 - dmesg clean after 30k stress + native suite
 
 This matters because 1010 is load-bearing only when the userspace
@@ -1236,14 +1268,18 @@ After cross-build to the production kernel `6.19.11-rt1-1-nspa` (no debug instru
 
 | Layer                | Run                                  | Result    | Ops       | Errors |
 |----------------------|--------------------------------------|-----------|-----------|--------|
-| 1 native sanity      | run-rt-suite.sh native               | 2/2 PASS  | small     | 0      |
+| 1 native sanity      | run-rt-suite.sh native               | 3/3 PASS  | small     | 0      |
 | 1 stress             | event-set-pi 60s 8x8                 | PASS      | ~158M     | 0      |
 | 1 stress             | mutex-pi 30s 8h+4mtx                 | PASS      | ~12M      | 0      |
 | 1 stress             | channel 30s 4x4                      | PASS      | ~52M      | 0      |
 | 1 stress             | mixed-load 300s 13 workers           | PASS      | ~145M     | 0      |
-| 2 PE matrix          | nspa_rt_test.exe baseline+rt         | 22/22 PASS| n/a       | 0      |
+| 2 PE matrix          | nspa_rt_test.exe baseline+rt         | 24 PASS / 0 FAIL / 0 TIMEOUT | n/a | 0 |
 
-**Cumulative on production kernel + A250A776 module: ~370 M ops, 0 syscall errors, 0 dmesg splats, refcnt=0 post-soak.**
+**Cumulative on production kernel: post-1009 baseline ~370 M ops on
+`A250A77651C8D5DAB719FE2`, then aggregate-wait on
+`CFF56DE1EF28D693BB597CD`, then 1011 / TRY_RECV2 on
+`10124FB81FDC76797EF1F91`; 0 syscall errors, 0 dmesg splats, refcnt=0
+post-soak.**
 
 Per the slub_debug benchmark caveat (`feedback_slub_debug_skews_benchmarks.md`), only PASS/FAIL is authoritative across debug vs production kernels; throughput numbers aren't directly comparable (debug-kernel `slub_debug=FZPU` + kfence + KASAN tax dominates).
 

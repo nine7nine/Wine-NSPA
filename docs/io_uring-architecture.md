@@ -1,16 +1,16 @@
 # Wine-NSPA -- io_uring I/O Architecture
 
-**Date:** 2026-04-28
+**Date:** 2026-04-30
 **Author:** Jordan Johnston
 **Kernel:** `6.19.11-rt1-1-nspa` (PREEMPT_RT_FULL)
 **Wine:** 11.6 + NSPA RT patchset
-**Status:** design reference; Phase 1 is shipped, while the remaining socket and pipe sections describe pending follow-on work.
+**Status:** design reference; Phase 1 and the dispatcher-owned Phase 4 `CreateFile` consumer are shipped, while the remaining socket and pipe sections describe pending follow-on work.
 
 This page explains where `io_uring` fits in Wine-NSPA, what has already landed for file I/O, and which architectural pieces carry forward into the still-pending socket and pipe work.
 
 ## Table of Contents
 
-1. [Status as of 2026-04-28](#1-status-as-of-2026-04-28)
+1. [Status as of 2026-04-30](#1-status-as-of-2026-04-30)
 2. [Overview](#2-overview)
 3. [Design Principles](#3-design-principles)
 4. [I/O Architecture: Before and After](#4-io-architecture-before-and-after)
@@ -22,13 +22,16 @@ This page explains where `io_uring` fits in Wine-NSPA, what has already landed f
 
 ---
 
-## 1. Status as of 2026-04-28
+## 1. Status as of 2026-04-30
 
 The original three-phase plan from 2026-04-15 has been re-scoped. Phase 1
 (synchronous poll replacement + async file I/O bypass) shipped default-on
-and has been stable through the 2026-04 audit cycle. Phases 2 and 3 are
-multi-session work, gated against the post-audit ntsync module
-(`srcversion A250A77651C8D5DAB719FE2`) and the audit §4.1 retry-loop
+and has been stable through the 2026-04 audit cycle. The server-side
+dispatcher-owned ring now also has a shipped Phase 4 consumer:
+default-on async `CreateFile` routed through the per-process ring under
+`NSPA_ENABLE_ASYNC_CREATE_FILE=1`. Phases 2 and 3 remain multi-session
+work, gated against the current ntsync production module
+(`srcversion 10124FB81FDC76797EF1F91`) and the audit §4.1 retry-loop
 hardening that closes silent-contract bugs in the shmem ring path.
 
 The architecture itself -- per-thread rings, the E2 bitmap, ALERTED-state
@@ -41,6 +44,7 @@ current kernel + ring code.
 | Phase | Surface | Status | Default | Notes |
 |-------|---------|--------|---------|-------|
 | Phase 1 | Sync poll + async file I/O | **Shipped** | On | `NtReadFile` / `NtWriteFile` async bypass + sync poll replacement; pool allocator (TLS, 32 ops); CQE drain at `server_select` / `server_wait` |
+| Phase 4 | Dispatcher-owned async `CreateFile` | **Shipped** | On | `NSPA_ENABLE_ASYNC_CREATE_FILE=1`; routes `CreateFile` through the per-process ring and removes the `open()` lock-drop CS from the audio xrun path |
 | Phase 2 | Sockets (sync + overlapped) | **Pending** | -- | E2 bitmap + ALERTED interception design validated; socket-io PE test passed historically; needs revalidation against post-audit ntsync + audit §4.1 retry-loop hardening |
 | Phase 3 | Pipes + named events | **Pending** | -- | Not yet designed; expected to reuse Phase 2 ALERTED-interception pattern with object-class-specific completion paths |
 
@@ -353,7 +357,7 @@ fallback for an edge case that rarely occurs in practice.
 interception) is settled; the existing socket-io PE test path passed
 under the prior ntsync module, but socket bypass needs a focused
 re-test against the post-audit module
-(`srcversion A250A77651C8D5DAB719FE2`) and the audit §4.1 retry-loop
+(`srcversion 10124FB81FDC76797EF1F91`) and the audit §4.1 retry-loop
 hardening.**
 
 ### The Challenge
@@ -548,7 +552,7 @@ The architecture and code are landed in `dlls/ntdll/unix/socket.c`,
 `dlls/ntdll/unix/sync.c`, and `server/sock.c`. What's pending is a
 focused validation session against:
 
-- The post-audit ntsync module (`A250A77651C8D5DAB719FE2`).
+- The current ntsync production module (`10124FB81FDC76797EF1F91`).
 - The audit §4.1 retry-loop hardening shipped in superproject
   `a7e34c7` (closes silent shmem-ring contract violations that the
   socket interception path also touches).
@@ -621,11 +625,12 @@ of the bypass roadmap.
 | io_uring ring management | Shipped | Per-thread, lazy init |
 | Pool allocator (TLS, 32 ops) | Shipped | RT-safe, zero malloc in submit path |
 | Phase 1: sync poll + async file I/O | Shipped, default-on | `NtReadFile` / `NtWriteFile` |
+| Phase 4: async `CreateFile` via dispatcher ring | Shipped, default-on | `NSPA_ENABLE_ASYNC_CREATE_FILE=1`; server-side consumer on the per-process ring |
 | Phase 2: socket I/O (sync + overlapped) | Pending revalidation | Architecture settled; needs re-test against post-audit ntsync + §4.1 ring hardening |
 | Phase 3: pipes + named events | Pending design | Not scheduled |
 | E2 bitmap (server `sock.c`) | Shipped | Engaged when Phase 2 client-poll bit is set |
 | ntsync `uring_fd` extension | Shipped (kernel patch) | Wakes ntsync waits on CQE |
-| ntsync PI v2 + audit fixes | Shipped (kernel patch) | Module srcversion `A250A77651C8D5DAB719FE2` |
+| ntsync PI v2 + audit fixes | Shipped (kernel patch) | Module srcversion `10124FB81FDC76797EF1F91` |
 | Audit §4.1 retry-loop hardening | Shipped (wine) | Superproject `a7e34c7` |
 
 ### Next Actions

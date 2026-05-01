@@ -412,6 +412,19 @@ This is Phase 1A.4.a lazy-promotion. The alternative -- eagerly promoting at min
 
 The promote RPC forwards `ObjectAttributes->Attributes` (typically `OBJ_CASE_INSENSITIVE`, plus `OBJ_INHERIT` when `bInheritHandles=TRUE` is set on `CreateProcess`). The server's `alloc_handle_entry` translates `OBJ_INHERIT` to `RESERVED_INHERIT` on the handle's access mask, which is how Wine tracks inheritable handles for `copy_handle_table` during `CreateProcess`. Without the forwarding, inheritable local-range handles would be silently dropped by the inheritance walk.
 
+### 7.2 2026-04-30 sync-parity fixes
+
+Three small follow-ups closed correctness gaps in the shipped local-file
+path without changing the architecture:
+
+- [`97a4216`](https://github.com/nine7nine/Wine-NSPA/commit/97a4216) populates `fd->nt_name` on directory-bypass promotion, which fixed the `start.exe` NULL-Name crash.
+- [`ef4e049`](https://github.com/nine7nine/Wine-NSPA/commit/ef4e049) rejects `FILE_NON_DIRECTORY_FILE` on the directory bypass path instead of accepting a shape that the server would reject.
+- [`2160e06`](https://github.com/nine7nine/Wine-NSPA/commit/2160e06) makes the shared-inode `check_sharing` path arbitrate `FILE_MAPPING_WRITE`, matching `server/fd.c::check_sharing`.
+
+These are exactly the right kind of follow-up for a shipped stub:
+preserve the fast path, preserve the fallback discipline, and close any
+remaining sync-parity gaps at the boundary.
+
 ---
 
 ## 8. Dispatch Flow
@@ -718,6 +731,7 @@ None of these has a profile-visible cost today; keep them on the server path.
 | 1A.7 | `2b193aa0590` | `NtDuplicateObject` same-process promote (fixes Ableton .als load) |
 | 1A.8 | `86e17b75986` | Object-generic API audit sweep (`NtCompareObjects`, security, permanence) |
 | 1A.9 | `18c209da804` | `OVERLAPPED` reject + `FILE_OPEN_IF` widen + CreateProcess inheritance (prong B) + `attributes` plumbing |
+| 1A.9 parity follow-up | `97a4216` + `ef4e049` + `2160e06` | promote-time `nt_name`, directory-bypass reject parity, `FILE_MAPPING_WRITE` sharing parity |
 | Menu-flash fix | `641dd63a313` + `72c59b04337` + `6edea95126f` | Init `nspa_lf_handle_base` at declaration + defer prong A + gate QS_TIMER synth on caller's filter |
 | Reorg A-D | `e81f4a3817f` .. `cc491efe052` | File moves into `nspa/` subdirs + intercept-site collapse + debug gating |
 
