@@ -113,7 +113,7 @@ The distinction matters: Section 11 discusses why.
   <text x="70" y="108" class="nt-label">Win32 waits</text>
   <text x="70" y="126" class="nt-small">WaitForSingleObject / WaitForMultipleObjects</text>
   <text x="70" y="150" class="nt-label">Gamma dispatcher</text>
-  <text x="70" y="168" class="nt-small">CHANNEL_RECV / REPLY</text>
+  <text x="70" y="168" class="nt-small">AGG_WAIT -> RECV2 / TRY_RECV2 / REPLY</text>
 
   <rect x="350" y="56" width="240" height="118" class="nt-kernel"/>
   <text x="470" y="82" text-anchor="middle" class="nt-violet">/dev/ntsync (drivers/misc/ntsync.c)</text>
@@ -149,11 +149,12 @@ The distinction matters: Section 11 discusses why.
   <text x="540" y="286" text-anchor="middle" class="nt-small">1008 deferred EVENT_SET_PI</text>
   <text x="540" y="304" text-anchor="middle" class="nt-small">cross-thread priority intent</text>
 
-  <rect x="655" y="220" width="245" height="98" class="nt-obj"/>
+  <rect x="655" y="220" width="245" height="116" class="nt-obj"/>
   <text x="777" y="246" text-anchor="middle" class="nt-green">Channel</text>
   <text x="777" y="268" text-anchor="middle" class="nt-small">1004 request/reply transport</text>
-  <text x="777" y="286" text-anchor="middle" class="nt-small">1005 RECV2 thread-token pass-through</text>
+  <text x="777" y="286" text-anchor="middle" class="nt-small">1005 RECV2 + thread-token pass-through</text>
   <text x="777" y="304" text-anchor="middle" class="nt-small">1007 exclusive recv, 1009 refcount UAF fix</text>
+  <text x="777" y="322" text-anchor="middle" class="nt-small">1011 TRY_RECV2 burst drain</text>
 
   <line x1="470" y1="174" x2="470" y2="204" class="nt-dash"/>
   <line x1="130" y1="204" x2="130" y2="220" class="nt-line"/>
@@ -194,7 +195,7 @@ Wine-NSPA's ntsync exposes four object types via `/dev/ntsync` (one character de
 | **Mutex**      | `CreateMutex`, `WaitForSingleObject`         | `NTSYNC_IOC_CREATE_MUTEX`         | `NTSYNC_IOC_WAIT_ANY` / `WAIT_ALL`  | `NTSYNC_IOC_MUTEX_UNLOCK`         |
 | **Semaphore**  | `CreateSemaphore`, `ReleaseSemaphore`        | `NTSYNC_IOC_CREATE_SEM`           | `NTSYNC_IOC_WAIT_ANY` / `WAIT_ALL`  | `NTSYNC_IOC_SEM_RELEASE`          |
 | **Event**      | `CreateEvent`, `SetEvent`, `ResetEvent`      | `NTSYNC_IOC_CREATE_EVENT`         | `NTSYNC_IOC_WAIT_ANY` / `WAIT_ALL`  | `NTSYNC_IOC_EVENT_SET` / `_RESET` / `_PULSE` / `_SET_PI` |
-| **Channel**    | (no Win32 equivalent -- NSPA-private IPC)    | `NTSYNC_IOC_CREATE_CHANNEL`       | `NTSYNC_IOC_CHANNEL_RECV` / `_RECV2`| `NTSYNC_IOC_CHANNEL_SEND_PI` / `_REPLY` |
+| **Channel**    | (no Win32 equivalent -- NSPA-private IPC)    | `NTSYNC_IOC_CREATE_CHANNEL`       | `NTSYNC_IOC_CHANNEL_RECV` / `_RECV2` / `_TRY_RECV2`| `NTSYNC_IOC_CHANNEL_SEND_PI` / `_REPLY` |
 
 Mutex / semaphore / event are upstream concepts; their semantics map 1:1 to Win32. The mutex tracks an owner TID for `WAIT_ABANDONED` semantics and abandoned-recovery; the semaphore is a counted resource pool; the event has both manual-reset and auto-reset variants plus the NSPA-private `EVENT_SET_PI` for cross-thread priority intent.
 
@@ -205,6 +206,8 @@ futex+manual-`sched_setscheduler` shm IPC. Channels do not participate
 in generic `WAIT_ANY` / `WAIT_ALL`; they are accessed through their own
 ioctls, and patch 1010 adds a **separate aggregate-wait registration
 path** that can observe channel readiness without consuming the entry.
+On 1011 kernels the current consumer shape is aggregate-wait, then
+`CHANNEL_RECV2`, then `TRY_RECV2` until the ready queue is empty.
 
 ### is_signaled by type
 
@@ -326,6 +329,10 @@ Four ioctls, all on a channel FD obtained via `NTSYNC_IOC_CREATE_CHANNEL`:
 
 The `payload_off` and `reply_off` fields are opaque to the kernel; conventionally they are indices into a per-process shared-memory region the client and wineserver both map. The kernel transports the cookies; user space interprets them.
 
+That is the 1004 base interface. The current production surface layers
+1005's `CHANNEL_RECV2` on top for thread-token return, then 1011's
+`CHANNEL_TRY_RECV2` for non-blocking post-dispatch drain.
+
 ### Internal state
 
 The channel object's per-instance state lives in `obj->u.channel`:
@@ -406,7 +413,7 @@ The rb-tree key is `(prio DESC, seq ASC)`: higher priority sorts first; ties bre
 
   <rect x="670" y="98" width="260" height="56" class="ch-box"/>
   <text x="800" y="122" text-anchor="middle" class="ch-label">RECV / RECV2 waiter</text>
-  <text x="800" y="140" text-anchor="middle" class="ch-small">blocked on recv_wq</text>
+  <text x="800" y="140" text-anchor="middle" class="ch-small">blocked on recv_wq; 1011 adds TRY_RECV2 follow-on</text>
 
   <line x1="610" y1="148" x2="670" y2="148" class="ch-line" marker-end="url(#chArrow)"/>
   <text x="640" y="138" text-anchor="middle" class="ch-yellow">boost + wake</text>
@@ -449,6 +456,11 @@ The rb-tree key is `(prio DESC, seq ASC)`: higher priority sorts first; ties bre
   <text x="470" y="472" text-anchor="middle" class="ch-yellow">Cleanup / free boundary</text>
   <text x="470" y="490" text-anchor="middle" class="ch-small">detach from pending or dispatched state, free only at final refcount drop</text>
 
+  <rect x="670" y="448" width="260" height="62" class="ch-fix"/>
+  <text x="800" y="472" text-anchor="middle" class="ch-yellow">1011 follow-on</text>
+  <text x="800" y="490" text-anchor="middle" class="ch-small">after REPLY, userspace may `TRY_RECV2`</text>
+  <text x="800" y="504" text-anchor="middle" class="ch-small">and drain more ready entries before sleeping again</text>
+
   <line x1="140" y1="406" x2="140" y2="448" class="ch-line"/>
   <line x1="140" y1="448" x2="330" y2="448" class="ch-line" marker-end="url(#chArrow)"/>
 
@@ -478,6 +490,10 @@ The cleanup path covers the case where the sender was interrupted (signal). The 
 6. `obj_unlock(ch)`.
 7. If `e->prio`, auto-boost `current` to `(e->policy, e->prio)` for the handler duration via `apply_event_pi_boost(dev, current, ...)`. Boost releases at next RECV's drain, or at REPLY's drain.
 8. Copy `(entry_id, payload_off, reply_off, sender_tid, prio[, thread_token])` to user space.
+
+In the shipped post-1011 dispatcher path, userspace follows the first
+successful `RECV2` with `TRY_RECV2` after each reply until the channel
+returns empty.
 
 ### REPLY flow
 

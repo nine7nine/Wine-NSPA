@@ -34,7 +34,7 @@ Wine-NSPA 11.x is a **work in progress** built on top of upstream Wine 11.6. Eve
 
 | Document | Description |
 |----------|-------------|
-| [State of The Art](https://nine7nine.github.io/Wine-NSPA/current-state.gen.html) | Live state board: shipped defaults, kernel + module versions, exact validation totals, dispatcher-burst A/B, flush-throttle gains, and open work. |
+| [State of The Art](https://nine7nine.github.io/Wine-NSPA/current-state.gen.html) | Current shipped-state board: defaults, kernel + module versions, exact validation totals, performance deltas, remaining gates, and open work. |
 | [RT Test Harness](https://nine7nine.github.io/Wine-NSPA/nspa-rt-test.gen.html) | Layer 1 native ntsync stress suite + Layer 2 PE matrix, now including `dispatcher-burst` for gamma / TRY_RECV2 coverage. |
 | [Test Suite Comparison](https://nine7nine.github.io/Wine-NSPA/nspa-test-comparison.gen.html) | v3 -> v7 timeline. Per-thread metrics, latency data, and the principle that PASS / FAIL + KASAN-clean is authoritative across versions. |
 

@@ -83,7 +83,7 @@ The gamma path involves four cooperating components:
 
 | Component | Location | Role |
 |---|---|---|
-| Kernel channel object | `drivers/misc/ntsync.c` | Priority rbtree of pending entries; SEND_PI / RECV2 / REPLY PI machinery |
+| Kernel channel object | `drivers/misc/ntsync.c` | Priority rbtree of pending entries; SEND_PI / RECV2 / TRY_RECV2 / REPLY PI machinery |
 | Aggregate-wait primitive | `drivers/misc/ntsync.c` + patch 1010 | Heterogeneous wait over channel object + fd sources |
 | Sender shim | `dlls/ntdll/unix/server.c` | `nspa_send_request_channel`: copy header, `SEND_PI`, copy reply |
 | Dispatcher context | `server/nspa/shmem_channel.c` | channel fd + shutdown eventfd + per-process `nspa_uring_instance` |
@@ -151,7 +151,7 @@ shmem window.
   <text x="480" y="151" text-anchor="middle" class="gc-label">priority rbtree of entries</text>
   <text x="480" y="168" text-anchor="middle" class="gc-sm">sender_tid, prio, payload_off, thread_token</text>
   <text x="480" y="185" text-anchor="middle" class="gc-sm">SEND_PI enqueue + boost + block</text>
-  <text x="480" y="202" text-anchor="middle" class="gc-sm">RECV2 dequeue + boost dispatcher</text>
+  <text x="480" y="202" text-anchor="middle" class="gc-sm">RECV2 dequeue + TRY_RECV2 burst drain</text>
   <text x="480" y="216" text-anchor="middle" class="gc-sm">REPLY wake sender + drain / re-boost</text>
 
   <rect x="660" y="48" width="276" height="248" class="gc-process"/>
@@ -161,7 +161,7 @@ shmem window.
   <rect x="684" y="104" width="228" height="62" class="gc-server"/>
   <text x="798" y="126" text-anchor="middle" class="gc-label">channel_dispatcher pthread</text>
   <text x="798" y="143" text-anchor="middle" class="gc-sm">aggregate-wait loop at NSPA_SRV_RT_PRIO</text>
-  <text x="798" y="157" text-anchor="middle" class="gc-sm">thread-token-aware; RECV2 / uring / shutdown aware</text>
+  <text x="798" y="157" text-anchor="middle" class="gc-sm">thread-token-aware; RECV2 / TRY_RECV2 / uring / shutdown aware</text>
 
   <rect x="684" y="194" width="228" height="70" class="gc-server"/>
   <text x="798" y="216" text-anchor="middle" class="gc-label">existing request handlers</text>
@@ -172,7 +172,7 @@ shmem window.
   <text x="305" y="208" text-anchor="middle" class="gc-pur">SEND_PI / block for reply</text>
 
   <line x1="590" y1="175" x2="684" y2="135" class="gc-arrow-g"/>
-  <text x="638" y="146" text-anchor="middle" class="gc-grn">RECV2</text>
+  <text x="638" y="146" text-anchor="middle" class="gc-grn">RECV2 / TRY_RECV2</text>
 
   <line x1="684" y1="228" x2="590" y2="228" class="gc-arrow-g"/>
   <text x="638" y="220" text-anchor="middle" class="gc-grn">REPLY</text>
@@ -186,9 +186,10 @@ shmem window.
 
 ### 2.2 Aggregate-wait topology
 
-Post-1010 gamma is no longer just a blocking `RECV2` loop. The
+Post-1010/1011 gamma is no longer just a blocking `RECV2` loop. The
 dispatcher waits on three sources and selects the work type from the
-aggregate-wait result.
+aggregate-wait result; on 1011 kernels it can then keep draining ready
+channel work with `TRY_RECV2` before it sleeps again.
 
 <div class="diagram-container">
 <svg width="100%" viewBox="0 0 980 520" xmlns="http://www.w3.org/2000/svg">
@@ -213,7 +214,7 @@ aggregate-wait result.
   </defs>
 
   <rect x="0" y="0" width="980" height="520" class="ga-bg"/>
-  <text x="490" y="28" text-anchor="middle" class="ga-h">Gamma dispatcher on post-1010 kernels</text>
+  <text x="490" y="28" text-anchor="middle" class="ga-h">Gamma dispatcher on post-1011 kernels</text>
 
   <rect x="250" y="70" width="480" height="84" class="ga-wait"/>
   <text x="490" y="98" text-anchor="middle" class="ga-v">`NTSYNC_IOC_AGGREGATE_WAIT`</text>
@@ -302,7 +303,7 @@ only carries scheduling metadata and reply ownership:
 
   <rect x="730" y="88" width="210" height="92" class="gr-server"/>
   <text x="835" y="114" text-anchor="middle" class="gr-t">dispatcher thread</text>
-  <text x="835" y="136" text-anchor="middle" class="gr-s">`RECV2`, handler dispatch, `REPLY`</text>
+  <text x="835" y="136" text-anchor="middle" class="gr-s">`RECV2`, optional `TRY_RECV2`, handler dispatch, `REPLY`</text>
   <text x="835" y="154" text-anchor="middle" class="gr-s">same thread owns completion + reply</text>
 
   <path d="M210 118 L250 118" class="gr-line" marker-end="url(#grArrow)"/>
@@ -312,7 +313,7 @@ only carries scheduling metadata and reply ownership:
   <text x="360" y="224" text-anchor="middle" class="gr-v">2. `SEND_PI` enqueues metadata and blocks</text>
 
   <path d="M690 118 L730 118" class="gr-line" marker-end="url(#grArrow)"/>
-  <text x="710" y="110" text-anchor="middle" class="gr-g">3. `RECV2` dequeues highest priority</text>
+  <text x="710" y="110" text-anchor="middle" class="gr-g">3. `RECV2` dequeues highest priority; burst mode may continue with `TRY_RECV2`</text>
 
   <path d="M835 180 C835 248, 350 248, 350 180" class="gr-line" marker-end="url(#grArrow)"/>
   <text x="592" y="266" text-anchor="middle" class="gr-y">4. handler reads request and writes reply in `request_shm`</text>
@@ -336,10 +337,11 @@ queue.
 
 ### 2.4 End-to-end flow diagram
 
-The following inline SVG shows a single request's lifecycle through
-gamma. Two senders are shown at differing priorities to illustrate
-the rbtree's strict-priority ordering and REPLY's automatic
-re-boost.
+The following inline SVG shows a burst-drain lifecycle through gamma.
+Two senders are shown at differing priorities to illustrate the
+rbtree's strict-priority ordering, REPLY's automatic re-boost, and the
+1011 `TRY_RECV2` follow-on that keeps draining ready work without
+returning to `AGG_WAIT`.
 
 <div class="diagram-container">
 <svg width="100%" viewBox="0 0 980 640" xmlns="http://www.w3.org/2000/svg">
@@ -363,7 +365,7 @@ re-boost.
 
   <rect x="0" y="0" width="980" height="640" class="gd-bg"/>
 
-  <text x="490" y="22" text-anchor="middle" class="gd-title">Gamma channel: two senders, one dispatcher, kernel-mediated PI</text>
+  <text x="490" y="22" text-anchor="middle" class="gd-title">Gamma channel burst-drain: two senders, one wake, one dispatcher</text>
 
   <!-- swim-lanes -->
   <line x1="170" y1="40"  x2="170" y2="620" class="gd-lane"/>
@@ -440,12 +442,12 @@ re-boost.
   <text x="300" y="407" text-anchor="middle" class="gd-l">memcpy reply <- shmem[B]</text>
   <text x="300" y="420" text-anchor="middle" class="gd-m">SEND_PI returns</text>
 
-  <!-- t3: dispatcher RECV2 again -->
+  <!-- t3: dispatcher TRY_RECV2 drains queued work -->
   <line x1="640" y1="382" x2="740" y2="426" stroke="#9ece6a" stroke-width="1.5"/>
-  <text x="710" y="404" class="gd-grn">RECV2</text>
+  <text x="710" y="404" class="gd-grn">TRY_RECV2</text>
 
   <rect x="740" y="418" width="200" height="32" class="gd-server"/>
-  <text x="840" y="431" text-anchor="middle" class="gd-l">RECV2 -> entry A</text>
+  <text x="840" y="431" text-anchor="middle" class="gd-l">TRY_RECV2 -> entry A</text>
   <text x="840" y="444" text-anchor="middle" class="gd-acc">no re-boost: same prio 80</text>
 
   <rect x="740" y="458" width="200" height="46" class="gd-server"/>
@@ -478,14 +480,16 @@ re-boost.
 </svg>
 </div>
 
-The two-sender scenario shows the property that motivated gamma:
-between B's REPLY and the dispatcher's next RECV2, the dispatcher
+The two-sender scenario shows the property that matters on 1011:
+between B's REPLY and the dispatcher's `TRY_RECV2`, the dispatcher
 **stays at FIFO 80** because the kernel re-boosted from the new
-queue head atomically inside REPLY. The legacy v1.5 design would
-have unboosted the dispatcher to 64 at unboost-time and then
-re-boosted to 80 only when A's `sched_setscheduler` landed --
-which would have raced with the dispatcher's own RECV-side
-runqueue insertion. Gamma closes that gap by construction.
+queue head atomically inside REPLY, and the dispatcher can keep
+draining ready work without returning to `AGG_WAIT`. The legacy v1.5
+design would have unboosted the dispatcher to 64 at unboost-time and
+then re-boosted to 80 only when A's `sched_setscheduler` landed --
+which would have raced with the dispatcher's own RECV-side runqueue
+insertion. Gamma closes that gap by construction, and 1011 removes the
+extra wake/round-trip once the next entry is already queued.
 
 ---
 
@@ -521,6 +525,7 @@ The gating env vars on the current production path are:
 - `NSPA_DISPATCHER_USE_TOKEN=0` -- A/B for T3 thread-token consumption
 - `NSPA_AGG_WAIT=0` -- opt out of the post-1010 aggregate-wait loop and
   force the old direct `CHANNEL_RECV2` path for that dispatcher
+- `NSPA_TRY_RECV2=0` -- keep one dequeue per wake even on 1011 kernels
 
 Gamma itself remains the default transport whenever the channel ioctls
 are present.
@@ -554,7 +559,7 @@ lines 1190-1494 for the channel object). Each NTSync channel is:
         refcount_t          refs;          /* added by patch 1009 (see audit) */
     };
 
-The channel exposes six ioctls. Five are core to gamma's hot path; one
+The channel exposes seven ioctls. Six are core to gamma's hot path; one
 is for opening a channel during process attach.
 
 | ioctl | Direction | Patch | Purpose |
@@ -563,6 +568,7 @@ is for opening a channel during process attach.
 | `NTSYNC_IOC_CHANNEL_SEND_PI` | client | 1004 | Enqueue + boost dispatcher + block for reply, atomically. |
 | `NTSYNC_IOC_CHANNEL_RECV` | dispatcher | 1004 | Dequeue highest-prio entry; boost dispatcher to that prio; return metadata. |
 | `NTSYNC_IOC_CHANNEL_RECV2` | dispatcher | 1005 | Same as RECV but additionally returns `thread_token`. |
+| `NTSYNC_IOC_CHANNEL_TRY_RECV2` | dispatcher | 1011 | Same payload as RECV2, but non-blocking; used for post-dispatch burst drain. |
 | `NTSYNC_IOC_CHANNEL_REPLY` | dispatcher | 1004 | Wake the matching entry's sender; drain our PI boost from that entry; auto-re-boost to the next pending entry's prio if any. |
 | `NTSYNC_IOC_CHANNEL_REGISTER_THREAD` / `DEREGISTER_THREAD` | wineserver | 1005 | Register `(tid -> struct thread *)` for token pass-through. |
 
@@ -1275,6 +1281,7 @@ this discipline applies to its own future evolution as well.
 | `ntsync-patches/1008-ntsync-event-set-pi-deferred-boost.patch` | -- | Deferred boost machinery (consumed by REPLY) |
 | `ntsync-patches/1009-ntsync-channel-entry-refcount.patch` | -- | refcount_t on `ntsync_channel_entry` (KASAN UAF fix) |
 | `ntsync-patches/1010-ntsync-aggregate-wait.patch` | -- | heterogeneous wait primitive used by the post-1010 dispatcher |
+| `ntsync-patches/1011-ntsync-channel-try-recv2.patch` | -- | non-blocking `RECV2` used for post-dispatch burst drain |
 
 ### 14.3 Memory / handoff documents
 

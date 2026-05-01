@@ -433,6 +433,16 @@ landed in [`f087a265`](https://github.com/nine7nine/Wine-NSPA/commit/f087a265)
 and was wired into the default PE matrix by
 [`343d7ac2`](https://github.com/nine7nine/Wine-NSPA/commit/343d7ac2).
 
+Published 2026-04-30 observations:
+
+- burst ops/sec (wall): `841,765` with TRY_RECV2 on vs `555,567` with
+  TRY_RECV2 off (`+34% / 1.5x`)
+- burst worst max ns: `23,014,325` with TRY_RECV2 on vs `31,843,082`
+  with TRY_RECV2 off (`-28%`)
+- steady avg ns: `35,202` with TRY_RECV2 on vs `33,405` with TRY_RECV2
+  off (flat in the no-burst case)
+- default matrix runtime contribution: `~7s wall`
+
 ### 3.12 / 3.13 -- internal `child-quickexit` and `help`
 
 ---
