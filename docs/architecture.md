@@ -1,8 +1,8 @@
 # Wine-NSPA -- Architecture Overview
 
-Wine 11.6 + NSPA RT patchset | Kernel 6.19.x-rt with NTSync PI | 2026-04-29
+Wine 11.6 + NSPA RT patchset | Kernel 6.19.x-rt with NTSync PI | 2026-05-01
 Author: Jordan Johnston
-Status: top-level architecture reference; reflects the shipped aggregate-wait + gamma Phase 3 path as of 2026-04-29.
+Status: top-level architecture reference; reflects the shipped 1003-1011 kernel stack, gamma aggregate-wait + TRY_RECV2 dispatcher path, and the current public bypass set as of 2026-05-01.
 
 This page is the system map for Wine-NSPA. Use it to understand the major layers, where each bypass sits, and which responsibilities still remain in wineserver.
 
@@ -122,7 +122,7 @@ The architecture has three layers: a kernel layer (NTSync, io_uring, librtpi-sty
   <rect x="40"  y="265" width="180" height="70" class="box-hot"/>
   <text x="130" y="283" text-anchor="middle" class="lbl-yel">gamma aggregate-wait dispatcher</text>
   <text x="130" y="297" text-anchor="middle" class="lbl-mut">per-process channel + uring</text>
-  <text x="130" y="311" text-anchor="middle" class="lbl-mut">AGG_WAIT -&gt; CHANNEL_RECV2</text>
+  <text x="130" y="311" text-anchor="middle" class="lbl-mut">AGG_WAIT -&gt; RECV2 -&gt; TRY_RECV2</text>
   <text x="130" y="325" text-anchor="middle" class="lbl-cy">same-thread CQE drain + REPLY</text>
 
   <rect x="240" y="265" width="180" height="70" class="box"/>
@@ -158,7 +158,7 @@ The architecture has three layers: a kernel layer (NTSync, io_uring, librtpi-sty
   <text x="140" y="450" text-anchor="middle" class="lbl-mut">NT sync object driver</text>
   <text x="140" y="464" text-anchor="middle" class="lbl-cy">1003 PI baseline</text>
   <text x="140" y="478" text-anchor="middle" class="lbl-cy">1004-1009 gamma transport</text>
-  <text x="140" y="492" text-anchor="middle" class="lbl-cy">1010 aggregate-wait</text>
+  <text x="140" y="492" text-anchor="middle" class="lbl-cy">1010 aggregate-wait + 1011 TRY_RECV2</text>
   <text x="140" y="506" text-anchor="middle" class="lbl-cy">channel notify-only source</text>
   <text x="140" y="520" text-anchor="middle" class="lbl-cy">post-1010 PI follow-ups</text>
 
@@ -227,7 +227,14 @@ Each subsection here is a one-paragraph (sometimes two) sketch of the subsystem;
 
 NSPA implements priority inheritance along four independent paths so that no Win32 sync surface is left as a priority-inversion source. CS-PI (Path A) repurposes `RTL_CRITICAL_SECTION::LockSemaphore` as a `FUTEX_LOCK_PI` futex word, giving every critical section the kernel's transitive PI chain semantics. NTSync direct (Path B) routes `NtWaitForSingleObject` and friends through `/dev/ntsync` ioctls, where the kernel module's 1003 patch implements priority-ordered waiter queues and per-task PI boost across mutex chains. Vendored librtpi (Path C) provides `pi_cond_wait` for unix-side condition variables built on `FUTEX_WAIT_REQUEUE_PI`. Win32 condvar PI (Path D) extends Path C up into the Win32 surface so `SleepConditionVariableCS` is also PI-clean.
 
-The kernel side is where the heavy lifting happens. The `ntsync.ko` module sits at `/dev/ntsync` and implements NT sync object semantics natively in the kernel, with PI-aware mutexes, priority-ordered waiter queues, and a channel object (1004 patch) that serves as the gamma dispatcher's transport. The patch stack runs from 1003 (priority inheritance) through 1009 (channel_entry refcount UAF fix); the 2026-04-27 cycle hardened the driver against four discovered RT-correctness bugs and validated cleanly against ~370M ops with zero KASAN splats.
+The kernel side is where the heavy lifting happens. The `ntsync.ko`
+module sits at `/dev/ntsync` and implements NT sync object semantics
+natively in the kernel, with PI-aware mutexes, priority-ordered waiter
+queues, a channel object (1004/1005) that serves as the gamma
+dispatcher transport, 1010 aggregate-wait for heterogeneous waits, and
+1011 `TRY_RECV2` for post-dispatch burst drain. The current production
+module is `10124FB81FDC76797EF1F91`, which carries 1003-1011 plus the
+post-1010 PI follow-ups.
 
 All four paths are gated on `NSPA_RT_PRIO`. When unset, every PI code path short-circuits and Wine behaves byte-for-byte like upstream. **Detail: see [ntsync-driver](ntsync-driver.gen.html), [cs-pi](cs-pi.gen.html), [condvar-pi-requeue](condvar-pi-requeue.gen.html).**
 
@@ -235,7 +242,20 @@ All four paths are gated on `NSPA_RT_PRIO`. When unset, every PI code path short
 
 The classical Wine IPC architecture has every client thread `read()`/`write()` over a unix socket pair to the wineserver process, which dispatches under `global_lock`. The earlier NSPA work (Torge Matthies's 2022 patch, forward-ported as the v1.5 line) replaced the socket round-trip with a per-thread shmem region and a futex signal, served by a pool of pthread dispatchers inside the server. That worked but had its own pile of correctness rough edges; it has been superseded by the **gamma channel dispatcher**.
 
-The gamma dispatcher uses the ntsync channel object to deliver a per-process kernel-mediated request/reply queue. The client thread issues `NTSYNC_IOC_CHANNEL_SEND_PI`; the wineserver dispatcher receives via `CHANNEL_RECV2` and replies via `CHANNEL_REPLY`. On post-1010 kernels the dispatcher blocks in `NTSYNC_IOC_AGGREGATE_WAIT` over the channel plus its per-process uring eventfd and shutdown eventfd, so the same RT thread can receive the request, drain deferred completions, and signal the reply. The channel object carries a 1005 thread-token so the kernel knows which client thread sent the request, and T1+T2+T3 thread-token consumption is shipped default-on. The legacy shmem-IPC path (`shmem-ipc.gen.html`) is **historical and superseded** and retained as reference material only.
+The gamma dispatcher uses the ntsync channel object to deliver a
+per-process kernel-mediated request/reply queue. The client thread
+issues `NTSYNC_IOC_CHANNEL_SEND_PI`; the dispatcher receives via
+`CHANNEL_RECV2` and replies via `CHANNEL_REPLY`. On post-1010 kernels it
+blocks in `NTSYNC_IOC_AGGREGATE_WAIT` over the channel plus its
+per-process uring eventfd and shutdown eventfd, and on 1011 kernels it
+follows each reply with non-blocking `TRY_RECV2` burst drain until the
+queue is empty. The current shipped path also carries a small hot-path
+tuning pack: inline request / queue helpers, lighter fences, and no
+production allocator poison overhead. The channel object carries a 1005
+thread-token so the kernel knows which client thread sent the request,
+and T1+T2+T3 thread-token consumption is shipped default-on. The legacy
+shmem-IPC path (`shmem-ipc.gen.html`) is **historical and superseded**
+and retained as reference material only.
 
 **Detail: see [gamma-channel-dispatcher](gamma-channel-dispatcher.gen.html). Historical: [shmem-ipc](shmem-ipc.gen.html) (superseded).**
 
@@ -289,7 +309,16 @@ The audio thread typically runs at NT band 31 / `TIME_CRITICAL`, which under `NS
 
 Each bypass moves a specific class of NT-API state or I/O work out of wineserver and into client-local state, bounded shared memory, or kernel-mediated primitives. Every path is independently gated, validated, and revertible.
 
-The current topology covers eleven concrete bypass surfaces plus the residual wineserver floor (process/thread lifecycle, cross-process naming, path resolution, handle inheritance). As of 2026-04-28, the shipped/default-on set includes sync primitives, hook caching, NT-local regular-file open, io_uring Phase 1 regular-file I/O, timers, msg-ring v1 same-process send/reply, and redraw-window push. Paint-cache (B1.0) remains in validation. Phase C (`GetMessage`), sechost device-IRP poll, and io_uring socket/pipe work remain pending.
+The current topology covers the shipped bypass surfaces plus the
+residual wineserver floor (process/thread lifecycle, cross-process
+naming, path resolution, handle inheritance). As of 2026-05-01, the
+shipped/default-on set includes sync primitives, hook caching,
+NT-local regular-file open, io_uring Phase 1 regular-file I/O, gamma's
+aggregate-wait + `TRY_RECV2` dispatcher path, Phase 4 async
+`CreateFile`, timers, msg-ring v1 same-process send/reply, redraw-window
+push, and the X11 flush throttle. Paint-cache (B1.0) remains in
+validation. Phase C (`GetMessage`), sechost device-IRP poll, and
+io_uring socket/pipe work remain pending.
 
 This staging keeps regression scope local and rebase cost bounded. The shipped paths already remove measurable server traffic while preserving an immediate fallback to the canonical wineserver path when a gate is disabled.
 
@@ -349,7 +378,7 @@ The mapping is governed by these env vars:
 
 ## 7. Status reference
 
-The canonical status board lives at **[current-state](current-state.gen.html)**. It tracks shipped vs gated vs pending features, the ntsync patch stack through 1010 aggregate-wait, the current production module / validation posture, and the active env-var matrix per subsystem.
+The canonical status board lives at **[current-state](current-state.gen.html)**. It tracks shipped vs gated vs pending features, the ntsync patch stack through 1011, the current production module / validation posture, the default-on feature set, and the current dispatcher hot-path tuning notes.
 
 This document describes system structure. `current-state.md` records current validation and default polarity.
 
@@ -370,7 +399,7 @@ Master overview (this doc) plus dedicated subsystem pages.
 | `nspa-local-file-architecture.gen.html` | NT-local file (read-only regular-file `NtCreateFile` bypass) |
 | `msg-ring-architecture.gen.html` | msg-ring v1 + v2 design (POST/SEND/REPLY, Phase A, B1.0, Phase C, MR1/MR2/MR4) |
 | `hook-cache.gen.html` | Tier 1+2 Win32 hook-chain cache |
-| `ntsync-driver.gen.html` | NTSync kernel driver, patch stack through 1010 aggregate-wait |
+| `ntsync-driver.gen.html` | NTSync kernel driver, patch stack through 1011 plus `TRY_RECV2` |
 | `cs-pi.gen.html` | Critical Section Priority Inheritance (Path A; v2.3) |
 | `condvar-pi-requeue.gen.html` | `RtlSleepConditionVariableCS` with `FUTEX_WAIT_REQUEUE_PI` (Path D) |
 | `io_uring-architecture.gen.html` | io_uring Phase 1 (regular-file I/O) + ALERTED-state interception |
@@ -380,8 +409,10 @@ Master overview (this doc) plus dedicated subsystem pages.
 | `sync-primitives-research.gen.html` | Background research on sync-primitive selection |
 | `shmem-ipc.gen.html` | Historical -- legacy shmem dispatcher (superseded by gamma) |
 
-For commit-level history, the wine submodule is at `wine-rt-claude/wine` (HEAD `ac823311aba` as of this writing); the kernel `ntsync` source is at `linux-nspa/src/linux-6.19.11/drivers/misc/ntsync.{c,h}`.
+The live defaults, current production module, and exact validation
+totals are maintained on `current-state.gen.html` rather than repeated
+here.
 
 ---
 
-*Master overview generated 2026-04-29. Wine submodule `b72419fc953`, ntsync `srcversion CFF56DE1EF28D693BB597CD`, kernel `6.19.11-rt1-1-nspa`. Per-subsystem detail in the dedicated pages linked above; live state in `current-state.gen.html`.*
+*Master overview updated 2026-05-01. Current production ntsync module `10124FB81FDC76797EF1F91`, kernel `6.19.11-rt1-1-nspa`. Per-subsystem detail is in the dedicated pages linked above; live state is in `current-state.gen.html`.*

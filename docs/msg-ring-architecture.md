@@ -1,9 +1,8 @@
 # Wine-NSPA — Message Ring Architecture
 
-**Date:** 2026-04-28
+**Date:** 2026-05-01
 **Author:** Jordan Johnston
-**Wine submodule HEAD:** `ac823311aba` (Wine 11.6 + NSPA fork)
-**Kernel:** `6.19.11-rt1-1-nspa` with NTSync PI (`A250A77651C8D5DAB719FE2`)
+**Kernel:** `6.19.11-rt1-1-nspa` with NTSync PI (`10124FB81FDC76797EF1F91`)
 **Subsystem source:** `wine/dlls/win32u/nspa/msg_ring.c` (1633 LOC),
 `wine/server/protocol.def` (slot definitions, lines 1020-1214),
 `wine/server/nspa/redraw_ring.c` (87 LOC server drain),
@@ -2037,7 +2036,7 @@ this footnote.
 
 ### 17.4 Related architecture docs in this site
 
-- [current-state.md](current-state.md) — Wine-NSPA state of the art (2026-04-28).
+- [current-state.md](current-state.md) — Wine-NSPA state of the art.
 - [gamma-channel-dispatcher.md](gamma-channel-dispatcher.md) — gamma backbone for in-process wineserver dispatch.
 - [shmem-ipc.gen.html](shmem-ipc.gen.html) — Shmem v1.5 (orthogonal to the message ring; both share NTSync).
 - [io_uring-architecture.gen.html](io_uring-architecture.gen.html) — Orthogonal I/O bypass layer.

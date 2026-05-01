@@ -1,10 +1,10 @@
 # Wine-NSPA — State of The Art
 
-**Date:** 2026-04-30
+**Date:** 2026-05-01
 **Author:** Jordan Johnston
 **Kernel:** `6.19.11-rt1-1-nspa` (PREEMPT_RT_FULL, production)
 **ntsync module:** `srcversion 10124FB81FDC76797EF1F91`
-**Status:** production state board as of 2026-04-30; aggregate-wait Phase 3, post-1011 TRY_RECV2 burst-drain, flush throttle, and Phase 4 async `create_file` are all in the shipped public set.
+**Status:** production state board as of 2026-05-01; the 2026-04-30 shipped feature set plus the immediate dispatcher hot-path tuning follow-ons are all in the public tree.
 
 This page is the project snapshot for what is actually shipped: kernel patch state, userspace feature state, validation totals, configuration knobs, and the remaining open work.
 
@@ -40,6 +40,12 @@ public story now includes the **dispatcher async-completion
 architecture**, the **Phase 4 async `create_file` consumer**, and the
 **1011 burst-drain follow-on**, not just the prerequisite channel and PI
 stack.
+
+Immediately after that feature landing, the dispatcher also got a
+second tuning sweep with no new user knob: lighter fences on the hot
+path, inlined helper glue, and production-off allocator debug poison /
+valgrind stubs so the shipped build stops paying debug-only costs on
+every server-bound RPC.
 
 What the project looks like today: one small kernel module
 (~3kLOC) plus a Wine fork that increasingly bypasses wineserver
@@ -104,7 +110,20 @@ when the gate is off.
 | LF `check_sharing` arbitrates `FILE_MAPPING_WRITE` | mirrors `server/fd.c::check_sharing` |
 | `local_wm_timer` eligibility tightening | `TIMERPROC` + cross-thread `SetTimer` cases defer to the server |
 
-### 2.5 Validation totals against `10124FB81FDC76797EF1F91`
+### 2.5 Dispatcher hot-path follow-ons (shipped, no user knob)
+
+| Commit | Landed change | Observed effect |
+|---|---|---|
+| `1d85c558ceb` | ACQ_REL fences + inline `nspa_queue_bypass_shm` | removes the hot accessor call and the unnecessary `mfence` cost from the dispatcher path |
+| `c0f5c515cd7` + `2870c9629ce` | gate `mark_block_*` poison and the paired valgrind annotations behind `NSPA_DEBUG_POISON_ALLOCS` | reclaims the full `1.34pp` allocator-debug tax seen under `dispatcher-burst`; `mark_block_uninitialized` falls out of the top symbols |
+| `0802dadc750` | inline `read_request_shm` at the dispatcher call site | `read_request_shm` was sampled at `3.55%` wineserver-relative under `dispatcher-burst`; after inlining it disappears from the symbol table and saves `~1pp` more on the dispatcher path |
+
+These are production-path cleanups, not new feature flags. They keep
+the shipped gamma dispatcher from paying avoidable function-call and
+debug-aid overhead once the architectural wins from aggregate-wait and
+`TRY_RECV2` are already in place.
+
+### 2.6 Validation totals against `10124FB81FDC76797EF1F91`
 
 | Layer | Run | Result | Ops | Errors |
 |---|---|---|---|---|
@@ -283,6 +302,18 @@ own correctness proof and gate.
 | `nspa_redraw_ring_drain` | 2.88% | absent | gone from top symbols |
 
 System-wide samples: 38,588 -> 19,415 per 30s.
+
+#### Post-ship dispatcher hot-path follow-ons
+
+| Commit | Measured result |
+|---|---|
+| `c0f5c515cd7` + `2870c9629ce` | `mark_block_uninitialized` was sampled at `1.34%` wineserver-relative under `dispatcher-burst`; after gating the poison + valgrind pair behind `NSPA_DEBUG_POISON_ALLOCS`, the full `1.34pp` cost is reclaimed |
+| `0802dadc750` | `read_request_shm` was sampled at `3.55%` wineserver-relative under `dispatcher-burst`; after inlining it disappears from the symbol table and saves `~1pp` more on the dispatcher path |
+
+These commits are layered on top of the bigger 2026-04-30 dispatcher
+shape change (`TRY_RECV2`, inline queue accessor, lighter fences). They
+do not change the architecture; they remove residual per-RPC overhead
+from the already-shipped path.
 
 #### PE-side `dispatcher-burst` A/B
 
@@ -500,5 +531,5 @@ hook cache, local-file, msg-ring, and the decomposition notes.
 
 ---
 
-*Generated 2026-04-30. ntsync `10124FB81FDC76797EF1F91`, kernel
+*Generated 2026-05-01. ntsync `10124FB81FDC76797EF1F91`, kernel
 `6.19.11-rt1-1-nspa`.*

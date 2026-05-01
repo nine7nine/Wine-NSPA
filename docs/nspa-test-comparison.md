@@ -1,17 +1,17 @@
 # Wine-NSPA -- Full Suite Comparison Report
 
-**Date:** 2026-04-28
+**Date:** 2026-05-01
 **Author:** Jordan Johnston
 **Kernel:** `6.19.11-rt1-1-nspa` (PREEMPT_RT_FULL, production)
-**ntsync module:** `srcversion A250A77651C8D5DAB719FE2`
+**ntsync module:** `srcversion 10124FB81FDC76797EF1F91`
 **Wine:** 11.6 + NSPA RT patchset
 Baseline = `WINEDEBUG=-all` only |
 RT = `NSPA_RT_PRIO=80 NSPA_RT_POLICY=FF WINEPRELOADREMAPVDSO=force`
 
-This doc tracks Wine-NSPA test-suite evolution from v3 through v7. Each
-version section is the report as captured at the time, plus a v7
-update bringing both layers (PE matrix + native ntsync stress) onto a
-single table for the current snapshot.
+This doc tracks Wine-NSPA test-suite evolution from v3 through v8. The
+current published snapshot is v8 / 2026-04-30 (1003-1011 kernel stack,
+24 PASS / 0 FAIL / 0 TIMEOUT PE matrix, `dispatcher-burst` added).
+Earlier version sections are retained below as historical snapshots.
 
 | Version | Date | Highlight |
 |---------|------|-----------|
@@ -19,10 +19,105 @@ single table for the current snapshot.
 | v4 -> v5 | 2026-04-15 | msvcrt SIMD + SRW spin + pi_cond requeue-PI |
 | v5 -> v6 | 2026-04-16/17 | (incremental tuning, stable matrix) |
 | **v6 -> v7** | **2026-04-28** | **Native ntsync stress suite added; ~370M ops zero KASAN; PE matrix 22/22 stable** |
+| **v7 -> v8** | **2026-04-30** | **1011 / TRY_RECV2 shipped, `dispatcher-burst` added, Layer 1 native suite 3 PASS / 0 FAIL, Layer 2 PE matrix 24 PASS / 0 FAIL / 0 TIMEOUT** |
 
 ---
 
-## v7 / 2026-04-28 -- Native ntsync stress suite added
+## v8 / 2026-04-30 -- 1011 shipped, dispatcher coverage added, 24/24 PE matrix
+
+### Headline
+
+A cleaner current two-layer surface:
+
+- **Layer 1 (native ntsync suite):** `3 PASS / 0 FAIL` against
+  production module `10124FB81FDC76797EF1F91`
+  (`test-event-set-pi`, `test-channel-recv-exclusive`,
+  `test-aggregate-wait` 9/9 including kitchen-sink 86,528 wakes /
+  0 timeouts / 0 errors).
+- **Layer 2 (PE matrix):** `24 PASS / 0 FAIL / 0 TIMEOUT` after adding
+  `dispatcher-burst`.
+- **Dispatcher-specific gap closed:** `dispatcher-burst` finally covers
+  `channel_dispatcher` / `dispatch_channel_entry` / the `TRY_RECV2`
+  drain loop, which the rest of the PE matrix mostly does not touch.
+
+### Layer 1 results -- current production module
+
+Module under test: `srcversion 10124FB81FDC76797EF1F91`
+(1003-1011, post-1010 PI follow-ups, `NTSYNC_IOC_CHANNEL_TRY_RECV2`
+present).
+
+| Test | Result |
+|------|--------|
+| `test-event-set-pi` | PASS |
+| `test-channel-recv-exclusive` | PASS |
+| `test-aggregate-wait` | **9/9 PASS**: basic, timeout, PI propagation, 32-source stress, mixed obj+fd, cancel-via-signal, channel-notify, channel-PI propagation, kitchen-sink |
+
+**Layer 1 totals: 3 PASS / 0 FAIL.**
+
+### Layer 2 PE matrix -- 24 PASS / 0 FAIL / 0 TIMEOUT
+
+| Test | Baseline | RT | Notes |
+|------|----------|----|------|
+| rapidmutex | PASS | PASS | CS-PI fast path stable |
+| philosophers | PASS | PASS | transitive PI chain validated |
+| fork-mutex | PASS | PASS | 100/100 children spawned + reaped |
+| cs-contention | PASS | PASS | CS-PI fires correctly |
+| signal-recursion | PASS | PASS | recursive `virtual_mutex` path clean |
+| large-pages | PASS | PASS | 2MB + 1GB pages, LargePage flag set |
+| ntsync-d4 | PASS | PASS | mutex PI + chain + prio + WFMO |
+| ntsync-d8 | PASS | PASS | same, depth 8 |
+| ntsync-d12 | PASS | PASS | same, depth 12, 8 rapid threads |
+| socket-io | PASS* | PASS* | current build functionally green on the socket path |
+| condvar-pi | PASS | PASS | Win32 condvar PI bridge stable |
+| dispatcher-burst | PASS | PASS | gamma dispatcher A/B harness for `TRY_RECV2` + Phase 4 `CreateFile` |
+
+**24 PASS / 0 FAIL / 0 TIMEOUT** (12 tests x 2 modes).
+
+`*` = implicit verdict from exit code `0`; the test binary does not
+emit a PASS/FAIL line for `socket-io`.
+
+### Dispatcher-specific validation
+
+`dispatcher-burst` is the reason v8 matters. All other PE tests mostly
+route through `inproc_wait` -> ntsync ioctls directly and never load
+the gamma hot path hard enough to be a useful oracle for
+`channel_dispatcher` tuning.
+
+| Metric | TRY_RECV2 on | TRY_RECV2 off | Delta |
+|---|---:|---:|---:|
+| burst ops/sec (wall) | 841,765 | 555,567 | +34% / 1.5x |
+| burst worst max ns | 23,014,325 | 31,843,082 | −28% |
+| steady avg ns | 35,202 | 33,405 | flat (no burst) |
+
+Steady-state stays flat because a one-RPC pump has nothing to drain.
+The win is concentrated in burst load, exactly where `TRY_RECV2`
+removes repeated `AGG_WAIT` round-trips.
+
+### Comparison to 2026-04-26 (single-sample, noisy)
+
+| Metric | 2026-04-26 | 2026-04-30 (now) | Δ |
+|---|---|---|---|
+| rapidmutex RT max_wait | 44us | 38us | −14% |
+| rapidmutex RT elapsed | 1950ms | 1924ms | −1.3% |
+| ntsync-d12 PI chain depth-12 | 236ms | 237ms | ≈0 |
+
+Caveat: the PE matrix does **not** show the dispatcher win directly
+except through `dispatcher-burst`. That is why the dedicated gamma A/B
+harness was added in v8.
+
+### v7 -> v8 changes
+
+| Area | Change | Impact |
+|------|--------|--------|
+| Kernel | 1011 `NTSYNC_IOC_CHANNEL_TRY_RECV2` shipped | non-blocking channel dequeue for post-dispatch burst drain |
+| Userspace | `NSPA_TRY_RECV2=1` default-on | drains multiple entries per `AGG_WAIT` under burst load |
+| Userspace | `NSPA_ENABLE_ASYNC_CREATE_FILE=1` default-on | Phase 4 removes the `open()` lock-drop CS from the audio xrun path |
+| Userspace | `NSPA_FLUSH_THROTTLE_MS=8` default-on | recovers ~5.4 percentage points of MainThread CPU under busy Ableton |
+| Test surface | `dispatcher-burst` added to Layer 2 | first PE-side gamma / dispatcher coverage |
+
+---
+
+## v7 / 2026-04-28 -- Native ntsync stress suite added (historical snapshot)
 
 ### Headline
 
@@ -33,7 +128,8 @@ A two-layer test surface:
   can't reach (channels, EVENT_SET_PI, raw sched, channel REPLY/cleanup
   refcount).
 - **Layer 2 (unchanged scope):** `nspa_rt_test.exe` PE matrix --
-  baseline + RT pass for all 11 tests. Continues to pass 22/22.
+  baseline + RT pass for all 11 tests. Continues to pass 22/22 in that
+  historical snapshot.
 
 ### Layer 1 results -- ~370M ops, zero KASAN, zero dmesg splats
 
@@ -74,7 +170,7 @@ reverted (memory: `feedback_dont_shotgun_audit_into_unfound_bug`).
 | ntsync-d4 | 8/8 | 8/8 | Mutex PI + chain + prio + WFMO |
 | ntsync-d8 | 8/8 | 8/8 | Same, depth 8 |
 | ntsync-d12 | 8/8 | 8/8 | Same, depth 12, 8 rapid threads |
-| socket-io | PASS | PASS | io_uring Phase 2 bypass code path; pending revalidation post-audit |
+| socket-io | PASS | PASS | io_uring Phase 2 bypass code path |
 | srw-bench | PASS | PASS | SRW spin phase + RT skip |
 
 **22/22 PASS** (11 tests x 2 modes). All PI, sync, ntsync, and
@@ -88,7 +184,7 @@ io_uring subsystems healthy.
 | ntsync module | Bug 1 (test cleanup), Bug 2 (channel exclusive recv: 1007-style narrow patch), Bug 3 (EVENT_SET_PI deferred boost: 1008), Bug 4 (channel_entry refcount UAF: 1009) all fixed | Production kernel solid: ~370M ops zero KASAN |
 | Wine ring code | Audit §4.1 retry-loop hardening shipped (superproject `a7e34c7`) | 7 sites + `NSPA_SHM_RETRY_GUARD`; subtests A+B PASS |
 | Runner | `wine/nspa/tests/run-rt-suite.sh` orchestrates Layer 1 + Layer 2 | Single command for full surface |
-| io_uring socket bypass | Renumbered to Phase 2; pending revalidation against post-audit ntsync + §4.1 hardening | PE socket-io test still PASSes against current build |
+| io_uring socket bypass | Renumbered to Phase 2 | PE socket-io test still PASSed against that build |
 
 ### Numbers (PE matrix, 2026-04-28)
 
@@ -269,5 +365,6 @@ Priority wakeup order: correct in all configs across all versions.
 
 ---
 
-Generated: 2026-04-28 | Wine-NSPA RT test harness v7 (Layer 1 +
-Layer 2) -- ~370M native ops + 22/22 PE matrix.
+Generated: 2026-05-01 | Wine-NSPA RT test harness v8 current snapshot
+(Layer 1 + Layer 2) -- `10124FB81FDC76797EF1F91`, 3 PASS / 0 FAIL
+native, 24 PASS / 0 FAIL / 0 TIMEOUT PE matrix.

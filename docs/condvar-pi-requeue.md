@@ -2,7 +2,7 @@
 
 Wine 11.6 + NSPA RT patchset | Kernel 6.19.x-rt with NTSync PI | 2026-04-16
 Author: Jordan Johnston
-Status: shipped 2026-04-16; 22/22 RT test suite PASS post-ship and validated against ~370M mixed-load operations through 2026-04-28.
+Status: shipped 2026-04-16; validated against ~370M mixed-load operations through 2026-04-28 and the current 2026-04-30 PE matrix (`24 PASS / 0 FAIL / 0 TIMEOUT`).
 
 This page is the design and implementation reference for the Win32 condvar PI bridge, including the requeue-PI syscall pairing, correctness envelope, and validation results.
 
@@ -521,7 +521,8 @@ The `condvar-pi` test validates the requeue-PI path under contention: an RT wait
 
 ### Full Suite Results
 
-22/22 PASS (11 tests x 2 modes: with and without PI), no regressions vs the v5 test suite baseline.
+24 PASS / 0 FAIL / 0 TIMEOUT (12 tests x 2 modes in the current PE
+matrix), no regressions after the later `dispatcher-burst` addition.
 
 ---
 

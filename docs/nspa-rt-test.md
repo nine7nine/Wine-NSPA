@@ -407,10 +407,10 @@ TCP loopback pair, per-message recv latency via overlapped WSARecv.
 
 PASS criteria: both phases complete without recv errors.
 
-Note: Phase 2 sockets is currently pending revalidation against the
-post-audit ntsync module + audit §4.1 retry-loop hardening. Treat the
-io_uring socket bypass as not-yet-revalidated until that session
-lands.
+The current public matrix is functionally green on this path in both
+baseline and RT modes. Dispatcher-specific tuning is validated by
+`dispatcher-burst`; `socket-io` remains its own correctness surface
+rather than the main gamma performance harness.
 
 ### 3.10 `srw-bench` -- SRW Lock Contention Benchmark
 
@@ -432,6 +432,8 @@ still giving a reproducible A/B for `NSPA_TRY_RECV2`. The subcommand
 landed in [`f087a265`](https://github.com/nine7nine/Wine-NSPA/commit/f087a265)
 and was wired into the default PE matrix by
 [`343d7ac2`](https://github.com/nine7nine/Wine-NSPA/commit/343d7ac2).
+The later dispatcher hot-path tuning commits continue to use this same
+subcommand as their PE-side oracle.
 
 Published 2026-04-30 observations:
 

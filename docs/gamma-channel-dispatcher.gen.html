@@ -2,7 +2,7 @@
 <html lang="en"><head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Wine-NSPA -- Gamma Channel-Based Wineserver Dispatcher</title>
+<title>Wine-NSPA -- Gamma Channel Dispatcher</title>
 <style>
   :root {
     --bg: #1a1b26; --fg: #c0caf5; --accent: #7aa2f7;
@@ -83,11 +83,11 @@
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/tokyo-night-dark.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
 </head><body>
-<h1 id="wine-nspa--gamma-channel-based-wineserver-dispatcher">Wine-NSPA &ndash; Gamma Channel-Based Wineserver Dispatcher</h1>
+<h1 id="wine-nspa--gamma-channel-dispatcher">Wine-NSPA &ndash; Gamma Channel Dispatcher</h1>
 
-<p>Wine 11.6 + NSPA RT patchset | Kernel 6.19.x-rt with NTSync channels + aggregate-wait + TRY_RECV2 | 2026-04-30
+<p>Wine 11.6 + NSPA RT patchset | Kernel 6.19.x-rt with NTSync channels + aggregate-wait + TRY_RECV2 | 2026-05-01
 Author: Jordan Johnston
-Status: production dispatcher architecture; aggregate-wait Phase 3 is default-on, and post-1011 TRY_RECV2 burst-drain is default-on when the kernel exposes it.</p>
+Status: production dispatcher architecture; aggregate-wait Phase 3, post-1011 TRY_RECV2 burst-drain, and the immediate hot-path tuning follow-ons are all part of the shipped path.</p>
 
 <p>This page explains the current wineserver request path for a Wine process: how requests enter the gamma channel, how the dispatcher owns the reply path, and how the post-1010 aggregate-wait loop fits into that design.</p>
 
@@ -1397,6 +1397,36 @@ shutdown.</li>
 (dispatcher ACQ_REL fences + inline accessor) and
 <a href="https://github.com/nine7nine/Wine-NSPA/commit/01d528f5"><code>01d528f5</code></a>
 (TRY_RECV2 burst-drain) on top of the 1011 kernel primitive.</p>
+
+<h4 id="post-ship-hot-path-follow-ons">Post-ship hot-path follow-ons</h4>
+
+<table>
+<thead>
+<tr>
+<th> Commit </th>
+<th> Implemented change </th>
+<th> Exact observed effect </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> <code>c0f5c515cd7</code> + <code>2870c9629ce</code> </td>
+<td> gate <code>mark_block_*</code> poison and the paired valgrind annotations behind <code>NSPA_DEBUG_POISON_ALLOCS</code> </td>
+<td> <code>mark_block_uninitialized</code> was sampled at <code>1.34%</code> wineserver-relative under <code>dispatcher-burst</code>; the combined change reclaims the full <code>1.34pp</code> and drops the symbol out of the top-20 </td>
+</tr>
+<tr>
+<td> <code>0802dadc750</code> </td>
+<td> inline <code>read_request_shm</code> at the dispatcher call site </td>
+<td> <code>read_request_shm</code> was sampled at <code>3.55%</code> wineserver-relative under <code>dispatcher-burst</code>; after inlining it disappears from the symbol table and saves <code>~1pp</code> more on the dispatcher path </td>
+</tr>
+</tbody>
+</table>
+
+
+<p>These follow-ons do not change the dispatcher architecture. They remove
+residual per-RPC overhead that remained after the bigger structural
+landing (<code>AGG_WAIT</code>, <code>TRY_RECV2</code>, inline queue accessor, lighter
+fences) was already in place.</p>
 
 <h4 id="pe-side-dispatcher-burst-ab">PE-side <code>dispatcher-burst</code> A/B</h4>
 

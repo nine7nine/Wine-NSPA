@@ -85,18 +85,18 @@
 </head><body>
 <h1 id="wine-nspa--full-suite-comparison-report">Wine-NSPA &ndash; Full Suite Comparison Report</h1>
 
-<p><strong>Date:</strong> 2026-04-28
+<p><strong>Date:</strong> 2026-05-01
 <strong>Author:</strong> Jordan Johnston
 <strong>Kernel:</strong> <code>6.19.11-rt1-1-nspa</code> (PREEMPT_RT_FULL, production)
-<strong>ntsync module:</strong> <code>srcversion A250A77651C8D5DAB719FE2</code>
+<strong>ntsync module:</strong> <code>srcversion 10124FB81FDC76797EF1F91</code>
 <strong>Wine:</strong> 11.6 + NSPA RT patchset
 Baseline = <code>WINEDEBUG=-all</code> only |
 RT = <code>NSPA_RT_PRIO=80 NSPA_RT_POLICY=FF WINEPRELOADREMAPVDSO=force</code></p>
 
-<p>This doc tracks Wine-NSPA test-suite evolution from v3 through v7. Each
-version section is the report as captured at the time, plus a v7
-update bringing both layers (PE matrix + native ntsync stress) onto a
-single table for the current snapshot.</p>
+<p>This doc tracks Wine-NSPA test-suite evolution from v3 through v8. The
+current published snapshot is v8 / 2026-04-30 (1003-1011 kernel stack,
+24 PASS / 0 FAIL / 0 TIMEOUT PE matrix, <code>dispatcher-burst</code> added).
+Earlier version sections are retained below as historical snapshots.</p>
 
 <table>
 <thead>
@@ -127,15 +127,288 @@ single table for the current snapshot.</p>
 <td> <strong>2026-04-28</strong> </td>
 <td> <strong>Native ntsync stress suite added; ~370M ops zero KASAN; PE matrix 22/22 stable</strong> </td>
 </tr>
+<tr>
+<td> <strong>v7 -> v8</strong> </td>
+<td> <strong>2026-04-30</strong> </td>
+<td> <strong>1011 / TRY_RECV2 shipped, <code>dispatcher-burst</code> added, Layer 1 native suite 3 PASS / 0 FAIL, Layer 2 PE matrix 24 PASS / 0 FAIL / 0 TIMEOUT</strong> </td>
+</tr>
 </tbody>
 </table>
 
 
 <hr />
 
-<h2 id="v7--2026-04-28--native-ntsync-stress-suite-added">v7 / 2026-04-28 &ndash; Native ntsync stress suite added</h2>
+<h2 id="v8--2026-04-30--1011-shipped-dispatcher-coverage-added-2424-pe-matrix">v8 / 2026-04-30 &ndash; 1011 shipped, dispatcher coverage added, 24/24 PE matrix</h2>
 
 <h3 id="headline">Headline</h3>
+
+<p>A cleaner current two-layer surface:</p>
+
+<ul>
+<li><strong>Layer 1 (native ntsync suite):</strong> <code>3 PASS / 0 FAIL</code> against
+production module <code>10124FB81FDC76797EF1F91</code>
+(<code>test-event-set-pi</code>, <code>test-channel-recv-exclusive</code>,
+<code>test-aggregate-wait</code> 9/9 including kitchen-sink 86,528 wakes /
+0 timeouts / 0 errors).</li>
+<li><strong>Layer 2 (PE matrix):</strong> <code>24 PASS / 0 FAIL / 0 TIMEOUT</code> after adding
+<code>dispatcher-burst</code>.</li>
+<li><strong>Dispatcher-specific gap closed:</strong> <code>dispatcher-burst</code> finally covers
+<code>channel_dispatcher</code> / <code>dispatch_channel_entry</code> / the <code>TRY_RECV2</code>
+drain loop, which the rest of the PE matrix mostly does not touch.</li>
+</ul>
+
+
+<h3 id="layer-1-results--current-production-module">Layer 1 results &ndash; current production module</h3>
+
+<p>Module under test: <code>srcversion 10124FB81FDC76797EF1F91</code>
+(1003-1011, post-1010 PI follow-ups, <code>NTSYNC_IOC_CHANNEL_TRY_RECV2</code>
+present).</p>
+
+<table>
+<thead>
+<tr>
+<th> Test </th>
+<th> Result </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> <code>test-event-set-pi</code> </td>
+<td> PASS </td>
+</tr>
+<tr>
+<td> <code>test-channel-recv-exclusive</code> </td>
+<td> PASS </td>
+</tr>
+<tr>
+<td> <code>test-aggregate-wait</code> </td>
+<td> <strong>9/9 PASS</strong>: basic, timeout, PI propagation, 32-source stress, mixed obj+fd, cancel-via-signal, channel-notify, channel-PI propagation, kitchen-sink </td>
+</tr>
+</tbody>
+</table>
+
+
+<p><strong>Layer 1 totals: 3 PASS / 0 FAIL.</strong></p>
+
+<h3 id="layer-2-pe-matrix--24-pass--0-fail--0-timeout">Layer 2 PE matrix &ndash; 24 PASS / 0 FAIL / 0 TIMEOUT</h3>
+
+<table>
+<thead>
+<tr>
+<th> Test </th>
+<th> Baseline </th>
+<th> RT </th>
+<th> Notes </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> rapidmutex </td>
+<td> PASS </td>
+<td> PASS </td>
+<td> CS-PI fast path stable </td>
+</tr>
+<tr>
+<td> philosophers </td>
+<td> PASS </td>
+<td> PASS </td>
+<td> transitive PI chain validated </td>
+</tr>
+<tr>
+<td> fork-mutex </td>
+<td> PASS </td>
+<td> PASS </td>
+<td> 100/100 children spawned + reaped </td>
+</tr>
+<tr>
+<td> cs-contention </td>
+<td> PASS </td>
+<td> PASS </td>
+<td> CS-PI fires correctly </td>
+</tr>
+<tr>
+<td> signal-recursion </td>
+<td> PASS </td>
+<td> PASS </td>
+<td> recursive <code>virtual_mutex</code> path clean </td>
+</tr>
+<tr>
+<td> large-pages </td>
+<td> PASS </td>
+<td> PASS </td>
+<td> 2MB + 1GB pages, LargePage flag set </td>
+</tr>
+<tr>
+<td> ntsync-d4 </td>
+<td> PASS </td>
+<td> PASS </td>
+<td> mutex PI + chain + prio + WFMO </td>
+</tr>
+<tr>
+<td> ntsync-d8 </td>
+<td> PASS </td>
+<td> PASS </td>
+<td> same, depth 8 </td>
+</tr>
+<tr>
+<td> ntsync-d12 </td>
+<td> PASS </td>
+<td> PASS </td>
+<td> same, depth 12, 8 rapid threads </td>
+</tr>
+<tr>
+<td> socket-io </td>
+<td> PASS* </td>
+<td> PASS* </td>
+<td> current build functionally green on the socket path </td>
+</tr>
+<tr>
+<td> condvar-pi </td>
+<td> PASS </td>
+<td> PASS </td>
+<td> Win32 condvar PI bridge stable </td>
+</tr>
+<tr>
+<td> dispatcher-burst </td>
+<td> PASS </td>
+<td> PASS </td>
+<td> gamma dispatcher A/B harness for <code>TRY_RECV2</code> + Phase 4 <code>CreateFile</code> </td>
+</tr>
+</tbody>
+</table>
+
+
+<p><strong>24 PASS / 0 FAIL / 0 TIMEOUT</strong> (12 tests x 2 modes).</p>
+
+<p><code>*</code> = implicit verdict from exit code <code>0</code>; the test binary does not
+emit a PASS/FAIL line for <code>socket-io</code>.</p>
+
+<h3 id="dispatcher-specific-validation">Dispatcher-specific validation</h3>
+
+<p><code>dispatcher-burst</code> is the reason v8 matters. All other PE tests mostly
+route through <code>inproc_wait</code> -> ntsync ioctls directly and never load
+the gamma hot path hard enough to be a useful oracle for
+<code>channel_dispatcher</code> tuning.</p>
+
+<table>
+<thead>
+<tr>
+<th> Metric </th>
+<th style="text-align:right;"> TRY_RECV2 on </th>
+<th style="text-align:right;"> TRY_RECV2 off </th>
+<th style="text-align:right;"> Delta </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> burst ops/sec (wall) </td>
+<td style="text-align:right;"> 841,765 </td>
+<td style="text-align:right;"> 555,567 </td>
+<td style="text-align:right;"> +34% / 1.5x </td>
+</tr>
+<tr>
+<td> burst worst max ns </td>
+<td style="text-align:right;"> 23,014,325 </td>
+<td style="text-align:right;"> 31,843,082 </td>
+<td style="text-align:right;"> −28% </td>
+</tr>
+<tr>
+<td> steady avg ns </td>
+<td style="text-align:right;"> 35,202 </td>
+<td style="text-align:right;"> 33,405 </td>
+<td style="text-align:right;"> flat (no burst) </td>
+</tr>
+</tbody>
+</table>
+
+
+<p>Steady-state stays flat because a one-RPC pump has nothing to drain.
+The win is concentrated in burst load, exactly where <code>TRY_RECV2</code>
+removes repeated <code>AGG_WAIT</code> round-trips.</p>
+
+<h3 id="comparison-to-2026-04-26-single-sample-noisy">Comparison to 2026-04-26 (single-sample, noisy)</h3>
+
+<table>
+<thead>
+<tr>
+<th> Metric </th>
+<th> 2026-04-26 </th>
+<th> 2026-04-30 (now) </th>
+<th> Δ </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> rapidmutex RT max_wait </td>
+<td> 44us </td>
+<td> 38us </td>
+<td> −14% </td>
+</tr>
+<tr>
+<td> rapidmutex RT elapsed </td>
+<td> 1950ms </td>
+<td> 1924ms </td>
+<td> −1.3% </td>
+</tr>
+<tr>
+<td> ntsync-d12 PI chain depth-12 </td>
+<td> 236ms </td>
+<td> 237ms </td>
+<td> ≈0 </td>
+</tr>
+</tbody>
+</table>
+
+
+<p>Caveat: the PE matrix does <strong>not</strong> show the dispatcher win directly
+except through <code>dispatcher-burst</code>. That is why the dedicated gamma A/B
+harness was added in v8.</p>
+
+<h3 id="v7---v8-changes">v7 -> v8 changes</h3>
+
+<table>
+<thead>
+<tr>
+<th> Area </th>
+<th> Change </th>
+<th> Impact </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> Kernel </td>
+<td> 1011 <code>NTSYNC_IOC_CHANNEL_TRY_RECV2</code> shipped </td>
+<td> non-blocking channel dequeue for post-dispatch burst drain </td>
+</tr>
+<tr>
+<td> Userspace </td>
+<td> <code>NSPA_TRY_RECV2=1</code> default-on </td>
+<td> drains multiple entries per <code>AGG_WAIT</code> under burst load </td>
+</tr>
+<tr>
+<td> Userspace </td>
+<td> <code>NSPA_ENABLE_ASYNC_CREATE_FILE=1</code> default-on </td>
+<td> Phase 4 removes the <code>open()</code> lock-drop CS from the audio xrun path </td>
+</tr>
+<tr>
+<td> Userspace </td>
+<td> <code>NSPA_FLUSH_THROTTLE_MS=8</code> default-on </td>
+<td> recovers ~5.4 percentage points of MainThread CPU under busy Ableton </td>
+</tr>
+<tr>
+<td> Test surface </td>
+<td> <code>dispatcher-burst</code> added to Layer 2 </td>
+<td> first PE-side gamma / dispatcher coverage </td>
+</tr>
+</tbody>
+</table>
+
+
+<hr />
+
+<h2 id="v7--2026-04-28--native-ntsync-stress-suite-added-historical-snapshot">v7 / 2026-04-28 &ndash; Native ntsync stress suite added (historical snapshot)</h2>
+
+<h3 id="headline-2">Headline</h3>
 
 <p>A two-layer test surface:</p>
 
@@ -145,7 +418,8 @@ single table for the current snapshot.</p>
 can&rsquo;t reach (channels, EVENT_SET_PI, raw sched, channel REPLY/cleanup
 refcount).</li>
 <li><strong>Layer 2 (unchanged scope):</strong> <code>nspa_rt_test.exe</code> PE matrix &ndash;
-baseline + RT pass for all 11 tests. Continues to pass 22/22.</li>
+baseline + RT pass for all 11 tests. Continues to pass 22/22 in that
+historical snapshot.</li>
 </ul>
 
 
@@ -286,7 +560,7 @@ reverted (memory: <code>feedback_dont_shotgun_audit_into_unfound_bug</code>).</p
 <td> socket-io </td>
 <td> PASS </td>
 <td> PASS </td>
-<td> io_uring Phase 2 bypass code path; pending revalidation post-audit </td>
+<td> io_uring Phase 2 bypass code path </td>
 </tr>
 <tr>
 <td> srw-bench </td>
@@ -334,8 +608,8 @@ io_uring subsystems healthy.</p>
 </tr>
 <tr>
 <td> io_uring socket bypass </td>
-<td> Renumbered to Phase 2; pending revalidation against post-audit ntsync + §4.1 hardening </td>
-<td> PE socket-io test still PASSes against current build </td>
+<td> Renumbered to Phase 2 </td>
+<td> PE socket-io test still PASSed against that build </td>
 </tr>
 </tbody>
 </table>
@@ -926,8 +1200,9 @@ resume target).</li>
 
 <hr />
 
-<p>Generated: 2026-04-28 | Wine-NSPA RT test harness v7 (Layer 1 +
-Layer 2) &ndash; ~370M native ops + 22/22 PE matrix.</p>
+<p>Generated: 2026-05-01 | Wine-NSPA RT test harness v8 current snapshot
+(Layer 1 + Layer 2) &ndash; <code>10124FB81FDC76797EF1F91</code>, 3 PASS / 0 FAIL
+native, 24 PASS / 0 FAIL / 0 TIMEOUT PE matrix.</p>
 
 <script>
 document.addEventListener("DOMContentLoaded", function () {

@@ -8,7 +8,7 @@
 > mediated channel using NTSync `NTSYNC_IOC_CHANNEL_*` ioctls, with kernel-
 > atomic priority inheritance.
 >
-> See: [Gamma Channel-Based Wineserver Dispatcher](gamma-channel-dispatcher.gen.html)
+> See: [Gamma Channel Dispatcher](gamma-channel-dispatcher.gen.html)
 >
 > This page is retained for historical context.
 

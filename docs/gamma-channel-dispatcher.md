@@ -1,8 +1,8 @@
-# Wine-NSPA -- Gamma Channel-Based Wineserver Dispatcher
+# Wine-NSPA -- Gamma Channel Dispatcher
 
-Wine 11.6 + NSPA RT patchset | Kernel 6.19.x-rt with NTSync channels + aggregate-wait + TRY_RECV2 | 2026-04-30
+Wine 11.6 + NSPA RT patchset | Kernel 6.19.x-rt with NTSync channels + aggregate-wait + TRY_RECV2 | 2026-05-01
 Author: Jordan Johnston
-Status: production dispatcher architecture; aggregate-wait Phase 3 is default-on, and post-1011 TRY_RECV2 burst-drain is default-on when the kernel exposes it.
+Status: production dispatcher architecture; aggregate-wait Phase 3, post-1011 TRY_RECV2 burst-drain, and the immediate hot-path tuning follow-ons are all part of the shipped path.
 
 This page explains the current wineserver request path for a Wine process: how requests enter the gamma channel, how the dispatcher owns the reply path, and how the post-1010 aggregate-wait loop fits into that design.
 
@@ -1089,6 +1089,18 @@ This profile shift is the combined effect of
 (dispatcher ACQ_REL fences + inline accessor) and
 [`01d528f5`](https://github.com/nine7nine/Wine-NSPA/commit/01d528f5)
 (TRY_RECV2 burst-drain) on top of the 1011 kernel primitive.
+
+#### Post-ship hot-path follow-ons
+
+| Commit | Implemented change | Exact observed effect |
+|---|---|---|
+| `c0f5c515cd7` + `2870c9629ce` | gate `mark_block_*` poison and the paired valgrind annotations behind `NSPA_DEBUG_POISON_ALLOCS` | `mark_block_uninitialized` was sampled at `1.34%` wineserver-relative under `dispatcher-burst`; the combined change reclaims the full `1.34pp` and drops the symbol out of the top-20 |
+| `0802dadc750` | inline `read_request_shm` at the dispatcher call site | `read_request_shm` was sampled at `3.55%` wineserver-relative under `dispatcher-burst`; after inlining it disappears from the symbol table and saves `~1pp` more on the dispatcher path |
+
+These follow-ons do not change the dispatcher architecture. They remove
+residual per-RPC overhead that remained after the bigger structural
+landing (`AGG_WAIT`, `TRY_RECV2`, inline queue accessor, lighter
+fences) was already in place.
 
 #### PE-side `dispatcher-burst` A/B
 

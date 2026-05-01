@@ -2,7 +2,7 @@
 
 Wine 11.6 + NSPA RT v2.3 | Kernel 6.19.x-rt with FUTEX_LOCK_PI | 2026-04-15
 Author: Jordan Johnston
-Status: stable since 2026-04-13 (v2.3); validated against ~370M mixed-load operations through 2026-04-28.
+Status: stable since 2026-04-13 (v2.3); validated against ~370M mixed-load operations through 2026-04-28 and against the current 2026-04-30 PE matrix (`24 PASS / 0 FAIL / 0 TIMEOUT`).
 
 This page is the design and implementation reference for Wine-NSPA's `RTL_CRITICAL_SECTION` priority-inheritance path, from lock acquisition mechanics down to fallback behavior and validation history.
 

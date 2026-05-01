@@ -17,10 +17,10 @@ Wine-NSPA 11.x is a **work in progress** built on top of upstream Wine 11.6. Eve
 | Document | Description |
 |----------|-------------|
 | [Aggregate-Wait and Async Completion](https://nine7nine.github.io/Wine-NSPA/aggregate-wait-and-async-completion.gen.html) | Landed kernel 1010 + dispatcher Phase 2/3 architecture: `NTSYNC_IOC_AGGREGATE_WAIT`, per-process dispatcher-owned `io_uring`, and same-thread CQE drain / reply. The 2026-04-30 Phase 4 / 1011 follow-ons build on this base. |
-| [Architecture Overview](https://nine7nine.github.io/Wine-NSPA/architecture.gen.html) | Master overview: layered architecture, subsystem map, RT priority mapping, links into the dedicated subsystem docs below. |
+| [Architecture Overview](https://nine7nine.github.io/Wine-NSPA/architecture.gen.html) | Master system map: client / wineserver / kernel layering, shipped bypass surfaces, residual wineserver floor, and links into the dedicated subsystem docs below. |
 | [Audio Stack](https://nine7nine.github.io/Wine-NSPA/audio-stack.gen.html) | winejack.drv (WASAPI + MIDI via JACK), nspaASIO bridge (ASIO -> WASAPI exclusive -> winejack -> JACK), Phase F zero-latency bufferSwitch inside the JACK callback. |
 | [Critical Section PI](https://nine7nine.github.io/Wine-NSPA/cs-pi.gen.html) | FUTEX_LOCK_PI on `CRITICAL_SECTION`: fast / slow path, PI chain, gating, fallback. v2.3 stable. |
-| [Gamma Channel-Based Wineserver Dispatcher](https://nine7nine.github.io/Wine-NSPA/gamma-channel-dispatcher.gen.html) | Single per-process kernel-mediated wineserver IPC channel via NTSync. SEND_PI / RECV2 / REPLY plus post-1010 aggregate-wait over channel + uring eventfd + shutdown eventfd, and post-1011 TRY_RECV2 burst drain. |
+| [Gamma Channel Dispatcher](https://nine7nine.github.io/Wine-NSPA/gamma-channel-dispatcher.gen.html) | Hybrid ntsync + wineserver request plane: single per-process channel transport, aggregate-wait over channel + uring eventfd + shutdown eventfd, and post-1011 TRY_RECV2 burst drain. |
 | [Hook Cache](https://nine7nine.github.io/Wine-NSPA/hook-cache.gen.html) | Two-tier Win32 hook chain cache. Tier 1 server-side count rebuild + Tier 2 full chain snapshot in queue_shm; clients walk the chain locally without RPC. |
 | [io_uring I/O Architecture](https://nine7nine.github.io/Wine-NSPA/io_uring-architecture.gen.html) | Phase 1 file I/O bypass and Phase 4 dispatcher-owned async `CreateFile` are shipped. Phase 2 sockets and Phase 3 pipes / named events remain queued. ntsync `uring_fd` integration. |
 | [Local-File Bypass Architecture](https://nine7nine.github.io/Wine-NSPA/nspa-local-file-architecture.gen.html) | NtCreateFile bypass for read-only regular files: client-private handle range, per-process table, shared inode-aggregation shmem with seqlock + PSHARED PI mutex bucket lock. ~28,500 file opens offloaded per Ableton startup. |
@@ -36,7 +36,7 @@ Wine-NSPA 11.x is a **work in progress** built on top of upstream Wine 11.6. Eve
 |----------|-------------|
 | [State of The Art](https://nine7nine.github.io/Wine-NSPA/current-state.gen.html) | Current shipped-state board: defaults, kernel + module versions, exact validation totals, performance deltas, remaining gates, and open work. |
 | [RT Test Harness](https://nine7nine.github.io/Wine-NSPA/nspa-rt-test.gen.html) | Layer 1 native ntsync stress suite + Layer 2 PE matrix, now including `dispatcher-burst` for gamma / TRY_RECV2 coverage. |
-| [Test Suite Comparison](https://nine7nine.github.io/Wine-NSPA/nspa-test-comparison.gen.html) | v3 -> v7 timeline. Per-thread metrics, latency data, and the principle that PASS / FAIL + KASAN-clean is authoritative across versions. |
+| [Test Suite Comparison](https://nine7nine.github.io/Wine-NSPA/nspa-test-comparison.gen.html) | v3 -> v8 timeline. Current Layer 1 / Layer 2 totals, `dispatcher-burst` A/B, and preserved historical latency / throughput reports. |
 
 ### Historical / Superseded
 
@@ -51,6 +51,8 @@ Wine-NSPA 11.x is a **work in progress** built on top of upstream Wine 11.6. Eve
 ## Status
 
 **WIP.** The 11.x tree passes its validation suite (Layer 1 native ntsync 3 PASS / 0 FAIL + Layer 2 PE matrix 24 PASS / 0 FAIL / 0 TIMEOUT) and is used for day-to-day development. The 2026-04-30 session added three default-on user-facing features: `NSPA_FLUSH_THROTTLE_MS=8`, `NSPA_ENABLE_ASYNC_CREATE_FILE=1`, and `NSPA_TRY_RECV2=1`.
+
+Immediate follow-on dispatcher tuning also landed on top of that shipped base: ACQ_REL fences, inlined dispatcher helpers, allocator debug poison / valgrind stubs gated out of production builds, and inlined `read_request_shm` on the gamma hot path.
 
 This is an active research branch -- code is not released and the architecture is still evolving.
 
