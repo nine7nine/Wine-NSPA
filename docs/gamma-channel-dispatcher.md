@@ -99,7 +99,7 @@ for every `server_call_unlocked` whose request fits in the per-thread
 shmem window.
 
 <div class="diagram-container">
-<svg width="100%" viewBox="0 0 960 340" xmlns="http://www.w3.org/2000/svg">
+<svg width="100%" viewBox="0 0 960 380" xmlns="http://www.w3.org/2000/svg">
   <style>
     .gc-bg { fill: #1a1b26; }
     .gc-process { fill: #24283b; stroke: #3b4261; stroke-width: 1.5; rx: 10; }
@@ -120,67 +120,70 @@ shmem window.
     .gc-arrow-y { stroke: #e0af68; stroke-width: 1.6; fill: none; stroke-dasharray: 5,4; }
   </style>
 
-  <rect x="0" y="0" width="960" height="340" class="gc-bg"/>
+  <rect x="0" y="0" width="960" height="380" class="gc-bg"/>
   <text x="480" y="24" text-anchor="middle" class="gc-head">Gamma channel topology</text>
 
-  <rect x="24" y="48" width="276" height="248" class="gc-process"/>
+  <rect x="24" y="48" width="276" height="272" class="gc-process"/>
   <text x="42" y="70" class="gc-blue">Client process</text>
   <text x="42" y="84" class="gc-sm">many sender threads, one shared channel fd</text>
 
-  <rect x="44" y="104" width="108" height="54" class="gc-client"/>
-  <text x="98" y="126" text-anchor="middle" class="gc-label">sender thread A</text>
-  <text x="98" y="143" text-anchor="middle" class="gc-sm">memcpy req</text>
+  <rect x="44" y="104" width="232" height="54" class="gc-client"/>
+  <text x="160" y="126" text-anchor="middle" class="gc-label">sender threads</text>
+  <text x="160" y="143" text-anchor="middle" class="gc-sm">build request header, copy payload, know caller RT prio</text>
 
-  <rect x="168" y="104" width="108" height="54" class="gc-client"/>
-  <text x="222" y="126" text-anchor="middle" class="gc-label">sender thread B</text>
-  <text x="222" y="143" text-anchor="middle" class="gc-sm">memcpy req</text>
+  <rect x="44" y="182" width="232" height="68" class="gc-shmem"/>
+  <text x="160" y="205" text-anchor="middle" class="gc-yel">per-thread `request_shm` pages</text>
+  <text x="160" y="223" text-anchor="middle" class="gc-sm">request bytes and reply bytes stay zero-copy</text>
+  <text x="160" y="239" text-anchor="middle" class="gc-sm">channel carries scheduling metadata only</text>
 
-  <rect x="44" y="186" width="232" height="62" class="gc-shmem"/>
-  <text x="160" y="208" text-anchor="middle" class="gc-yel">per-thread request_shm pages</text>
-  <text x="160" y="225" text-anchor="middle" class="gc-sm">payload and reply remain zero-copy</text>
-  <text x="160" y="239" text-anchor="middle" class="gc-sm">channel carries metadata only</text>
+  <rect x="74" y="270" width="172" height="24" class="gc-client"/>
+  <text x="160" y="286" text-anchor="middle" class="gc-sm">shared `nspa_request_channel_fd`</text>
 
-  <rect x="74" y="264" width="172" height="22" class="gc-client"/>
-  <text x="160" y="279" text-anchor="middle" class="gc-sm">nspa_request_channel_fd</text>
-
-  <rect x="342" y="72" width="276" height="200" class="gc-process"/>
+  <rect x="342" y="72" width="276" height="248" class="gc-process"/>
   <text x="360" y="94" class="gc-pur">Kernel</text>
   <text x="360" y="108" class="gc-sm">ntsync channel object</text>
 
-  <rect x="370" y="128" width="220" height="94" class="gc-kernel"/>
-  <text x="480" y="151" text-anchor="middle" class="gc-label">priority rbtree of entries</text>
-  <text x="480" y="168" text-anchor="middle" class="gc-sm">sender_tid, prio, payload_off, thread_token</text>
-  <text x="480" y="185" text-anchor="middle" class="gc-sm">SEND_PI enqueue + boost + block</text>
-  <text x="480" y="202" text-anchor="middle" class="gc-sm">RECV2 dequeue + TRY_RECV2 burst drain</text>
-  <text x="480" y="216" text-anchor="middle" class="gc-sm">REPLY wake sender + drain / re-boost</text>
+  <rect x="370" y="124" width="220" height="96" class="gc-kernel"/>
+  <text x="480" y="148" text-anchor="middle" class="gc-label">priority queue of entries</text>
+  <text x="480" y="166" text-anchor="middle" class="gc-sm">sender_tid, prio, payload_off, thread_token</text>
+  <text x="480" y="184" text-anchor="middle" class="gc-sm">`SEND_PI` enqueue + boost + block</text>
+  <text x="480" y="202" text-anchor="middle" class="gc-sm">`RECV2` dequeue + `TRY_RECV2` burst drain</text>
 
-  <rect x="660" y="48" width="276" height="248" class="gc-process"/>
+  <rect x="370" y="240" width="220" height="58" class="gc-kernel"/>
+  <text x="480" y="262" text-anchor="middle" class="gc-label">reply / PI handoff</text>
+  <text x="480" y="279" text-anchor="middle" class="gc-sm">`REPLY` wakes sender and drains / re-applies PI</text>
+
+  <rect x="660" y="48" width="276" height="272" class="gc-process"/>
   <text x="678" y="70" class="gc-grn">Wineserver process</text>
   <text x="678" y="84" class="gc-sm">one dispatcher pthread per client process</text>
 
-  <rect x="684" y="104" width="228" height="62" class="gc-server"/>
-  <text x="798" y="126" text-anchor="middle" class="gc-label">channel_dispatcher pthread</text>
-  <text x="798" y="143" text-anchor="middle" class="gc-sm">aggregate-wait loop at NSPA_SRV_RT_PRIO</text>
-  <text x="798" y="157" text-anchor="middle" class="gc-sm">thread-token-aware; RECV2 / TRY_RECV2 / uring / shutdown aware</text>
+  <rect x="684" y="124" width="228" height="72" class="gc-server"/>
+  <text x="798" y="146" text-anchor="middle" class="gc-label">channel_dispatcher pthread</text>
+  <text x="798" y="164" text-anchor="middle" class="gc-sm">aggregate-wait loop at `NSPA_SRV_RT_PRIO`</text>
+  <text x="798" y="180" text-anchor="middle" class="gc-sm">`RECV2` / `TRY_RECV2` / uring / shutdown aware</text>
 
-  <rect x="684" y="194" width="228" height="70" class="gc-server"/>
-  <text x="798" y="216" text-anchor="middle" class="gc-label">existing request handlers</text>
-  <text x="798" y="233" text-anchor="middle" class="gc-sm">read_request_shm under global_lock</text>
-  <text x="798" y="247" text-anchor="middle" class="gc-sm">writes reply back into request_shm</text>
+  <rect x="684" y="220" width="228" height="64" class="gc-server"/>
+  <text x="798" y="242" text-anchor="middle" class="gc-label">existing request handlers</text>
+  <text x="798" y="259" text-anchor="middle" class="gc-sm">`read_request_shm()` under `global_lock`</text>
+  <text x="798" y="275" text-anchor="middle" class="gc-sm">reply written back into `request_shm`</text>
 
-  <line x1="246" y1="275" x2="370" y2="175" class="gc-arrow-p"/>
-  <text x="305" y="208" text-anchor="middle" class="gc-pur">SEND_PI / block for reply</text>
+  <line x1="300" y1="172" x2="370" y2="172" class="gc-arrow-p"/>
+  <text x="335" y="160" text-anchor="middle" class="gc-pur">1. `SEND_PI` metadata</text>
 
-  <line x1="590" y1="175" x2="684" y2="135" class="gc-arrow-g"/>
-  <text x="638" y="146" text-anchor="middle" class="gc-grn">RECV2 / TRY_RECV2</text>
+  <line x1="590" y1="172" x2="684" y2="172" class="gc-arrow-g"/>
+  <text x="637" y="160" text-anchor="middle" class="gc-grn">2. `AGG_WAIT` -&gt; `RECV2` / `TRY_RECV2`</text>
 
-  <line x1="684" y1="228" x2="590" y2="228" class="gc-arrow-g"/>
-  <text x="638" y="220" text-anchor="middle" class="gc-grn">REPLY</text>
+  <line x1="798" y1="196" x2="798" y2="220" class="gc-arrow-g"/>
+  <text x="858" y="210" text-anchor="middle" class="gc-grn">3. dispatch handler</text>
 
-  <line x1="160" y1="186" x2="160" y2="158" class="gc-arrow-y"/>
-  <line x1="798" y1="194" x2="798" y2="166" class="gc-arrow-y"/>
-  <text x="480" y="316" text-anchor="middle" class="gc-sm">Attach-time path: wineserver creates the channel fd and transfers it</text>
-  <text x="480" y="330" text-anchor="middle" class="gc-sm">to the client with SCM_RIGHTS in `init_first_thread`.</text>
+  <line x1="684" y1="258" x2="590" y2="258" class="gc-arrow-g"/>
+  <text x="637" y="246" text-anchor="middle" class="gc-grn">4. `REPLY(entry_id)`</text>
+
+  <line x1="370" y1="258" x2="300" y2="258" class="gc-arrow-p"/>
+  <text x="335" y="246" text-anchor="middle" class="gc-pur">5. wake sender</text>
+
+  <text x="480" y="344" text-anchor="middle" class="gc-sm">Attach-time path: wineserver creates the channel fd and transfers it to the client</text>
+  <text x="480" y="358" text-anchor="middle" class="gc-sm">with `SCM_RIGHTS` in `init_first_thread`; request and reply bytes remain in `request_shm`.</text>
 </svg>
 </div>
 
@@ -248,8 +251,8 @@ channel work with `TRY_RECV2` before it sleeps again.
 
   <rect x="180" y="390" width="620" height="90" class="ga-note"/>
   <text x="490" y="416" text-anchor="middle" class="ga-y">Load-bearing invariant</text>
-  <text x="490" y="438" text-anchor="middle" class="ga-s">the thread that receives the request is also the thread that drains the completion and signals the reply</text>
-  <text x="490" y="456" text-anchor="middle" class="ga-s">`NSPA_AGG_WAIT=0` or `-ENOTTY` at first aggregate-wait call falls back to the legacy direct receive loop</text>
+  <text x="490" y="438" text-anchor="middle" class="ga-s">the same RT thread receives, drains completion, and signals the reply</text>
+  <text x="490" y="456" text-anchor="middle" class="ga-s">aggregate-wait opt-out or `-ENOTTY` selects the legacy direct receive loop</text>
   <text x="490" y="472" text-anchor="middle" class="ga-s">`NSPA_TRY_RECV2=0` or `-ENOTTY` keeps one dequeue per wake</text>
 </svg>
 </div>
@@ -260,14 +263,14 @@ For one request, the payload stays in `request_shm` while the channel
 only carries scheduling metadata and reply ownership:
 
 <div class="diagram-container">
-<svg width="100%" viewBox="0 0 980 430" xmlns="http://www.w3.org/2000/svg">
+<svg width="100%" viewBox="0 0 980 590" xmlns="http://www.w3.org/2000/svg">
   <style>
     .gr-bg { fill: #1a1b26; }
     .gr-client { fill: #1a2235; stroke: #7aa2f7; stroke-width: 1.8; rx: 8; }
-    .gr-shmem { fill: #2a2418; stroke: #e0af68; stroke-width: 1.8; rx: 8; }
     .gr-kernel { fill: #1f2535; stroke: #bb9af7; stroke-width: 1.8; rx: 8; }
     .gr-server { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
-    .gr-note { fill: #24283b; stroke: #7dcfff; stroke-width: 1.6; rx: 8; }
+    .gr-note { fill: #2a2418; stroke: #e0af68; stroke-width: 1.6; rx: 8; }
+    .gr-lane { stroke: #3b4261; stroke-width: 1; stroke-dasharray: 6,4; }
     .gr-h { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
     .gr-t { fill: #c0caf5; font: 11px 'JetBrains Mono', monospace; }
     .gr-s { fill: #a9b1d6; font: 9px 'JetBrains Mono', monospace; }
@@ -283,49 +286,67 @@ only carries scheduling metadata and reply ownership:
     </marker>
   </defs>
 
-  <rect x="0" y="0" width="980" height="430" class="gr-bg"/>
+  <rect x="0" y="0" width="980" height="590" class="gr-bg"/>
   <text x="490" y="28" text-anchor="middle" class="gr-h">Single-request sequence</text>
 
-  <rect x="40" y="88" width="170" height="92" class="gr-client"/>
-  <text x="125" y="114" text-anchor="middle" class="gr-t">sender thread</text>
-  <text x="125" y="136" text-anchor="middle" class="gr-s">build request header</text>
-  <text x="125" y="154" text-anchor="middle" class="gr-s">own RT priority already known</text>
+  <line x1="160" y1="76" x2="160" y2="544" class="gr-lane"/>
+  <line x1="490" y1="76" x2="490" y2="544" class="gr-lane"/>
+  <line x1="820" y1="76" x2="820" y2="544" class="gr-lane"/>
 
-  <rect x="250" y="88" width="200" height="92" class="gr-shmem"/>
-  <text x="350" y="114" text-anchor="middle" class="gr-y">per-thread `request_shm`</text>
-  <text x="350" y="136" text-anchor="middle" class="gr-s">request payload and reply payload</text>
-  <text x="350" y="154" text-anchor="middle" class="gr-s">zero-copy data plane</text>
+  <text x="160" y="62" text-anchor="middle" class="gr-t">sender thread</text>
+  <text x="490" y="62" text-anchor="middle" class="gr-v">kernel channel object</text>
+  <text x="820" y="62" text-anchor="middle" class="gr-g">dispatcher thread</text>
 
-  <rect x="490" y="88" width="200" height="92" class="gr-kernel"/>
-  <text x="590" y="114" text-anchor="middle" class="gr-v">kernel channel object</text>
-  <text x="590" y="136" text-anchor="middle" class="gr-s">enqueue entry: tid, prio, token</text>
-  <text x="590" y="154" text-anchor="middle" class="gr-s">boost dispatcher and block sender</text>
+  <rect x="220" y="88" width="540" height="46" class="gr-note"/>
+  <text x="490" y="110" text-anchor="middle" class="gr-y">data plane stays in `request_shm`</text>
+  <text x="490" y="126" text-anchor="middle" class="gr-s">request bytes and reply bytes are zero-copy; the channel only carries metadata and reply ownership</text>
 
-  <rect x="730" y="88" width="210" height="92" class="gr-server"/>
-  <text x="835" y="114" text-anchor="middle" class="gr-t">dispatcher thread</text>
-  <text x="835" y="136" text-anchor="middle" class="gr-s">`RECV2`, optional `TRY_RECV2`, handler dispatch, `REPLY`</text>
-  <text x="835" y="154" text-anchor="middle" class="gr-s">same thread owns completion + reply</text>
+  <rect x="60" y="168" width="200" height="48" class="gr-client"/>
+  <text x="160" y="190" text-anchor="middle" class="gr-t">1. build request</text>
+  <text x="160" y="206" text-anchor="middle" class="gr-s">copy header and payload into `request_shm`</text>
 
-  <path d="M210 118 L250 118" class="gr-line" marker-end="url(#grArrow)"/>
-  <text x="230" y="110" text-anchor="middle" class="gr-b">1. write request</text>
+  <line x1="160" y1="216" x2="160" y2="244" class="gr-line" marker-end="url(#grArrow)"/>
 
-  <path d="M125 180 C125 232, 590 232, 590 180" class="gr-line" marker-end="url(#grArrow)"/>
-  <text x="360" y="224" text-anchor="middle" class="gr-v">2. `SEND_PI` enqueues metadata and blocks</text>
+  <rect x="60" y="244" width="200" height="54" class="gr-client"/>
+  <text x="160" y="266" text-anchor="middle" class="gr-b">2. `SEND_PI`</text>
+  <text x="160" y="284" text-anchor="middle" class="gr-s">submit metadata, boost dispatcher, block sender</text>
 
-  <path d="M690 118 L730 118" class="gr-line" marker-end="url(#grArrow)"/>
-  <text x="710" y="110" text-anchor="middle" class="gr-g">3. `RECV2` dequeues highest priority; burst mode may continue with `TRY_RECV2`</text>
+  <line x1="260" y1="271" x2="390" y2="271" class="gr-line" marker-end="url(#grArrow)"/>
 
-  <path d="M835 180 C835 248, 350 248, 350 180" class="gr-line" marker-end="url(#grArrow)"/>
-  <text x="592" y="266" text-anchor="middle" class="gr-y">4. handler reads request and writes reply in `request_shm`</text>
+  <rect x="390" y="244" width="200" height="54" class="gr-kernel"/>
+  <text x="490" y="266" text-anchor="middle" class="gr-v">channel entry queued</text>
+  <text x="490" y="284" text-anchor="middle" class="gr-s">tid, prio, payload_off, thread_token</text>
 
-  <path d="M730 150 C690 150, 690 318, 590 318 C490 318, 490 180, 490 150" class="gr-line" marker-end="url(#grArrow)"/>
-  <text x="612" y="334" text-anchor="middle" class="gr-g">5. `REPLY(entry_id)` wakes sender and drains / re-applies PI</text>
+  <line x1="490" y1="298" x2="490" y2="336" class="gr-line" marker-end="url(#grArrow)"/>
 
-  <path d="M490 336 C370 336, 250 336, 125 336 C125 336, 125 180, 125 180" class="gr-line" marker-end="url(#grArrow)"/>
-  <text x="304" y="354" text-anchor="middle" class="gr-b">6. `SEND_PI` returns; sender copies reply locally</text>
+  <rect x="390" y="336" width="200" height="54" class="gr-kernel"/>
+  <text x="490" y="358" text-anchor="middle" class="gr-v">3. `RECV2` dequeues winner</text>
+  <text x="490" y="376" text-anchor="middle" class="gr-s">burst mode may continue with `TRY_RECV2`</text>
 
-  <rect x="170" y="372" width="640" height="34" class="gr-note"/>
-  <text x="490" y="394" text-anchor="middle" class="gr-s">Control plane = channel entry and PI ownership. Data plane = request/reply bytes in the sender's `request_shm` page.</text>
+  <line x1="590" y1="363" x2="720" y2="363" class="gr-line" marker-end="url(#grArrow)"/>
+
+  <rect x="720" y="336" width="200" height="54" class="gr-server"/>
+  <text x="820" y="358" text-anchor="middle" class="gr-g">4. handler runs</text>
+  <text x="820" y="376" text-anchor="middle" class="gr-s">reads `request_shm`, writes reply bytes back</text>
+
+  <line x1="820" y1="390" x2="820" y2="428" class="gr-line" marker-end="url(#grArrow)"/>
+
+  <rect x="720" y="428" width="200" height="48" class="gr-server"/>
+  <text x="820" y="450" text-anchor="middle" class="gr-g">5. `REPLY(entry_id)`</text>
+  <text x="820" y="466" text-anchor="middle" class="gr-s">same thread completes wake + reply signal</text>
+
+  <line x1="720" y1="452" x2="590" y2="452" class="gr-line" marker-end="url(#grArrow)"/>
+
+  <rect x="390" y="428" width="200" height="48" class="gr-kernel"/>
+  <text x="490" y="450" text-anchor="middle" class="gr-v">reply ownership returns</text>
+  <text x="490" y="466" text-anchor="middle" class="gr-s">kernel wakes sender and drains / re-applies PI</text>
+
+  <line x1="490" y1="476" x2="490" y2="514" class="gr-line" marker-end="url(#grArrow)"/>
+  <line x1="390" y1="514" x2="260" y2="514" class="gr-line" marker-end="url(#grArrow)"/>
+
+  <rect x="60" y="490" width="200" height="48" class="gr-client"/>
+  <text x="160" y="512" text-anchor="middle" class="gr-b">6. sender resumes</text>
+  <text x="160" y="528" text-anchor="middle" class="gr-s">`SEND_PI` returns; caller copies reply locally</text>
 </svg>
 </div>
 

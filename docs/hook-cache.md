@@ -125,13 +125,13 @@ Tier 2 lives in `nspa_queue_bypass_shm_t`, NSPA's per-queue auxiliary shmem regi
   <rect x="60" y="60" width="800" height="80" fill="#24283b" stroke="#3b4261"/>
   <text x="80" y="85" fill="#e0af68" font-family="monospace" font-size="13" font-weight="bold">[1] Tier 1 gate -- is_hooked( id )</text>
   <text x="80" y="105" fill="#c0caf5" font-family="monospace" font-size="11">    read queue_shm-&gt;hooks_count[id - WH_MINHOOK] under NSPA_SHM_RETRY_GUARD seqlock</text>
-  <text x="80" y="122" fill="#9ece6a" font-family="monospace" font-size="11">    count == 0  ---&gt;  return 0   // no hook of this id; skip the whole walk. ~99% of calls land here.</text>
+  <text x="80" y="122" fill="#9ece6a" font-family="monospace" font-size="11">    count == 0  ---&gt;  return 0   // skip the walk; this is the common case.</text>
 
   <!-- Step 2: tier 2 try -->
   <rect x="60" y="160" width="800" height="120" fill="#24283b" stroke="#3b4261"/>
   <text x="80" y="185" fill="#e0af68" font-family="monospace" font-size="13" font-weight="bold">[2] Tier 2 try -- nspa_hook_try_read_cache( walker, id, event )</text>
   <text x="80" y="205" fill="#c0caf5" font-family="monospace" font-size="11">    seqlock-bound snapshot of bypass-&gt;nspa_hook_chains[idx]</text>
-  <text x="80" y="222" fill="#c0caf5" font-family="monospace" font-size="11">    apply per-thread + per-event filter on the snapshot, copy survivors into walker.entries[]</text>
+  <text x="80" y="222" fill="#c0caf5" font-family="monospace" font-size="11">    filter the snapshot, copy surviving entries into walker.entries[]</text>
   <text x="80" y="240" fill="#9ece6a" font-family="monospace" font-size="11">    n &gt;= 0  ---&gt;  walker is populated; iterate locally; no server RPCs.</text>
   <text x="80" y="258" fill="#f7768e" font-family="monospace" font-size="11">    n  &lt; 0  ---&gt;  overflowed / retry exhausted / bypass-shm unmapped; fall through.</text>
 
@@ -140,14 +140,14 @@ Tier 2 lives in `nspa_queue_bypass_shm_t`, NSPA's per-queue auxiliary shmem regi
   <text x="80" y="325" fill="#e0af68" font-family="monospace" font-size="13" font-weight="bold">[3] Legacy RPC fallback (vanilla Wine path)</text>
   <text x="80" y="345" fill="#c0caf5" font-family="monospace" font-size="11">    SERVER_START_REQ( start_hook_chain )</text>
   <text x="80" y="362" fill="#c0caf5" font-family="monospace" font-size="11">    while ( has_next ) SERVER_START_REQ( get_hook_info )   // one RPC per chain entry</text>
-  <text x="80" y="380" fill="#c0caf5" font-family="monospace" font-size="11">    SERVER_START_REQ( finish_hook_chain )                  // skipped when tier1_active and queue-local-only</text>
-  <text x="80" y="400" fill="#bb9af7" font-family="monospace" font-size="11">    triggered: chain &gt; CAP, global hooks fire here, WINEVENT-out-of-context, pool full.</text>
+  <text x="80" y="380" fill="#c0caf5" font-family="monospace" font-size="11">    SERVER_START_REQ( finish_hook_chain )  // skipped when tier1_active and queue-local-only</text>
+  <text x="80" y="400" fill="#bb9af7" font-family="monospace" font-size="11">    triggered by CAP overflow, global hooks, WINEVENT-out-of-context, or pool full.</text>
 
   <!-- Step 4: server publish side -->
   <rect x="60" y="440" width="800" height="80" fill="#24283b" stroke="#7aa2f7"/>
   <text x="80" y="465" fill="#7dcfff" font-family="monospace" font-size="13" font-weight="bold">[server] write side -- add_hook / remove_hook handlers</text>
-  <text x="80" y="485" fill="#c0caf5" font-family="monospace" font-size="11">    add_queue_hook_count() bumps Tier 1 hooks_count[]; nspa_hook_cache_rebuild() repopulates Tier 2.</text>
-  <text x="80" y="503" fill="#c0caf5" font-family="monospace" font-size="11">    seqlock writer protocol: version += 1 (odd) BEGIN; rewrite entries[]; version += 1 (even) END.</text>
+  <text x="80" y="485" fill="#c0caf5" font-family="monospace" font-size="11">    Tier 1 counts bump; rebuild repopulates the Tier 2 snapshot.</text>
+  <text x="80" y="503" fill="#c0caf5" font-family="monospace" font-size="11">    seqlock writer: version++ odd BEGIN; rewrite entries[]; version++ even END.</text>
 </svg>
 </div>
 

@@ -464,7 +464,7 @@ The rb-tree key is `(prio DESC, seq ASC)`: higher priority sorts first; ties bre
   <line x1="140" y1="406" x2="140" y2="448" class="ch-line"/>
   <line x1="140" y1="448" x2="330" y2="448" class="ch-line" marker-end="url(#chArrow)"/>
 
-  <text x="470" y="534" text-anchor="middle" class="ch-small">senders are ordered by priority in-kernel; per-sender ordering remains serial because each SEND_PI blocks for REPLY</text>
+  <text x="470" y="534" text-anchor="middle" class="ch-small">priority ordering is in-kernel; per-sender order stays serial because each SEND_PI blocks for REPLY</text>
 </svg>
 </div>
 

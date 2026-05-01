@@ -28,12 +28,11 @@ This page is the project snapshot for what is actually shipped: kernel patch sta
 Wine-NSPA moved beyond the post-1010 aggregate-wait baseline on
 2026-04-30. The kernel now ships patch 1011
 (`NTSYNC_IOC_CHANNEL_TRY_RECV2`) on top of the 1003-1011 stack, and the
-wineserver side ships three default-on follow-ons built on that base:
-
-- `NSPA_FLUSH_THROTTLE_MS=8` on `x11drv` MainThread flushes
-- `NSPA_ENABLE_ASYNC_CREATE_FILE=1` for Phase 4 `CreateFile` through the
-  per-process dispatcher-owned `io_uring` ring
-- `NSPA_TRY_RECV2=1` for post-dispatch burst drain on 1011 kernels
+wineserver side now ships three default-on follow-ons built on that
+base: `NSPA_FLUSH_THROTTLE_MS=8` for `x11drv` MainThread flushes,
+`NSPA_ENABLE_ASYNC_CREATE_FILE=1` for Phase 4 `CreateFile` through the
+per-process dispatcher-owned `io_uring` ring, and `NSPA_TRY_RECV2=1`
+for post-dispatch burst drain on 1011 kernels.
 
 The important distinction for this state board is that the stable
 public story now includes the **dispatcher async-completion
@@ -269,7 +268,7 @@ own correctness proof and gate.
   <line x1="175" y1="220" x2="175" y2="270" class="cs-line" marker-end="url(#csArrow)"/>
   <line x1="470" y1="220" x2="470" y2="270" class="cs-line" marker-end="url(#csArrow)"/>
   <line x1="765" y1="220" x2="765" y2="270" class="cs-line" marker-end="url(#csArrow)"/>
-  <text x="470" y="456" text-anchor="middle" class="cs-small">top row is production reality today; bottom row is the remaining gating and roadmap pressure on that shipped base</text>
+  <text x="470" y="456" text-anchor="middle" class="cs-small">top row = shipped state today; bottom row = remaining gates and roadmap pressure</text>
 </svg>
 </div>
 

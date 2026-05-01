@@ -307,13 +307,13 @@ When an RT client thread (SCHED_FIFO) sends a request, it must boost the dispatc
   <!-- Why not FUTEX_LOCK_PI -->
   <rect x="20" y="150" width="740" height="65" rx="6" fill="#24283b" stroke="#3b4261" stroke-width="1"/>
   <text x="390" y="172" text-anchor="middle" fill="#e0af68" font-size="10" font-weight="bold">Why not FUTEX_LOCK_PI? (attempted and REJECTED)</text>
-  <text x="390" y="192" text-anchor="middle" fill="#c0caf5" font-size="9">Dispatcher sleeps on notify futex (not PI futex). FUTEX_LOCK_PI on a separate word requires</text>
+  <text x="390" y="192" text-anchor="middle" fill="#c0caf5" font-size="9">Dispatcher sleeps on a notify futex, not the PI futex itself. A separate PI word requires</text>
   <text x="390" y="206" text-anchor="middle" fill="#c0caf5" font-size="9">unlock + re-acquire between dispatches. Under SMP contention, this causes deadlocks</text>
 
   <!-- FUTEX_LOCK_PI deadlock scenario -->
   <rect x="20" y="225" width="740" height="45" rx="6" fill="#24283b" stroke="#f7768e" stroke-width="1.5"/>
-  <text x="390" y="244" text-anchor="middle" fill="#c0caf5" font-size="9">Deadlock: Client A holds PI lock, Client B boosts dispatcher, dispatcher blocks on PI lock held by A</text>
-  <text x="390" y="260" text-anchor="middle" fill="#c0caf5" font-size="8">Manual boost avoids this by never creating lock dependencies between clients and the dispatcher</text>
+  <text x="390" y="244" text-anchor="middle" fill="#c0caf5" font-size="9">Deadlock: client A holds PI lock, client B boosts dispatcher, dispatcher blocks on A's PI lock</text>
+  <text x="390" y="260" text-anchor="middle" fill="#c0caf5" font-size="8">Manual boost avoids client↔dispatcher lock dependencies entirely</text>
 </svg>
 </div>
 

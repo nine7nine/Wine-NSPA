@@ -24,6 +24,28 @@ CSS='<style>
     max-width: 1100px; margin: 0 auto; padding: 2rem 1.5rem;
     line-height: 1.7;
   }
+  .page-nav {
+    display: flex;
+    justify-content: flex-end;
+    margin-bottom: 0.5rem;
+  }
+  .page-nav a {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.35rem 0.7rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: rgba(36, 40, 59, 0.9);
+    color: var(--accent);
+    font-size: 0.78rem;
+    line-height: 1;
+  }
+  .page-nav a:hover {
+    background: var(--surface);
+    color: var(--cyan);
+    text-decoration: none;
+  }
   h1 { color: var(--accent); font-size: 1.5rem; margin: 1.5rem 0 0.5rem; }
   h2 { color: var(--accent); font-size: 1.2rem; margin: 2rem 0 0.75rem;
        border-bottom: 1px solid var(--border); padding-bottom: 0.3rem; }
@@ -164,6 +186,7 @@ convert_one() {
         echo "$CSS"
         echo "$HIGHLIGHT_HEAD"
         echo "</head><body>"
+        echo '<div class="page-nav"><a href="index.html">Docs Home</a></div>'
         preprocess_markdown "$md" | markdown
         echo "$HIGHLIGHT_TAIL"
         echo "</body></html>"

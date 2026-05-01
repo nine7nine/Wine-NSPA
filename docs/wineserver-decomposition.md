@@ -180,7 +180,7 @@ The decomposition arc treats lock-discipline patches as Phase 1 -- "individually
   <line x1="310" y1="278" x2="335" y2="278" class="wd-line" marker-end="url(#wdArrow)"/>
   <line x1="605" y1="278" x2="630" y2="278" class="wd-line" marker-end="url(#wdArrow)"/>
   <line x1="320" y1="486" x2="620" y2="486" class="wd-axis"/>
-  <text x="470" y="510" text-anchor="middle" class="wd-small">ordering principle: move state out first, then split waits/threads, then partition the residual locks</text>
+  <text x="470" y="510" text-anchor="middle" class="wd-small">ordering: move state out first, then split waits/threads, then partition residual locks</text>
 </svg>
 </div>
 

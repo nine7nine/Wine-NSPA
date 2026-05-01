@@ -165,7 +165,7 @@ The three flavors above resolve into a single layered data path. Every Win32 aud
 
   <text x="20" y="392" class="lbl-tier">JACK</text>
   <rect x="100" y="372" width="720" height="48" class="box-jack"/>
-  <text x="460" y="392" text-anchor="middle" class="lbl-acc">wine-audio JACK client -- jack_port_register output_1..N + input_1..N (deinterleaved float32)</text>
+  <text x="460" y="392" text-anchor="middle" class="lbl-acc">wine-audio JACK client -- output_1..N + input_1..N ports (deinterleaved float32)</text>
   <text x="460" y="410" text-anchor="middle" class="lbl-mut">SCHED_FIFO process_callback owns the period clock; wakes via libjack</text>
 
   <line x1="460" y1="420" x2="460" y2="450" class="conn"/>
@@ -682,8 +682,8 @@ Other audio drivers (`winealsa.drv`, `winepulse.drv`, `wineoss.drv`) needed stub
   <text x="285" y="170" class="lbl-fx">futex_wake (1)</text>
   <text x="565" y="173" class="lbl-fx">futex_wake (2)</text>
 
-  <text x="80" y="320" class="lbl-dim">data flow: JACK capture buffers -> ASIO input slot -> host bufferSwitch -> ASIO output slot -> JACK port buffers</text>
-  <text x="80" y="338" class="lbl-dim">handshake state machine: IDLE -> CAPTURE_READY -> OUTPUT_READY -> IDLE   (one JACK period)</text>
+  <text x="80" y="320" class="lbl-dim">data flow: JACK capture -&gt; ASIO input -&gt; bufferSwitch -&gt; ASIO output -&gt; JACK port</text>
+  <text x="80" y="338" class="lbl-dim">handshake: IDLE -&gt; CAPTURE_READY -&gt; OUTPUT_READY -&gt; IDLE   (one JACK period)</text>
   <text x="80" y="356" class="lbl-dim">audio out the JACK port at end of same period the host filled</text>
 </svg>
 </div>
@@ -773,7 +773,7 @@ The handshake state is a single 32-bit `int` shared between the play_thread and 
   <text x="88" y="130" class="lbl-sm">timeout / malformed</text>
   <text x="50" y="150" class="lbl-mut">all transitions: __atomic_compare_exchange</text>
 
-  <text x="460" y="450" text-anchor="middle" class="lbl-grn">one JACK period: IDLE -&gt; CAPTURE_READY -&gt; OUTPUT_READY -&gt; IDLE  (~ period_us total wallclock)</text>
+  <text x="460" y="450" text-anchor="middle" class="lbl-grn">one JACK period total: IDLE -&gt; CAPTURE_READY -&gt; OUTPUT_READY -&gt; IDLE</text>
 </svg>
 </div>
 

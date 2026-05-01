@@ -3,11 +3,12 @@
 Wine 11.6 + NSPA RT patchset | Kernel patch 1010 + Gamma dispatcher Phase 2/3 | 2026-04-30
 Author: Jordan Johnston
 
-This page documents the **landed** aggregate-wait work in Wine-NSPA:
-
-- kernel patch **1010**: `NTSYNC_IOC_AGGREGATE_WAIT`
-- userspace **Phase 2**: per-process dispatcher-owned `io_uring`
-- userspace **Phase 3**: gamma dispatcher waits on channel + uring eventfd + shutdown eventfd and drains CQEs inline on the same RT thread
+This page documents the **landed** aggregate-wait slice in Wine-NSPA:
+kernel patch **1010** (`NTSYNC_IOC_AGGREGATE_WAIT`) plus the first
+userspace consumer shape that uses it, namely dispatcher **Phase 2**
+(per-process dispatcher-owned `io_uring`) and **Phase 3** (gamma waits
+on channel + uring eventfd + shutdown eventfd and drains CQEs inline on
+the same RT thread).
 
 **Status:** shipped and validated. `NSPA_AGG_WAIT` is **default-on** as of 2026-04-29. The 2026-04-30 follow-ons (`NSPA_ENABLE_ASYNC_CREATE_FILE=1` and, on 1011 kernels, `NSPA_TRY_RECV2=1`) now ship on top of this same foundation.
 
@@ -16,12 +17,13 @@ This page documents the **landed** aggregate-wait work in Wine-NSPA:
 ## Table of Contents
 
 1. [Overview](#1-overview)
-2. [Why the old bridge was wrong](#2-why-the-old-bridge-was-wrong)
-3. [Kernel patch 1010](#3-kernel-patch-1010)
-4. [Wine-NSPA Phase 2 and Phase 3](#4-wine-nspa-phase-2-and-phase-3)
-5. [Validation and deployment](#5-validation-and-deployment)
-6. [Relationship to the broader decomposition plan](#6-relationship-to-the-broader-decomposition-plan)
-7. [References](#7-references)
+2. [Scope of this page](#2-scope-of-this-page)
+3. [Why the old bridge was wrong](#3-why-the-old-bridge-was-wrong)
+4. [Kernel patch 1010](#4-kernel-patch-1010)
+5. [Wine-NSPA Phase 2 and Phase 3](#5-wine-nspa-phase-2-and-phase-3)
+6. [Validation and deployment](#6-validation-and-deployment)
+7. [Relationship to the broader decomposition plan](#7-relationship-to-the-broader-decomposition-plan)
+8. [References](#8-references)
 
 ---
 
@@ -63,22 +65,32 @@ The same RT thread handles the full lifecycle.
 | Userspace | `struct nspa_dispatcher_ctx` | single owner for channel fd, shutdown eventfd, and ring lifetime |
 | Userspace | aggregate-wait dispatcher loop | same-thread request receive, CQE drain, and reply |
 
-### What did not ship here
+---
 
-This page stays focused on the 1010 / Phase 2 / Phase 3 slice itself.
-The later follow-ons -- Phase 4 async `create_file` and the 1011
-TRY_RECV2 burst-drain -- use this same infrastructure but are documented
-in their own current-state / gamma / io_uring pages rather than being
-re-explained in detail here.
+## 2. Scope of this page
+
+This page stays focused on the 1010 / Phase 2 / Phase 3 slice itself:
+the kernel wait primitive, the dispatcher-owned ring, and the
+same-thread completion/reply invariant that those pieces established.
+
+The later follow-ons are intentionally not expanded here. Phase 4 async
+`create_file` is a later consumer of the same dispatcher-owned ring, and
+1011 `TRY_RECV2` is a later queue-drain optimization on top of the
+already-landed dispatcher shape. Those are part of the current shipped
+system, but they belong in the pages that track the dispatcher hot path
+and current production state:
+[gamma-channel-dispatcher](gamma-channel-dispatcher.gen.html),
+[io_uring-architecture](io_uring-architecture.gen.html), and
+[current-state](current-state.gen.html).
 
 ---
 
-## 2. Why the old bridge was wrong
+## 3. Why the old bridge was wrong
 
 The rejected shape was:
 
 <div class="diagram-container">
-<svg width="100%" viewBox="0 0 980 470" xmlns="http://www.w3.org/2000/svg">
+<svg width="100%" viewBox="0 0 980 430" xmlns="http://www.w3.org/2000/svg">
   <style>
     .bg { fill: #1a1b26; }
     .lane { stroke: #3b4261; stroke-width: 1.2; stroke-dasharray: 6,4; }
@@ -98,40 +110,46 @@ The rejected shape was:
     </marker>
   </defs>
 
-  <rect x="0" y="0" width="980" height="470" class="bg"/>
+  <rect x="0" y="0" width="980" height="430" class="bg"/>
   <text x="490" y="26" text-anchor="middle" class="h">Rejected cross-thread bridge</text>
 
   <text x="250" y="62" text-anchor="middle" class="t">Dispatcher pthread</text>
   <text x="730" y="62" text-anchor="middle" class="r">Wineserver main thread</text>
-  <line x1="250" y1="76" x2="250" y2="360" class="lane"/>
-  <line x1="730" y1="76" x2="730" y2="360" class="lane"/>
+  <line x1="250" y1="76" x2="250" y2="310" class="lane"/>
+  <line x1="730" y1="76" x2="730" y2="310" class="lane"/>
 
   <rect x="120" y="96" width="260" height="58" class="box"/>
   <text x="250" y="120" text-anchor="middle" class="t">`CHANNEL_RECV2`</text>
   <text x="250" y="140" text-anchor="middle" class="s">dispatcher owns request entry</text>
 
-  <rect x="120" y="188" width="260" height="78" class="box"/>
-  <text x="250" y="212" text-anchor="middle" class="t">handler submits SQE</text>
-  <text x="250" y="232" text-anchor="middle" class="s">deferred path returns to channel receive loop</text>
-  <text x="250" y="250" text-anchor="middle" class="s">completion is now somebody else’s problem</text>
+  <line x1="250" y1="154" x2="250" y2="182" class="line" marker-end="url(#badArrow)"/>
+
+  <rect x="120" y="182" width="260" height="78" class="box"/>
+  <text x="250" y="206" text-anchor="middle" class="t">handler submits SQE</text>
+  <text x="250" y="226" text-anchor="middle" class="s">deferred path returns to channel receive loop</text>
+  <text x="250" y="244" text-anchor="middle" class="s">request is no longer owned by the dispatcher</text>
 
   <rect x="600" y="96" width="260" height="58" class="bad"/>
   <text x="730" y="120" text-anchor="middle" class="t">`main_loop_epoll`</text>
   <text x="730" y="140" text-anchor="middle" class="s">main thread owns uring wake</text>
 
-  <rect x="600" y="188" width="260" height="92" class="bad"/>
-  <text x="730" y="212" text-anchor="middle" class="t">CQE arrives later</text>
-  <text x="730" y="232" text-anchor="middle" class="s">main thread drains CQE</text>
-  <text x="730" y="250" text-anchor="middle" class="s">callback restores state and writes reply</text>
-  <text x="730" y="268" text-anchor="middle" class="s">`CHANNEL_REPLY` issued cross-thread</text>
+  <line x1="730" y1="154" x2="730" y2="182" class="line" marker-end="url(#badArrow)"/>
 
-  <path d="M380 227 C480 227, 520 227, 600 227" class="line" marker-end="url(#badArrow)"/>
-  <path d="M600 305 C520 320, 460 328, 380 338" class="line" marker-end="url(#badArrow)"/>
+  <rect x="600" y="182" width="260" height="92" class="bad"/>
+  <text x="730" y="206" text-anchor="middle" class="t">CQE arrives later</text>
+  <text x="730" y="226" text-anchor="middle" class="s">main thread drains CQE</text>
+  <text x="730" y="244" text-anchor="middle" class="s">callback restores state and writes reply</text>
+  <text x="730" y="262" text-anchor="middle" class="s">`CHANNEL_REPLY` issued cross-thread</text>
 
-  <rect x="150" y="386" width="680" height="56" class="note"/>
-  <text x="490" y="410" text-anchor="middle" class="y">Why it was rejected</text>
-  <text x="490" y="426" text-anchor="middle" class="s">completion timing and reply ordering now depend on main-thread wake timing</text>
-  <text x="490" y="440" text-anchor="middle" class="s">and contention, not on dispatcher availability</text>
+  <text x="490" y="172" text-anchor="middle" class="y">ownership jump after SQE submit</text>
+  <line x1="380" y1="221" x2="600" y2="221" class="line" marker-end="url(#badArrow)"/>
+  <text x="490" y="238" text-anchor="middle" class="s">completion timing now depends on the main-thread wake path</text>
+
+  <line x1="730" y1="274" x2="730" y2="316" class="line" marker-end="url(#badArrow)"/>
+  <rect x="170" y="326" width="640" height="58" class="note"/>
+  <text x="490" y="348" text-anchor="middle" class="y">Why it was rejected</text>
+  <text x="490" y="364" text-anchor="middle" class="s">request receive, CQE drain, and reply signaling no longer live on one RT thread</text>
+  <text x="490" y="378" text-anchor="middle" class="s">reply ordering depends on main-thread wake timing and contention instead of dispatcher availability</text>
 </svg>
 </div>
 
@@ -148,7 +166,7 @@ but timing-sensitive application behavior did not.
 
 ---
 
-## 3. Kernel patch 1010
+## 4. Kernel patch 1010
 
 Patch 1010 adds `NTSYNC_IOC_AGGREGATE_WAIT`: a heterogeneous wait that combines
 NTSync object sources, pollable fd sources, and an optional absolute deadline.
@@ -253,9 +271,9 @@ without pretending the code lost its rollback path.
 
 ---
 
-## 4. Wine-NSPA Phase 2 and Phase 3
+## 5. Wine-NSPA Phase 2 and Phase 3
 
-### 4.1 Phase 2: dispatcher-owned `io_uring`
+### 5.1 Phase 2: dispatcher-owned `io_uring`
 
 Phase 2 did not make handlers async by itself. It put the ring and its state in the
 correct ownership domain first.
@@ -279,7 +297,7 @@ Key properties:
 - ring lifecycle ends with the dispatcher that owns it
 - `shutdown_efd` gives the aggregate-wait path an explicit teardown wakeup
 
-### 4.2 Phase 3: aggregate-wait dispatcher loop
+### 5.2 Phase 3: aggregate-wait dispatcher loop
 
 The dispatcher now waits on three sources:
 
@@ -341,12 +359,12 @@ The dispatcher now waits on three sources:
 
   <rect x="160" y="392" width="660" height="94" class="note"/>
   <text x="490" y="418" text-anchor="middle" class="y">Operational invariants</text>
-  <text x="490" y="440" text-anchor="middle" class="s">same RT thread receives the request, drains the completion, and signals the reply</text>
-  <text x="490" y="458" text-anchor="middle" class="s">`-ENOTTY` at first aggregate-wait call permanently selects the old `CHANNEL_RECV2` loop for that dispatcher</text>
+  <text x="490" y="440" text-anchor="middle" class="s">same RT thread receives the request, drains completion, and signals the reply</text>
+  <text x="490" y="458" text-anchor="middle" class="s">aggregate-wait `-ENOTTY` selects the legacy direct `CHANNEL_RECV2` loop</text>
 </svg>
 </div>
 
-### 4.3 Dispatcher behavior
+### 5.3 Dispatcher behavior
 
 The loop is now:
 
@@ -364,7 +382,7 @@ The loop is now:
 5. if the fired source is `shutdown_efd`:
    - exit cleanly and free the dispatcher-owned context
 
-### 4.4 Fallback behavior
+### 5.4 Fallback behavior
 
 Userspace still handles two older-kernel shapes:
 
@@ -443,7 +461,7 @@ That logic is runtime feature detection, not a release ladder:
 
 ---
 
-## 5. Validation and deployment
+## 6. Validation and deployment
 
 ### Production state
 
@@ -474,7 +492,7 @@ boost state is established. The production module includes those corrections.
 
 ---
 
-## 6. Relationship to the broader decomposition plan
+## 7. Relationship to the broader decomposition plan
 
 The public decomposition plan still has queued work in front of it, but the aggregate-wait
 story is no longer purely hypothetical.
@@ -502,7 +520,7 @@ needs to prove the syscall shape from scratch; it can build on a production cons
 
 ---
 
-## 7. References
+## 8. References
 
 - `wine/server/nspa/shmem_channel.c` — dispatcher context, aggregate-wait loop, shutdown path
 - `wine/server/nspa/uring.h` — per-process `nspa_uring_instance` public surface
