@@ -54,6 +54,8 @@ Wine-NSPA 11.x is a **work in progress** built on top of upstream Wine 11.6. Eve
 
 Immediate follow-on dispatcher tuning also landed on top of that shipped base: ACQ_REL fences, inlined dispatcher helpers, allocator debug poison / valgrind stubs gated out of production builds, and inlined `read_request_shm` on the gamma hot path.
 
+The 2026-05-01 shipped follow-ons worth carrying in public docs are smaller but real: the `winex11.drv` alpha-bit flush loop is now AVX2-vectorized (`x11drv_surface_flush` 6.72% -> 2.39%, total `winex11.so` 6.76% -> 2.43%, bit-identical output), and the top Tier 1 compatibility/log-noise cleanup landed (`~565` stub prints per Ableton run -> `~5` first-time prints, plus `ShutdownBlockReasonCreate/Destroy` now succeed silently instead of failing with `ERROR_CALL_NOT_IMPLEMENTED`).
+
 This is an active research branch -- code is not released and the architecture is still evolving.
 
 Key areas under active work:

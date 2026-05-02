@@ -4,7 +4,7 @@
 **Author:** Jordan Johnston
 **Kernel:** `6.19.11-rt1-1-nspa` (PREEMPT_RT_FULL, production)
 **ntsync module:** `srcversion 10124FB81FDC76797EF1F91`
-**Status:** production state board as of 2026-05-01; the 2026-04-30 shipped feature set plus the immediate dispatcher hot-path tuning follow-ons are all in the public tree.
+**Status:** production state board as of 2026-05-01; the 2026-04-30 shipped feature set plus the immediate dispatcher hot-path tuning follow-ons, the winex11 AVX2 flush follow-on, and the Tier 1 compatibility/log-hygiene cleanup are all in the public tree.
 
 This page is the project snapshot for what is actually shipped: kernel patch state, userspace feature state, validation totals, configuration knobs, and the remaining open work.
 
@@ -45,6 +45,12 @@ second tuning sweep with no new user knob: lighter fences on the hot
 path, inlined helper glue, and production-off allocator debug poison /
 valgrind stubs so the shipped build stops paying debug-only costs on
 every server-bound RPC.
+
+Two smaller 2026-05-01 follow-ons also shipped on top of that base:
+the `winex11.drv` alpha-bit flush loop is now AVX2-vectorized, and the
+dominant non-actionable Ableton FIXME noise sources were collapsed to
+first-print-only while `ShutdownBlockReasonCreate/Destroy` stopped
+reporting `ERROR_CALL_NOT_IMPLEMENTED` as a hard failure.
 
 What the project looks like today: one small kernel module
 (~3kLOC) plus a Wine fork that increasingly bypasses wineserver
@@ -122,7 +128,21 @@ the shipped gamma dispatcher from paying avoidable function-call and
 debug-aid overhead once the architectural wins from aggregate-wait and
 `TRY_RECV2` are already in place.
 
-### 2.6 Validation totals against `10124FB81FDC76797EF1F91`
+### 2.6 2026-05-01 shipped follow-ons (no new user knob)
+
+| Commit | Landed change | Observed effect |
+|---|---|---|
+| `527647bac3e` | AVX2-vectorize the alpha-bit OR loop in `dlls/winex11.drv/bitblt.c::x11drv_surface_flush` | `x11drv_surface_flush`: `6.72%` -> `2.39%` (`-4.33pp`, `-64%`); total `winex11.so`: `6.76%` -> `2.43%` (`-4.33pp`); output bit-identical, no visual regression |
+| `97aff17da45` + `206f32b3de9` | once-guard 9 dominant stub FIXMEs and real-impl `ShutdownBlockReasonCreate/Destroy` as silent success | top stub noise drops from `~565` prints per Ableton run to `~5` first-time prints; shutdown-reason calls stop failing with `ERROR_CALL_NOT_IMPLEMENTED` |
+
+These are compatibility and presentation cleanups, not architectural
+changes. The AVX2 change reduces PE-side GUI flush cost under the same
+busy Ableton workload already used for the 2026-04-30 throttle and
+dispatcher measurements. The FIXMEs cleanup does not change RT
+behaviour, but it makes real regressions easier to spot because known
+stub chatter no longer buries the logs.
+
+### 2.7 Validation totals against `10124FB81FDC76797EF1F91`
 
 | Layer | Run | Result | Ops | Errors |
 |---|---|---|---|---|
@@ -330,6 +350,20 @@ from the already-shipped path.
 | `copy_rect_32` memmove | 4.38% | 2.49% | −43% |
 | MainThread CPU recovered | — | — | ~5.4 percentage points |
 
+#### Winex11 AVX2 follow-on after throttle
+
+| Symbol | Before AVX2 | After AVX2 | Delta |
+|---|---:|---:|---:|
+| `x11drv_surface_flush` | 6.72% | 2.39% | −4.33pp / −64% |
+| total `winex11.so` | 6.76% | 2.43% | −4.33pp |
+| total kernel | 10.22% | 8.58% | −1.64pp |
+
+This was a pure PE-side follow-on inside `winex11.drv`, after the
+8ms flush throttle had already landed. The hot scalar `ptr[x] |=
+alpha_bits` loop was replaced with an AVX2 `vpor` path over 8 pixels
+per iteration, with a scalar tail. Publicly relevant result: lower
+MainThread GUI flush cost with bit-identical output.
+
 #### PE-suite comparison vs 2026-04-26
 
 | Metric | 2026-04-26 | 2026-04-30 | Delta |
@@ -509,7 +543,7 @@ State boards and architecture deep-dives produced by the project:
 
 | Doc | Subject |
 |---|---|
-| `current-state.md` | This document — state of the art on 2026-04-30 |
+| `current-state.md` | This document — state of the art on 2026-05-01 |
 | `cs-pi.gen.html` | Critical Section Priority Inheritance (CS-PI v2.3) — twelve-section deep dive |
 | `condvar-pi-requeue.gen.html` | `RtlSleepConditionVariableCS` `FUTEX_WAIT_REQUEUE_PI` slow path |
 | `aggregate-wait-and-async-completion.gen.html` | Landed kernel 1010 + dispatcher Phase 2/3 aggregate-wait architecture |
