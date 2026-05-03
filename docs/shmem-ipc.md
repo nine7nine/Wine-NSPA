@@ -227,7 +227,7 @@ Each client thread that connects to the wineserver gets a dedicated **dispatcher
   <text x="720" y="342" text-anchor="middle" class="d-lbl-g">PI boosts its dispatcher</text>
 
   <!-- Arrows from clients to dispatchers -->
-  <line x1="120" y1="310" x2="320" y2="135" stroke="#9ece6a" stroke-width="1"/>
+  <path d="M120 310 L120 220 L320 220 L320 135" stroke="#9ece6a" stroke-width="1" fill="none"/>
   <line x1="310" y1="310" x2="380" y2="195" stroke="#9ece6a" stroke-width="1"/>
   <line x1="500" y1="310" x2="430" y2="255" stroke="#9ece6a" stroke-width="1"/>
 </svg>

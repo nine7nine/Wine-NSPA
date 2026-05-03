@@ -751,7 +751,7 @@ The handshake state is a single 32-bit `int` shared between the play_thread and 
   <text x="615" y="178" class="lbl-trans-em">CAS: IDLE -&gt; CAPTURE_READY</text>
   <text x="615" y="192" class="lbl-trans">T_jack copies capture, futex_wake T_play</text>
 
-  <line x1="780" y1="298" x2="540" y2="380" class="conn"/>
+  <path d="M780 298 L780 330 L540 330 L540 380" class="conn"/>
   <text x="565" y="332" class="lbl-trans-em">CAS: CAPTURE_READY -&gt; OUTPUT_READY</text>
   <text x="565" y="346" class="lbl-trans">T_play returns from bufferSwitch, futex_wake T_jack</text>
 

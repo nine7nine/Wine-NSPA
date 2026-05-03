@@ -1,6 +1,6 @@
 # Wine-NSPA -- Full Suite Comparison Report
 
-**Date:** 2026-05-01
+**Date:** 2026-05-02
 **Author:** Jordan Johnston
 **Kernel:** `6.19.11-rt1-1-nspa` (PREEMPT_RT_FULL, production)
 **ntsync module:** `srcversion 10124FB81FDC76797EF1F91`
@@ -9,9 +9,12 @@ Baseline = `WINEDEBUG=-all` only |
 RT = `NSPA_RT_PRIO=80 NSPA_RT_POLICY=FF WINEPRELOADREMAPVDSO=force`
 
 This doc tracks Wine-NSPA test-suite evolution from v3 through v8. The
-current published snapshot is v8 / 2026-04-30 (1003-1011 kernel stack,
-24 PASS / 0 FAIL / 0 TIMEOUT PE matrix, `dispatcher-burst` added).
-Earlier version sections are retained below as historical snapshots.
+current published full-suite snapshot remains v8 / 2026-04-30
+(1003-1011 kernel stack, 24 PASS / 0 FAIL / 0 TIMEOUT PE matrix,
+`dispatcher-burst` added). The shipped 2026-05-02 follow-ons below are
+validated by targeted harnesses and smoke runs rather than a new v9
+full-suite publish. Earlier version sections are retained below as
+historical snapshots.
 
 | Version | Date | Highlight |
 |---------|------|-----------|
@@ -20,6 +23,33 @@ Earlier version sections are retained below as historical snapshots.
 | v5 -> v6 | 2026-04-16/17 | (incremental tuning, stable matrix) |
 | **v6 -> v7** | **2026-04-28** | **Native ntsync stress suite added; ~370M ops zero KASAN; PE matrix 22/22 stable** |
 | **v7 -> v8** | **2026-04-30** | **1011 / TRY_RECV2 shipped, `dispatcher-burst` added, Layer 1 native suite 3 PASS / 0 FAIL, Layer 2 PE matrix 24 PASS / 0 FAIL / 0 TIMEOUT** |
+
+---
+
+## Post-v8 shipped follow-ons (2026-05-02) -- targeted validators, not a new matrix version
+
+### Why this is not labeled v9
+
+The public project has shipped meaningful new client-side work since v8:
+spawn-main + `ntdll_sched`, sched-hosted timer migrations, anonymous
+local events default-on, and socket `RECVMSG` / `SENDMSG` default-on.
+Those changes were validated with targeted harnesses and real-workload
+smoke, but they have **not** yet been rolled into a new published
+full-suite matrix version. So the current matrix version remains v8.
+
+### Targeted 2026-05-02 results
+
+| Area | Validation surface | Published result |
+|------|--------------------|------------------|
+| client scheduler + RT timer migrations | `run-rt-probe-validation.sh` | `10/10 PASS`; Ableton boot / library / project / playback PASS; net `-1` helper thread per process |
+| anonymous local events default-on | Ableton playback smoke vs Phase 4.5 baseline | system CPU `40-57%` -> `~35%` during playback (`~15-20%` reduction); thread count and wineserver CPU unchanged |
+| socket `RECVMSG` / `SENDMSG` default-on | `socket-io` deferred path + Ableton smoke | throughput `+6.5%`; p99 latency `-6.8%`; `0/2000` failures; Ableton clean at `63` threads with zero new errors vs Phase 4.6 baseline |
+
+### Reading this with the rest of the docs
+
+Use this page for the current published matrix boundary. Use
+`current-state.gen.html` for the exact shipped defaults and targeted
+2026-05-02 validation numbers that landed after v8.
 
 ---
 

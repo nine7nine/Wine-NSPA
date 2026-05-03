@@ -108,9 +108,9 @@
 <div class="page-nav"><a href="index.html">Docs Home</a></div>
 <h1 id="wine-nspa--nt-local-stubs">Wine-NSPA &ndash; NT-local stubs</h1>
 
-<p>Wine 11.6 + NSPA RT patchset | Kernel 6.19.x-rt with NTSync PI | 2026-04-30
+<p>Wine 11.6 + NSPA RT patchset | Kernel 6.19.x-rt with NTSync PI | 2026-05-02
 Author: Jordan Johnston
-Status: architectural pattern reference for shipped client-local NT bypasses and their fallback discipline.</p>
+Status: architectural pattern reference for the shipped client-local NT bypasses, now including anonymous events and sched-hosted timer dispatch.</p>
 
 <p>This page explains the NT-local stub pattern itself: what gets moved into the client process, how cross-process arbitration is still preserved, and how the shipped stubs fit into the broader decomposition story.</p>
 
@@ -127,8 +127,9 @@ Status: architectural pattern reference for shipped client-local NT bypasses and
 
 <ol>
 <li><a href="#71-nspa_local_file--ntcreatefile-bypass"><code>nspa_local_file</code> &ndash; <code>NtCreateFile</code> bypass</a></li>
-<li><a href="#72-nspa_local_timer--ntsettimer-fast-path"><code>nspa_local_timer</code> &ndash; <code>NtSetTimer</code> fast path</a></li>
-<li><a href="#73-nspa_local_wm_timer--wm_timer-dispatcher"><code>nspa_local_wm_timer</code> &ndash; <code>WM_TIMER</code> dispatcher</a></li>
+<li><a href="#72-anonymous-local-events--ntcreateevent-fast-path">anonymous local events &ndash; <code>NtCreateEvent</code> fast path</a></li>
+<li><a href="#73-nspa_local_timer--ntsettimer-fast-path"><code>nspa_local_timer</code> &ndash; <code>NtSetTimer</code> fast path</a></li>
+<li><a href="#74-nspa_local_wm_timer--wm_timer-dispatcher"><code>nspa_local_wm_timer</code> &ndash; <code>WM_TIMER</code> dispatcher</a></li>
 </ol>
 </li>
 <li><a href="#8-future-stubs-roadmap">Future stubs (roadmap)</a></li>
@@ -160,8 +161,8 @@ arbitration is required. Each stub picks an NT surface, owns its own
 data structures (a private handle range, a per-process table, a shmem
 region, a dispatcher thread), and short-circuits the server when it can.</p>
 
-<p>The pattern is already shipping. As of 2026-04-27 there are three live
-NT-local stubs in tree:</p>
+<p>The pattern is already shipping. As of 2026-05-02 there are four live
+NT-local stub surfaces in tree:</p>
 
 <table>
 <thead>
@@ -176,6 +177,11 @@ NT-local stubs in tree:</p>
 <td> <code>nspa_local_file</code> </td>
 <td> <code>NtCreateFile</code> (read-only regulars) + downstream <code>NtReadFile</code>, <code>NtClose</code>, <code>NtQueryInformationFile</code>, <code>NtCreateSection</code>, <code>NtDuplicateObject</code> routing </td>
 <td> <code>dlls/ntdll/unix/nspa/local_file.c</code> </td>
+</tr>
+<tr>
+<td> local event fast path </td>
+<td> anonymous <code>NtCreateEvent</code> with server-aware async-completion signaling </td>
+<td> <code>dlls/ntdll/unix/sync.c</code> + <code>server/nspa/inproc_event_table.c</code> </td>
 </tr>
 <tr>
 <td> <code>nspa_local_timer</code> </td>
@@ -219,7 +225,7 @@ NT-local stubs in tree:</p>
 
   <rect x="40" y="66" width="180" height="66" class="ns-box" rx="6"/>
   <text x="130" y="92" text-anchor="middle" class="ns-label">NT API entry point</text>
-  <text x="130" y="109" text-anchor="middle" class="ns-sm">NtCreateFile / NtSetTimer / NtUserSetTimer</text>
+  <text x="130" y="109" text-anchor="middle" class="ns-sm">NtCreateFile / NtCreateEvent / NtSetTimer / NtUserSetTimer</text>
 
   <rect x="280" y="66" width="170" height="66" class="ns-fast" rx="6"/>
   <text x="365" y="92" text-anchor="middle" class="ns-blue">eligibility predicate</text>
@@ -250,7 +256,7 @@ NT-local stubs in tree:</p>
 
   <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="220" y1="99" x2="280" y2="99" class="ns-arrow"/>
   <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="450" y1="99" x2="510" y2="90" class="ns-arrow-b"/>
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="450" y1="99" x2="760" y2="173" class="ns-arrow-g"/>
+  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M450 99 L690 99 L690 173 L760 173" class="ns-arrow-g"/>
   <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="605" y1="132" x2="605" y2="168" class="ns-arrow-p"/>
   <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="605" y1="252" x2="605" y2="288" class="ns-arrow-y"/>
   <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="700" y1="315" x2="760" y2="200" class="ns-arrow-y"/>
@@ -263,8 +269,8 @@ NT-local stubs in tree:</p>
   <rect x="40" y="286" width="410" height="78" class="ns-box" rx="6"/>
   <text x="245" y="309" text-anchor="middle" class="ns-label">Shipped surfaces</text>
   <text x="245" y="324" text-anchor="middle" class="ns-sm">nspa_local_file: client-private file handles</text>
-  <text x="245" y="338" text-anchor="middle" class="ns-sm">nspa_local_timer: anonymous NT timers</text>
-  <text x="245" y="352" text-anchor="middle" class="ns-sm">nspa_local_wm_timer: owner-process WM_TIMER dispatch</text>
+  <text x="245" y="338" text-anchor="middle" class="ns-sm">local event: anonymous NtCreateEvent client-range handles</text>
+  <text x="245" y="352" text-anchor="middle" class="ns-sm">local timers + local WM_TIMER: sched-hosted dispatch inside the process</text>
 </svg>
 </div>
 
@@ -722,14 +728,128 @@ mints a server handle via <code>nspa_create_file_from_unix_fd</code> RPC and
 caches it. Long tail of NT-API surface (info classes, section creation,
 duplication) routes through the promoted handle.</p>
 
-<p><strong>Feature gate:</strong> <code>NSPA_LOCAL_FILES=1</code> (default-off as of 2026-04-27,
-pending production validation; the table machinery is always built).</p>
+<p><strong>Feature gate:</strong> <code>NSPA_LOCAL_FILES=1</code> (shipped; set <code>NSPA_LOCAL_FILES=0</code>
+to force the legacy wineserver path for diagnostic A/B).</p>
 
 <p><strong>Dedicated reference:</strong> <code>nspa-local-file-architecture.gen.html</code> &ndash;
 the per-stub deep dive. Read it for the full design rationale,
 sharing-arbitration semantics, eligibility matrix, and Phase history.</p>
 
-<h3 id="72-nspa_local_timer--ntsettimer-fast-path">7.2 <code>nspa_local_timer</code> &ndash; <code>NtSetTimer</code> fast path</h3>
+<h3 id="72-anonymous-local-events--ntcreateevent-fast-path">7.2 anonymous local events &ndash; <code>NtCreateEvent</code> fast path</h3>
+
+<p><strong>Surface:</strong> anonymous <code>NtCreateEvent</code> on the client-range fast path,
+with the server still able to signal those events correctly when they
+are passed into server-managed async-I/O paths.</p>
+
+<p><strong>Files:</strong></p>
+
+<table>
+<thead>
+<tr>
+<th> Path </th>
+<th> Role </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> <code>dlls/ntdll/unix/sync.c</code> </td>
+<td> anonymous event create, client-handle allocation, inproc-sync cache population, register / unregister with wineserver </td>
+</tr>
+<tr>
+<td> <code>server/nspa/inproc_event_table.c</code> </td>
+<td> per-process <code>(client handle -&gt; ntsync fd)</code> registration table </td>
+</tr>
+<tr>
+<td> <code>server/async.c</code> </td>
+<td> fallback lookup and direct <code>NTSYNC_IOC_EVENT_SET</code> signaling on completion </td>
+</tr>
+</tbody>
+</table>
+
+
+<p><strong>Design shape:</strong> the event object itself is client-local, but the server is
+made aware of it at creation time. That is the important distinction from the
+older anonymous-event fast path: when a client-range event handle later crosses
+into a wineserver-managed async path, the server does not reject it as an
+unknown handle. Instead it looks up the registered ntsync fd and signals that
+fd directly on completion.</p>
+
+<p>That completion path is broader than the raw <code>NtCreateEvent</code> call itself. It is
+the thing that keeps named-pipe / RPC listener waits, SCM-via-pipe startup, and
+wined3d-style present-completion events working once anonymous events flip to
+client-range by default.</p>
+
+<p><strong>Async parity detail:</strong> the shipped implementation also mirrors the server&rsquo;s
+normal queue-time <code>reset_event</code> discipline before async operations are armed.
+That fix landed during the same session after validation exposed stale
+<code>io_status</code> behaviour on the client-range path.</p>
+
+<p><strong>Eligibility:</strong> anonymous only. Named, inherited, or directory-relative
+events still fall through to the server because their semantics live in the NT
+object namespace.</p>
+
+<p><strong>Feature gate:</strong> <code>NSPA_NT_LOCAL_EVENT=1</code> (default-on as of 2026-05-02). Set
+<code>NSPA_NT_LOCAL_EVENT=0</code> to force anonymous events back through wineserver.</p>
+
+<p><strong>Architectural consequence:</strong> this is now the base that anonymous local timers
+build on. The timer stub no longer needs a temporary helper to create a
+server-visible backing event up front; it can call <code>NtCreateEvent</code> directly and
+inherit the same client-range fast path.</p>
+
+<p><strong>Validation note:</strong> smoke 0/1 with <code>NSPA_NT_LOCAL_EVENT=1</code> were clean after
+the reset fix, with zero <code>err:service</code>, <code>err:rpc</code>, or <code>err:ole</code> errors.</p>
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 940 350" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
+  <style>
+    .le-bg { fill: #1a1b26; }
+    .le-box { fill: #24283b; stroke: #3b4261; stroke-width: 1.5; rx: 8; }
+    .le-fast { fill: #1a2235; stroke: #7aa2f7; stroke-width: 2; rx: 8; }
+    .le-srv { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 2; rx: 8; }
+    .le-note { fill: #2a2418; stroke: #e0af68; stroke-width: 1.6; rx: 8; }
+    .le-t { fill: #c0caf5; font: 11px 'JetBrains Mono', monospace; }
+    .le-s { fill: #a9b1d6; font: 9px 'JetBrains Mono', monospace; }
+    .le-h { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
+    .le-g { fill: #9ece6a; font: bold 10px 'JetBrains Mono', monospace; }
+    .le-y { fill: #e0af68; font: bold 10px 'JetBrains Mono', monospace; }
+    .le-line { stroke: #c0caf5; stroke-width: 1.5; fill: none; }
+  </style>
+  <defs>
+    <marker id="leArrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M0,0 L8,3 L0,6" fill="#c0caf5"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="940" height="350" class="le-bg" rx="6"/>
+  <text x="470" y="26" text-anchor="middle" class="le-h">Anonymous local event with server-aware completion</text>
+
+  <rect x="50" y="82" width="230" height="84" class="le-fast" rx="6"/>
+  <text x="165" y="110" text-anchor="middle" class="le-t">PE-side `NtCreateEvent`</text>
+  <text x="165" y="132" text-anchor="middle" class="le-s">client-range handle + ntsync fd</text>
+  <text x="165" y="150" text-anchor="middle" class="le-s">cached in inproc-sync table</text>
+
+  <rect x="355" y="82" width="230" height="84" class="le-srv" rx="6"/>
+  <text x="470" y="110" text-anchor="middle" class="le-g">server registration table</text>
+  <text x="470" y="132" text-anchor="middle" class="le-s">(client handle -> ntsync fd)</text>
+  <text x="470" y="150" text-anchor="middle" class="le-s">per-process, lazy lifetime</text>
+
+  <rect x="660" y="82" width="230" height="84" class="le-srv" rx="6"/>
+  <text x="775" y="110" text-anchor="middle" class="le-t">server async completion</text>
+  <text x="775" y="132" text-anchor="middle" class="le-s">direct `NTSYNC_IOC_EVENT_SET` on registered fd</text>
+  <text x="775" y="150" text-anchor="middle" class="le-s">no `STATUS_INVALID_HANDLE` fallback failure</text>
+
+  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M280 124 L355 124" class="le-line" marker-end="url(#leArrow)"/>
+  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M585 124 L660 124" class="le-line" marker-end="url(#leArrow)"/>
+
+  <rect x="150" y="214" width="640" height="76" class="le-note" rx="6"/>
+  <text x="470" y="246" text-anchor="middle" class="le-y">Why this matters</text>
+  <text x="470" y="264" text-anchor="middle" class="le-s">client-range events now compose with server-managed async paths</text>
+  <text x="470" y="278" text-anchor="middle" class="le-s">instead of being limited to purely local waits</text>
+</svg>
+</div>
+
+
+<h3 id="73-nspa_local_timer--ntsettimer-fast-path">7.3 <code>nspa_local_timer</code> &ndash; <code>NtSetTimer</code> fast path</h3>
 
 <p><strong>Surface:</strong> <code>NtCreateTimer</code> (anonymous only), <code>NtSetTimer</code>,
 <code>NtCancelTimer</code>, <code>NtQueryTimer</code>.</p>
@@ -794,24 +914,23 @@ sharing-arbitration semantics, eligibility matrix, and Phase history.</p>
 
 
 <p><strong>Design twist:</strong> unlike the local-file bypass, the timer stub does
-<em>not</em> return a private handle. The handle returned to the app is a
-server-allocated <code>NtCreateEvent</code> handle (<code>local_timer.c:485-489</code>):</p>
+<em>not</em> return a private timer handle. The object still presents itself as
+an event-backed timer handle to the rest of Wine. What changed on
+2026-05-02 is that the anonymous backing event now comes from the same
+client-range <code>NtCreateEvent</code> fast path described in §7.2, rather than
+from a dedicated temporary helper.</p>
 
-<pre><code class="code-block">event_type = (timer_type == NotificationTimer) ? NotificationEvent : SynchronizationEvent;
-if ((ret = NtCreateEvent( &amp;event, access, NULL,
-                          event_type, FALSE )))
-    return ret;
-</code></pre>
+<p>The bypass is still in the <em>firing</em> path. On expiry the timer code issues
+<code>NtSetEvent</code> against the backing event handle. Because that handle is now
+client-range by default, expiry stays entirely on the local fast path unless
+the event later crosses into a server-managed async surface.</p>
 
-<p>The bypass is in the <em>firing</em> path, not the creation path. A
-dispatcher pthread (SCHED_FIFO at <code>NSPA_RT_PRIO - 1</code>) sleeps on a
-<code>pi_cond_t</code> with <code>CLOCK_MONOTONIC</code> absolute deadlines. On expiry it
-issues <code>NtSetEvent</code> against the backing event handle. Because the
-backing handle is an NTSync event with <code>direct-sync</code> enabled (the
-client-range fast-path), <code>NtSetEvent</code> is a futex-only operation &ndash;
-no wineserver RPC. Net result: timer expiry costs a <code>pi_cond_timedwait</code>
-wake-up + an <code>NtSetEvent</code> futex op + optional <code>NtQueueApcThread</code> RPC.
-Server&rsquo;s old <code>timer_callback</code> path is bypassed entirely.</p>
+<p><strong>Dispatch host:</strong> when RT is available and
+<code>NSPA_SCHED_USE_FOR_LOCAL_TIMER</code> is left at its default setting, timer expiry
+is hosted on the shared <code>wine-sched-rt</code> thread instead of a dedicated helper
+pthread. The priority class stays the same (<code>SCHED_FIFO</code> at
+<code>NSPA_RT_PRIO - 1</code>); the win is consolidation and shared infrastructure, not a
+different scheduler policy.</p>
 
 <p><strong>Eligibility:</strong> anonymous only (<code>!attr-&gt;ObjectName</code>). Named timers
 fall through to the server because their cross-process visibility
@@ -832,10 +951,11 @@ the deadline queue. <code>fire_timer</code> (which calls <code>NtSetEvent</code>
 entry. The dispatcher loop at <code>local_timer.c:346-437</code> is the
 canonical drop-fire-reacquire pattern.</p>
 
-<p><strong>Feature gate:</strong> <code>NSPA_DISABLE_LOCAL_TIMERS</code> (default-on; gate
-disables the bypass).</p>
+<p><strong>Feature gate:</strong> <code>NSPA_DISABLE_LOCAL_TIMERS</code> keeps the older global bypass
+gate, and <code>NSPA_SCHED_USE_FOR_LOCAL_TIMER=0</code> forces the legacy dedicated RT
+helper thread when the local timer stub itself is still enabled.</p>
 
-<h3 id="73-nspa_local_wm_timer--wm_timer-dispatcher">7.3 <code>nspa_local_wm_timer</code> &ndash; <code>WM_TIMER</code> dispatcher</h3>
+<h3 id="74-nspa_local_wm_timer--wm_timer-dispatcher">7.4 <code>nspa_local_wm_timer</code> &ndash; <code>WM_TIMER</code> dispatcher</h3>
 
 <p><strong>Surface:</strong> <code>NtUserSetTimer</code>, <code>NtUserSetSystemTimer</code>, <code>NtUserKillTimer</code>,
 <code>NtUserKillSystemTimer</code>, plus <code>WM_TIMER</code> / <code>WM_SYSTIMER</code> posting into
@@ -915,12 +1035,15 @@ else
 if (!peer_shm) return STATUS_NOT_IMPLEMENTED;
 </code></pre>
 
-<p>The dispatcher pthread is a pure shmem-writer &ndash; it never enters
-wineserver. <code>peek_message</code> on the consumer side drains the ring
-client-side via <code>nspa_try_pop_own_timer_ring</code>. End-to-end, a
-WM_TIMER expiry is a <code>pi_cond_timedwait</code> wake + a ring slot store +
-a consumer ring-pop. Server&rsquo;s old <code>pending_timers</code> / <code>expired_timers</code>
-dispatch is bypassed entirely.</p>
+<p>The dispatcher is a pure shmem-writer &ndash; it never enters wineserver.
+<code>peek_message</code> on the consumer side drains the ring client-side via
+<code>nspa_try_pop_own_timer_ring</code>. End-to-end, a WM_TIMER expiry is a timer
+wake plus a ring-slot store plus a consumer ring-pop. Server&rsquo;s old
+<code>pending_timers</code> / <code>expired_timers</code> dispatch is bypassed entirely.</p>
+
+<p>As of 2026-05-02, eligible WM_TIMER dispatch also shares the RT sched
+host instead of owning a dedicated helper pthread. That keeps the same
+effective priority while removing another per-process helper thread.</p>
 
 <p><strong>Cross-process refusal:</strong> hwnds owned by other processes are
 explicitly rejected (<code>local_wm_timer.c:474</code>). Cross-process WM_TIMERs
@@ -941,8 +1064,9 @@ without taking the lock &ndash; the slot&rsquo;s state byte is the
 synchronisation point with the consumer. The dispatcher does not
 issue any wineserver RPC.</p>
 
-<p><strong>Feature gate:</strong> <code>NSPA_DISABLE_LOCAL_WM_TIMERS</code> (default-on; gate
-disables the bypass).</p>
+<p><strong>Feature gate:</strong> <code>NSPA_DISABLE_LOCAL_WM_TIMERS</code> keeps the older global bypass
+gate, and <code>NSPA_SCHED_USE_FOR_WM_TIMER=0</code> forces the legacy dedicated RT
+helper thread when the WM_TIMER stub itself is still enabled.</p>
 
 <p><strong>2026-04-30 follow-up:</strong> <a href="https://github.com/nine7nine/Wine-NSPA/commit/78947c1"><code>78947c1</code></a>
 tightened the eligibility predicate so <code>TIMERPROC</code> and cross-thread

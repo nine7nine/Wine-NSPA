@@ -1,0 +1,613 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Wine-NSPA -- Client Scheduler Architecture</title>
+<style>
+  :root {
+    --bg: #1a1b26; --fg: #c0caf5; --accent: #7aa2f7;
+    --green: #9ece6a; --red: #f7768e; --yellow: #e0af68;
+    --surface: #24283b; --border: #3b4261; --muted: #8c92b3;
+    --purple: #bb9af7; --orange: #ff9e64; --cyan: #7dcfff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+    background: var(--bg); color: var(--fg);
+    max-width: 1100px; margin: 0 auto; padding: 2rem 1.5rem;
+    line-height: 1.7;
+  }
+  .page-nav {
+    display: flex;
+    justify-content: flex-end;
+    margin-bottom: 0.5rem;
+  }
+  .page-nav a {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.35rem 0.7rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: rgba(36, 40, 59, 0.9);
+    color: var(--accent);
+    font-size: 0.78rem;
+    line-height: 1;
+  }
+  .page-nav a:hover {
+    background: var(--surface);
+    color: var(--cyan);
+    text-decoration: none;
+  }
+  h1 { color: var(--accent); font-size: 1.5rem; margin: 1.5rem 0 0.5rem; }
+  h2 { color: var(--accent); font-size: 1.2rem; margin: 2rem 0 0.75rem;
+       border-bottom: 1px solid var(--border); padding-bottom: 0.3rem; }
+  h3 { color: var(--yellow); font-size: 1rem; margin: 1.25rem 0 0.5rem; }
+  h4 { color: var(--cyan); font-size: 0.95rem; margin: 1rem 0 0.4rem; }
+  p, li { font-size: 0.85rem; margin-bottom: 0.5rem; }
+  ul, ol { padding-left: 1.5rem; margin-bottom: 0.75rem; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  table {
+    width: 100%; border-collapse: collapse;
+    margin: 0.75rem 0 1rem; font-size: 0.8rem;
+  }
+  th, td {
+    padding: 0.4rem 0.75rem; text-align: left;
+    border: 1px solid var(--border);
+  }
+  th { background: var(--surface); color: var(--accent); font-weight: 600; }
+  td { background: var(--bg); }
+  code {
+    background: var(--surface); padding: 0.15rem 0.4rem;
+    border-radius: 3px; font-size: 0.82rem; color: var(--cyan);
+  }
+  pre {
+    background: var(--surface); padding: 1rem 1.1rem; border-radius: 8px;
+    overflow-x: auto; margin: 0.75rem 0 1rem;
+    border: 1px solid var(--border);
+  }
+  pre code {
+    display: block; background: transparent; padding: 0;
+    font-size: 0.8rem; color: inherit;
+  }
+  pre code.hljs,
+  code.hljs {
+    background: transparent;
+    padding: 0;
+  }
+  blockquote {
+    background: var(--surface); border-left: 3px solid var(--accent);
+    padding: 0.75rem 1rem; margin: 1rem 0; border-radius: 0 4px 4px 0;
+    font-size: 0.82rem;
+  }
+  blockquote strong { color: var(--yellow); }
+  hr { border: none; border-top: 1px solid var(--border); margin: 2rem 0; }
+  strong { color: var(--fg); }
+  em { color: var(--muted); font-style: italic; }
+  .diagram-container {
+    display: flex; justify-content: center;
+    margin: 1.25rem auto 1.5rem; padding: 0.75rem;
+    background: rgba(36, 40, 59, 0.55);
+    border: 1px solid var(--border); border-radius: 10px;
+    overflow-x: auto;
+  }
+  .diagram-container svg {
+    display: block;
+    width: 100% !important;
+    max-width: 100%;
+    height: auto !important;
+    margin: 0 auto;
+    flex: 0 0 auto;
+  }
+</style>
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/tokyo-night-dark.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
+</head><body>
+<div class="page-nav"><a href="index.html">Docs Home</a></div>
+<h1 id="wine-nspa--client-scheduler-architecture">Wine-NSPA &ndash; Client Scheduler Architecture</h1>
+
+<p><strong>Date:</strong> 2026-05-02
+<strong>Author:</strong> Jordan Johnston
+<strong>Kernel:</strong> <code>6.19.11-rt1-1-nspa</code> (PREEMPT_RT_FULL)
+<strong>Wine:</strong> 11.6 + NSPA RT patchset
+<strong>Status:</strong> shipped architecture reference for the spawn-main carry, the <code>ntdll_sched</code> substrate, and the live default-class and RT-class scheduler consumers.</p>
+
+<p>This page explains the client-side scheduler infrastructure that landed on
+2026-05-02: the spawn-main thread split, the per-process <code>ntdll_sched</code>
+dispatch loops, the lazy RT-class sched thread, and the first consumers now
+routed through them.</p>
+
+<h2 id="table-of-contents">Table of Contents</h2>
+
+<ol>
+<li><a href="#1-overview">Overview</a></li>
+<li><a href="#2-thread-model">Thread model</a></li>
+<li><a href="#3-api-surface">API surface</a></li>
+<li><a href="#4-shipped-consumers">Shipped consumers</a></li>
+<li><a href="#5-validation-and-gates">Validation and gates</a></li>
+<li><a href="#6-relationship-to-the-rest-of-wine-nspa">Relationship to the rest of Wine-NSPA</a></li>
+<li><a href="#7-references">References</a></li>
+</ol>
+
+
+<hr />
+
+<h2 id="1-overview">1. Overview</h2>
+
+<p>The architectural prerequisite was upstream spawn-main: the Unix bootstrap
+thread no longer becomes the application&rsquo;s Win32 main thread. Instead, the
+bootstrap thread parks in <code>sched_run()</code> and becomes a per-process scheduler
+host, while the app main thread is created separately and continues through
+normal Win32 startup.</p>
+
+<p>On top of that split, Wine-NSPA now ships a client-side scheduler substrate:</p>
+
+<ul>
+<li>one always-present default-class sched thread, named <code>wine-sched</code></li>
+<li>one lazy RT-class sched thread, named <code>wine-sched-rt</code>, created only when an
+RT consumer actually registers work and <code>NSPA_RT_PRIO</code> is configured</li>
+<li><code>ntdll_sched_*</code> entry points for poll, timer, async, synchronous call, and
+cancel</li>
+</ul>
+
+
+<p>The purpose is not to replace wineserver dispatch. Gamma remains
+wineserver-side. This scheduler is the client-process sidecar used to host
+small helper loops and timer dispatchers without adding more dedicated helper
+threads per subsystem.</p>
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 960 420" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
+  <style>
+    .sc-bg { fill: #1a1b26; }
+    .sc-box { fill: #24283b; stroke: #3b4261; stroke-width: 1.5; rx: 8; }
+    .sc-main { fill: #1a2235; stroke: #7aa2f7; stroke-width: 2; rx: 8; }
+    .sc-sched { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 2; rx: 8; }
+    .sc-rt { fill: #2a1f35; stroke: #bb9af7; stroke-width: 2; rx: 8; }
+    .sc-note { fill: #2a2418; stroke: #e0af68; stroke-width: 1.6; rx: 8; }
+    .sc-t { fill: #c0caf5; font: 11px 'JetBrains Mono', monospace; }
+    .sc-s { fill: #a9b1d6; font: 9px 'JetBrains Mono', monospace; }
+    .sc-h { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
+    .sc-g { fill: #9ece6a; font: bold 10px 'JetBrains Mono', monospace; }
+    .sc-v { fill: #bb9af7; font: bold 10px 'JetBrains Mono', monospace; }
+    .sc-y { fill: #e0af68; font: bold 10px 'JetBrains Mono', monospace; }
+    .sc-line { stroke: #c0caf5; stroke-width: 1.5; fill: none; }
+  </style>
+  <defs>
+    <marker id="scArrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M0,0 L8,3 L0,6" fill="#c0caf5"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="960" height="420" class="sc-bg" rx="6"/>
+  <text x="480" y="28" text-anchor="middle" class="sc-h">Per-process thread model after spawn-main</text>
+
+  <rect x="50" y="70" width="860" height="290" class="sc-box" rx="6"/>
+  <text x="78" y="96" class="sc-t">Wine process</text>
+  <text x="78" y="112" class="sc-s">spawn-main separates the bootstrap scheduler host from the Win32 app main thread</text>
+
+  <rect x="90" y="150" width="220" height="100" class="sc-main" rx="6"/>
+  <text x="200" y="178" text-anchor="middle" class="sc-t">application main thread</text>
+  <text x="200" y="200" text-anchor="middle" class="sc-s">runs Win32 startup and normal user code</text>
+  <text x="200" y="218" text-anchor="middle" class="sc-s">no longer doubles as the Unix bootstrap loop</text>
+
+  <rect x="370" y="138" width="220" height="124" class="sc-sched" rx="6"/>
+  <text x="480" y="166" text-anchor="middle" class="sc-g">`wine-sched`</text>
+  <text x="480" y="188" text-anchor="middle" class="sc-s">default-class scheduler thread</text>
+  <text x="480" y="206" text-anchor="middle" class="sc-s">SCHED_OTHER by design</text>
+  <text x="480" y="224" text-anchor="middle" class="sc-s">hosts poll / timer / async / call work</text>
+  <text x="480" y="242" text-anchor="middle" class="sc-s">always present after process bootstrap</text>
+
+  <rect x="650" y="150" width="220" height="100" class="sc-rt" rx="6"/>
+  <text x="760" y="178" text-anchor="middle" class="sc-v">`wine-sched-rt`</text>
+  <text x="760" y="200" text-anchor="middle" class="sc-s">lazy RT-class scheduler thread</text>
+  <text x="760" y="218" text-anchor="middle" class="sc-s">spawned on first RT-class registration</text>
+  <text x="760" y="236" text-anchor="middle" class="sc-s">SCHED_FIFO at `NSPA_RT_PRIO - 1`</text>
+
+  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M310 200 L370 200" class="sc-line" marker-end="url(#scArrow)"/>
+  <text x="340" y="188" text-anchor="middle" class="sc-g">spawn-main split</text>
+
+  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M590 200 L650 200" class="sc-line" marker-end="url(#scArrow)"/>
+  <text x="620" y="188" text-anchor="middle" class="sc-v">RT-class only</text>
+
+  <rect x="150" y="286" width="660" height="58" class="sc-note" rx="6"/>
+  <text x="480" y="314" text-anchor="middle" class="sc-y">Load-bearing invariant</text>
+  <text x="480" y="330" text-anchor="middle" class="sc-s">the sched host stays separate from the app main thread</text>
+  <text x="480" y="344" text-anchor="middle" class="sc-s">gamma and wineserver remain separate server-side machinery</text>
+</svg>
+</div>
+
+
+<hr />
+
+<h2 id="2-thread-model">2. Thread model</h2>
+
+<p>The shipped thread model has two classes.</p>
+
+<table>
+<thead>
+<tr>
+<th> Class </th>
+<th> Thread name </th>
+<th> Spawn policy </th>
+<th> Scheduler policy </th>
+<th> Purpose </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> Default </td>
+<td> <code>wine-sched</code> </td>
+<td> always present after spawn-main </td>
+<td> <code>SCHED_OTHER</code> </td>
+<td> general poll/timer/async/call hosting </td>
+</tr>
+<tr>
+<td> RT </td>
+<td> <code>wine-sched-rt</code> </td>
+<td> lazy, first RT-class registration only </td>
+<td> <code>SCHED_FIFO</code> at <code>NSPA_RT_PRIO - 1</code> </td>
+<td> precision timer consumers that used to own dedicated RT helper threads </td>
+</tr>
+</tbody>
+</table>
+
+
+<p>Two details matter:</p>
+
+<ul>
+<li>The default sched thread is intentionally pinned to <code>SCHED_OTHER</code>. It is a
+general callback host and must not become an RT thread accidentally.</li>
+<li>The RT sched thread is optional. If RT promotion is unavailable, RT-class
+registrations return <code>STATUS_NOT_SUPPORTED</code> and the caller falls back to its
+legacy dedicated-thread path.</li>
+</ul>
+
+
+<p>The scheduler implementation itself uses:</p>
+
+<ul>
+<li>PI mutexes around each sched-instance user list</li>
+<li>a non-blocking wake pipe so producers never deadlock on a full signal fd</li>
+<li>generation-stamped handles for ABA-safe cancel</li>
+<li>self-call detection in <code>ntdll_sched_call()</code> so the sched thread does not
+deadlock by waiting for work it must dispatch itself</li>
+</ul>
+
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 960 420" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
+  <style>
+    .sm-bg { fill: #1a1b26; }
+    .sm-box { fill: #24283b; stroke: #3b4261; stroke-width: 1.5; rx: 8; }
+    .sm-api { fill: #1a2235; stroke: #7aa2f7; stroke-width: 2; rx: 8; }
+    .sm-inst { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 2; rx: 8; }
+    .sm-rt { fill: #2a1f35; stroke: #bb9af7; stroke-width: 2; rx: 8; }
+    .sm-note { fill: #2a2418; stroke: #e0af68; stroke-width: 1.6; rx: 8; }
+    .sm-t { fill: #c0caf5; font: 11px 'JetBrains Mono', monospace; }
+    .sm-s { fill: #a9b1d6; font: 9px 'JetBrains Mono', monospace; }
+    .sm-h { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
+    .sm-g { fill: #9ece6a; font: bold 10px 'JetBrains Mono', monospace; }
+    .sm-v { fill: #bb9af7; font: bold 10px 'JetBrains Mono', monospace; }
+    .sm-y { fill: #e0af68; font: bold 10px 'JetBrains Mono', monospace; }
+    .sm-line { stroke: #c0caf5; stroke-width: 1.5; fill: none; }
+  </style>
+  <defs>
+    <marker id="smArrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M0,0 L8,3 L0,6" fill="#c0caf5"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="960" height="420" class="sm-bg" rx="6"/>
+  <text x="480" y="28" text-anchor="middle" class="sm-h">`ntdll_sched` routing model</text>
+
+  <rect x="60" y="80" width="220" height="236" class="sm-api" rx="6"/>
+  <text x="170" y="108" text-anchor="middle" class="sm-t">public entry points</text>
+  <text x="170" y="136" text-anchor="middle" class="sm-s">`ntdll_sched_register_poll`</text>
+  <text x="170" y="154" text-anchor="middle" class="sm-s">`ntdll_sched_register_timer`</text>
+  <text x="170" y="172" text-anchor="middle" class="sm-s">`ntdll_sched_async`</text>
+  <text x="170" y="190" text-anchor="middle" class="sm-s">`ntdll_sched_call`</text>
+  <text x="170" y="208" text-anchor="middle" class="sm-s">`ntdll_sched_cancel`</text>
+  <text x="170" y="236" text-anchor="middle" class="sm-s">generation-tagged handles</text>
+  <text x="170" y="254" text-anchor="middle" class="sm-s">ABA-safe cancel across instances</text>
+  <text x="170" y="272" text-anchor="middle" class="sm-s">self-call runs inline on sched thread</text>
+
+  <rect x="370" y="92" width="220" height="92" class="sm-inst" rx="6"/>
+  <text x="480" y="120" text-anchor="middle" class="sm-g">default instance</text>
+  <text x="480" y="142" text-anchor="middle" class="sm-s">poll users + timer users</text>
+  <text x="480" y="160" text-anchor="middle" class="sm-s">PI mutex + non-blocking wake pipe</text>
+
+  <rect x="370" y="212" width="220" height="92" class="sm-rt" rx="6"/>
+  <text x="480" y="240" text-anchor="middle" class="sm-v">RT instance</text>
+  <text x="480" y="262" text-anchor="middle" class="sm-s">same API, separate sched instance</text>
+  <text x="480" y="280" text-anchor="middle" class="sm-s">lazy-spawned only when needed</text>
+
+  <rect x="680" y="92" width="220" height="92" class="sm-inst" rx="6"/>
+  <text x="790" y="120" text-anchor="middle" class="sm-g">`wine-sched` loop</text>
+  <text x="790" y="142" text-anchor="middle" class="sm-s">poll()</text>
+  <text x="790" y="160" text-anchor="middle" class="sm-s">dispatch callbacks outside producer locks</text>
+
+  <rect x="680" y="212" width="220" height="92" class="sm-rt" rx="6"/>
+  <text x="790" y="240" text-anchor="middle" class="sm-v">`wine-sched-rt` loop</text>
+  <text x="790" y="262" text-anchor="middle" class="sm-s">same dispatch core</text>
+  <text x="790" y="280" text-anchor="middle" class="sm-s">RT-only consumers</text>
+
+  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M280 140 L370 140" class="sm-line" marker-end="url(#smArrow)"/>
+  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M280 258 L370 258" class="sm-line" marker-end="url(#smArrow)"/>
+  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M590 140 L680 140" class="sm-line" marker-end="url(#smArrow)"/>
+  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M590 258 L680 258" class="sm-line" marker-end="url(#smArrow)"/>
+
+  <rect x="180" y="334" width="600" height="54" class="sm-note" rx="6"/>
+  <text x="480" y="362" text-anchor="middle" class="sm-y">Cancel and wake discipline</text>
+  <text x="480" y="378" text-anchor="middle" class="sm-s">generation-checked cancel avoids stale-handle ABA</text>
+  <text x="480" y="392" text-anchor="middle" class="sm-s">non-blocking wake writes avoid producer-side deadlock</text>
+</svg>
+</div>
+
+
+<hr />
+
+<h2 id="3-api-surface">3. API surface</h2>
+
+<p>The shipped API surface is:</p>
+
+<pre><code class="language-c code-block">
+NTSTATUS ntdll_sched_register_poll( int fd, int events,
+                                    poll_callback callback,
+                                    void *private,
+                                    sched_handle_t *handle );
+
+NTSTATUS ntdll_sched_register_timer( const LARGE_INTEGER *timeout,
+                                     async_callback callback,
+                                     void *private,
+                                     sched_handle_t *handle );
+
+NTSTATUS ntdll_sched_async( async_callback callback, void *private );
+NTSTATUS ntdll_sched_call( call_callback callback, void *private );
+NTSTATUS ntdll_sched_cancel( sched_handle_t handle );
+</code></pre>
+
+
+<p>NSPA adds class routing through <code>NTDLL_SCHED_CLASS_DEFAULT</code> and
+<code>NTDLL_SCHED_CLASS_RT</code>. Consumers that need RT dispatch call the class-aware
+registration helpers; consumers that only need a general callback host stay on
+the default instance.</p>
+
+<p>The important semantics:</p>
+
+<ul>
+<li><code>register_*</code> returns a generation-stamped handle that can be canceled later</li>
+<li><code>cancel</code> is best-effort and returns <code>STATUS_NOT_FOUND</code> on a stale or already
+consumed handle</li>
+<li><code>async</code> is fire-and-forget</li>
+<li><code>call</code> is synchronous to the caller, but self-calls from the sched thread
+run inline to avoid deadlock</li>
+</ul>
+
+
+<hr />
+
+<h2 id="4-shipped-consumers">4. Shipped consumers</h2>
+
+<h3 id="41-async-close-queue-on-wine-sched">4.1 Async close queue on <code>wine-sched</code></h3>
+
+<p>The first real consumer is the local-file async close queue. For eligible
+fully-shareable local-file handles, <code>NtClose</code> no longer pays unix <code>close()</code> and
+server <code>close_handle</code> latency inline on the caller thread. Instead it pushes a
+bounded queue entry to the default sched thread.</p>
+
+<p>The shipped rules are conservative:</p>
+
+<ul>
+<li>queue capacity: 64</li>
+<li>eligibility: <code>FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE</code> only</li>
+<li>pre-flush on same-path reopen to close the local race window</li>
+<li>fallback inline on queue-full, disabled sched routing, or restrictive sharing</li>
+</ul>
+
+
+<p>This is a latency and consolidation feature, not a semantic change. Restrictive
+sharing closes still go inline immediately so any blocked opener sees the close
+at the same point as before.</p>
+
+<h3 id="42-local_timer-and-local_wm_timer-on-wine-sched-rt">4.2 <code>local_timer</code> and <code>local_wm_timer</code> on <code>wine-sched-rt</code></h3>
+
+<p>The next shipped consumers are the timer dispatchers that used to own separate
+RT helper threads:</p>
+
+<ul>
+<li><code>nspa_local_timer</code></li>
+<li><code>nspa_local_wm_timer</code></li>
+</ul>
+
+
+<p>When RT is available, both now route onto the shared RT sched instance instead
+of running dedicated <code>pthread</code> loops. The priority class is unchanged from the
+legacy design: <code>SCHED_FIFO</code> at <code>NSPA_RT_PRIO - 1</code>. The win is consolidation and
+shared infrastructure, not a different scheduling policy.</p>
+
+<p>When both migrations are active together, the process loses one helper thread
+relative to the pre-migration layout because two legacy loops collapse onto one
+shared <code>wine-sched-rt</code> host.</p>
+
+<h3 id="43-observability-sampler-on-the-default-class">4.3 Observability sampler on the default class</h3>
+
+<p><code>NSPA_SCHED_OBS_INTERVAL_MS</code> enables a periodic sampler hosted on the default
+class. It is not a production fast path, but it is shipped and useful because
+it exercises the timer and cancel paths continuously with a real in-tree
+consumer.</p>
+
+<p>Current built-in output is written to <code>/dev/shm/nspa-obs.&lt;pid&gt;</code> and includes
+stats such as:</p>
+
+<ul>
+<li>close-queue depth</li>
+<li>RT-probe liveness and firing counters when the RT probe is enabled</li>
+</ul>
+
+
+<p>This sampler remains default OFF.</p>
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 960 430" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
+  <style>
+    .cc-bg { fill: #1a1b26; }
+    .cc-box { fill: #24283b; stroke: #3b4261; stroke-width: 1.5; rx: 8; }
+    .cc-def { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 2; rx: 8; }
+    .cc-rt { fill: #2a1f35; stroke: #bb9af7; stroke-width: 2; rx: 8; }
+    .cc-src { fill: #1a2235; stroke: #7aa2f7; stroke-width: 2; rx: 8; }
+    .cc-note { fill: #2a2418; stroke: #e0af68; stroke-width: 1.6; rx: 8; }
+    .cc-t { fill: #c0caf5; font: 11px 'JetBrains Mono', monospace; }
+    .cc-s { fill: #a9b1d6; font: 9px 'JetBrains Mono', monospace; }
+    .cc-h { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
+    .cc-g { fill: #9ece6a; font: bold 10px 'JetBrains Mono', monospace; }
+    .cc-v { fill: #bb9af7; font: bold 10px 'JetBrains Mono', monospace; }
+    .cc-y { fill: #e0af68; font: bold 10px 'JetBrains Mono', monospace; }
+    .cc-line { stroke: #c0caf5; stroke-width: 1.5; fill: none; }
+  </style>
+  <defs>
+    <marker id="ccArrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M0,0 L8,3 L0,6" fill="#c0caf5"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="960" height="430" class="cc-bg" rx="6"/>
+  <text x="480" y="28" text-anchor="middle" class="cc-h">Current shipped consumer map</text>
+
+  <rect x="70" y="90" width="230" height="72" class="cc-src" rx="6"/>
+  <text x="185" y="118" text-anchor="middle" class="cc-t">local-file close path</text>
+  <text x="185" y="140" text-anchor="middle" class="cc-s">eligible full-share closes enqueue work</text>
+
+  <rect x="70" y="200" width="230" height="72" class="cc-src" rx="6"/>
+  <text x="185" y="228" text-anchor="middle" class="cc-t">`NtSetTimer` / `WM_TIMER`</text>
+  <text x="185" y="250" text-anchor="middle" class="cc-s">precision timer expiries and reposts</text>
+
+  <rect x="70" y="310" width="230" height="72" class="cc-src" rx="6"/>
+  <text x="185" y="338" text-anchor="middle" class="cc-t">observability sampler</text>
+  <text x="185" y="360" text-anchor="middle" class="cc-s">periodic stats snapshot when env-enabled</text>
+
+  <rect x="410" y="118" width="220" height="96" class="cc-def" rx="6"/>
+  <text x="520" y="146" text-anchor="middle" class="cc-g">`wine-sched`</text>
+  <text x="520" y="168" text-anchor="middle" class="cc-s">async close queue drain</text>
+  <text x="520" y="186" text-anchor="middle" class="cc-s">observability timer</text>
+
+  <rect x="410" y="246" width="220" height="96" class="cc-rt" rx="6"/>
+  <text x="520" y="274" text-anchor="middle" class="cc-v">`wine-sched-rt`</text>
+  <text x="520" y="296" text-anchor="middle" class="cc-s">`local_timer` dispatch</text>
+  <text x="520" y="314" text-anchor="middle" class="cc-s">`local_wm_timer` dispatch</text>
+
+  <rect x="730" y="170" width="170" height="82" class="cc-note" rx="6"/>
+  <text x="815" y="198" text-anchor="middle" class="cc-y">Fallback path</text>
+  <text x="815" y="220" text-anchor="middle" class="cc-s">legacy dedicated thread</text>
+  <text x="815" y="236" text-anchor="middle" class="cc-s">or inline close if routing is unavailable</text>
+
+  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M300 126 L410 150" class="cc-line" marker-end="url(#ccArrow)"/>
+  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M300 236 L410 294" class="cc-line" marker-end="url(#ccArrow)"/>
+  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M300 346 L410 182" class="cc-line" marker-end="url(#ccArrow)"/>
+  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M630 294 L730 220" class="cc-line" marker-end="url(#ccArrow)"/>
+</svg>
+</div>
+
+
+<hr />
+
+<h2 id="5-validation-and-gates">5. Validation and gates</h2>
+
+<p>The public status here is based on targeted validation of the shipped
+consumers, not on a new full-suite publish.</p>
+
+<table>
+<thead>
+<tr>
+<th> Item </th>
+<th> Default </th>
+<th> Override </th>
+<th> Validation state </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> <code>NSPA_USE_SCHED_THREAD</code> </td>
+<td> <code>1</code> </td>
+<td> <code>NSPA_USE_SCHED_THREAD=0</code> </td>
+<td> shipped default ON after async close queue landed and Ableton validation held </td>
+</tr>
+<tr>
+<td> <code>NSPA_SCHED_USE_FOR_WM_TIMER</code> </td>
+<td> ON when RT available </td>
+<td> <code>NSPA_SCHED_USE_FOR_WM_TIMER=0</code> </td>
+<td> shipped default ON; part of the 10/10 RT-probe regression pass </td>
+</tr>
+<tr>
+<td> <code>NSPA_SCHED_USE_FOR_LOCAL_TIMER</code> </td>
+<td> ON when RT available </td>
+<td> <code>NSPA_SCHED_USE_FOR_LOCAL_TIMER=0</code> </td>
+<td> shipped default ON; part of the 10/10 RT-probe regression pass </td>
+</tr>
+<tr>
+<td> <code>NSPA_SCHED_OBS_INTERVAL_MS</code> </td>
+<td> OFF </td>
+<td> set positive integer ms </td>
+<td> shipped opt-in sampler </td>
+</tr>
+</tbody>
+</table>
+
+
+<p>Targeted 2026-05-02 results:</p>
+
+<ul>
+<li>spawn-main carry: Smoke 0 / 1 / 2 / 3 PASS</li>
+<li>Ableton playback after spawn-main: wineserver observed at <code>0.0%</code> CPU during
+playback</li>
+<li>combined sched-RT migrations: <code>10/10</code> RT-probe regression check PASS</li>
+<li>combined sched-RT migrations: Ableton boot, library scan, project load, and
+playback PASS</li>
+<li>combined sched-RT migrations: net <code>-1</code> thread per process relative to the
+pre-migration layout</li>
+</ul>
+
+
+<hr />
+
+<h2 id="6-relationship-to-the-rest-of-wine-nspa">6. Relationship to the rest of Wine-NSPA</h2>
+
+<p>This page is client-side infrastructure. It composes with, but does not replace:</p>
+
+<ul>
+<li><strong>Gamma channel dispatcher:</strong> still wineserver-side and still the server RPC
+path for requests that need wineserver authority</li>
+<li><strong>NT-local stubs:</strong> the sched threads now host some of those client-local
+dispatchers, especially timers</li>
+<li><strong>io_uring:</strong> separate client-side async I/O substrate; not routed through
+<code>ntdll_sched</code></li>
+</ul>
+
+
+<p>The main decomposition consequence is that the client side now has a cleaner
+place to host helper loops. That shrinks the number of ad-hoc per-subsystem
+threads and moves more timing-sensitive work out of the wineserver process
+without changing wineserver ownership of cross-process semantics.</p>
+
+<hr />
+
+<h2 id="7-references">7. References</h2>
+
+<ul>
+<li><a href="architecture.gen.html">architecture</a></li>
+<li><a href="nt-local-stubs.gen.html">nt-local-stubs</a></li>
+<li><a href="io_uring-architecture.gen.html">io_uring-architecture</a></li>
+<li><a href="wineserver-decomposition.gen.html">wineserver-decomposition</a></li>
+</ul>
+
+
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+  document.querySelectorAll("pre code").forEach(function (block) {
+    hljs.highlightElement(block);
+  });
+});
+</script>
+</body></html>

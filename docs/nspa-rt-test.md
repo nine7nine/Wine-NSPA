@@ -1,11 +1,11 @@
 # Wine-NSPA RT Test Harness
 
-**Date:** 2026-04-30
+**Date:** 2026-05-02
 **Author:** Jordan Johnston
 **Kernel:** `6.19.11-rt1-1-nspa` (PREEMPT_RT_FULL)
 **ntsync module:** `srcversion 10124FB81FDC76797EF1F91`
 **Wine:** 11.6 + NSPA RT patchset
-**Status:** public test-harness reference; Layer 1 native suite is 3 PASS / 0 FAIL and Layer 2 PE matrix is 24 PASS / 0 FAIL / 0 TIMEOUT as of 2026-04-30.
+**Status:** public test-harness reference; the last full published matrix remains Layer 1 native suite 3 PASS / 0 FAIL and Layer 2 PE matrix 24 PASS / 0 FAIL / 0 TIMEOUT as of 2026-04-30. The 2026-05-02 shipped follow-ons are covered by targeted validators rather than a new full-suite publish.
 
 ## Table of Contents
 
@@ -46,6 +46,18 @@ exercises `inproc_wait` -> ntsync ioctls directly and does **not** hit
 loop. `dispatcher-burst` is the first PE-side workload in the published
 matrix that covers that path.
 
+The 2026-05-02 shipped follow-ons did **not** introduce a new full matrix
+version. They were validated with targeted harnesses instead:
+
+- `run-rt-probe-validation.sh` covers the sched-hosted `local_timer` and
+  `local_wm_timer` migrations and passed `10/10`
+- the existing `socket-io` PE subcommand now exercises the shipped
+  `IORING_OP_RECVMSG` / `IORING_OP_SENDMSG` path and measured `+6.5%`
+  deferred-path throughput, `-6.8%` p99 latency, `0/2000` failures
+- Ableton boot / library scan / project load / playback smoke covers the
+  local-event default flip and the client-scheduler / socket carries under
+  the real mixed workload
+
 The PE binary runs in two modes:
 
 - **Baseline mode** (`WINEDEBUG=-all` only) -- no RT promotion, all
@@ -55,7 +67,7 @@ The PE binary runs in two modes:
   TIME_CRITICAL threads become SCHED_FIFO, PI boost is active, the
   vDSO is remapped for RT-safe clock access.
 
-### Validation Totals (2026-04-30)
+### Published Full-Suite Totals (2026-04-30)
 
 - **Layer 1 native suite:** 3 PASS / 0 FAIL against module
   `10124FB81FDC76797EF1F91` (`test-event-set-pi`,
@@ -63,6 +75,17 @@ The PE binary runs in two modes:
   kitchen-sink 86,528 wakes / 0 timeouts / 0 errors).
 - **Layer 2 PE matrix:** 24 PASS / 0 FAIL / 0 TIMEOUT (12 tests x
   baseline + RT), including `dispatcher-burst`.
+
+### Targeted Follow-On Validators (2026-05-02)
+
+- **sched RT-probe script:** `run-rt-probe-validation.sh` -- `10/10 PASS`
+  for the `wine-sched-rt` migration of `local_timer` and
+  `local_wm_timer`
+- **socket deferred path:** `socket-io` continues to pass in baseline + RT
+  while now exercising the shipped `RECVMSG` / `SENDMSG` SQE path
+- **real workload smoke:** Ableton boot / library scan / project load /
+  playback remained clean after the client-scheduler, local-event, and
+  socket follow-ons
 
 ### Build
 
@@ -278,7 +301,7 @@ Each PE subcommand targets a specific cross-section of the stack:
 | philosophers | sync.c (transitive PI) | futex_lock_pi | Deadlock or starvation in PI chain |
 | ntsync | ntsync client | /dev/ntsync | PI not firing, wrong wakeup order |
 | dispatcher-burst | gamma dispatcher + server-side io_uring | `/dev/ntsync` channel + aggregate-wait + TRY_RECV2 | dispatcher hot path regresses with no PE-side coverage |
-| socket-io | io_uring.c | io_uring | Async recv latency regression |
+| socket-io | io_uring.c | io_uring `RECVMSG` / `SENDMSG` + ntsync `uring_fd` | Async socket deferred-path latency or completion regression |
 | signal-recursion | virtual.c | segv_handler | Deadlock in recursive mutex path |
 | large-pages | virtual.c | hugetlbfs | Silent fallback to 4KB pages |
 | fork-mutex | process.c | posix_spawn | Child hangs from corrupted mutex |
@@ -300,7 +323,7 @@ Each PE subcommand targets a specific cross-section of the stack:
 | 6 | `signal-recursion` | PAGE_GUARD fault stress (N threads) | iters completed, fault count, elapsed | virtual.c recursive mutex |
 | 7 | `large-pages` | VirtualAlloc(MEM_LARGE_PAGES) 2MB + PAGEMAP | HugePages_Free delta, LargePage flag | virtual.c large pages |
 | 8 | `ntsync` | 5 sub-tests: rapid mutex, PI, prio, chain, WFMO | per-sub PASS/FAIL, wait times | /dev/ntsync driver |
-| 9 | `socket-io` | TCP loopback: immediate + deferred recv | latency (us) p50/p95/p99/max, msgs/sec | io_uring (Phase 2 surface) |
+| 9 | `socket-io` | TCP loopback: immediate + deferred socket path | latency (us) p50/p95/p99/max, msgs/sec | io_uring socket SQE path |
 | 10 | `srw-bench` | SRW lock contention benchmark | acquire latency (ns) p50/p99/max, ops/sec | sync.c SRW |
 | 11 | `dispatcher-burst` | Gamma dispatcher A/B harness (`CreateFile` / `CloseHandle` on `NUL`) | burst ops/sec, worst max ns, steady avg ns | gamma dispatcher + Phase 4 `create_file` |
 | 12 | `child-quickexit` | Internal helper for fork-mutex | exit code 42 | (internal) |
@@ -396,21 +419,29 @@ PASS criteria: all 5 sub-tests plus 5a-5d PASS.
 
 ### 3.9 `socket-io` -- Async TCP Loopback Latency
 
-TCP loopback pair, per-message recv latency via overlapped WSARecv.
+TCP loopback pair, per-message recv latency via overlapped WSARecv. The sender
+side of the same harness also exercises the shipped `SENDMSG` path.
 
 - **Phase A immediate:** sender sends *before* receiver calls WSARecv.
   Exercises `try_recv` fast path.
 - **Phase B deferred:** receiver calls WSARecv *before* sender sends.
-  Forces the async wait path: WSARecv returns `WSA_IO_PENDING`. With
-  io_uring Phase 2 (sockets) enabled, this exercises the
-  POLL_ADD/CQE/try_recv interception path.
+  Forces the async wait path: WSARecv returns `WSA_IO_PENDING`. On the
+  current shipped build this exercises the true socket-SQE path:
+  `IORING_OP_RECVMSG` on recv, `IORING_OP_SENDMSG` on send, plus the
+  existing CQE drain at Wine wait boundaries.
 
 PASS criteria: both phases complete without recv errors.
 
-The current public matrix is functionally green on this path in both
+Published 2026-05-02 deferred-path observations:
+
+- throughput: `+6.5%`
+- p99 latency: `-6.8%`
+- failures: `0/2000`
+
+The current public matrix remains functionally green on this path in both
 baseline and RT modes. Dispatcher-specific tuning is validated by
-`dispatcher-burst`; `socket-io` remains its own correctness surface
-rather than the main gamma performance harness.
+`dispatcher-burst`; `socket-io` remains its own correctness and latency
+surface rather than the main gamma performance harness.
 
 ### 3.10 `srw-bench` -- SRW Lock Contention Benchmark
 
@@ -539,6 +570,17 @@ returns the fail count.
 
 Layer 2 invokes `nspa/run_rt_tests.sh` with the existing baseline + RT
 matrix.
+
+### Targeted Validator: `run-rt-probe-validation.sh`
+
+The 2026-05-02 sched-hosted timer migrations shipped without minting a new
+PE subcommand. Instead they use a small dedicated validator script that:
+
+- registers RT-class timer work on `wine-sched-rt`
+- verifies callback delivery and cancellation behaviour
+- checks that the RT sched host is the thread actually running the timer work
+
+Published result: `10/10 PASS`.
 
 ### Layer 2 Runner: `nspa/run_rt_tests.sh`
 

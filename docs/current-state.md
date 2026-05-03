@@ -1,12 +1,14 @@
 # Wine-NSPA — State of The Art
 
-**Date:** 2026-05-01
+**Date:** 2026-05-02
 **Author:** Jordan Johnston
 **Kernel:** `6.19.11-rt1-1-nspa` (PREEMPT_RT_FULL, production)
 **ntsync module:** `srcversion 10124FB81FDC76797EF1F91`
-**Status:** production state board as of 2026-05-01; the 2026-04-30 shipped feature set plus the immediate dispatcher hot-path tuning follow-ons, the winex11 AVX2 flush follow-on, and the Tier 1 compatibility/log-hygiene cleanup are all in the public tree.
+**Status:** production state board as of 2026-05-02; the public tree now includes the 2026-04-30 dispatcher / aggregate-wait base, the 2026-05-01 GUI and compatibility follow-ons, and the 2026-05-02 spawn-main / client-scheduler, local-event, timer, and socket-uring follow-ons.
 
-This page is the project snapshot for what is actually shipped: kernel patch state, userspace feature state, validation totals, configuration knobs, and the remaining open work.
+This page is the shipped-state snapshot: kernel patch state, live userspace
+features, exact defaults and gates, targeted validation totals, and the
+remaining work that is still ahead.
 
 ---
 
@@ -17,7 +19,7 @@ This page is the project snapshot for what is actually shipped: kernel patch sta
 3. [Active subsystems](#3-active-subsystems)
 4. [Validation and performance](#4-validation-and-performance)
 5. [Open work, in priority order](#5-open-work-in-priority-order)
-6. [Recent investigation arc](#6-recent-investigation-arc-2026-04-26-to-2026-04-30)
+6. [Recent landed arc](#6-recent-landed-arc-2026-04-30-to-2026-05-02)
 7. [Configuration reference](#7-configuration-reference)
 8. [Doc index](#8-doc-index)
 
@@ -25,38 +27,29 @@ This page is the project snapshot for what is actually shipped: kernel patch sta
 
 ## 1. Overview
 
-Wine-NSPA moved beyond the post-1010 aggregate-wait baseline on
-2026-04-30. The kernel now ships patch 1011
-(`NTSYNC_IOC_CHANNEL_TRY_RECV2`) on top of the 1003-1011 stack, and the
-wineserver side now ships three default-on follow-ons built on that
-base: `NSPA_FLUSH_THROTTLE_MS=8` for `x11drv` MainThread flushes,
-`NSPA_ENABLE_ASYNC_CREATE_FILE=1` for Phase 4 `CreateFile` through the
-per-process dispatcher-owned `io_uring` ring, and `NSPA_TRY_RECV2=1`
-for post-dispatch burst drain on 1011 kernels.
+The public 2026-05-02 state is no longer just "aggregate-wait plus a faster
+dispatcher". Three larger client-side follow-ons shipped on top of that base:
 
-The important distinction for this state board is that the stable
-public story now includes the **dispatcher async-completion
-architecture**, the **Phase 4 async `create_file` consumer**, and the
-**1011 burst-drain follow-on**, not just the prerequisite channel and PI
-stack.
+- the **spawn-main + `ntdll_sched` substrate**, now default-on as the per-process
+  client scheduler host via `NSPA_USE_SCHED_THREAD`
+- the **local event / local timer / local WM_TIMER consolidation**, with
+  anonymous events now client-range by default and the timer dispatchers moved
+  onto the shared RT sched host when RT is available
+- the **socket `io_uring` RECVMSG / SENDMSG path**, now default-on through
+  `NSPA_URING_RECV=1` and `NSPA_URING_SEND=1`
 
-Immediately after that feature landing, the dispatcher also got a
-second tuning sweep with no new user knob: lighter fences on the hot
-path, inlined helper glue, and production-off allocator debug poison /
-valgrind stubs so the shipped build stops paying debug-only costs on
-every server-bound RPC.
+The important architectural distinction is that these are not isolated feature
+flags. They continue the same direction as gamma, local-file, msg-ring, and
+the earlier timer work: move latency-sensitive common-case work out of the
+single-threaded wineserver path while keeping honest fallback paths for
+cross-process or server-authoritative semantics.
 
-Two smaller 2026-05-01 follow-ons also shipped on top of that base:
-the `winex11.drv` alpha-bit flush loop is now AVX2-vectorized, and the
-dominant non-actionable Ableton FIXME noise sources were collapsed to
-first-print-only while `ShutdownBlockReasonCreate/Destroy` stopped
-reporting `ERROR_CALL_NOT_IMPLEMENTED` as a hard failure.
-
-What the project looks like today: one small kernel module
-(~3kLOC) plus a Wine fork that increasingly bypasses wineserver
-through bounded shmem rings, all gated by a single env var
-(`NSPA_RT_PRIO`) so upstream-Wine bytewise behaviour is unchanged
-when the gate is off.
+What the project looks like today: one small kernel overlay
+(1003-1011 on top of upstream `ntsync`) plus a Wine fork that increasingly
+routes work through kernel-mediated channels, client-range sync objects,
+bounded shared-memory rings, local NT stubs, and per-process scheduler hosts,
+all still gated so upstream-Wine behaviour remains available when the NSPA
+paths are disabled.
 
 ---
 
@@ -79,7 +72,10 @@ when the gate is off.
 |---|---|
 | Wine base | Wine 11.6 + NSPA fork |
 | Dispatcher shape | gamma + aggregate-wait + post-1011 `TRY_RECV2` burst drain |
+| Client scheduler | spawn-main + `ntdll_sched`, default-class and RT-class consumers live |
 | Async file path | Phase 4 async `CreateFile`, default ON |
+| Async socket path | `io_uring` RECVMSG / SENDMSG, default ON |
+| Local sync path | anonymous events client-range by default; timers piggyback on that base |
 | X11 flush policy | `NSPA_FLUSH_THROTTLE_MS=8`, default ON |
 
 ### 2.3 Patch stack on top of upstream ntsync
@@ -96,24 +92,13 @@ when the gate is off.
 | 1010 | Aggregate-wait | Heterogeneous object+fd wait; channel notify-only path used by the gamma dispatcher | Shipped |
 | 1011 | Channel TRY_RECV2 | `NTSYNC_IOC_CHANNEL_TRY_RECV2`: non-blocking `RECV2` for post-dispatch burst drain | Shipped |
 
-### 2.4 Default-on session changes -- 2026-04-30
-
-#### Env-controlled features now default-on
+### 2.4 2026-04-30 shipped defaults
 
 | Feature | Default | Override | User-visible result |
 |---|---|---|---|
 | `NSPA_FLUSH_THROTTLE_MS` | `8` | `NSPA_FLUSH_THROTTLE_MS=N`; `=0` disables | `x11drv_surface_flush`: 8.23% -> 4.74% (−43%); `copy_rect_32` memmove: 4.38% -> 2.49% (−43%); MainThread CPU recovered: ~5.4 percentage points |
 | `NSPA_ENABLE_ASYNC_CREATE_FILE` | `1` | `NSPA_ENABLE_ASYNC_CREATE_FILE=0` | Phase 4 routes `CreateFile` through the per-process `io_uring` ring, removing the `open()` lock-drop CS from the audio xrun path |
 | `NSPA_TRY_RECV2` | `1` | `NSPA_TRY_RECV2=0` | On ntsync 1011 kernels, drains multiple channel entries per `AGG_WAIT` instead of N round-trips |
-
-#### Correctness fixes shipped in the same session
-
-| Fix | Effect |
-|---|---|
-| LF dir-bypass `fd->nt_name` populated on promote | fixes `start.exe` NULL-Name crash |
-| LF rejects `FILE_NON_DIRECTORY_FILE` on dir bypass | restores sync parity for directory opens |
-| LF `check_sharing` arbitrates `FILE_MAPPING_WRITE` | mirrors `server/fd.c::check_sharing` |
-| `local_wm_timer` eligibility tightening | `TIMERPROC` + cross-thread `SetTimer` cases defer to the server |
 
 ### 2.5 Dispatcher hot-path follow-ons (shipped, no user knob)
 
@@ -142,7 +127,28 @@ dispatcher measurements. The FIXMEs cleanup does not change RT
 behaviour, but it makes real regressions easier to spot because known
 stub chatter no longer buries the logs.
 
-### 2.7 Validation totals against `10124FB81FDC76797EF1F91`
+### 2.7 2026-05-02 shipped client-side follow-ons
+
+| Feature | Default | Override | Shipped effect |
+|---|---|---|---|
+| `NSPA_USE_SCHED_THREAD` | `1` | `NSPA_USE_SCHED_THREAD=0` | spawn-main + `ntdll_sched` substrate is now engaged by default; first real consumer is the async close queue |
+| `NSPA_SCHED_USE_FOR_WM_TIMER` | ON when RT available | `NSPA_SCHED_USE_FOR_WM_TIMER=0` | `local_wm_timer` dispatch moves onto shared `wine-sched-rt` instead of a dedicated RT helper thread |
+| `NSPA_SCHED_USE_FOR_LOCAL_TIMER` | ON when RT available | `NSPA_SCHED_USE_FOR_LOCAL_TIMER=0` | `local_timer` dispatch moves onto shared `wine-sched-rt` instead of a dedicated RT helper thread |
+| `NSPA_NT_LOCAL_EVENT` | `1` | `NSPA_NT_LOCAL_EVENT=0` | anonymous `NtCreateEvent` now uses the client-range fast path with server-side fd registration for async-completion signaling |
+| `NSPA_URING_RECV` | `1` | `NSPA_URING_RECV=0` | `recv_socket` uses `IORING_OP_RECVMSG` on the shipped async socket path |
+| `NSPA_URING_SEND` | `1` | `NSPA_URING_SEND=0` | `send_socket` uses `IORING_OP_SENDMSG` on the shipped async socket path |
+
+Supporting shipped changes in the same arc:
+
+| Change | Effect |
+|---|---|
+| client-range event async parity fix | server-side async queue path mirrors the `reset_event` discipline used for server events; smoke 0/1 with `NSPA_NT_LOCAL_EVENT=1` were clean with zero `err:service`, `err:rpc`, or `err:ole` errors |
+| `NtCreateTimer` client-range backing event default ON | local timers stop paying a server-created event helper round-trip for anonymous backing events |
+| local-file async close queue | eligible fully-shareable local-file closes leave the caller thread immediately and drain on `wine-sched` |
+| sched observability sampler | shipped opt-in periodic sampler behind `NSPA_SCHED_OBS_INTERVAL_MS` |
+| heap LFH carries | two LFH heuristic / retained-group carries shipped with smoke level 0 + 1 PASS; broader public validation still ahead |
+
+### 2.8 Validation baseline against `10124FB81FDC76797EF1F91`
 
 | Layer | Run | Result | Ops | Errors |
 |---|---|---|---|---|
@@ -154,7 +160,7 @@ stub chatter no longer buries the logs.
 
 **Layer 1 totals: 3 PASS / 0 FAIL. Layer 2 totals: 24 PASS / 0 FAIL /
 0 TIMEOUT. Module `10124FB81FDC76797EF1F91` was loaded live and
-verified while these results were collected.**
+verified while these full-suite results were collected.**
 
 Patch-level kernel detail lives on `ntsync-driver.gen.html`; dispatcher
 and async-completion detail lives on
@@ -197,15 +203,18 @@ own correctness proof and gate.
 | **Condvar PI requeue** | Shipped | ON when `NSPA_RT_PRIO` set | `FUTEX_WAIT_REQUEUE_PI`; `RtlSleepConditionVariableCS` slow path. |
 | **librtpi vendoring** | Shipped | n/a | Header-only `rtpi.h` forwarder into the vendored library copy. |
 | **NT-local file** (`nspa_local_file`) | Shipped | ON | `NtCreateFile` bypass for unix-name-resolvable paths, with 2026-04-30 sync-parity fixes for directory promotion and `FILE_MAPPING_WRITE` sharing. |
-| **NT-local timer** (`nspa_local_timer`) | Shipped | ON | NT timer object client-resolution. |
-| **NT-local WM timer** (`nspa_local_wm_timer`) | Shipped | ON | `SetTimer` userspace path; `TIMERPROC` + cross-thread cases now explicitly defer to the server. |
+| **Client scheduler** (`wine-sched` / `wine-sched-rt`) | Shipped | ON | spawn-main + `ntdll_sched` substrate; default-class host plus lazy RT-class host, with `NSPA_USE_SCHED_THREAD=0` as the diagnostic override. |
+| **NT-local event** | Shipped | ON | anonymous `NtCreateEvent` now routes to client-range handles by default, with server-side fd registration so async completion still signals correctly across wineserver-managed paths. |
+| **NT-local timer** (`nspa_local_timer`) | Shipped | ON | anonymous NT timers now use client-range backing events by default and, when RT is available, dispatch on the shared `wine-sched-rt` host. |
+| **NT-local WM timer** (`nspa_local_wm_timer`) | Shipped | ON | `SetTimer` userspace path; `TIMERPROC` + cross-thread cases defer to the server, while eligible local dispatch now shares the RT sched host instead of owning its own helper thread. |
+| **Async local-file close queue** | Shipped | ON with sched enabled | eligible fully-shareable local-file closes defer unix `close()` + server `close_handle` onto `wine-sched`, removing close-path latency from the caller thread. |
 | **msg-ring v1 (POST/SEND/REPLY)** | Shipped | ON | Bounded mpmc shmem ring for `PostMessage` / `SendMessage` / reply between Wine threads in the same process. |
 | **msg-ring v2 B1.0 paint-cache** | Shipped | **OFF** (gated) | Cross-process redraw cache for `WM_PAINT` fast-path; one clean confirmation run exists, but the default-on flip still wants more validation. |
 | **msg-ring v2 Phase C get_message** | **WIP, paused** | n/a | Remaining message-pump bypass piece; once it lands, window messages are fully out of wineserver. |
-| **io_uring Phase 1 (socket I/O)** | Shipped | ON when `NSPA_RT_PRIO` set | ALERTED-state interception; ntsync `uring_fd` extension under the older numbering. |
+| **io_uring Phase 1 (file I/O)** | Shipped | ON when `NSPA_RT_PRIO` set | sync poll replacement plus async `NtReadFile` / `NtWriteFile` bypass on the PE side. |
 | **Dispatcher Phase 2/3 (`NSPA_AGG_WAIT`)** | Shipped | ON | Per-process server-side `io_uring` infrastructure plus aggregate-wait dispatcher loop. Same RT thread receives requests, drains CQEs, and signals replies. |
 | **Async `CreateFile` (Phase 4)** | Shipped | ON | `NSPA_ENABLE_ASYNC_CREATE_FILE=1` routes `CreateFile` through the dispatcher-owned ring and removes the `open()` lock-drop critical section from the audio xrun path. |
-| **io_uring socket/pipe follow-on** | Pending | n/a | Socket and pipe coverage beyond the shipped dispatcher-owned ring consumer; sync socket work remains a separate revalidation thread. |
+| **io_uring socket RECVMSG / SENDMSG (Phase 4.8 A+B)** | Shipped | ON | `NSPA_URING_RECV=1` and `NSPA_URING_SEND=1`; deferred `socket-io` path now uses true socket SQEs instead of only poll-then-syscall. |
 | **Wineserver `global_lock` PI** | Shipped | ON when `NSPA_RT_PRIO` set | `pthread_mutex` → `pi_mutex` on `global_lock`; CFS holders boost via PI chain when the boosted dispatcher contends. |
 | **vDSO preloader (Jinoh Kang port)** | Shipped | ON | Full port minus the EHDR-unmap piece intentionally omitted on static-pie x86_64. |
 | **NSPA priority mapping** | Shipped | ON when `NSPA_RT_PRIO` set | `fifo_prio = nspa_rt_prio_base - (31 - nt_band)`, clamped `[1..98]`; TIME_CRITICAL pinned to ceiling. |
@@ -241,7 +250,7 @@ own correctness proof and gate.
   </defs>
 
   <rect x="0" y="0" width="940" height="500" class="cs-bg"/>
-  <text x="470" y="28" text-anchor="middle" class="cs-title">2026-04-30 deployment board: what is shipped, what is gated, and what is next</text>
+  <text x="470" y="28" text-anchor="middle" class="cs-title">2026-05-02 deployment board: what is shipped, what is gated, and what is next</text>
 
   <rect x="50" y="70" width="250" height="150" class="cs-green"/>
   <text x="175" y="96" text-anchor="middle" class="cs-tag-green">Kernel / sync substrate</text>
@@ -252,10 +261,10 @@ own correctness proof and gate.
 
   <rect x="345" y="70" width="250" height="150" class="cs-green"/>
   <text x="470" y="96" text-anchor="middle" class="cs-tag-green">Client-side bypasses</text>
-  <text x="470" y="122" text-anchor="middle" class="cs-label">gamma + Phase 4 async create_file</text>
-  <text x="470" y="140" text-anchor="middle" class="cs-small">local-file, local timers, hook cache, msg-ring v1</text>
-  <text x="470" y="164" text-anchor="middle" class="cs-label">TRY_RECV2 + flush throttle shipped</text>
-  <text x="470" y="182" text-anchor="middle" class="cs-small">many hot paths no longer need global_lock</text>
+  <text x="470" y="122" text-anchor="middle" class="cs-label">gamma + spawn-main + local events</text>
+  <text x="470" y="140" text-anchor="middle" class="cs-small">local-file, sched-hosted timers, hook cache, msg-ring v1</text>
+  <text x="470" y="164" text-anchor="middle" class="cs-label">socket uring + async create_file shipped</text>
+  <text x="470" y="182" text-anchor="middle" class="cs-small">more client-side work avoids wineserver entirely</text>
 
   <rect x="640" y="70" width="250" height="150" class="cs-green"/>
   <text x="765" y="96" text-anchor="middle" class="cs-tag-green">Audio stack</text>
@@ -275,8 +284,8 @@ own correctness proof and gate.
   <text x="470" y="296" text-anchor="middle" class="cs-tag-violet">Paused / queued</text>
   <text x="470" y="322" text-anchor="middle" class="cs-label">msg-ring Phase C get_message</text>
   <text x="470" y="340" text-anchor="middle" class="cs-small">remaining message-pump bypass piece</text>
-  <text x="470" y="364" text-anchor="middle" class="cs-label">io_uring sockets + pipes</text>
-  <text x="470" y="382" text-anchor="middle" class="cs-small">follow-on surfaces beyond the shipped ring consumer</text>
+  <text x="470" y="364" text-anchor="middle" class="cs-label">sechost device-IRP poll</text>
+  <text x="470" y="382" text-anchor="middle" class="cs-small">next substantial bypass candidate after the shipped 4.8 socket work</text>
 
   <rect x="640" y="270" width="250" height="140" class="cs-wip"/>
   <text x="765" y="296" text-anchor="middle" class="cs-tag-violet">Longer horizon</text>
@@ -296,19 +305,38 @@ own correctness proof and gate.
 
 ## 4. Validation and performance
 
-### 4.1 What's clean
+### 4.1 Full-suite baseline still in force
 
-- ntsync module `10124FB81FDC76797EF1F91` against prod kernel `6.19.11-rt1-1-nspa`: 1003-1011 live, loaded, and verified clean.
-- Native suite: **3 PASS / 0 FAIL** (`test-event-set-pi`, `test-channel-recv-exclusive`, `test-aggregate-wait`).
-- `test-aggregate-wait`: **9/9 PASS**, including kitchen-sink `86,528 wakes / 0 timeouts / 0 errors`.
-- nspa_rt_test PE matrix: **24 PASS / 0 FAIL / 0 TIMEOUT** (baseline + RT).
-- `dispatcher-burst` is now in the PE matrix and is the first PE-side harness that actually covers `channel_dispatcher` / `dispatch_channel_entry` / the TRY_RECV2 drain loop.
-- Ableton Live 12 Lite — full smoke level 4 — **two clean runs on 2026-04-28**:
-  - **Run-3**: paint-cache OFF (default config). Drum-track-load-while-playing × multiple, audio clean, exit 0.
-  - **Run-4**: `NSPA_ENABLE_PAINT_CACHE=1` (the historical 5-min-lockup config). Past 5-min threshold without incident, multiple drum-load cycles, audio clean, exit 0.
-- Ableton Live 12 Lite — **Phase 3 dispatcher + TRY_RECV2 + Phase 4 create_file** (2026-04-30): clean under the same workload, with the dispatcher re-profiled under a 30s busy capture.
+- ntsync module `10124FB81FDC76797EF1F91` against prod kernel
+  `6.19.11-rt1-1-nspa`: 1003-1011 live, loaded, and verified clean.
+- Native suite: **3 PASS / 0 FAIL** (`test-event-set-pi`,
+  `test-channel-recv-exclusive`, `test-aggregate-wait`).
+- `test-aggregate-wait`: **9/9 PASS**, including kitchen-sink
+  `86,528 wakes / 0 timeouts / 0 errors`.
+- `nspa_rt_test` PE matrix: **24 PASS / 0 FAIL / 0 TIMEOUT** (baseline + RT).
+- `dispatcher-burst` remains the PE-side harness that exercises the gamma hot
+  path directly.
 
-### 4.2 Headline performance
+The 2026-05-02 work did not publish a new full-suite version. What it added was
+targeted validation for the newly-landed scheduler, timer, event, and socket
+surfaces.
+
+### 4.2 Targeted 2026-05-02 validation
+
+| Surface | Validation | Result |
+|---|---|---|
+| spawn-main + sched base | Smoke 0 / 1 / 2 / 3 | PASS |
+| spawn-main steady-state | Ableton playback | wineserver observed at `0.0%` CPU during playback |
+| sched-RT migrations | `run-rt-probe-validation.sh` | `10/10 PASS` |
+| sched-RT migrations | Smoke 0 / 1 | PASS |
+| sched-RT migrations | Ableton boot + library + project load + playback | PASS |
+| sched-RT migrations | runtime shape | net `-1` thread per process vs pre-migration layout |
+| timer backing-event flip | smoke + RT probe + playback | clean; `63` threads stable, no sync / handle / timer errors |
+| local events default-ON | Ableton boot + library + project load + `30s+` playback | clean |
+| socket RECVMSG / SENDMSG default-ON | `socket-io` deferred path | `+6.5%` throughput, `-6.8%` p99 latency, `0/2000` failures |
+| socket RECVMSG / SENDMSG default-ON | Ableton boot + library + playback | clean; `63` threads, zero new errors vs Phase 4.6 baseline |
+
+### 4.3 Headline performance
 
 #### Dispatcher tuning under Ableton busy workload
 
@@ -320,21 +348,9 @@ own correctness proof and gate.
 | `req_get_update_region` | 4.92% | absent | gone from top symbols |
 | `nspa_redraw_ring_drain` | 2.88% | absent | gone from top symbols |
 
-System-wide samples: 38,588 -> 19,415 per 30s.
+System-wide samples: `38,588 -> 19,415` per 30s.
 
-#### Post-ship dispatcher hot-path follow-ons
-
-| Commit | Measured result |
-|---|---|
-| `c0f5c515cd7` + `2870c9629ce` | `mark_block_uninitialized` was sampled at `1.34%` wineserver-relative under `dispatcher-burst`; after gating the poison + valgrind pair behind `NSPA_DEBUG_POISON_ALLOCS`, the full `1.34pp` cost is reclaimed |
-| `0802dadc750` | `read_request_shm` was sampled at `3.55%` wineserver-relative under `dispatcher-burst`; after inlining it disappears from the symbol table and saves `~1pp` more on the dispatcher path |
-
-These commits are layered on top of the bigger 2026-04-30 dispatcher
-shape change (`TRY_RECV2`, inline queue accessor, lighter fences). They
-do not change the architecture; they remove residual per-RPC overhead
-from the already-shipped path.
-
-#### PE-side `dispatcher-burst` A/B
+#### `dispatcher-burst` A/B
 
 | Metric | TRY_RECV2 on | TRY_RECV2 off | Delta |
 |---|---:|---:|---:|
@@ -342,159 +358,68 @@ from the already-shipped path.
 | burst worst max ns | 23,014,325 | 31,843,082 | −28% |
 | steady avg ns | 35,202 | 33,405 | flat (no burst) |
 
-#### Flush throttle impact
+#### X11 flush follow-ons
 
-| Symbol | Before throttle | After throttle=8ms | Delta |
+| Symbol | Before | After | Delta |
 |---|---:|---:|---:|
-| `x11drv_surface_flush` | 8.23% | 4.74% | −43% |
+| `x11drv_surface_flush` throttle | 8.23% | 4.74% | −43% |
 | `copy_rect_32` memmove | 4.38% | 2.49% | −43% |
-| MainThread CPU recovered | — | — | ~5.4 percentage points |
+| `x11drv_surface_flush` AVX2 | 6.72% | 2.39% | −4.33pp / −64% |
+| total `winex11.so` AVX2 | 6.76% | 2.43% | −4.33pp |
+| total kernel after AVX2 | 10.22% | 8.58% | −1.64pp |
 
-#### Winex11 AVX2 follow-on after throttle
+#### 2026-05-02 feature-specific wins
 
-| Symbol | Before AVX2 | After AVX2 | Delta |
-|---|---:|---:|---:|
-| `x11drv_surface_flush` | 6.72% | 2.39% | −4.33pp / −64% |
-| total `winex11.so` | 6.76% | 2.43% | −4.33pp |
-| total kernel | 10.22% | 8.58% | −1.64pp |
-
-This was a pure PE-side follow-on inside `winex11.drv`, after the
-8ms flush throttle had already landed. The hot scalar `ptr[x] |=
-alpha_bits` loop was replaced with an AVX2 `vpor` path over 8 pixels
-per iteration, with a scalar tail. Publicly relevant result: lower
-MainThread GUI flush cost with bit-identical output.
-
-#### PE-suite comparison vs 2026-04-26
-
-| Metric | 2026-04-26 | 2026-04-30 | Delta |
-|---|---:|---:|---:|
-| rapidmutex RT max_wait | 44us | 38us | −14% |
-| rapidmutex RT elapsed | 1950ms | 1924ms | −1.3% |
-| ntsync-d12 PI chain depth-12 | 236ms | 237ms | ≈0 |
-
-### 4.3 Remaining gates
-
-- **`NSPA_ENABLE_PAINT_CACHE=1`** — one clean confirmation run exists,
-  but the default-on flip still wants a second-day cold start, a
-  longer soak (>30 min playback + idle), and workload variation
-  beyond the existing drum-load case.
-- **Phase 4 + TRY_RECV2 long-soak** — current data is clean, but an
-  hours-long default-on Ableton session is still worth doing.
-- **Throttle=16 A/B** — the current 8ms default is validated; a higher
-  throttle setting still needs its own data before any wider change.
-- **`NSPA_DISABLE_EPOLL`** — runtime A/B for poll vs epoll on the
-  wineserver main loop; epoll remains the default.
+| Feature | Result |
+|---|---|
+| local events default-ON | Ableton system CPU from Phase 4.5 baseline `40-57%` to `~35%` during playback (`~15-20%` reduction) |
+| socket RECVMSG / SENDMSG | `socket-io` deferred path `+6.5%` throughput, `-6.8%` p99 latency, `0/2000` failures |
 
 ### 4.4 Residual caveats
 
-- **F5 paint-cache 5-min lockup** — Run-4 cleared the historical
-  workload cleanly, but the exact pre-fix root cause is still a working
-  hypothesis rather than a trace-proven fact.
-- **Why confidence is higher now** — idle CPU stayed clean and audio
-  continued through drum-load GUI pauses, which is consistent with the
-  minimal 1007/1008/1009 kernel fixes plus Phase B lock-drop doing the
-  work they were meant to do.
+- The last published full PE matrix is still the 2026-04-30 `24 PASS / 0 FAIL /
+  0 TIMEOUT` run. The 2026-05-02 features are covered by targeted validation,
+  not a new full-suite publish yet.
+- Local events default-ON still exposes a known cosmetic log line in some
+  Ableton runs: `wined3d_cs_destroy` "Closing present event failed". It is not
+  currently associated with a functional failure or resource leak.
+- The LFH carries shipped, but public validation is intentionally light so far:
+  smoke level 0 + 1 only.
 
 ---
 
 ## 5. Open work, in priority order
 
-1. **Phase 4 + TRY_RECV2 long-soak** — extended Ableton session under
-   default-on settings to validate stability over hours.
-2. **Throttle=16 A/B** — see whether the throttle curve keeps paying
-   past 8ms before changing the default.
-3. **WM_TIMER MR2 fix** — cache queue ntsync sync fd at `SetTimer`
-   time so dispatcher wake semantics close the remaining idle-wake gap.
-4. **Second paint-cache validation run** — different day / cold start
-   plus long-soak (>30 min) plus workload variation. Closes the F5
-   chapter. After that, flip `NSPA_ENABLE_PAINT_CACHE` default-on.
-5. **msg-ring v2 Phase C get_message bypass** — paused mid-development.
-   After C lands, window messages are fully out of wineserver.
-6. **io_uring socket + pipe follow-on** — sync socket revalidation plus
-   pipe/named-event surface work on top of the shipped ring consumer.
-7. **`wine_sechost_service` device-IRP poll** — ~530 polls/s, 63k
-   `get_next_device_request` per Ableton run; audit Q2
-   (payload-distribution) is the gate before any bypass design.
-8. **Wineserver decomposition remainder** — timer thread + FD poll
-   thread splits still queued. The aggregate-wait kernel/userspace
-   slice is already shipped; the remaining design work is how the rest
-   of wineserver composes around it.
-9. **MR3 GC pass** — peer-cache slot leak under thread churn;
-   ~30 LOC; perf cliff, not lockup. Defer until somebody hits it.
-10. **CS DYNAMIC_SPIN substitution** — `RTL_CRITICAL_SECTION_FLAG_DYNAMIC_SPIN`
-   FIXME stub for CRT heap; plan is ~4000 spincount gated behind
-   `!nspa_cs_pi_active()`. Low priority.
-11. **Wow64 clean rebuild** — 32-bit (i386) DLLs may be stale. Required
-   for 32-bit VST plugins and older games. Medium priority.
+1. **Second paint-cache validation run** — different day / cold start plus a
+   longer soak before any default-on flip.
+2. **Full-suite rerun against the 2026-05-02 stack** — the last published
+   matrix is still v8 / 2026-04-30; the new scheduler / event / socket surfaces
+   deserve a fresh public matrix.
+3. **Longer local-event and 4.8 socket soak** — targeted validations are clean;
+   hours-scale default-on runtime is still worth publishing.
+4. **`wine_sechost_service` device-IRP poll** — still the next obvious
+   high-frequency bypass candidate.
+5. **msg-ring v2 Phase C get_message bypass** — paused mid-development; still
+   the remaining message-pump bypass piece.
+6. **Wineserver decomposition remainder** — aggregate-wait is already shipped;
+   timer/fd-poll/router splits remain longer-horizon work.
+7. **Wow64 clean rebuild** — 32-bit (i386) DLLs may be stale. Required for
+   32-bit VST plugins and older games.
 
 ---
 
-## 6. Recent investigation arc (2026-04-26 to 2026-04-30)
+## 6. Recent landed arc (2026-04-30 to 2026-05-02)
 
-The three-day arc is worth recording in one place because it
-illustrates how Wine-NSPA's failure modes cross the kernel/userspace
-boundary and how the discipline of "trace before audit" plays out.
-
-**2026-04-26 morning** — msg-ring v2 B1.0 paint-cache shipped
-default-on. Ableton ran fine for 4–5 minutes then locked into pure
-userspace deadlock. Mechanism unexplained; paint-cache was reverted to
-default-off the same day.
-
-**2026-04-26 afternoon** — assumed kernel-side, given the symptom
-shape (silent userspace stall, no kernel splat). Spent the day on a
-five-patch ntsync "audit-finding" series (1007–1011) without ever
-tracing the original `EVENT_SET_PI` slab UAF. All five were later
-rolled back. The cost of skipping the trace step was a full day of
-wasted patch-writing.
-
-**2026-04-27 morning** — installed the debug kernel
-(`linux-nspa-debug` with `slub_debug=FZPU` + `kfence` + KASAN). Ran
-the test suite. KASAN fired in `test-channel-stress`: REPLY's
-`wake_up_all` racing `SEND_PI`'s `kfree(e)`. **Root caused.** Same bug
-class as the rolled-back 1008/1009 — but now with a backtrace. Clean
-fix was `refcount_t` on `ntsync_channel_entry`, ~15 LOC. Three more
-bugs surfaced in sequence: channel-RECV thundering-herd (1007 — clean
-fix `wait_event_interruptible_exclusive`, 3 LOC), `EVENT_SET_PI`
-deferred boost (1008 — staged under `obj_lock`, applied inline), test
-cleanup asymmetry (Bug 1 — test-only).
-
-**2026-04-27 afternoon** — debug kernel itself proved unstable under
-heavy PREEMPT_RT load (`MAX_LOCKDEP_CHAINS too low`, `__might_sleep`
-warnings, `softlockup_panic=1` configured). Module rebuilt for
-production kernel `6.19.11-rt1-1-nspa`. Validation ran clean: 370M ops,
-zero errors.
-
-**2026-04-27 evening** — pivoted to wine-userspace audit on the
-working hypothesis that remaining lockups are now wine-side. 1576-LOC
-walk of `dlls/win32u/nspa/msg_ring.c` found three pre-existing bugs:
-MR1 (reply-slot ABA), MR2 (`FUTEX_PRIVATE` on shared memfd), MR4
-(POST dual-signal-fail wake-loss). All shipped the same evening.
-P2/P3/P5 follow-up audits all clean.
-
-**2026-04-28 daytime** — Ableton run-3 PASS (paint-cache OFF).
-Closed the lockup investigation. Then run-4 with
-`NSPA_ENABLE_PAINT_CACHE=1` PASS, past the historical 5-min threshold,
-likely incidentally fixing F5 via MR1.
-
-**2026-04-29** — kernel 1010 + gamma Phase 2/3 shipped as the first
-landed aggregate-wait consumer. The dispatcher now waits on `(channel,
-uring eventfd, shutdown eventfd)`, drains CQEs inline on the same RT
-thread, and signals replies from that same thread.
-
-**2026-04-30** — three compounding default-on follow-ons landed on top
-of that base: flush throttle at 8ms, Phase 4 async `create_file`, and
-1011 TRY_RECV2 burst drain. `dispatcher-burst` was added to the PE
-matrix specifically because the existing PE suite did not exercise the
-dispatcher hot path. The Ableton 30s busy capture then confirmed the
-full-stack result: `channel_dispatcher` 14.51% -> 0.70%, with
-system-wide samples 38,588 -> 19,415 per 30s.
-
-**The takeaway** — the bugs found were all on the critical RT-sync
-path that every remaining bypass (Phase C, io_uring 2/3, sechost)
-calls into. They would have surfaced regardless, just attributed to
-whichever bypass was being shipped at the time. Better paid now on a
-contained surface than mid-feature-rollout. The discipline lesson —
-trace before audit — remains the operating principle going forward.
+| Date | Shipped work | Public result |
+|---|---|---|
+| 2026-04-30 | flush throttle + async `CreateFile` + `TRY_RECV2` | dispatcher hot path and MainThread flush cost both dropped materially |
+| 2026-05-01 | winex11 AVX2 flush follow-on + Tier 1 log hygiene | lower GUI flush cost, cleaner logs, no semantic drift |
+| 2026-05-02 | spawn-main + `ntdll_sched` substrate | one default scheduler host per process, plus lazy RT-class host |
+| 2026-05-02 | async local-file close queue | caller thread stops paying eligible close latency inline |
+| 2026-05-02 | sched-hosted `local_timer` + `local_wm_timer` | RT timer work consolidated onto shared `wine-sched-rt` |
+| 2026-05-02 | `NtCreateTimer` client-range backing event default ON | anonymous timer backing events stop using the temporary server helper path |
+| 2026-05-02 | local events default ON | anonymous events move client-side while async completion remains server-correct |
+| 2026-05-02 | socket RECVMSG / SENDMSG default ON | `socket-io` deferred path gets a real `io_uring` data path, not just poll interception |
 
 ---
 
@@ -511,7 +436,14 @@ trace before audit — remains the operating principle going forward.
 | `NSPA_AGG_WAIT=1` | Phase 3 aggregate-wait dispatcher loop. **Default ON post-1010 validation.** Set `0` to force the legacy direct receive loop. |
 | `NSPA_TRY_RECV2=1` | Post-dispatch burst-drain on ntsync 1011 kernels. **Default ON.** Set `0` to force one `AGG_WAIT` round-trip per dequeued entry. |
 | `NSPA_ENABLE_ASYNC_CREATE_FILE=1` | Phase 4 async `CreateFile` through the dispatcher-owned ring. **Default ON.** Set `0` to stay on the older sync handler path. |
+| `NSPA_USE_SCHED_THREAD=1` | Client scheduler host. **Default ON.** Set `0` to keep consumers on their older inline / dedicated-thread paths. |
+| `NSPA_SCHED_USE_FOR_WM_TIMER=1` | Route `local_wm_timer` onto `wine-sched-rt` when RT is available. Set `0` to keep the legacy dedicated RT helper thread. |
+| `NSPA_SCHED_USE_FOR_LOCAL_TIMER=1` | Route `local_timer` onto `wine-sched-rt` when RT is available. Set `0` to keep the legacy dedicated RT helper thread. |
+| `NSPA_SCHED_OBS_INTERVAL_MS=N` | Opt-in sched observability sampler. Default OFF. Writes `/dev/shm/nspa-obs.<pid>` periodically. |
+| `NSPA_NT_LOCAL_EVENT=1` | Anonymous `NtCreateEvent` client-range fast path. **Default ON.** Set `0` to force anonymous events back through wineserver. |
 | `NSPA_FLUSH_THROTTLE_MS=8` | `flush_window_surfaces` throttle on `x11drv` MainThread. **Default ON at 8.** Set `N` to retune; `0` disables. |
+| `NSPA_URING_RECV=1` | Socket RECVMSG `io_uring` path. **Default ON.** Set `0` to force the older recv path. |
+| `NSPA_URING_SEND=1` | Socket SENDMSG `io_uring` path. **Default ON.** Set `0` to force the older send path. |
 | `NSPA_ENABLE_PAINT_CACHE=1` | msg-ring v2 B1.0 paint-cache. **Default OFF.** Awaiting second validation run. |
 | `NSPA_DISABLE_EPOLL=1` | A/B PREEMPT_RT poll vs epoll on wineserver main loop. Default upstream (epoll). |
 | `WINEPRELOADREMAPVDSO=force\|skip\|on-conflict` | vDSO preloader behaviour. Default `on-conflict`. |
@@ -543,26 +475,29 @@ State boards and architecture deep-dives produced by the project:
 
 | Doc | Subject |
 |---|---|
-| `current-state.md` | This document — state of the art on 2026-05-01 |
+| `current-state.md` | This document — state of the art on 2026-05-02 |
+| `client-scheduler-architecture.gen.html` | spawn-main + `ntdll_sched`, default-class and RT-class scheduler hosts, and the shipped consumers routed through them |
 | `cs-pi.gen.html` | Critical Section Priority Inheritance (CS-PI v2.3) — twelve-section deep dive |
 | `condvar-pi-requeue.gen.html` | `RtlSleepConditionVariableCS` `FUTEX_WAIT_REQUEUE_PI` slow path |
 | `aggregate-wait-and-async-completion.gen.html` | Landed kernel 1010 + dispatcher Phase 2/3 aggregate-wait architecture |
 | `gamma-channel-dispatcher.gen.html` | Gamma request/reply transport plus post-1010 aggregate-wait dispatcher loop |
 | `ntsync-driver.gen.html` | NTSync kernel driver patch stack through 1011 plus `TRY_RECV2` |
-| `io_uring-architecture.gen.html` | io_uring Phase 1-4 integration, including dispatcher-owned async `CreateFile` |
+| `io_uring-architecture.gen.html` | io_uring Phase 1-4.8 integration, including dispatcher-owned async `CreateFile` and shipped socket RECVMSG / SENDMSG |
 | `msg-ring-architecture.gen.html` | msg-ring v1 + v2 design notes |
 | `nspa-local-file-architecture.gen.html` | NT-local file bypass (`NtCreateFile` short-circuit) |
+| `nt-local-stubs.gen.html` | NT-local stub pattern, now including local events and sched-hosted timer dispatch |
 | `shmem-ipc.gen.html` | NSPA shmem IPC primitives (γ + redraw + paint-cache) |
 | `nspa-rt-test.gen.html` | nspa_rt_test PE harness reference |
 | `architecture.gen.html` | Whole-system architecture overview |
 | `decoration-loop-investigation.gen.html` | Wine 11.6 X11 windowing decoration-loop bug 57955 |
 | `sync-primitives-research.gen.html` | Background research on sync primitive selection |
 
-The architecture-heavy pieces added through 2026-04-30 are now covered
-in the public docs set, including the gamma dispatcher, aggregate-wait,
-hook cache, local-file, msg-ring, and the decomposition notes.
+The architecture-heavy pieces added through 2026-05-02 are now covered
+in the public docs set, including the client scheduler, local events,
+socket `io_uring`, gamma, aggregate-wait, hook cache, local-file,
+msg-ring, and the decomposition notes.
 
 ---
 
-*Generated 2026-05-01. ntsync `10124FB81FDC76797EF1F91`, kernel
+*Generated 2026-05-02. ntsync `10124FB81FDC76797EF1F91`, kernel
 `6.19.11-rt1-1-nspa`.*

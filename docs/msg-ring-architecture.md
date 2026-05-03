@@ -545,7 +545,7 @@ locally.
   <text x="605" y="222" class="mf-label-green">mlock(map, size):</text>
   <text x="620" y="236" class="mf-label-sm">pin in RAM, no RT page faults</text>
 
-  <line x1="335" y1="215" x2="585" y2="140" stroke="#9ece6a" stroke-width="1.5" fill="none"/>
+  <path d="M335 215 L460 215 L460 140 L585 140" stroke="#9ece6a" stroke-width="1.5" fill="none"/>
   <text x="460" y="173" class="mf-label-green" text-anchor="middle">SCM_RIGHTS</text>
   <text x="460" y="186" class="mf-label-sm" text-anchor="middle">fd crosses the wineserver socket</text>
 

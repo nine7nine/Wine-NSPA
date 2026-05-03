@@ -1,43 +1,43 @@
 # Wine-NSPA -- io_uring I/O Architecture
 
-**Date:** 2026-04-30
+**Date:** 2026-05-02
 **Author:** Jordan Johnston
 **Kernel:** `6.19.11-rt1-1-nspa` (PREEMPT_RT_FULL)
 **Wine:** 11.6 + NSPA RT patchset
-**Status:** design reference; Phase 1 and the dispatcher-owned Phase 4 `CreateFile` consumer are shipped, while the remaining socket and pipe sections describe pending follow-on work.
+**Status:** shipped design reference; Phase 1 file I/O, dispatcher-owned async `CreateFile`, and Phase 4.8 socket RECVMSG / SENDMSG are all live. The remaining non-`io_uring` server-managed surfaces are documented here only to explain the current boundary.
 
-This page explains where `io_uring` fits in Wine-NSPA, what has already landed for file I/O, and which architectural pieces carry forward into the still-pending socket and pipe work.
+This page explains where `io_uring` fits in Wine-NSPA, what has already landed
+for file and socket I/O, and which surfaces remain outside the `io_uring`
+boundary because they are still fundamentally server-managed.
 
 ## Table of Contents
 
-1. [Status as of 2026-04-30](#1-status-as-of-2026-04-30)
+1. [Status as of 2026-05-02](#1-status-as-of-2026-05-02)
 2. [Overview](#2-overview)
 3. [Design Principles](#3-design-principles)
 4. [I/O Architecture: Before and After](#4-io-architecture-before-and-after)
 5. [Phase 1: File I/O Bypass (shipped)](#5-phase-1-file-io-bypass-shipped)
-6. [Phase 2: Socket I/O Bypass (pending)](#6-phase-2-socket-io-bypass-pending)
-7. [Phase 3: Pipes and Named Events (pending)](#7-phase-3-pipes-and-named-events-pending)
+6. [Phase 4.8: Socket RECVMSG / SENDMSG (shipped)](#6-phase-48-socket-recvmsg--sendmsg-shipped)
+7. [What stays outside `io_uring`](#7-what-stays-outside-iouring)
 8. [File Manifest](#8-file-manifest)
 9. [Status Summary](#9-status-summary)
 
 ---
 
-## 1. Status as of 2026-04-30
+## 1. Status as of 2026-05-02
 
-The original three-phase plan from 2026-04-15 has been re-scoped. Phase 1
-(synchronous poll replacement + async file I/O bypass) shipped default-on
-and has been stable through the 2026-04 audit cycle. The server-side
-dispatcher-owned ring now also has a shipped Phase 4 consumer:
-default-on async `CreateFile` routed through the per-process ring under
-`NSPA_ENABLE_ASYNC_CREATE_FILE=1`. Phases 2 and 3 remain multi-session
-work, gated against the current ntsync production module
-(`srcversion 10124FB81FDC76797EF1F91`) and the audit §4.1 retry-loop
-hardening that closes silent-contract bugs in the shmem ring path.
+The `io_uring` story is now broader than the original file-I/O landing.
+Three pieces are shipped in production:
 
-The architecture itself -- per-thread rings, the E2 bitmap, ALERTED-state
-interception, and the ntsync `uring_fd` extension -- is settled. What
-remains is socket and pipe surface area, plus retesting against the
-current kernel + ring code.
+- **Phase 1:** sync poll replacement plus async file read/write on the PE side
+- **Phase 4:** dispatcher-owned async `CreateFile` on the per-process server ring
+- **Phase 4.8 A+B:** PE-side socket `RECVMSG` / `SENDMSG`, default on via
+  `NSPA_URING_RECV=1` and `NSPA_URING_SEND=1`
+
+The important boundary correction from 2026-05-02 is that `io_uring` does
+**not** subsume named-pipe or named-event completion. Those remain
+server-managed surfaces and compose with the local-event fix instead of
+replacing it.
 
 ### Phase Status Table
 
@@ -45,26 +45,28 @@ current kernel + ring code.
 |-------|---------|--------|---------|-------|
 | Phase 1 | Sync poll + async file I/O | **Shipped** | On | `NtReadFile` / `NtWriteFile` async bypass + sync poll replacement; pool allocator (TLS, 32 ops); CQE drain at `server_select` / `server_wait` |
 | Phase 4 | Dispatcher-owned async `CreateFile` | **Shipped** | On | `NSPA_ENABLE_ASYNC_CREATE_FILE=1`; routes `CreateFile` through the per-process ring and removes the `open()` lock-drop CS from the audio xrun path |
-| Phase 2 | Sockets (sync + overlapped) | **Pending** | -- | E2 bitmap + ALERTED interception design validated; socket-io PE test passed historically; needs revalidation against post-audit ntsync + audit §4.1 retry-loop hardening |
-| Phase 3 | Pipes + named events | **Pending** | -- | Not yet designed; expected to reuse Phase 2 ALERTED-interception pattern with object-class-specific completion paths |
+| Phase 4.8 A | Socket recv | **Shipped** | On | `NSPA_URING_RECV=1`; `recv_socket` submits `IORING_OP_RECVMSG` on the deferred path |
+| Phase 4.8 B | Socket send | **Shipped** | On | `NSPA_URING_SEND=1`; `send_socket` submits `IORING_OP_SENDMSG` on the deferred path |
+| Phase 4.8 C | `NtFlushBuffersFile` FSYNC | **Dropped** | -- | disk path is already synchronous `fsync()`; no meaningful `io_uring` win |
+| Phase 4.8 D | anonymous pipes / inotify | **Dropped** | -- | both blocked by existing server-managed infrastructure shape |
 
 ### Delta from the 2026-04-15 plan
 
 - Phases 1 and 2 of the 2026-04-15 plan (sync poll replacement, async
   file I/O bypass) have collapsed into a single shipped Phase 1.
-- The 2026-04-15 Phase 3 (sockets) is now Phase 2, deferred to a focused
-  re-validation session.
-- A new Phase 3 has been carved out for pipe and named-event surfaces,
-  which were previously not on the roadmap.
+- Socket work is no longer theoretical follow-on work. The data path is
+  shipped on the PE side via `RECVMSG` / `SENDMSG`.
+- Pipes and named events did **not** become `io_uring` work. Their remaining
+  completion story is handled by other server-managed mechanisms.
 
 ---
 
 ## 2. Overview
 
-This document is the io_uring design and implementation reference for
+This document is the `io_uring` design and implementation reference for
 Wine-NSPA. It covers the integration boundary, per-thread ring model,
-ALERTED-state interception, and the remaining socket/pipe work. For
-project-wide context, see the architecture overview.
+the shipped file / socket paths, and the surfaces that remain outside the
+`io_uring` boundary. For project-wide context, see the architecture overview.
 
 This design addresses two bottlenecks:
 
@@ -351,240 +353,117 @@ fallback for an edge case that rarely occurs in practice.
 
 ---
 
-## 6. Phase 2: Socket I/O Bypass (pending)
+## 6. Phase 4.8: Socket RECVMSG / SENDMSG (shipped)
 
-**Status: Pending revalidation. Architecture (E2 bitmap + ALERTED-state
-interception) is settled; the existing socket-io PE test path passed
-under the prior ntsync module, but socket bypass needs a focused
-re-test against the post-audit module
-(`srcversion 10124FB81FDC76797EF1F91`) and the audit §4.1 retry-loop
-hardening.**
+**Status: Shipped, default-on.**
 
-### The Challenge
+The socket path now uses true socket SQEs on the deferred async path:
 
-Socket I/O (`sock_recv` / `sock_send`) is tightly coupled with the
-server's async lifecycle:
+- `NSPA_URING_RECV=1` routes recv completion through `IORING_OP_RECVMSG`
+- `NSPA_URING_SEND=1` routes send completion through `IORING_OP_SENDMSG`
 
-- Server creates `wait_handle` for the async operation
-- Server tracks socket state (connect, listen, accept, shutdown)
-- Server manages AFD poll state (`pending_events`, `reported_events`)
-- Client uses `set_async_direct_result()` to report completion
-- `sock_get_poll_events()` in server decides what to monitor
+The integration boundary is still the same as the earlier ALERTED-state work:
+the server remains authoritative for the async lifecycle and socket state
+machine, while the client owns readiness monitoring and the data move itself.
 
-Unlike file I/O (where the server's only role is fd monitoring), the
-socket code has the server actively participating in the protocol
-state machine.
+### Shipped shape
 
-### Approach: E2 Bitmap + ALERTED-State Interception
-
-| Option | Description | Verdict |
-|--------|-------------|---------|
-| **B1: Server flag** | Add `client_poll` flag to recv/send. Server skips epoll. | Evaluated, not used |
-| **B2: Both poll** | Server + client both monitor. First wins. | Rejected (no global_lock benefit) |
-| **E2: Shared bitmap** | Process-level bitmap. Client sets bit per fd. Server checks in `sock_get_poll_events()`. | **Selected** |
-| **C: Full bypass** | Skip server entirely for connected TCP. | Rejected (breaks socket state machine) |
-
-### How It Works
-
-The key is **ALERTED-state interception** -- intercepting in the
-ALERTED block *before* `set_async_direct_result` is called:
-
-    Server: recv_socket -> STATUS_ALERTED + wait_handle
-    Client: try_recv(fd) -> EAGAIN (not ready)
-                                                  <- interception point
-      BEFORE: set_async_direct_result(PENDING)    <- would restart on server
-      NOW:    set bitmap + io_uring POLL_ADD      <- async stays ALERTED
-              return STATUS_PENDING
-      ... io_uring monitors fd ...
-    CQE fires:
-      try_recv(fd) -> SUCCESS (data available)
-      set_async_direct_result(SUCCESS, bytes)     <- server accepts
-      Server: completes async, signals event/IOCP
+1. server returns an ALERTED async
+2. client intercepts before restarting the async on the server
+3. E2 bitmap excludes the fd from server poll ownership
+4. client submits the socket SQE
+5. CQE completion feeds the same Wine completion helpers and reports the final
+   result back once
 
 <div class="diagram-container">
-<svg width="100%" viewBox="0 0 920 780" xmlns="http://www.w3.org/2000/svg">
+<svg width="100%" viewBox="0 0 940 420" xmlns="http://www.w3.org/2000/svg">
   <style>
-    .bg { fill: #1a1b26; }
-    .lane-old { fill: #271a22; stroke: #f7768e; stroke-width: 1.5; }
-    .lane-new { fill: #16251a; stroke: #9ece6a; stroke-width: 1.5; }
-    .box-shared { fill: #24283b; stroke: #7aa2f7; stroke-width: 1.8; rx: 8; }
-    .box-neutral { fill: #24283b; stroke: #9aa5ce; stroke-width: 1.4; rx: 8; }
-    .box-intercept { fill: #2a2418; stroke: #e0af68; stroke-width: 2.2; rx: 8; }
-    .box-old { fill: #2a1a1a; stroke: #f7768e; stroke-width: 1.8; rx: 8; }
-    .box-new { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
-    .box-kernel { fill: #1a1f2a; stroke: #7dcfff; stroke-width: 1.8; rx: 8; }
-    .summary-old { fill: #2a1a1a; stroke: #f7768e; stroke-width: 1.6; rx: 20; }
-    .summary-new { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.6; rx: 20; }
-    .label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
-    .label-sm { fill: #c0caf5; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
-    .label-muted { fill: #8c92b3; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
-    .label-blue { fill: #7aa2f7; font-size: 12px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
-    .label-red { fill: #f7768e; font-size: 12px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
-    .label-green { fill: #9ece6a; font-size: 12px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
-    .label-cyan { fill: #7dcfff; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
-    .label-yellow { fill: #e0af68; font-size: 12px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
-    .arrow-shared { stroke: #7aa2f7; stroke-width: 1.8; fill: none; }
-    .arrow-old { stroke: #f7768e; stroke-width: 1.8; fill: none; }
-    .arrow-new { stroke: #9ece6a; stroke-width: 1.8; fill: none; }
-    .arrow-kernel { stroke: #7dcfff; stroke-width: 1.8; fill: none; }
-    .footnote { fill: #8c92b3; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+    .sr-bg { fill: #1a1b26; }
+    .sr-box { fill: #24283b; stroke: #3b4261; stroke-width: 1.5; rx: 8; }
+    .sr-srv { fill: #2a1f35; stroke: #bb9af7; stroke-width: 2; rx: 8; }
+    .sr-cli { fill: #1a2235; stroke: #7aa2f7; stroke-width: 2; rx: 8; }
+    .sr-kern { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 2; rx: 8; }
+    .sr-note { fill: #2a2418; stroke: #e0af68; stroke-width: 1.6; rx: 8; }
+    .sr-t { fill: #c0caf5; font: 11px 'JetBrains Mono', monospace; }
+    .sr-s { fill: #a9b1d6; font: 9px 'JetBrains Mono', monospace; }
+    .sr-h { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
+    .sr-v { fill: #bb9af7; font: bold 10px 'JetBrains Mono', monospace; }
+    .sr-g { fill: #9ece6a; font: bold 10px 'JetBrains Mono', monospace; }
+    .sr-y { fill: #e0af68; font: bold 10px 'JetBrains Mono', monospace; }
+    .sr-line { stroke: #c0caf5; stroke-width: 1.5; fill: none; }
   </style>
+  <defs>
+    <marker id="srArrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="#c0caf5"/>
+    </marker>
+  </defs>
 
-  <rect x="0" y="0" width="920" height="780" class="bg"/>
-  <text x="460" y="28" text-anchor="middle" class="label-yellow">Phase 2 Socket Recv: ALERTED-State Interception</text>
+  <rect x="0" y="0" width="940" height="420" class="sr-bg"/>
+  <text x="470" y="28" text-anchor="middle" class="sr-h">Shipped socket path on the deferred async case</text>
 
-  <rect x="250" y="52" width="420" height="54" class="box-shared"/>
-  <text x="460" y="74" text-anchor="middle" class="label-blue">1. Server returns ALERTED async</text>
-  <text x="460" y="91" text-anchor="middle" class="label-sm">recv_socket() -> STATUS_ALERTED + wait_handle</text>
+  <rect x="50" y="92" width="220" height="84" class="sr-srv"/>
+  <text x="160" y="120" text-anchor="middle" class="sr-v">server async lifecycle</text>
+  <text x="160" y="142" text-anchor="middle" class="sr-s">returns ALERTED async + wait handle</text>
+  <text x="160" y="160" text-anchor="middle" class="sr-s">retains protocol-state authority</text>
 
-  <line x1="460" y1="106" x2="460" y2="132" class="arrow-shared"/>
+  <rect x="360" y="92" width="220" height="84" class="sr-cli"/>
+  <text x="470" y="120" text-anchor="middle" class="sr-t">client interception</text>
+  <text x="470" y="142" text-anchor="middle" class="sr-s">set E2 bitmap, keep async ALERTED</text>
+  <text x="470" y="160" text-anchor="middle" class="sr-s">submit RECVMSG / SENDMSG SQE</text>
 
-  <rect x="250" y="132" width="420" height="54" class="box-neutral"/>
-  <text x="460" y="154" text-anchor="middle" class="label">2. Client probes fd immediately</text>
-  <text x="460" y="171" text-anchor="middle" class="label-sm">try_recv(fd) -> EAGAIN</text>
+  <rect x="670" y="92" width="220" height="84" class="sr-kern"/>
+  <text x="780" y="120" text-anchor="middle" class="sr-g">kernel `io_uring`</text>
+  <text x="780" y="142" text-anchor="middle" class="sr-s">socket readiness and data move</text>
+  <text x="780" y="160" text-anchor="middle" class="sr-s">CQE fires on completion</text>
 
-  <line x1="460" y1="186" x2="460" y2="212" class="arrow-shared"/>
+  <path d="M270 134 L360 134" class="sr-line" marker-end="url(#srArrow)"/>
+  <path d="M580 134 L670 134" class="sr-line" marker-end="url(#srArrow)"/>
 
-  <rect x="170" y="212" width="580" height="42" class="box-intercept"/>
-  <text x="460" y="238" text-anchor="middle" class="label-yellow">3. Interception point: before set_async_direct_result(PENDING)</text>
-
-  <rect x="40" y="284" width="390" height="392" rx="12" class="lane-old"/>
-  <rect x="490" y="284" width="390" height="392" rx="12" class="lane-new"/>
-
-  <text x="235" y="308" text-anchor="middle" class="label-red">Legacy server-monitored path</text>
-  <text x="685" y="308" text-anchor="middle" class="label-green">NSPA io_uring path</text>
-
-  <line x1="235" y1="254" x2="235" y2="330" class="arrow-old"/>
-  <line x1="685" y1="254" x2="685" y2="330" class="arrow-new"/>
-
-  <rect x="85" y="330" width="300" height="58" class="box-old"/>
-  <text x="235" y="352" text-anchor="middle" class="label-red">set_async_direct_result(PENDING)</text>
-  <text x="235" y="369" text-anchor="middle" class="label-sm">server requeues async</text>
-  <text x="235" y="382" text-anchor="middle" class="label-muted">fd returns to server poll ownership</text>
-
-  <line x1="235" y1="388" x2="235" y2="414" class="arrow-old"/>
-
-  <rect x="85" y="414" width="300" height="58" class="box-old"/>
-  <text x="235" y="436" text-anchor="middle" class="label-red">epoll monitors fd</text>
-  <text x="235" y="453" text-anchor="middle" class="label-sm">dispatch runs under global_lock</text>
-  <text x="235" y="466" text-anchor="middle" class="label-muted">extra kernel wake and server pass</text>
-
-  <line x1="235" y1="472" x2="235" y2="498" class="arrow-old"/>
-
-  <rect x="85" y="498" width="300" height="58" class="box-old"/>
-  <text x="235" y="520" text-anchor="middle" class="label-red">async_wake_up(ALERTED)</text>
-  <text x="235" y="537" text-anchor="middle" class="label-sm">client callback re-fetches fd</text>
-  <text x="235" y="550" text-anchor="middle" class="label-muted">final completion after server wake</text>
-
-  <rect x="95" y="594" width="280" height="34" class="summary-old"/>
-  <text x="235" y="616" text-anchor="middle" class="label-red">2 server calls after interception + epoll cycle</text>
-
-  <rect x="535" y="330" width="300" height="62" class="box-new"/>
-  <text x="685" y="352" text-anchor="middle" class="label-green">set E2 bitmap bit + return STATUS_PENDING</text>
-  <text x="685" y="369" text-anchor="middle" class="label-sm">server-side async remains ALERTED</text>
-  <text x="685" y="382" text-anchor="middle" class="label-muted">sock_get_poll_events() can exclude the fd</text>
-
-  <line x1="685" y1="392" x2="685" y2="418" class="arrow-new"/>
-
-  <rect x="535" y="418" width="300" height="58" class="box-kernel"/>
-  <text x="685" y="440" text-anchor="middle" class="label-cyan">io_uring POLL_ADD(fd, POLLIN)</text>
-  <text x="685" y="457" text-anchor="middle" class="label-sm">kernel owns readiness monitoring</text>
-  <text x="685" y="470" text-anchor="middle" class="label-muted">no server dispatch while waiting</text>
-
-  <line x1="685" y1="476" x2="685" y2="502" class="arrow-kernel"/>
-
-  <rect x="535" y="502" width="300" height="58" class="box-kernel"/>
-  <text x="685" y="524" text-anchor="middle" class="label-cyan">CQE / eventfd signals readiness</text>
-  <text x="685" y="541" text-anchor="middle" class="label-sm">sync wait drains via ntsync uring_fd</text>
-  <text x="685" y="554" text-anchor="middle" class="label-muted">overlapped path drains in async completion path</text>
-
-  <line x1="685" y1="560" x2="685" y2="586" class="arrow-new"/>
-
-  <rect x="535" y="586" width="300" height="58" class="box-new"/>
-  <text x="685" y="608" text-anchor="middle" class="label-green">retry try_recv(fd) -> SUCCESS</text>
-  <text x="685" y="625" text-anchor="middle" class="label-sm">data is now available</text>
-  <text x="685" y="638" text-anchor="middle" class="label-muted">client issues final result once</text>
-
-  <line x1="685" y1="644" x2="685" y2="670" class="arrow-new"/>
-
-  <rect x="535" y="670" width="300" height="58" class="box-shared"/>
-  <text x="685" y="692" text-anchor="middle" class="label-blue">set_async_direct_result(SUCCESS, bytes)</text>
-  <text x="685" y="709" text-anchor="middle" class="label-sm">server completes async and signals event / IOCP</text>
-  <text x="685" y="722" text-anchor="middle" class="label-muted">single server call with the final completion only</text>
-
-  <text x="460" y="746" text-anchor="middle" class="footnote">Safety condition: ALERTED asyncs are already detached from server epoll;</text>
-  <text x="460" y="762" text-anchor="middle" class="footnote">the E2 bitmap is an additional guard for poll-state recomputation.</text>
+  <rect x="210" y="236" width="520" height="62" class="sr-note"/>
+  <text x="470" y="262" text-anchor="middle" class="sr-y">Single completion path</text>
+  <text x="470" y="280" text-anchor="middle" class="sr-s">the CQE handler feeds Wine's normal async completion helpers and reports the final result once</text>
 </svg>
 </div>
 
-**Why this works:** When an async is ALERTED on the server,
-`terminated=1` and `async_waiting()` returns false. The server does
-*not* monitor the fd via epoll. The bitmap provides additional safety
-(`sock_get_poll_events` returns -1). Only one call to
-`set_async_direct_result` ever happens -- from the CQE handler with the
-final result.
+### Validation
 
-**Why previous approaches failed (4 attempts):**
+The 2026-05-02 default-on flip was backed by:
 
-1. **CQ drain inline NtSetEvent:** Signal reentrancy crash --
-   `NtSetEvent` requires Wine signal manipulation, unsafe from CQ
-   drain context.
-2. **Deferred completion flush:** Deadlock -- event must be signaled
-   *during* the wait to wake `inproc_wait`, not after.
-3. **Direct ntsync ioctl:** Double completion --
-   `set_async_direct_result(PENDING)` restarted the async, server
-   monitored via epoll AND io_uring monitored -> race.
-4. **Bitmap after `set_async_direct_result`:** Same race -- bitmap set
-   too late, async already restarted.
+- `socket-io` deferred path: `+6.5%` throughput
+- `socket-io` deferred path: `-6.8%` p99 latency
+- `socket-io`: `0/2000` failures
+- Ableton boot, library scan, and playback: clean with `63` threads and zero
+  new errors versus the Phase 4.6 baseline
 
-### Sync vs Overlapped Path
+### Why this stays server-correct
 
-| | Sync | Overlapped |
-|---|------|-----------|
-| ALERTED block | Intercept, submit POLL_ADD | Same |
-| Return | `wait_async(wait_handle)` -- blocks | `STATUS_PENDING` -- returns immediately |
-| CQE wakeup | ntsync `uring_fd` -> retry loop drains CQ -> `set_async_direct_result` -> ntsync signals wait_handle | `set_async_direct_result` -> server signals event/IOCP |
-| Fallback (EAGAIN in CQE) | `set_async_direct_result(PENDING)` -> server restarts async -> epoll | Same |
+The client is not bypassing the socket state machine. It is bypassing the
+monitoring and data-transfer part of the async path once the server has already
+established the async object and its completion contract.
 
-### What's Pending
+That is why the current shape is viable:
 
-The architecture and code are landed in `dlls/ntdll/unix/socket.c`,
-`dlls/ntdll/unix/sync.c`, and `server/sock.c`. What's pending is a
-focused validation session against:
-
-- The current ntsync production module (`10124FB81FDC76797EF1F91`).
-- The audit §4.1 retry-loop hardening shipped in superproject
-  `a7e34c7` (closes silent shmem-ring contract violations that the
-  socket interception path also touches).
-- The current socket-io PE test (Phase A immediate + Phase B
-  overlapped) under both baseline and RT modes.
-
-Until that session lands, treat Phase 2 as un-validated against
-current kernel + ring code.
+- completion still flows through `set_async_direct_result`
+- event and IOCP signaling still happen through the normal Wine completion path
+- the server still owns the socket object and its protocol-visible state
 
 ---
 
-## 7. Phase 3: Pipes and Named Events (pending)
+## 7. What stays outside `io_uring`
 
-**Status: Pending. Not yet designed.**
+Not every async surface is an `io_uring` candidate.
 
-Pipe I/O (`NtReadFile` / `NtWriteFile` on `FILE_PIPE` handles) and named
-events (`NtCreateNamedPipeFile`, `NtCreateEvent` with name) currently
-take the same server-mediated async path as sockets. They share the
-same `register_async`/epoll-monitor/`async_wake_up` lifecycle.
+| Surface | Current reason it stays outside |
+|---|---|
+| named pipes | server-owned pseudo-fd architecture; no real PE-side kernel fd to submit against |
+| named events | server-side naming / object-directory semantics, not an fd-monitoring problem |
+| anonymous-pipe follow-on | current Win32 `CreatePipe` route still sits on the named-pipe pseudo-fd infrastructure |
+| directory notify via inotify | current inotify state is one server-process-wide facility, not a per-PE resource |
 
-The expected design reuses Phase 2's ALERTED-state interception with
-object-class-specific completion paths:
-
-- **Pipe handles:** `IORING_OP_READ` / `IORING_OP_WRITE` directly on
-  the unix fd (analogous to file I/O). Need to handle pipe-specific
-  EOF and EPIPE semantics.
-- **Named events:** No fd to poll -- this is a server-side naming
-  question, not an io_uring question. May fold into the gamma channel
-  bypass instead.
-
-This work has not been scheduled. It is captured here for completeness
-of the bypass roadmap.
+The 2026-05-02 correction is that these are not "Phase 4.8 pending" in the
+same sense that sockets used to be pending. Named-pipe and named-event
+completion now compose with the **local-event** server-registration path, not
+with `io_uring`.
 
 ---
 
@@ -602,7 +481,7 @@ of the bypass roadmap.
 |------|--------------|---------|
 | `dlls/ntdll/unix/unix_private.h` | +30 | io_uring function declarations, bitmap helpers |
 | `dlls/ntdll/unix/file.c` | ~30 | Phase 1: sync poll + async read/write bypass |
-| `dlls/ntdll/unix/socket.c` | ~120 | Phase 2: ALERTED interception, CQE handler, bitmap set/clear |
+| `dlls/ntdll/unix/socket.c` | ~120 | shipped socket path: ALERTED interception, RECVMSG / SENDMSG CQE handlers, bitmap set/clear |
 | `dlls/ntdll/unix/sync.c` | ~40 | ntsync uring_fd retry loop, deferred completion flush |
 | `dlls/ntdll/unix/server.c` | +2 | Completion drain at server_select/server_wait |
 | `dlls/ntdll/unix/thread.c` | +1 | Ring cleanup at thread exit |
@@ -626,8 +505,8 @@ of the bypass roadmap.
 | Pool allocator (TLS, 32 ops) | Shipped | RT-safe, zero malloc in submit path |
 | Phase 1: sync poll + async file I/O | Shipped, default-on | `NtReadFile` / `NtWriteFile` |
 | Phase 4: async `CreateFile` via dispatcher ring | Shipped, default-on | `NSPA_ENABLE_ASYNC_CREATE_FILE=1`; server-side consumer on the per-process ring |
-| Phase 2: socket I/O (sync + overlapped) | Pending revalidation | Architecture settled; needs re-test against post-audit ntsync + §4.1 ring hardening |
-| Phase 3: pipes + named events | Pending design | Not scheduled |
+| Phase 4.8 A+B: socket I/O (deferred path) | Shipped, default-on | `NSPA_URING_RECV=1`, `NSPA_URING_SEND=1`; validated on `socket-io` and Ableton |
+| Phase 4.8 C/D follow-ons | Dropped | not worthwhile or blocked by server-managed architecture |
 | E2 bitmap (server `sock.c`) | Shipped | Engaged when Phase 2 client-poll bit is set |
 | ntsync `uring_fd` extension | Shipped (kernel patch) | Wakes ntsync waits on CQE |
 | ntsync PI v2 + audit fixes | Shipped (kernel patch) | Module srcversion `10124FB81FDC76797EF1F91` |
@@ -635,12 +514,9 @@ of the bypass roadmap.
 
 ### Next Actions
 
-1. Phase 2 revalidation session: run `socket-io` PE test under current
-   ntsync + audit-hardened ring code; flip Phase 2 default-on if clean.
-2. Phase 3 design pass: enumerate pipe + named-event server paths and
-   decide whether to reuse Phase 2's ALERTED interception or fold into
-   the gamma channel bypass.
-3. Profile: measure server epoll fd reduction and global_lock hold
-   time under socket load.
-4. Investigate multishot recv + provided buffers for streaming socket
-   optimization.
+1. Publish a fresh full-suite run against the 2026-05-02 stack so the socket
+   default-on flip sits beside a new matrix result, not just targeted validation.
+2. Profile server epoll hold-time reduction under heavier socket load than the
+   current `socket-io` harness.
+3. Keep named-pipe and named-event follow-on work on the server-managed track,
+   not on the `io_uring` roadmap.
