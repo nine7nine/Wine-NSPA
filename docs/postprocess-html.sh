@@ -21,7 +21,7 @@ postprocess_one() {
                 $plain =~ s/\s+$//;
 
                 my $len = length($plain);
-                my $size = $len >= 108 ? "7.5px" : "8px";
+                my $size = $len >= 116 ? "7px" : $len >= 100 ? "7.5px" : "8px";
 
                 if ($attrs =~ /\bstyle="([^"]*)"/i) {
                     my $style = $1;
@@ -36,6 +36,52 @@ postprocess_one() {
                     $attrs .= qq{ style="font-size:$size; letter-spacing:-0.15px"};
                 }
 
+                if ($len >= 90 && $plain =~ /\s/ &&
+                    $plain !~ /&[A-Za-z#0-9]+;/ &&
+                    $attrs =~ /\bx="([^"]+)"/i &&
+                    $attrs =~ /\by="([^"]+)"/i)
+                {
+                    my ($x, $y) = ($1, $2);
+
+                    if ($x =~ /^-?\d+(?:\.\d+)?$/ && $y =~ /^-?\d+(?:\.\d+)?$/) {
+                        my $mid = int($len / 2);
+                        my @spaces;
+                        while ($plain =~ / /g) { push @spaces, pos($plain) - 1; }
+
+                        my @window = grep { $_ >= int($len * 0.34) && $_ <= int($len * 0.68) } @spaces;
+                        my @candidates = @window ? @window : @spaces;
+                        my $best;
+
+                        for my $pos (@candidates) {
+                            my $score = abs($pos - $mid);
+                            if (!defined $best || $score < $best->[1]) {
+                                $best = [$pos, $score];
+                            }
+                        }
+
+                        if ($best) {
+                            my $split = $best->[0];
+                            my $line1 = substr($plain, 0, $split);
+                            my $line2 = substr($plain, $split + 1);
+
+                            $line1 =~ s/\s+$//;
+                            $line2 =~ s/^\s+//;
+
+                            if ($line1 ne q{} && $line2 ne q{}) {
+                                my $attrs1 = $attrs;
+                                my $attrs2 = $attrs;
+                                my $y1 = $y - 7;
+                                my $y2 = $y + 9;
+
+                                $attrs1 =~ s/\by="[^"]*"/y="$y1"/i;
+                                $attrs2 =~ s/\by="[^"]*"/y="$y2"/i;
+
+                                return qq{<text$attrs1>$line1</text><text$attrs2>$line2</text>};
+                            }
+                        }
+                    }
+                }
+
                 return qq{<text$attrs>$content</text>};
             }
 
@@ -43,6 +89,11 @@ postprocess_one() {
                 (\.[A-Za-z0-9_-]*?(?:small|muted|dim|footnote|caption|lbl-mut|label-mut|subtle)[A-Za-z0-9_-]*\s*\{.*?\bfill:\s*)
                 \#(?:8c92b3|565f89|545c7e|3b4261)
             }{$1 . "#a9b1d6"}egxsi;
+
+            $svg =~ s~
+                (\.[A-Za-z0-9_-]*?(?:lane|divider|axis|dash|rail|guide|boundary|region|timeline)[A-Za-z0-9_-]*\s*\{(?=[^}]*\bstroke-dasharray\b)[^}]*?\bstroke:\s*)
+                \#(?:3b4261|565f89|545c7e|8c92b3)
+            ~$1 . "#6b7398"~egxsi;
 
             $svg =~ s/(\.[A-Za-z0-9_-]*?(?:line|conn|arrow)[A-Za-z0-9_-]*\s*\{[^}]*?\bstroke-width:\s*)(?:2(?:\.0+)?|1\.[4-9][0-9]*)/$1 . "1.15"/egxsi;
 
@@ -53,6 +104,12 @@ postprocess_one() {
                 \#(?:8c92b3|565f89|545c7e|3b4261)
                 (")
             }{$1 . "#a9b1d6" . $2}egxsi;
+
+            $svg =~ s{
+                (<(?:line|path|polyline|polygon|rect)\b(?=[^>]*\bstroke-dasharray=)[^>]*\bstroke=")
+                \#(?:3b4261|565f89|545c7e|8c92b3)
+                (")
+            }{$1 . "#6b7398" . $2}egxsi;
 
             $svg =~ s{
                 <rect\b
@@ -82,7 +139,7 @@ postprocess_one() {
             # SVG text a little so diagrams degrade toward "fits" rather
             # than spilling out of the box entirely.
             $svg =~ s{
-                <text\b([^>]*)>([^<\n]{96,})</text>
+                <text\b([^>]*)>([^<\n]{88,})</text>
             }{tighten_long_svg_text($1, $2)}egxs;
 
             return $svg;
@@ -172,7 +229,7 @@ postprocess_one() {
         while (/<svg\b.*?<\/svg>/sg) {
             my $svg = $&;
 
-            while ($svg =~ /<text\b[^>]*>([^<\n]{100,})<\/text>/g) {
+            while ($svg =~ /<text\b[^>]*>([^<\n]{90,})<\/text>/g) {
                 my $snippet = $1;
                 $snippet =~ s/\s+/ /g;
                 $snippet =~ s/^(.{0,110}).*$/$1.../ if length($snippet) > 110;
