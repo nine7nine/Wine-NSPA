@@ -1,21 +1,12 @@
 # Wine-NSPA -- Shmem IPC Architecture (LEGACY -- superseded by gamma channel dispatcher)
 
-> **Status: SUPERSEDED 2026-04-26.**
->
-> This document describes the v1.5 / v2.4 per-thread shmem-pthread dispatcher
-> with userspace `sched_setscheduler` PI boost. That architecture has been
-> replaced by the **gamma channel dispatcher**: a single per-process kernel-
-> mediated channel using NTSync `NTSYNC_IOC_CHANNEL_*` ioctls, with kernel-
-> atomic priority inheritance.
->
-> See: [Gamma Channel Dispatcher](gamma-channel-dispatcher.gen.html)
->
-> This page is retained for historical context.
+Historical reference for the older v1.5 / v2.4 per-thread shmem-pthread
+dispatcher with userspace `sched_setscheduler` PI boost. This design is
+superseded by the **gamma channel dispatcher**: a single per-process
+kernel-mediated channel using NTSync `NTSYNC_IOC_CHANNEL_*` ioctls with
+kernel-atomic priority inheritance.
 
----
-
-Wine-NSPA 11.6 | Kernel 6.19.11-rt1-1-nspa (PREEMPT_RT) | 2026-04-15
-Author: Jordan Johnston
+See: [Gamma Channel Dispatcher](gamma-channel-dispatcher.gen.html)
 
 ## Table of Contents
 

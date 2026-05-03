@@ -108,12 +108,6 @@
 <div class="page-nav"><a href="index.html">Docs Home</a></div>
 <h1 id="wine-nspa--state-of-the-art">Wine-NSPA — State of The Art</h1>
 
-<p><strong>Date:</strong> 2026-05-02
-<strong>Author:</strong> Jordan Johnston
-<strong>Kernel:</strong> <code>6.19.11-rt1-1-nspa</code> (PREEMPT_RT_FULL, production)
-<strong>ntsync module:</strong> <code>srcversion 10124FB81FDC76797EF1F91</code>
-<strong>Status:</strong> production state board as of 2026-05-02; the public tree now includes the 2026-04-30 dispatcher / aggregate-wait base, the 2026-05-01 GUI and compatibility follow-ons, and the 2026-05-02 spawn-main / client-scheduler, local-event, timer, and socket-uring follow-ons.</p>
-
 <p>This page is the shipped-state snapshot: kernel patch state, live userspace
 features, exact defaults and gates, targeted validation totals, and the
 remaining work that is still ahead.</p>
@@ -231,7 +225,7 @@ paths are disabled.</p>
 </tr>
 <tr>
 <td> Async file path </td>
-<td> Phase 4 async <code>CreateFile</code>, default ON </td>
+<td> async <code>CreateFile</code>, default ON </td>
 </tr>
 <tr>
 <td> Async socket path </td>
@@ -341,7 +335,7 @@ paths are disabled.</p>
 <td> <code>NSPA_ENABLE_ASYNC_CREATE_FILE</code> </td>
 <td> <code>1</code> </td>
 <td> <code>NSPA_ENABLE_ASYNC_CREATE_FILE=0</code> </td>
-<td> Phase 4 routes <code>CreateFile</code> through the per-process <code>io_uring</code> ring, removing the <code>open()</code> lock-drop CS from the audio xrun path </td>
+<td> routes <code>CreateFile</code> through the per-process <code>io_uring</code> ring, removing the <code>open()</code> lock-drop CS from the audio xrun path </td>
 </tr>
 <tr>
 <td> <code>NSPA_TRY_RECV2</code> </td>
@@ -562,8 +556,8 @@ stub chatter no longer buries the logs.</p>
 0 TIMEOUT. Module <code>10124FB81FDC76797EF1F91</code> was loaded live and
 verified while these full-suite results were collected.</strong></p>
 
-<p>Patch-level kernel detail lives on <code>ntsync-driver.gen.html</code>; dispatcher
-and async-completion detail lives on
+<p>NTSync kernel and Wine in-process sync detail lives on
+<code>ntsync-driver.gen.html</code>; dispatcher and async-completion detail lives on
 <code>gamma-channel-dispatcher.gen.html</code> and
 <code>aggregate-wait-and-async-completion.gen.html</code>.</p>
 
@@ -641,13 +635,13 @@ own correctness proof and gate.</p>
 <td> Per-process kernel-mediated channel via ntsync 1004/1005/1011, with post-1010 aggregate-wait over channel + uring eventfd + shutdown eventfd and post-dispatch TRY_RECV2 burst drain on 1011 kernels. </td>
 </tr>
 <tr>
-<td> <strong>Phase A — <code>open_fd</code> refactor</strong> </td>
+<td> <strong>Open-path refactor</strong> </td>
 <td> Shipped </td>
 <td> ON </td>
 <td> <code>fchdir+open</code> → <code>openat</code>; first step toward holding <code>global_lock</code> for less of the open path. </td>
 </tr>
 <tr>
-<td> <strong>Phase B — <code>openat</code> lock-drop</strong> </td>
+<td> <strong>Open-path lock-drop</strong> </td>
 <td> Shipped </td>
 <td> ON </td>
 <td> Release <code>global_lock</code> around <code>openat()</code> so audio thread requests are not blocked by slow file syscalls during drum-load. </td>
@@ -719,37 +713,37 @@ own correctness proof and gate.</p>
 <td> Bounded mpmc shmem ring for <code>PostMessage</code> / <code>SendMessage</code> / reply between Wine threads in the same process. </td>
 </tr>
 <tr>
-<td> <strong>msg-ring v2 B1.0 paint-cache</strong> </td>
+<td> <strong>msg-ring paint cache</strong> </td>
 <td> Shipped </td>
-<td> <strong>OFF</strong> (gated) </td>
-<td> Cross-process redraw cache for <code>WM_PAINT</code> fast-path; one clean confirmation run exists, but the default-on flip still wants more validation. </td>
+<td> ON </td>
+<td> Cross-process redraw cache for <code>WM_PAINT</code>; <code>NSPA_ENABLE_PAINT_CACHE=0</code> is now the diagnostic opt-out, while the default shipped path stays on. </td>
 </tr>
 <tr>
-<td> <strong>msg-ring v2 Phase C get_message</strong> </td>
+<td> <strong>Direct <code>get_message</code> bypass</strong> </td>
 <td> <strong>WIP, paused</strong> </td>
 <td> n/a </td>
 <td> Remaining message-pump bypass piece; once it lands, window messages are fully out of wineserver. </td>
 </tr>
 <tr>
-<td> <strong>io_uring Phase 1 (file I/O)</strong> </td>
+<td> <strong><code>io_uring</code> file I/O bypass</strong> </td>
 <td> Shipped </td>
 <td> ON when <code>NSPA_RT_PRIO</code> set </td>
 <td> sync poll replacement plus async <code>NtReadFile</code> / <code>NtWriteFile</code> bypass on the PE side. </td>
 </tr>
 <tr>
-<td> <strong>Dispatcher Phase 2/3 (<code>NSPA_AGG_WAIT</code>)</strong> </td>
+<td> <strong>Aggregate-wait dispatcher</strong> (<code>NSPA_AGG_WAIT</code>) </td>
 <td> Shipped </td>
 <td> ON </td>
 <td> Per-process server-side <code>io_uring</code> infrastructure plus aggregate-wait dispatcher loop. Same RT thread receives requests, drains CQEs, and signals replies. </td>
 </tr>
 <tr>
-<td> <strong>Async <code>CreateFile</code> (Phase 4)</strong> </td>
+<td> <strong>Async <code>CreateFile</code></strong> </td>
 <td> Shipped </td>
 <td> ON </td>
 <td> <code>NSPA_ENABLE_ASYNC_CREATE_FILE=1</code> routes <code>CreateFile</code> through the dispatcher-owned ring and removes the <code>open()</code> lock-drop critical section from the audio xrun path. </td>
 </tr>
 <tr>
-<td> <strong>io_uring socket RECVMSG / SENDMSG (Phase 4.8 A+B)</strong> </td>
+<td> <strong><code>io_uring</code> socket recv/send</strong> </td>
 <td> Shipped </td>
 <td> ON </td>
 <td> <code>NSPA_URING_RECV=1</code> and <code>NSPA_URING_SEND=1</code>; deferred <code>socket-io</code> path now uses true socket SQEs instead of only poll-then-syscall. </td>
@@ -790,10 +784,10 @@ own correctness proof and gate.</p>
 <tr>
 <td> <code>winejack.drv</code> </td>
 <td> Shipped </td>
-<td> Phase 1 MIDI + Phase 2 WASAPI audio + future MIDI through unified driver </td>
+<td> JACK-backed MIDI plus WASAPI audio in one driver </td>
 </tr>
 <tr>
-<td> <code>nspaASIO</code> Phase F </td>
+<td> <code>nspaASIO</code> low-latency path </td>
 <td> Shipped </td>
 <td> Zero-latency <code>bufferSwitch</code> invoked <strong>inside</strong> the JACK RT callback — same-period output, no double-buffering hop </td>
 </tr>
@@ -849,7 +843,7 @@ own correctness proof and gate.</p>
   <text x="765" y="96" text-anchor="middle" class="cs-tag-green">Audio stack</text>
   <text x="765" y="122" text-anchor="middle" class="cs-label">winejack.drv</text>
   <text x="765" y="140" text-anchor="middle" class="cs-small">MIDI + WASAPI on JACK</text>
-  <text x="765" y="164" text-anchor="middle" class="cs-label">nspaASIO Phase F</text>
+  <text x="765" y="164" text-anchor="middle" class="cs-label">nspaASIO low-latency path</text>
   <text x="765" y="182" text-anchor="middle" class="cs-small">bufferSwitch in JACK RT callback</text>
 
   <rect x="50" y="270" width="250" height="140" class="cs-gate" rx="6"/>
@@ -861,7 +855,7 @@ own correctness proof and gate.</p>
 
   <rect x="345" y="270" width="250" height="140" class="cs-wip" rx="6"/>
   <text x="470" y="296" text-anchor="middle" class="cs-tag-violet">Paused / queued</text>
-  <text x="470" y="322" text-anchor="middle" class="cs-label">msg-ring Phase C get_message</text>
+  <text x="470" y="322" text-anchor="middle" class="cs-label">direct get_message bypass</text>
   <text x="470" y="340" text-anchor="middle" class="cs-small">remaining message-pump bypass piece</text>
   <text x="470" y="364" text-anchor="middle" class="cs-label">sechost device-IRP poll</text>
   <text x="470" y="382" text-anchor="middle" class="cs-small">next substantial bypass candidate after the shipped 4.8 socket work</text>
@@ -873,9 +867,9 @@ own correctness proof and gate.</p>
   <text x="765" y="364" text-anchor="middle" class="cs-label">phase 4</text>
   <text x="765" y="382" text-anchor="middle" class="cs-small">router/handler split + lock partitioning</text>
 
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="175" y1="220" x2="175" y2="270" class="cs-line" marker-end="url(#csArrow)"/>
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="470" y1="220" x2="470" y2="270" class="cs-line" marker-end="url(#csArrow)"/>
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="765" y1="220" x2="765" y2="270" class="cs-line" marker-end="url(#csArrow)"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="175" y1="220" x2="175" y2="270" class="cs-line"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="470" y1="220" x2="470" y2="270" class="cs-line"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="765" y1="220" x2="765" y2="270" class="cs-line"/>
   <text x="470" y="456" text-anchor="middle" class="cs-small">top row = shipped state today; bottom row = remaining gates and roadmap pressure</text>
 </svg>
 </div>
@@ -963,7 +957,7 @@ surfaces.</p>
 <tr>
 <td> socket RECVMSG / SENDMSG default-ON </td>
 <td> Ableton boot + library + playback </td>
-<td> clean; <code>63</code> threads, zero new errors vs Phase 4.6 baseline </td>
+<td> clean; <code>63</code> threads, zero new errors vs the earlier socket baseline </td>
 </tr>
 </tbody>
 </table>
@@ -1111,7 +1105,7 @@ surfaces.</p>
 <tbody>
 <tr>
 <td> local events default-ON </td>
-<td> Ableton system CPU from Phase 4.5 baseline <code>40-57%</code> to <code>~35%</code> during playback (<code>~15-20%</code> reduction) </td>
+<td> Ableton system CPU from the earlier event baseline <code>40-57%</code> to <code>~35%</code> during playback (<code>~15-20%</code> reduction) </td>
 </tr>
 <tr>
 <td> socket RECVMSG / SENDMSG </td>
@@ -1140,8 +1134,8 @@ smoke level 0 + 1 only.</li>
 <h2 id="5-open-work-in-priority-order">5. Open work, in priority order</h2>
 
 <ol>
-<li><strong>Second paint-cache validation run</strong> — different day / cold start plus a
-longer soak before any default-on flip.</li>
+<li><strong>Longer paint-cache soak</strong> — different day / cold start plus a
+longer runtime window so the default-on path has a cleaner public record.</li>
 <li><strong>Full-suite rerun against the 2026-05-02 stack</strong> — the last published
 matrix is still v8 / 2026-04-30; the new scheduler / event / socket surfaces
 deserve a fresh public matrix.</li>
@@ -1149,7 +1143,7 @@ deserve a fresh public matrix.</li>
 hours-scale default-on runtime is still worth publishing.</li>
 <li><strong><code>wine_sechost_service</code> device-IRP poll</strong> — still the next obvious
 high-frequency bypass candidate.</li>
-<li><strong>msg-ring v2 Phase C get_message bypass</strong> — paused mid-development; still
+<li><strong>Direct <code>get_message</code> bypass</strong> — paused mid-development; still
 the remaining message-pump bypass piece.</li>
 <li><strong>Wineserver decomposition remainder</strong> — aggregate-wait is already shipped;
 timer/fd-poll/router splits remain longer-horizon work.</li>
@@ -1239,7 +1233,7 @@ timer/fd-poll/router splits remain longer-horizon work.</li>
 </tr>
 <tr>
 <td> <code>NSPA_OPENFD_LOCKDROP=1</code> </td>
-<td> Phase B <code>openat</code> lock-drop. <strong>Default ON post-1006.</strong> </td>
+<td> Open-path <code>openat()</code> lock-drop. <strong>Default ON post-1006.</strong> </td>
 </tr>
 <tr>
 <td> <code>NSPA_DISPATCHER_USE_TOKEN=1</code> </td>
@@ -1247,7 +1241,7 @@ timer/fd-poll/router splits remain longer-horizon work.</li>
 </tr>
 <tr>
 <td> <code>NSPA_AGG_WAIT=1</code> </td>
-<td> Phase 3 aggregate-wait dispatcher loop. <strong>Default ON post-1010 validation.</strong> Set <code>0</code> to force the legacy direct receive loop. </td>
+<td> Aggregate-wait dispatcher loop. <strong>Default ON post-1010 validation.</strong> Set <code>0</code> to force the legacy direct receive loop. </td>
 </tr>
 <tr>
 <td> <code>NSPA_TRY_RECV2=1</code> </td>
@@ -1255,7 +1249,7 @@ timer/fd-poll/router splits remain longer-horizon work.</li>
 </tr>
 <tr>
 <td> <code>NSPA_ENABLE_ASYNC_CREATE_FILE=1</code> </td>
-<td> Phase 4 async <code>CreateFile</code> through the dispatcher-owned ring. <strong>Default ON.</strong> Set <code>0</code> to stay on the older sync handler path. </td>
+<td> Async <code>CreateFile</code> through the dispatcher-owned ring. <strong>Default ON.</strong> Set <code>0</code> to stay on the older sync handler path. </td>
 </tr>
 <tr>
 <td> <code>NSPA_USE_SCHED_THREAD=1</code> </td>
@@ -1291,7 +1285,7 @@ timer/fd-poll/router splits remain longer-horizon work.</li>
 </tr>
 <tr>
 <td> <code>NSPA_ENABLE_PAINT_CACHE=1</code> </td>
-<td> msg-ring v2 B1.0 paint-cache. <strong>Default OFF.</strong> Awaiting second validation run. </td>
+<td> msg-ring paint cache. <strong>Default ON.</strong> Set <code>0</code> to force the older RPC path for A/B testing. </td>
 </tr>
 <tr>
 <td> <code>NSPA_DISABLE_EPOLL=1</code> </td>
@@ -1407,7 +1401,7 @@ REALTIME-class priorities scale linearly below it.</p>
 </tr>
 <tr>
 <td> <code>aggregate-wait-and-async-completion.gen.html</code> </td>
-<td> Landed kernel 1010 + dispatcher Phase 2/3 aggregate-wait architecture </td>
+<td> Aggregate-wait plus same-thread async completion architecture </td>
 </tr>
 <tr>
 <td> <code>gamma-channel-dispatcher.gen.html</code> </td>
@@ -1415,11 +1409,11 @@ REALTIME-class priorities scale linearly below it.</p>
 </tr>
 <tr>
 <td> <code>ntsync-driver.gen.html</code> </td>
-<td> NTSync kernel driver patch stack through 1011 plus <code>TRY_RECV2</code> </td>
+<td> NTSync kernel overlay plus Wine in-process sync path, including aggregate-wait and <code>TRY_RECV2</code> </td>
 </tr>
 <tr>
 <td> <code>io_uring-architecture.gen.html</code> </td>
-<td> io_uring Phase 1-4.8 integration, including dispatcher-owned async <code>CreateFile</code> and shipped socket RECVMSG / SENDMSG </td>
+<td> <code>io_uring</code> integration for file I/O, async <code>CreateFile</code>, and shipped socket RECVMSG / SENDMSG </td>
 </tr>
 <tr>
 <td> <code>msg-ring-architecture.gen.html</code> </td>
@@ -1464,7 +1458,7 @@ msg-ring, and the decomposition notes.</p>
 
 <hr />
 
-<p><em>Generated 2026-05-02. ntsync <code>10124FB81FDC76797EF1F91</code>, kernel
+<p><em>Generated 2026-05-03. State board reflects the shipped 2026-05-02 set. ntsync <code>10124FB81FDC76797EF1F91</code>, kernel
 <code>6.19.11-rt1-1-nspa</code>.</em></p>
 
 <script>

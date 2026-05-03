@@ -2,7 +2,7 @@
 <html lang="en"><head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Wine-NSPA -- NTSync Kernel Driver</title>
+<title>Wine-NSPA -- NTSync and In-Process Synchronization</title>
 <style>
   :root {
     --bg: #1a1b26; --fg: #c0caf5; --accent: #7aa2f7;
@@ -106,30 +106,26 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
 </head><body>
 <div class="page-nav"><a href="index.html">Docs Home</a></div>
-<h1 id="wine-nspa--ntsync-kernel-driver">Wine-NSPA &ndash; NTSync Kernel Driver</h1>
+<h1 id="wine-nspa--ntsync-and-in-process-synchronization">Wine-NSPA &ndash; NTSync and In-Process Synchronization</h1>
 
-<p>Linux-NSPA 6.19.11-rt1-1 (PREEMPT_RT), CONFIG_NTSYNC=m | 2026-04-30
-Author: Jordan Johnston
-Status: production kernel-driver reference; patch stack 1003-1011 plus the post-1010 PI follow-ups is the shipped baseline.</p>
-
-<p>This page is the patch-by-patch architecture and implementation guide for the Wine-NSPA ntsync overlay, including the gamma transport work, the landed aggregate-wait primitive, and the 1011 burst-drain follow-on.</p>
+<p>This page is the feature-by-feature architecture and implementation guide for the Wine-NSPA ntsync overlay, including the Wine-side in-process sync path, the gamma transport work, the landed aggregate-wait primitive, and the burst-drain follow-on.</p>
 
 <h2 id="table-of-contents">Table of Contents</h2>
 
 <ol>
 <li><a href="#1-overview">Overview</a></li>
 <li><a href="#2-object-types">Object Types</a></li>
-<li><a href="#3-the-1003-pi-baseline">The 1003 PI Baseline</a></li>
-<li><a href="#4-patch-1004-channel-object">Patch 1004: Channel Object</a></li>
-<li><a href="#5-patch-1005-thread-token-pass-through">Patch 1005: Thread-Token Pass-Through</a></li>
-<li><a href="#6-patch-1006-rt-alloc-hoist">Patch 1006: RT Alloc-Hoist</a></li>
-<li><a href="#7-patch-1007-channel-exclusive-recv">Patch 1007: Channel Exclusive Recv</a></li>
-<li><a href="#8-patch-1008-event_set_pi-deferred-boost">Patch 1008: EVENT_SET_PI Deferred Boost</a></li>
-<li><a href="#9-patch-1009-channel_entry-refcount-uaf">Patch 1009: channel_entry Refcount UAF</a></li>
-<li><a href="#10-patch-1010-aggregate-wait">Patch 1010: Aggregate-Wait</a></li>
-<li><a href="#11-lessons-and-audit-philosophy">Lessons and Audit Philosophy</a></li>
-<li><a href="#12-wine-consumer-side">Wine Consumer Side</a></li>
-<li><a href="#13-validation">Validation</a></li>
+<li><a href="#3-priority-inheritance-baseline-1003">Priority-inheritance baseline (1003)</a></li>
+<li><a href="#4-channel-object-1004">Channel object (1004)</a></li>
+<li><a href="#5-thread-token-pass-through-1005">Thread-token pass-through (1005)</a></li>
+<li><a href="#6-rt-alloc-hoist-1006">RT alloc-hoist (1006)</a></li>
+<li><a href="#7-channel-exclusive-recv-1007">Channel exclusive recv (1007)</a></li>
+<li><a href="#8-deferred-event_set_pi-boost-1008">Deferred <code>EVENT_SET_PI</code> boost (1008)</a></li>
+<li><a href="#9-channel_entry-refcount-uaf-fix-1009">channel_entry refcount UAF fix (1009)</a></li>
+<li><a href="#10-aggregate-wait-1010">Aggregate-wait (1010)</a></li>
+<li><a href="#11-wine-userspace-integration">Wine userspace integration</a></li>
+<li><a href="#12-validation">Validation</a></li>
+<li><a href="#13-audit-notes">Audit notes</a></li>
 <li><a href="#14-references">References</a></li>
 </ol>
 
@@ -162,7 +158,7 @@ baseline that first validated aggregate-wait; the earlier
 <code>A250A77651C8D5DAB719FE2</code> module remains the post-1009 baseline that
 was validated to ~370M mixed operations.</p>
 
-<p>This doc covers the patch-by-patch design rationale: what each patch changes, what bug it closes (or feature it adds), how it preserves NT semantics, and how it interacts with the <code>obj_lock</code> raw_spinlock and PREEMPT_RT.</p>
+<p>This doc covers the patch-by-patch design rationale: what each change adds, what bug it closes (or feature it exposes), how it preserves NT semantics, and how it interacts with the <code>obj_lock</code> raw_spinlock and PREEMPT_RT.</p>
 
 <h3 id="nspa-overlay-relationship">NSPA overlay relationship</h3>
 
@@ -263,8 +259,8 @@ The distinction matters: Section 11 discusses why.</p>
     .nt-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .nt-yellow { fill: #e0af68; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .nt-violet { fill: #bb9af7; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
-    .nt-line { stroke: #c0caf5; stroke-width: 1.4; }
-    .nt-dash { stroke: #3b4261; stroke-width: 1.2; stroke-dasharray: 6,4; }
+    .nt-line { stroke: #c0caf5; stroke-width: 1.15; }
+    .nt-dash { stroke: #3b4261; stroke-width: 0.9; stroke-dasharray: 6,4; }
   </style>
   <defs>
     <marker id="ntArrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
@@ -296,8 +292,8 @@ The distinction matters: Section 11 discusses why.</p>
   <text x="780" y="144" text-anchor="middle" class="nt-small">wake queues + task priority ordering</text>
   <text x="780" y="162" text-anchor="middle" class="nt-small">KASAN / debug kernels found 1007-1009 bugs</text>
 
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="280" y1="115" x2="350" y2="115" class="nt-line" marker-end="url(#ntArrow)"/>
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="590" y1="115" x2="660" y2="115" class="nt-line" marker-end="url(#ntArrow)"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="280" y1="115" x2="350" y2="115" class="nt-line"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="590" y1="115" x2="660" y2="115" class="nt-line"/>
 
   <rect x="40" y="220" width="180" height="98" class="nt-obj" rx="6"/>
   <text x="130" y="246" text-anchor="middle" class="nt-green">Mutex</text>
@@ -653,7 +649,7 @@ raw_spinlock_t dev-&gt;boost_lock    device-wide, protects boosted_owners list
 <svg width="100%" viewBox="0 0 940 560" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
   <style>
     .ch-bg { fill: #1a1b26; }
-    .ch-lane { fill: none; stroke: #3b4261; stroke-width: 1; stroke-dasharray: 5,4; }
+    .ch-lane { fill: none; stroke: #3b4261; stroke-width: 0.9; stroke-dasharray: 5,4; }
     .ch-box { fill: #24283b; stroke: #7aa2f7; stroke-width: 2; rx: 7; }
     .ch-kernel { fill: #1a1a2a; stroke: #bb9af7; stroke-width: 2; rx: 7; }
     .ch-state { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 7; }
@@ -664,7 +660,7 @@ raw_spinlock_t dev-&gt;boost_lock    device-wide, protects boosted_owners list
     .ch-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .ch-yellow { fill: #e0af68; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .ch-violet { fill: #bb9af7; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
-    .ch-line { stroke: #c0caf5; stroke-width: 1.4; }
+    .ch-line { stroke: #c0caf5; stroke-width: 1.15; }
   </style>
   <defs>
     <marker id="chArrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
@@ -692,13 +688,13 @@ raw_spinlock_t dev-&gt;boost_lock    device-wide, protects boosted_owners list
   <text x="470" y="140" text-anchor="middle" class="ch-small">key = (prio DESC, seq ASC)</text>
   <text x="470" y="158" text-anchor="middle" class="ch-small">depth++, entry may become new minimum</text>
 
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="240" y1="126" x2="330" y2="126" class="ch-line" marker-end="url(#chArrow)"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="240" y1="126" x2="330" y2="126" class="ch-line"/>
 
   <rect x="670" y="98" width="260" height="56" class="ch-box" rx="6"/>
   <text x="800" y="122" text-anchor="middle" class="ch-label">RECV / RECV2 waiter</text>
   <text x="800" y="140" text-anchor="middle" class="ch-small">blocked on recv_wq; 1011 adds TRY_RECV2 follow-on</text>
 
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="610" y1="148" x2="670" y2="148" class="ch-line" marker-end="url(#chArrow)"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="610" y1="148" x2="670" y2="148" class="ch-line"/>
   <text x="640" y="138" text-anchor="middle" class="ch-yellow">boost + wake</text>
   <text x="640" y="154" text-anchor="middle" class="ch-small">1007 makes wake exclusive</text>
 
@@ -708,8 +704,8 @@ raw_spinlock_t dev-&gt;boost_lock    device-wide, protects boosted_owners list
   <text x="470" y="270" text-anchor="middle" class="ch-small">mark DISPATCHED, append list, depth--</text>
   <text x="470" y="288" text-anchor="middle" class="ch-small">1005 RECV2 adds thread_token lookup</text>
 
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="800" y1="154" x2="800" y2="210" class="ch-line" marker-end="url(#chArrow)"/>
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="800" y1="250" x2="610" y2="250" class="ch-line" marker-end="url(#chArrow)"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="800" y1="154" x2="800" y2="210" class="ch-line"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="800" y1="250" x2="610" y2="250" class="ch-line"/>
 
   <rect x="670" y="326" width="260" height="80" class="ch-box" rx="6"/>
   <text x="800" y="350" text-anchor="middle" class="ch-label">handler runs in wineserver</text>
@@ -717,7 +713,7 @@ raw_spinlock_t dev-&gt;boost_lock    device-wide, protects boosted_owners list
   <text x="800" y="386" text-anchor="middle" class="ch-small">reply data written to shared memory</text>
   <text x="800" y="404" text-anchor="middle" class="ch-small">then REPLY(entry_id)</text>
 
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="800" y1="290" x2="800" y2="326" class="ch-line" marker-end="url(#chArrow)"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="800" y1="290" x2="800" y2="326" class="ch-line"/>
 
   <rect x="330" y="326" width="280" height="80" class="ch-state" rx="6"/>
   <text x="470" y="350" text-anchor="middle" class="ch-green">DISPATCHED list</text>
@@ -725,7 +721,7 @@ raw_spinlock_t dev-&gt;boost_lock    device-wide, protects boosted_owners list
   <text x="470" y="386" text-anchor="middle" class="ch-small">1009 refcount keeps entry alive across wake</text>
   <text x="470" y="404" text-anchor="middle" class="ch-small">receiver drain drops handler boost</text>
 
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="670" y1="366" x2="610" y2="366" class="ch-line" marker-end="url(#chArrow)"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="670" y1="366" x2="610" y2="366" class="ch-line"/>
 
   <rect x="40" y="326" width="200" height="80" class="ch-box" rx="6"/>
   <text x="140" y="350" text-anchor="middle" class="ch-label">sender sleep</text>
@@ -733,7 +729,7 @@ raw_spinlock_t dev-&gt;boost_lock    device-wide, protects boosted_owners list
   <text x="140" y="386" text-anchor="middle" class="ch-small">cleanup may race with REPLY</text>
   <text x="140" y="404" text-anchor="middle" class="ch-small">1009 closes UAF window</text>
 
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="330" y1="366" x2="240" y2="366" class="ch-line" marker-end="url(#chArrow)"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="330" y1="366" x2="240" y2="366" class="ch-line"/>
 
   <rect x="330" y="448" width="280" height="62" class="ch-fix" rx="6"/>
   <text x="470" y="472" text-anchor="middle" class="ch-yellow">Cleanup / free boundary</text>
@@ -745,7 +741,7 @@ raw_spinlock_t dev-&gt;boost_lock    device-wide, protects boosted_owners list
   <text x="800" y="504" text-anchor="middle" class="ch-small">and drain more ready entries before sleeping again</text>
 
   <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="140" y1="406" x2="140" y2="448" class="ch-line"/>
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="140" y1="448" x2="330" y2="448" class="ch-line" marker-end="url(#chArrow)"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="140" y1="448" x2="330" y2="448" class="ch-line"/>
 
   <text x="470" y="534" text-anchor="middle" class="ch-small" style="font-size:8px; letter-spacing:-0.15px">priority ordering is in-kernel; per-sender order stays serial because each SEND_PI blocks for REPLY</text>
 </svg>
@@ -966,7 +962,7 @@ Comm: Ableton Web Con      PREEMPT_{RT,(lazy)}
 </table>
 
 
-<p>Sites 1-4 had been latent since the 1003 PI patch landed; 5-6 were new in 1005 (thread-token registration). The Ableton lockup was almost certainly triggered by 5 or 6: <code>T2</code> thread-token registration is always-on when channel + kernel support are present, and Ableton boot creates dozens of threads -> dozens of register/deregister calls -> poisoned freelist 13 minutes in. Sites 1-4 had likely also caused several previous unexplained host lockups (Phase B msg-ring, B1.0 paint-cache, &ldquo;in-handler instrumentation triggers host lockup&rdquo; series).</p>
+<p>Sites 1-4 had been latent since the 1003 PI patch landed; 5-6 were new in 1005 (thread-token registration). The Ableton lockup was almost certainly triggered by 5 or 6: <code>T2</code> thread-token registration is always-on when channel + kernel support are present, and Ableton boot creates dozens of threads -> dozens of register/deregister calls -> poisoned freelist 13 minutes in. Sites 1-4 had likely also caused several previous unexplained host lockups in the earlier msg-ring, paint-cache, and instrumentation-related lockup series.</p>
 
 <h3 id="the-pi_work-poolcleanup-pattern">The pi_work pool/cleanup pattern</h3>
 
@@ -1364,7 +1360,7 @@ on:</p>
     .ag-s { fill: #a9b1d6; font: 9px 'JetBrains Mono', monospace; }
     .ag-h { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
     .ag-v { fill: #bb9af7; font: bold 10px 'JetBrains Mono', monospace; }
-    .ag-line { stroke: #c0caf5; stroke-width: 1.4; fill: none; }
+    .ag-line { stroke: #c0caf5; stroke-width: 1.15; fill: none; }
   </style>
   <defs>
     <marker id="agArrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
@@ -1393,8 +1389,8 @@ on:</p>
   <text x="790" y="142" text-anchor="middle" class="ag-s">uring eventfd</text>
   <text x="790" y="160" text-anchor="middle" class="ag-s">future fd-poll / timer wake sources</text>
 
-  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M260 142 L360 142" class="ag-line" marker-end="url(#agArrow)"/>
-  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M680 142 L580 142" class="ag-line" marker-end="url(#agArrow)"/>
+  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M260 142 L360 142" class="ag-line"/>
+  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M680 142 L580 142" class="ag-line"/>
 
   <rect x="140" y="254" width="660" height="62" class="ag-note" rx="6"/>
   <text x="470" y="278" text-anchor="middle" class="ag-t">Load-bearing follow-up in production</text>
@@ -1482,62 +1478,294 @@ functionally correct on the one-entry-per-wake path.</p>
 
 <hr />
 
-<h2 id="11-lessons-and-audit-philosophy">11. Lessons and Audit Philosophy</h2>
+<h2 id="11-wine-userspace-integration">11. Wine userspace integration</h2>
 
-<p>The patches in this stack divide cleanly into two categories. The boundary matters because it dictates which patches were safe to ship in a flurry and which weren&rsquo;t.</p>
+<p>The Wine-side ntsync integration lives primarily in
+<code>dlls/ntdll/unix/sync.c</code>, with the server-owned bridge in
+<code>server/inproc_sync.c</code>. This is the other half of the story that the
+kernel sections above do not show by themselves: Wine-NSPA does not
+only have a kernel ntsync overlay, it also has a userspace
+handle-to-fd layer that decides when a Win32 wait or signal can go
+straight to <code>/dev/ntsync</code>.</p>
 
-<h3 id="mechanically-verifiable-correctness-vs-code-review-hypothesis">Mechanically verifiable correctness vs. code-review hypothesis</h3>
+<h3 id="111-two-userspace-consumer-shapes">11.1 Two userspace consumer shapes</h3>
 
-<p>Patches in the <strong>mechanically verifiable</strong> category enforce a rule that has an oracle. If the rule is violated, kernel debug infra (<code>CONFIG_DEBUG_ATOMIC_SLEEP</code>, <code>LOCKDEP</code>, <code>KASAN</code>) will splat. The patch either makes the splat go away or it doesn&rsquo;t; there is no ambiguity.</p>
+<p>There are two distinct userspace shapes:</p>
 
 <ul>
-<li><strong>1006</strong> (RT alloc-hoist) enforces &ldquo;no sleeping alloc/free under <code>raw_spinlock_t</code> on PREEMPT_RT&rdquo;. <code>CONFIG_DEBUG_ATOMIC_SLEEP</code> will splat on a violation. Mechanical.</li>
-<li><strong>1009</strong> (channel_entry refcount) closes a UAF that KASAN catches by construction. The fix is a textbook refcount discipline. Mechanical.</li>
-<li><strong>1008</strong> (EVENT_SET_PI deferred boost) closes a measurable flake (4% miss rate on a deterministic test). The fix removes a code path with a known race; the test now passes 100%. Mechanical (the test is the oracle).</li>
-<li><strong>1007</strong> (channel exclusive recv) closes a deterministic-hang test that was stale-coded around the buggy behaviour. The fix is a 3-LOC swap to a kernel primitive (<code>wait_event_interruptible_exclusive</code>) whose semantics are documented and obvious. Mechanical.</li>
+<li><strong>server-owned sync handles</strong>: named objects, inherited objects,
+cross-process objects, and any handle that still originates in
+wineserver. The first wait or signal does a one-time
+<code>get_inproc_sync_fd</code> request; after that, ntdll caches the fd and
+goes direct.</li>
+<li><strong>client-created anonymous sync handles</strong>: anonymous mutexes,
+semaphores, and anonymous events when <code>NSPA_NT_LOCAL_EVENT</code> is left
+at its default-on setting. These never need wineserver to mint the
+fd in the first place; ntdll allocates a client-range handle, issues
+the ntsync create ioctl itself, and populates the cache immediately.</li>
 </ul>
 
 
-<p>Patches in the <strong>code-review hypothesis</strong> category encode a reviewer&rsquo;s argument that some code is buggy. There is no oracle. If the reviewer&rsquo;s argument is wrong (or the bug is somewhere else), the patch ships new bugs without fixing the original one.</p>
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 980 470" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
+  <style>
+    .bg { fill: #1a1b26; }
+    .lane { fill: #24283b; stroke: #3b4261; stroke-width: 0.9; rx: 10; }
+    .srv { fill: #1f2535; stroke: #7aa2f7; stroke-width: 1.8; rx: 8; }
+    .cli { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
+    .mid { fill: #2a1f35; stroke: #bb9af7; stroke-width: 1.8; rx: 8; }
+    .note { fill: #2a2418; stroke: #e0af68; stroke-width: 1.6; rx: 8; }
+    .t { fill: #c0caf5; font: 11px 'JetBrains Mono', monospace; }
+    .s { fill: #a9b1d6; font: 9px 'JetBrains Mono', monospace; }
+    .h { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
+    .g { fill: #9ece6a; font: bold 10px 'JetBrains Mono', monospace; }
+    .v { fill: #bb9af7; font: bold 10px 'JetBrains Mono', monospace; }
+    .y { fill: #e0af68; font: bold 10px 'JetBrains Mono', monospace; }
+    .line { stroke: #c0caf5; stroke-width: 1.2; fill: none; }
+    .guide { stroke: #3b4261; stroke-width: 1; stroke-dasharray: 6,4; }
+  </style>
 
-<h3 id="the-rolled-back-codex-1007-1011-series">The rolled-back Codex 1007-1011 series</h3>
+  <rect x="0" y="0" width="980" height="470" class="bg" rx="6"/>
+  <text x="490" y="26" text-anchor="middle" class="h">Wine-side ntsync consumers: server-owned handles and client-created anonymous handles</text>
 
-<p>On 2026-04-26 there was an unfound EVENT_SET_PI slab UAF (<code>___slab_alloc+0x316</code> GP-fault, <code>ntsync_obj_ioctl+0x44e</code>). KASAN was queued but not yet run. Codex&rsquo;s review surfaced three &ldquo;other issues&rdquo; (cross-snapshot PI, non-exclusive RECV, channel-accept-in-<code>setup_wait</code>), and patches 1007-1011 (5 patches in 6 hours, including a 34KB rewrite) shipped under the rationale that &ldquo;(1) ∧ (2) explains the hang.&rdquo;</p>
+  <rect x="40" y="56" width="420" height="324" class="lane" rx="6"/>
+  <text x="250" y="82" text-anchor="middle" class="v">server-owned handle path</text>
 
-<p>That rationale was theory, not a measured trace. The actual unfound slab UAF was 1006 &ndash; a <code>kfree</code> under <code>raw_spinlock_t</code> in <code>channel_register/deregister_thread</code>. None of 1007-1011&rsquo;s hypotheses were correct about the original symptom. Worse, the 1007-1011 series introduced a new UAF (the CHANNEL_REPLY UAF that 1009 ultimately fixed) that only existed because channels had been added at all.</p>
+  <rect x="80" y="104" width="340" height="60" class="srv" rx="6"/>
+  <text x="250" y="128" text-anchor="middle" class="t">named / inherited / cross-process Win32 sync handle</text>
+  <text x="250" y="146" text-anchor="middle" class="s">wineserver remains the authority that created the object</text>
 
-<p>All of 1007-1011 were rolled back. The proper sequence was then:</p>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="250" y1="164" x2="250" y2="192" class="line"/>
 
-<ol>
-<li><strong>First</strong>, KASAN-clean the alloc/free sites under raw_spinlock_t (the actual bug). That became patch 1006.</li>
-<li><strong>Then</strong>, with KASAN now usable as an oracle, run the stress tests. Each splat or hang is now a real bug, not slab dust.</li>
-<li><strong>One bug per patch</strong>, surgical, with the test that found it as the validation gate. 1007 / 1008 / 1009 each fix exactly one KASAN- or test-confirmed bug.</li>
-</ol>
+  <rect x="80" y="192" width="340" height="70" class="mid" rx="6"/>
+  <text x="250" y="216" text-anchor="middle" class="t">server `inproc_sync` object + ntsync fd</text>
+  <text x="250" y="234" text-anchor="middle" class="s">`server/inproc_sync.c` owns the fd and exposes it via `get_inproc_sync_fd`</text>
+  <text x="250" y="252" text-anchor="middle" class="s">one-time wineserver lookup on first consumer-side use</text>
+
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="250" y1="262" x2="250" y2="292" class="line"/>
+
+  <rect x="80" y="292" width="340" height="60" class="srv" rx="6"/>
+  <text x="250" y="316" text-anchor="middle" class="t">ntdll `inproc_sync` cache entry</text>
+  <text x="250" y="334" text-anchor="middle" class="s">later waits and signals bypass wineserver and reuse the cached fd</text>
+
+  <rect x="520" y="56" width="420" height="324" class="lane" rx="6"/>
+  <text x="730" y="82" text-anchor="middle" class="g">client-created anonymous path</text>
+
+  <rect x="560" y="104" width="340" height="60" class="cli" rx="6"/>
+  <text x="730" y="128" text-anchor="middle" class="t">anonymous `NtCreateMutex` / `NtCreateSemaphore` / `NtCreateEvent`</text>
+  <text x="730" y="146" text-anchor="middle" class="s">event path is shipped default-on via `NSPA_NT_LOCAL_EVENT=1` (`=0` disables)</text>
+
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="730" y1="164" x2="730" y2="192" class="line"/>
+
+  <rect x="560" y="192" width="340" height="70" class="cli" rx="6"/>
+  <text x="730" y="216" text-anchor="middle" class="t">ntdll allocates client-range handle and issues `NTSYNC_IOC_CREATE_*`</text>
+  <text x="730" y="234" text-anchor="middle" class="s">fd is cached immediately; no wineserver round-trip to mint the object</text>
+  <text x="730" y="252" text-anchor="middle" class="s">anonymous events also register their fd with wineserver for async completion</text>
+
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="730" y1="262" x2="730" y2="292" class="line"/>
+
+  <rect x="560" y="292" width="340" height="60" class="cli" rx="6"/>
+  <text x="730" y="316" text-anchor="middle" class="t">same ntdll `inproc_sync` cache shape</text>
+  <text x="730" y="334" text-anchor="middle" class="s">waits and signals go straight to `/dev/ntsync` from the first operation</text>
+
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="250" y1="380" x2="250" y2="410" class="guide"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="730" y1="380" x2="730" y2="410" class="guide"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="250" y1="410" x2="730" y2="410" class="guide"/>
+
+  <rect x="220" y="402" width="540" height="52" class="note" rx="6"/>
+  <text x="490" y="426" text-anchor="middle" class="y">both paths converge on the same wait / signal helpers</text>
+  <text x="490" y="442" text-anchor="middle" class="s">`dlls/ntdll/unix/sync.c` drives the same `/dev/ntsync` ioctls in both cases</text>
+</svg>
+</div>
 
 
-<h3 id="operating-principle">Operating principle</h3>
+<h3 id="112-server-owned-sync-handles">11.2 Server-owned sync handles</h3>
 
-<p>When chasing an unidentified bug, narrow on the actual symptom (trace / KASAN / ftrace / repro) &ndash; do not pile speculative fixes from adjacent code review under the cover of &ldquo;while I was in there, I noticed&hellip;&rdquo;. Even when the audit is internally well-reasoned, the issues it surfaces are almost certainly unrelated to the observed symptom &ndash; and shipping them piles new failure modes on top of the original one.</p>
+<p>Server-owned sync objects still exist because some Win32 handles are not
+purely local: named objects, inherited handles, and cross-process
+objects all need wineserver as the authoritative creator and
+bookkeeper. That does <strong>not</strong> mean every wait on those objects keeps
+round-tripping through wineserver.</p>
 
-<p>Independent CRIT findings can still be filed as separate tickets/patches, but they should not ship until the original symptom is understood. At minimum: do not ship them on the same day, on top of an unfound bug, in the same module.</p>
+<p><code>server/inproc_sync.c</code> attaches an ntsync-backed <code>struct inproc_sync</code>
+object to the server object and keeps the fd alive there. On the client
+side, <code>get_inproc_sync()</code> first tries a lock-free cache lookup. On a
+miss, ntdll enters the protected <code>fd_cache_mutex</code> section, asks
+wineserver for <code>get_inproc_sync_fd</code>, receives the fd once, and then
+caches <code>(handle -&gt; fd, type, access)</code> locally.</p>
 
-<p>A small surface area that is clearly correct in isolation (e.g. a refcount discipline patch with a real KASAN trace) can ship &ndash; but only after asking: &ldquo;is this fixing damage I caused with adjacent work, or real upstream-relevant correctness?&rdquo; 1009 was the latter.</p>
+<p>The important steady-state property is: <strong>server-owned does not mean
+server-waited</strong>. Once the fd is cached, <code>NtWaitForSingleObject</code>,
+<code>NtWaitForMultipleObjects</code>, <code>NtSetEvent</code>, <code>NtReleaseSemaphore</code>, and the
+other supported paths all go straight to <code>/dev/ntsync</code>.</p>
 
-<p>This is also why 1006 was safe to ship in-flurry while the rolled-back 1007-1011 wasn&rsquo;t: 1006 has an oracle (<code>CONFIG_DEBUG_ATOMIC_SLEEP</code>), the rolled-back series had only Codex&rsquo;s argument.</p>
+<p>Two details keep the cache safe:</p>
 
-<h3 id="reference">Reference</h3>
+<ul>
+<li>the cache entry carries a refcount and <code>closed</code> bit so handle reuse
+does not return a stale fd after <code>NtClose</code></li>
+<li>the miss path is protected by <code>fd_cache_mutex</code> plus an uninterrupted
+section so fd receipt cannot race with handle close or concurrent fd
+caching</li>
+</ul>
 
-<p><code>feedback_dont_shotgun_audit_into_unfound_bug.md</code> in the project memory documents this lesson in operational terms.</p>
 
-<hr />
+<h3 id="113-client-created-anonymous-sync-handles">11.3 Client-created anonymous sync handles</h3>
 
-<h2 id="12-wine-consumer-side">12. Wine Consumer Side</h2>
+<p>For anonymous objects, Wine-NSPA can skip wineserver even at creation
+time.</p>
 
-<p>The Wine-side ntsync integration lives in <code>dlls/ntdll/unix/sync.c</code>. Most of it is upstream (Wine&rsquo;s own ntsync support landed in 11.x); NSPA&rsquo;s overlay touches a handful of paths.</p>
+<p><code>alloc_client_handle()</code> hands out values from a client-private handle
+range that is disjoint from server handles. ntdll then issues the
+kernel create ioctl itself:</p>
+
+<ul>
+<li><code>NTSYNC_IOC_CREATE_MUTEX</code></li>
+<li><code>NTSYNC_IOC_CREATE_SEM</code></li>
+<li><code>NTSYNC_IOC_CREATE_EVENT</code></li>
+</ul>
+
+
+<p>and stores the returned fd directly in the same <code>inproc_sync</code> cache that
+the server-owned path uses.</p>
+
+<p>The current shipped rules are:</p>
+
+<ul>
+<li>anonymous mutexes: client-created</li>
+<li>anonymous semaphores: client-created</li>
+<li>anonymous events: client-created when <code>NSPA_NT_LOCAL_EVENT</code> is left at
+its default-on setting; <code>NSPA_NT_LOCAL_EVENT=0</code> forces the older
+wineserver-created event path</li>
+<li>named or inheritable objects: stay on the server path</li>
+</ul>
+
+
+<p>There are two extra pieces of bookkeeping in this path:</p>
+
+<ul>
+<li>client-created mutexes are tracked in <code>client_mutex_list</code> so thread
+exit can issue <code>NTSYNC_IOC_MUTEX_KILL</code> and preserve abandoned-mutex
+semantics</li>
+<li>client-created events register their fd with wineserver so server-side
+async completion can signal them directly instead of failing on a
+client-range handle</li>
+</ul>
+
+
+<h3 id="114-wait-and-signal-execution">11.4 Wait and signal execution</h3>
+
+<p>The steady-state wait helper is <code>inproc_wait()</code>. It resolves each handle
+to an fd with <code>get_inproc_sync()</code>, collects an optional alert fd, adds
+the optional <code>io_uring</code> eventfd, and then calls <code>linux_wait_objs()</code>.</p>
+
+<p>That means the full wait path is already a <em>userspace + kernel</em> design,
+not just a kernel one:</p>
+
+<ul>
+<li>ntdll does handle-to-fd resolution and cache management</li>
+<li><code>linux_wait_objs()</code> issues <code>NTSYNC_IOC_WAIT_ANY</code> / <code>WAIT_ALL</code></li>
+<li>if ntsync wakes because the <code>io_uring</code> eventfd fired, ntdll drains
+CQEs and re-enters the wait</li>
+</ul>
+
+
+<p>Signal-side helpers follow the same shape. <code>inproc_signal_and_wait()</code>
+releases or signals the source object directly with the matching ioctl,
+then waits on the destination object with the same in-process wait path.</p>
+
+<p>For cross-thread wakeups inside Wine, <code>wine_server_signal_internal_sync()</code>
+is the high-level entry point. If the current thread is running with an
+RT policy and priority, it tries <code>NTSYNC_IOC_EVENT_SET_PI</code>; otherwise it
+falls back to plain <code>EVENT_SET</code>. That is the userspace half of the
+deferred-boost behavior described in section 8.</p>
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 980 430" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
+  <style>
+    .bg { fill: #1a1b26; }
+    .box { fill: #24283b; stroke: #7aa2f7; stroke-width: 1.8; rx: 8; }
+    .fast { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
+    .mid { fill: #1f2535; stroke: #bb9af7; stroke-width: 1.8; rx: 8; }
+    .note { fill: #2a2418; stroke: #e0af68; stroke-width: 1.6; rx: 8; }
+    .t { fill: #c0caf5; font: 11px 'JetBrains Mono', monospace; }
+    .s { fill: #a9b1d6; font: 9px 'JetBrains Mono', monospace; }
+    .h { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
+    .g { fill: #9ece6a; font: bold 10px 'JetBrains Mono', monospace; }
+    .v { fill: #bb9af7; font: bold 10px 'JetBrains Mono', monospace; }
+    .y { fill: #e0af68; font: bold 10px 'JetBrains Mono', monospace; }
+    .line { stroke: #c0caf5; stroke-width: 1.2; fill: none; }
+  </style>
+
+  <rect x="0" y="0" width="980" height="430" class="bg" rx="6"/>
+  <text x="490" y="26" text-anchor="middle" class="h">Userspace wait / signal path on top of ntsync</text>
+
+  <rect x="80" y="76" width="240" height="78" class="box" rx="6"/>
+  <text x="200" y="102" text-anchor="middle" class="t">Win32 call site</text>
+  <text x="200" y="124" text-anchor="middle" class="s">`NtWait*`, `SignalObjectAndWait`, queue wake, async completion wake</text>
+
+  <rect x="370" y="76" width="240" height="78" class="mid" rx="6"/>
+  <text x="490" y="102" text-anchor="middle" class="v">ntdll `inproc_sync` layer</text>
+  <text x="490" y="124" text-anchor="middle" class="s">cache lookup, access/type check, optional server fd fetch on miss</text>
+
+  <rect x="660" y="76" width="240" height="78" class="fast" rx="6"/>
+  <text x="780" y="102" text-anchor="middle" class="g">`linux_wait_objs()` / direct signal helper</text>
+  <text x="780" y="124" text-anchor="middle" class="s">issues `WAIT_ANY` / `WAIT_ALL` / `EVENT_SET(_PI)` / unlock / release ioctls</text>
+
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="320" y1="115" x2="370" y2="115" class="line"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="610" y1="115" x2="660" y2="115" class="line"/>
+
+  <rect x="180" y="224" width="220" height="86" class="box" rx="6"/>
+  <text x="290" y="248" text-anchor="middle" class="t">wait side</text>
+  <text x="290" y="268" text-anchor="middle" class="s">optional alert fd</text>
+  <text x="290" y="286" text-anchor="middle" class="s">optional `io_uring` eventfd</text>
+
+  <rect x="430" y="224" width="220" height="86" class="mid" rx="6"/>
+  <text x="540" y="248" text-anchor="middle" class="t">kernel wake result</text>
+  <text x="540" y="268" text-anchor="middle" class="s">object signaled, alert fired, or `STATUS_URING_COMPLETION`</text>
+  <text x="540" y="286" text-anchor="middle" class="s">CQE wake loops back through ntdll drain and re-wait</text>
+
+  <rect x="680" y="224" width="220" height="86" class="fast" rx="6"/>
+  <text x="790" y="248" text-anchor="middle" class="g">signal side</text>
+  <text x="790" y="268" text-anchor="middle" class="s">direct event set / mutex unlock / semaphore release</text>
+  <text x="790" y="286" text-anchor="middle" class="s">`EVENT_SET_PI` used when caller is RT and priority-known</text>
+
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="490" y1="154" x2="490" y2="188" class="line"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="490" y1="188" x2="290" y2="188" class="line"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="290" y1="188" x2="290" y2="224" class="line"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="780" y1="154" x2="780" y2="188" class="line"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="780" y1="188" x2="790" y2="188" class="line"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="790" y1="188" x2="790" y2="224" class="line"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="400" y1="266" x2="430" y2="266" class="line"/>
+
+  <rect x="200" y="340" width="580" height="56" class="note" rx="6"/>
+  <text x="490" y="364" text-anchor="middle" class="y">steady state is direct once a handle resolves to an ntsync fd</text>
+  <text x="490" y="380" text-anchor="middle" class="s">waits and signals bypass wineserver until close</text>
+</svg>
+</div>
+
+
+<h3 id="115-coverage-boundary">11.5 Coverage boundary</h3>
+
+<p>The important testing split is:</p>
+
+<ul>
+<li><strong>PE-side wait coverage</strong> exercises the userspace path above. The
+<code>nspa_rt_test.exe ntsync</code> harness creates Win32 mutexes, semaphores,
+and events, resolves them through <code>inproc_wait()</code>, and then hits
+<code>linux_wait_objs()</code> / the direct signal helpers.</li>
+<li><strong>queue-wake and local-event coverage</strong> exercises the direct event
+signal path (<code>wine_server_signal_internal_sync()</code> and the registered
+event-fd path used by async completion).</li>
+<li><strong>native ntsync tests</strong> exercise raw kernel behavior that the Win32
+surface cannot reach directly: staged <code>EVENT_SET_PI</code>, channel races,
+aggregate-wait source ordering, and the hardening bugs from 1007-1009.</li>
+</ul>
+
 
 <h3 id="linux_wait_objs">linux_wait_objs</h3>
 
-<p>The wait wrapper is largely unchanged from upstream. NSPA&rsquo;s only addition is the <code>uring_fd</code> parameter (passed via the repurposed <code>pad</code> field) that lets a single <code>WAIT_ANY</code> call wake on either an ntsync object signal or an io_uring CQE. See <code>ntsync-driver.gen.html</code> Section 7 for the original 1003-era discussion of <code>uring_fd</code>.</p>
+<p>The wait wrapper is largely unchanged from upstream. NSPA&rsquo;s only addition is the <code>uring_fd</code> parameter (passed via the repurposed <code>pad</code> field) that lets a single <code>WAIT_ANY</code> call wake on either an ntsync object signal or an io_uring CQE.</p>
 
 <pre><code class="code-block">static NTSTATUS linux_wait_objs(int device, DWORD count, const int *objs,
                                 WAIT_TYPE type, int alert_fd, int uring_fd,
@@ -1559,7 +1787,11 @@ functionally correct on the one-entry-per-wake path.</p>
 }
 </code></pre>
 
-<p>The user-space code is deliberately oblivious to the kernel-side EVENT_SET_PI staging machinery added by 1008. Wine just calls <code>WAIT_ANY</code> / <code>WAIT_ALL</code>; the kernel handles boost consumption transparently in the unqueue loop. No Wine-side change was needed for 1008.</p>
+<p>The user-space code is deliberately oblivious to the kernel-side
+<code>EVENT_SET_PI</code> staging machinery added by 1008. Wine just calls
+<code>WAIT_ANY</code> / <code>WAIT_ALL</code>; the kernel handles boost consumption
+transparently in the unqueue loop. No Wine-side change was needed for
+1008.</p>
 
 <h3 id="linux_set_event_obj_pi">linux_set_event_obj_pi</h3>
 
@@ -1580,13 +1812,23 @@ functionally correct on the one-entry-per-wake path.</p>
 }
 </code></pre>
 
-<p>This is called from the gamma dispatcher path when an RT audio thread signals a queue event to the dispatcher pthread. The audio thread passes its own <code>(SCHED_FIFO, prio)</code>; the kernel stages the boost on the event; the dispatcher consumes the signal in its <code>WAIT_ANY</code> and gets boosted at wait-return.</p>
+<p>This is called from the gamma dispatcher path when an RT audio thread
+signals a queue event to the dispatcher pthread. The audio thread
+passes its own <code>(SCHED_FIFO, prio)</code>; the kernel stages the boost on the
+event; the dispatcher consumes the signal in its <code>WAIT_ANY</code> and gets
+boosted at wait-return.</p>
 
-<p>After 1008, this path is bulletproof against the fast-path race: even if the dispatcher pthread takes <code>obj_lock</code> first and sees <code>signaled=true</code>, it consumes the staged boost in the unqueue loop on its way out. The 4% boost-miss rate disappears.</p>
+<p>After 1008, this path is bulletproof against the fast-path race: even
+if the dispatcher pthread takes <code>obj_lock</code> first and sees
+<code>signaled=true</code>, it consumes the staged boost in the unqueue loop on
+its way out. The 4% boost-miss rate disappears.</p>
 
 <h3 id="channel-ioctl-wrappers">Channel ioctl wrappers</h3>
 
-<p>The wineserver dispatcher uses the channel ioctls directly via <code>ioctl()</code> calls; there is no portable <code>linux_channel_*</code> helper at the Wine ntdll layer because channels are wineserver-process-private (they don&rsquo;t cross the wineserver-client boundary as Win32 handles).</p>
+<p>The wineserver dispatcher uses the channel ioctls directly via
+<code>ioctl()</code> calls; there is no portable <code>linux_channel_*</code> helper at the
+Wine ntdll layer because channels are wineserver-process-private (they
+don&rsquo;t cross the wineserver-client boundary as Win32 handles).</p>
 
 <p>The dispatcher loop calls:</p>
 
@@ -1595,17 +1837,22 @@ functionally correct on the one-entry-per-wake path.</p>
 ioctl(channel_fd, NTSYNC_IOC_CHANNEL_REPLY, &amp;args.entry_id);
 </code></pre>
 
-<p>with <code>RECV</code> as fallback if <code>RECV2</code> returns <code>-ENOTTY</code> (old kernel without 1005). The client-side <code>SEND_PI</code> is invoked from the wineserver request-marshalling fast path; the client&rsquo;s RT thread blocks in the kernel until reply.</p>
+<p>with <code>RECV</code> as fallback if <code>RECV2</code> returns <code>-ENOTTY</code> (old kernel
+without 1005). The client-side <code>SEND_PI</code> is invoked from the wineserver
+request-marshalling fast path; the client&rsquo;s RT thread blocks in the
+kernel until reply.</p>
 
 <h3 id="alloc_client_handle">alloc_client_handle</h3>
 
-<p>Client-side ntsync object creation (mutexes / semaphores) bypasses the wineserver entirely &ndash; a 1003-era optimization. The handle pool uses <code>InterlockedDecrement(&amp;client_handle_next)</code> to allocate negative handle values that don&rsquo;t collide with server-allocated handles. Wait operations (<code>NtWaitForSingleObject</code>) resolve the handle to a cached FD via <code>inproc_wait()</code>, then call <code>linux_wait_objs()</code> which issues the kernel ioctl directly.</p>
+<p>Client-side ntsync object creation uses <code>InterlockedDecrement(&amp;client_handle_next)</code> to allocate client-range handles that don&rsquo;t collide with server-allocated handles. Wait operations (<code>NtWaitForSingleObject</code>) resolve the handle to a cached fd via <code>inproc_wait()</code>, then call <code>linux_wait_objs()</code> which issues the kernel ioctl directly.</p>
 
-<p>Currently enabled for mutexes and semaphores. Event objects are client-capable at the kernel level but disabled in the Wine client due to historic stability issues with certain applications (Ableton Live).</p>
+<p>Currently enabled for anonymous mutexes and semaphores, plus anonymous
+events when <code>NSPA_NT_LOCAL_EVENT</code> is left at its shipped default-on
+setting.</p>
 
 <hr />
 
-<h2 id="13-validation">13. Validation</h2>
+<h2 id="12-validation">12. Validation</h2>
 
 <h3 id="module-srcversion-lineage">Module srcversion lineage</h3>
 
@@ -1641,7 +1888,7 @@ ioctl(channel_fd, NTSYNC_IOC_CHANNEL_REPLY, &amp;args.entry_id);
 <tr>
 <td> <code>CFF56DE1EF28D693BB597CD</code>   </td>
 <td> + 1010 + post-1010 PI follow-ups</td>
-<td> aggregate-wait production module; dispatcher Phase 3 default-on   </td>
+<td> aggregate-wait production module; same-thread dispatcher default-on </td>
 </tr>
 <tr>
 <td> <code>10124FB81FDC76797EF1F91</code>   </td>
@@ -1762,7 +2009,7 @@ ioctl(channel_fd, NTSYNC_IOC_CHANNEL_REPLY, &amp;args.entry_id);
 
 <p>Cumulative debug-kernel: ~30 million operations, zero KASAN splats post-Bug 4 fix.</p>
 
-<h3 id="production-validation-after-1010--1011">Production validation after 1010 / 1011</h3>
+<h3 id="production-validation-after-aggregate-wait-and-burst-drain">Production validation after aggregate-wait and burst-drain</h3>
 
 <p>The aggregate-wait consumer path was validated on the production
 kernel/userspace pair rather than only in isolation:</p>
@@ -1776,8 +2023,8 @@ kernel/userspace pair rather than only in isolation:</p>
 <li><code>dispatcher-burst</code> in the PE matrix gives a reproducible A/B for the
 dispatcher path itself; burst ops/sec is 841,765 with TRY_RECV2 on vs
 555,567 with TRY_RECV2 off (+34% / 1.5x)</li>
-<li>Phase 3 gamma dispatcher default-on under Ableton PASS</li>
-<li>Phase 4 async <code>create_file</code> + TRY_RECV2 under Ableton PASS</li>
+<li>aggregate-wait gamma dispatcher default-on under Ableton PASS</li>
+<li>async <code>create_file</code> plus <code>TRY_RECV2</code> under Ableton PASS</li>
 <li>dmesg clean after 30k stress + native suite</li>
 </ul>
 
@@ -1942,7 +2189,7 @@ post-soak.</strong></p>
 
 <h3 id="original-1003-era-pi-metrics-still-valid">Original 1003-era PI metrics (still valid)</h3>
 
-<p>The PI contention / priority wakeup ordering / rapid mutex throughput / philosophers tests from the original <code>ntsync-driver.gen.html</code> remain valid. None of patches 1004-1009 touched the mutex PI path; the metrics are unchanged:</p>
+<p>The PI contention / priority wakeup ordering / rapid mutex throughput / philosophers tests from the original <code>ntsync-driver.gen.html</code> remain valid. None of the later channel or aggregate-wait carries changed the mutex PI path; the metrics are unchanged:</p>
 
 <table>
 <thead>
@@ -1989,6 +2236,55 @@ post-soak.</strong></p>
 
 
 <p>Priority wakeup ordering is exact (5 waiters at distinct priorities wake in priority order, both baseline and RT modes, all test runs). PI chain propagation is correct up to depth 12.</p>
+
+<hr />
+
+<h2 id="13-audit-notes">13. Audit notes</h2>
+
+<p>The patches in this stack divide cleanly into two categories. The boundary matters because it dictates which patches were safe to ship in a flurry and which weren&rsquo;t.</p>
+
+<h3 id="mechanically-verifiable-correctness-vs-code-review-hypothesis">Mechanically verifiable correctness vs. code-review hypothesis</h3>
+
+<p>Patches in the <strong>mechanically verifiable</strong> category enforce a rule that has an oracle. If the rule is violated, kernel debug infra (<code>CONFIG_DEBUG_ATOMIC_SLEEP</code>, <code>LOCKDEP</code>, <code>KASAN</code>) will splat. The patch either makes the splat go away or it doesn&rsquo;t; there is no ambiguity.</p>
+
+<ul>
+<li><strong>1006</strong> (RT alloc-hoist) enforces &ldquo;no sleeping alloc/free under <code>raw_spinlock_t</code> on PREEMPT_RT&rdquo;. <code>CONFIG_DEBUG_ATOMIC_SLEEP</code> will splat on a violation. Mechanical.</li>
+<li><strong>1009</strong> (channel_entry refcount) closes a UAF that KASAN catches by construction. The fix is a textbook refcount discipline. Mechanical.</li>
+<li><strong>1008</strong> (EVENT_SET_PI deferred boost) closes a measurable flake (4% miss rate on a deterministic test). The fix removes a code path with a known race; the test now passes 100%. Mechanical (the test is the oracle).</li>
+<li><strong>1007</strong> (channel exclusive recv) closes a deterministic-hang test that was stale-coded around the buggy behaviour. The fix is a 3-LOC swap to a kernel primitive (<code>wait_event_interruptible_exclusive</code>) whose semantics are documented and obvious. Mechanical.</li>
+</ul>
+
+
+<p>Patches in the <strong>code-review hypothesis</strong> category encode a reviewer&rsquo;s argument that some code is buggy. There is no oracle. If the reviewer&rsquo;s argument is wrong (or the bug is somewhere else), the patch ships new bugs without fixing the original one.</p>
+
+<h3 id="the-rolled-back-codex-1007-1011-series">The rolled-back Codex 1007-1011 series</h3>
+
+<p>On 2026-04-26 there was an unfound EVENT_SET_PI slab UAF (<code>___slab_alloc+0x316</code> GP-fault, <code>ntsync_obj_ioctl+0x44e</code>). KASAN was queued but not yet run. Codex&rsquo;s review surfaced three &ldquo;other issues&rdquo; (cross-snapshot PI, non-exclusive RECV, channel-accept-in-<code>setup_wait</code>), and patches 1007-1011 (5 patches in 6 hours, including a 34KB rewrite) shipped under the rationale that &ldquo;(1) ∧ (2) explains the hang.&rdquo;</p>
+
+<p>That rationale was theory, not a measured trace. The actual unfound slab UAF was 1006 &ndash; a <code>kfree</code> under <code>raw_spinlock_t</code> in <code>channel_register/deregister_thread</code>. None of 1007-1011&rsquo;s hypotheses were correct about the original symptom. Worse, the 1007-1011 series introduced a new UAF (the CHANNEL_REPLY UAF that 1009 ultimately fixed) that only existed because channels had been added at all.</p>
+
+<p>All of 1007-1011 were rolled back. The proper sequence was then:</p>
+
+<ol>
+<li><strong>First</strong>, KASAN-clean the alloc/free sites under raw_spinlock_t (the actual bug). That became patch 1006.</li>
+<li><strong>Then</strong>, with KASAN now usable as an oracle, run the stress tests. Each splat or hang is now a real bug, not slab dust.</li>
+<li><strong>One bug per patch</strong>, surgical, with the test that found it as the validation gate. 1007 / 1008 / 1009 each fix exactly one KASAN- or test-confirmed bug.</li>
+</ol>
+
+
+<h3 id="operating-principle">Operating principle</h3>
+
+<p>When chasing an unidentified bug, narrow on the actual symptom (trace / KASAN / ftrace / repro) &ndash; do not pile speculative fixes from adjacent code review under the cover of &ldquo;while I was in there, I noticed&hellip;&rdquo;. Even when the audit is internally well-reasoned, the issues it surfaces are almost certainly unrelated to the observed symptom &ndash; and shipping them piles new failure modes on top of the original one.</p>
+
+<p>Independent CRIT findings can still be filed as separate tickets/patches, but they should not ship until the original symptom is understood. At minimum: do not ship them on the same day, on top of an unfound bug, in the same module.</p>
+
+<p>A small surface area that is clearly correct in isolation (e.g. a refcount discipline patch with a real KASAN trace) can ship &ndash; but only after asking: &ldquo;is this fixing damage I caused with adjacent work, or real upstream-relevant correctness?&rdquo; 1009 was the latter.</p>
+
+<p>This is also why 1006 was safe to ship in-flurry while the rolled-back 1007-1011 wasn&rsquo;t: 1006 has an oracle (<code>CONFIG_DEBUG_ATOMIC_SLEEP</code>), the rolled-back series had only Codex&rsquo;s argument.</p>
+
+<h3 id="reference">Reference</h3>
+
+<p><code>feedback_dont_shotgun_audit_into_unfound_bug.md</code> in the project memory documents this lesson in operational terms.</p>
 
 <hr />
 

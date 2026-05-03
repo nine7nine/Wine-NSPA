@@ -108,10 +108,6 @@
 <div class="page-nav"><a href="index.html">Docs Home</a></div>
 <h1 id="wine-nspa-audio-stack">Wine-NSPA Audio Stack</h1>
 
-<p>Wine 11.6 + NSPA | JACK 1.x / PipeWire-JACK | PREEMPT_RT kernel | 2026-04-27
-Author: Jordan Johnston
-Status: current audio-stack reference for the shipped JACK/WASAPI/nspaASIO path, including the low-latency Phase F route.</p>
-
 <p>This page explains how Wine-NSPA moves Windows audio through winejack, how nspaASIO fits into that stack, and which timing-critical work stays inside the JACK callback.</p>
 
 <h2 id="table-of-contents">Table of Contents</h2>
@@ -125,7 +121,7 @@ Status: current audio-stack reference for the shipped JACK/WASAPI/nspaASIO path,
 <li><a href="#6-exclusive-mode-and-the-fast-path">Exclusive mode and the fast path</a></li>
 <li><a href="#7-midi">MIDI</a></li>
 <li><a href="#8-nspaasio-the-asio-bridge">nspaASIO: the ASIO bridge</a></li>
-<li><a href="#9-phase-f-zero-latency-bufferswitch-in-the-jack-callback">Phase F: zero-latency bufferSwitch in the JACK callback</a></li>
+<li><a href="#9-direct-callback-path-zero-latency-bufferswitch-in-the-jack-callback">Direct callback path: zero-latency bufferSwitch in the JACK callback</a></li>
 <li><a href="#10-intentionally-unimplemented-surfaces">Intentionally unimplemented surfaces</a></li>
 <li><a href="#11-deferred-work">Deferred work</a></li>
 <li><a href="#12-other-audio-drivers">Other audio drivers</a></li>
@@ -145,7 +141,7 @@ Status: current audio-stack reference for the shipped JACK/WASAPI/nspaASIO path,
 <ol>
 <li><strong>winejack.drv</strong> is a Wine audio driver that exposes a JACK backend to Wine&rsquo;s WASAPI surface and to WinMM MIDI. It replaces the role that <code>winealsa.drv</code> and <code>winepulse.drv</code> play in upstream Wine. One driver, two transports: WASAPI audio over JACK audio ports, and WinMM MIDI over JACK MIDI ports.</li>
 <li><strong>nspaASIO</strong> is a vendored ASIO driver shipped as <code>dlls/nspaasio</code>. It implements the COM <code>IASIO</code> interface that DAWs probe for, and routes the ASIO callback model into a path that ends at <code>winejack.drv</code> and JACK. It does not ship its own JACK client; it delegates to winejack so that ASIO and WASAPI applications share a single transport.</li>
-<li><strong>Phase F</strong> is the design that closes the loop on latency. Instead of bouncing audio data through an intermediate ring buffer, Phase F dispatches the ASIO <code>bufferSwitch</code> callback directly inside the JACK process callback, with a small futex-based handshake to wake the application&rsquo;s process thread. The data written by the host comes out the same JACK period it went in.</li>
+<li><strong>The direct callback path</strong> closes the loop on latency. Instead of bouncing audio data through an intermediate ring buffer, it dispatches the ASIO <code>bufferSwitch</code> callback directly inside the JACK process callback, with a small futex-based handshake to wake the application&rsquo;s process thread. The data written by the host comes out the same JACK period it went in.</li>
 </ol>
 
 
@@ -191,7 +187,7 @@ Status: current audio-stack reference for the shipped JACK/WASAPI/nspaASIO path,
 <p><strong>ASIO</strong> (DAWs and plugin hosts that prefer the ASIO callback model: Reaper, Ableton, Cubase, FL Studio):</p>
 
 <pre><code class="code-block">Win32 app -&gt; COM IASIO -&gt; nspaASIO
-          -&gt; Phase F registration with winejack.drv
+          -&gt; direct callback registration with winejack.drv
           -&gt; JACK process callback dispatches bufferSwitch in-band
           -&gt; JACK audio ports
           -&gt; JACK RT engine
@@ -208,7 +204,7 @@ Status: current audio-stack reference for the shipped JACK/WASAPI/nspaASIO path,
 
 <p>WinMM MIDI is a separate JACK client (<code>wine-midi</code>) from the audio one (<code>wine-audio</code>). They have separate process callbacks, separate lifecycles, and separate port sets. Sharing a single client for audio and MIDI is possible but offers no real benefit &ndash; JACK callbacks are cheap, and decoupling lets MIDI come up before audio is initialized and stay up after audio shuts down.</p>
 
-<p>The three flavors above resolve into a single layered data path. Every Win32 audio API ultimately funnels through <code>mmdevapi</code> into <code>winejack.drv</code>&rsquo;s Unix side, which holds the JACK client and the per-period process callback. Phase F shortcuts ASIO data past the WASAPI ring while still re-using the same JACK client, the same port set, and the same process callback. The diagram below shows the layering and which boundary each API surface enters at.</p>
+<p>The three flavors above resolve into a single layered data path. Every Win32 audio API ultimately funnels through <code>mmdevapi</code> into <code>winejack.drv</code>&rsquo;s Unix side, which holds the JACK client and the per-period process callback. The direct callback path shortcuts ASIO data past the WASAPI ring while still re-using the same JACK client, the same port set, and the same process callback. The diagram below shows the layering and which boundary each API surface enters at.</p>
 
 <div class="diagram-container">
 <svg width="100%" viewBox="0 0 940 580" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
@@ -226,9 +222,9 @@ Status: current audio-stack reference for the shipped JACK/WASAPI/nspaASIO path,
     .box-driver { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; }
     .box-jack { fill: #1f2535; stroke: #7dcfff; stroke-width: 1.5; }
     .box-hw { fill: #2a2418; stroke: #e0af68; stroke-width: 1.5; }
-    .conn { stroke: #565f89; stroke-width: 1.4; }
-    .conn-fast { stroke: #bb9af7; stroke-width: 1.6; stroke-dasharray: 6 3; }
-    .divider { stroke: #3b4261; stroke-width: 1; stroke-dasharray: 4 4; }
+    .conn { stroke: #565f89; stroke-width: 1.15; }
+    .conn-fast { stroke: #bb9af7; stroke-width: 1.15; stroke-dasharray: 6 3; }
+    .divider { stroke: #3b4261; stroke-width: 0.9; stroke-dasharray: 4 4; }
   </style>
 
   <text x="470" y="26" text-anchor="middle" class="lbl-hdr">Wine-NSPA audio data path -- three API surfaces, one JACK transport</text>
@@ -324,9 +320,9 @@ Status: current audio-stack reference for the shipped JACK/WASAPI/nspaASIO path,
 
 <p>The driver is registered in <code>configure.ac</code> and links against <code>libjack</code>. It builds as <code>winejack.so</code> and ships alongside the other Wine DLLs.</p>
 
-<h3 id="phase-1-vs-phase-2">Phase 1 vs Phase 2</h3>
+<h3 id="midi-first-then-audio">MIDI first, then audio</h3>
 
-<p>The driver was implemented in two phases. <strong>Phase 1</strong> delivered MIDI &ndash; <code>jackmidi.c</code> and the MIDI half of <code>unixlib.h</code>. During Phase 1, audio still went through <code>winealsa.drv</code> (with a small delegation that let <code>winealsa.drv</code> ask <code>winejack.drv</code> for its MIDI driver via <code>NSPA_JACK_MIDI=1</code>), so applications could get JACK MIDI without depending on the audio side. <strong>Phase 2</strong> delivered WASAPI audio &ndash; the function-table entries in <code>jack.c</code>, the stream lifecycle, and the JACK audio process callback. After Phase 2, MIDI and audio share <code>winejack.drv</code> as a single Wine driver, and <code>winealsa.drv</code>&rsquo;s MIDI delegation is no longer the recommended path.</p>
+<p>The driver landed in two major slices. The first delivered MIDI &ndash; <code>jackmidi.c</code> and the MIDI half of <code>unixlib.h</code>. At that point audio still went through <code>winealsa.drv</code> (with a small delegation that let <code>winealsa.drv</code> ask <code>winejack.drv</code> for its MIDI driver via <code>NSPA_JACK_MIDI=1</code>), so applications could get JACK MIDI without depending on the audio side. The second delivered WASAPI audio &ndash; the function-table entries in <code>jack.c</code>, the stream lifecycle, and the JACK audio process callback. After that, MIDI and audio shared <code>winejack.drv</code> as a single Wine driver, and <code>winealsa.drv</code>&rsquo;s MIDI delegation stopped being the recommended path.</p>
 
 <h3 id="internal-layering">Internal layering</h3>
 
@@ -575,8 +571,8 @@ Status: current audio-stack reference for the shipped JACK/WASAPI/nspaASIO path,
     .box-jack { fill: #1f2535; stroke: #7dcfff; stroke-width: 1.5; }
     .box-state { fill: #2a2418; stroke: #e0af68; stroke-width: 1.5; }
     .box-ring { fill: #2a1a1a; stroke: #f7768e; stroke-width: 1.5; }
-    .conn { stroke: #565f89; stroke-width: 1.4; }
-    .conn-ring { stroke: #f7768e; stroke-width: 1.4; }
+    .conn { stroke: #565f89; stroke-width: 1.15; }
+    .conn-ring { stroke: #f7768e; stroke-width: 1.15; }
   </style>
 
   <text x="470" y="24" text-anchor="middle" class="lbl-hdr">WinMM MIDI flow + lifecycle (jackmidi.c, wine-midi JACK client)</text>
@@ -758,19 +754,19 @@ Status: current audio-stack reference for the shipped JACK/WASAPI/nspaASIO path,
 
 <p>The alternative &ndash; having nspaASIO open its own JACK client &ndash; is what <code>wineasio</code> does, and it is a simpler architecture for the ASIO use case alone. But it forks the audio code. The same Wine prefix running an ASIO DAW <em>and</em> a WASAPI media player <em>and</em> a WinMM game now has two JACK clients, two sets of latency-reporting decisions, and two sets of bugs to fix. By going through WASAPI exclusive, nspaASIO and any WASAPI exclusive application share the same <code>winejack.drv</code> code path, the same JACK client, the same format conversion logic, the same locking strategy.</p>
 
-<p>This is the Phase 3 of the original winejack roadmap: Phase 1 was MIDI, Phase 2 was WASAPI audio, Phase 3 was the ASIO bridge that sits on top.</p>
+<p>This is the third major layer of the winejack stack: MIDI first, then WASAPI audio, then the ASIO bridge that sits on top.</p>
 
 <h3 id="whats-in-nspaasioc">What&rsquo;s in <code>nspaasio.c</code></h3>
 
 <p>The file (~1200 lines) implements the <code>IASIO</code> COM vtable: <code>init</code>, <code>start</code>, <code>stop</code>, <code>getChannels</code>, <code>getSampleRate</code>, <code>setSampleRate</code>, <code>getBufferSize</code>, <code>createBuffers</code>, <code>disposeBuffers</code>, <code>controlPanel</code>, <code>future</code>, <code>outputReady</code>, plus the standard COM <code>QueryInterface</code> / <code>AddRef</code> / <code>Release</code>. Most entries are thin &ndash; they translate the ASIO call into a sequence of WASAPI calls or look up a value cached at <code>init</code> time.</p>
 
-<p>The interesting entries are <code>createBuffers</code> and <code>start</code>. <code>createBuffers</code> allocates the ASIO buffer pool (per-channel float32 arrays, size 2 &ndash; the standard ASIO double buffer), sets up the WASAPI exclusive client, and <em>attempts to register with winejack for Phase F</em>. If Phase F registration succeeds, <code>start</code> becomes a thin pass-through; if it fails, <code>start</code> spins up the play_thread that runs the WASAPI fallback loop.</p>
+<p>The interesting entries are <code>createBuffers</code> and <code>start</code>. <code>createBuffers</code> allocates the ASIO buffer pool (per-channel float32 arrays, size 2 &ndash; the standard ASIO double buffer), sets up the WASAPI exclusive client, and <em>attempts to register with winejack for the direct callback path</em>. If that registration succeeds, <code>start</code> becomes a thin pass-through; if it fails, <code>start</code> spins up the play_thread that runs the WASAPI fallback loop.</p>
 
-<h2 id="9-phase-f-zero-latency-bufferswitch-in-the-jack-callback">9. Phase F: zero-latency bufferSwitch in the JACK callback</h2>
+<h2 id="9-direct-callback-path-zero-latency-bufferswitch-in-the-jack-callback">9. Direct callback path: zero-latency bufferSwitch in the JACK callback</h2>
 
-<p>Phase F is the design that gives ASIO applications the same single-period latency as a native JACK client. The idea, in one sentence: <em>don&rsquo;t run the ASIO bufferSwitch on a separate Wine thread that reads from a buffer the JACK callback wrote &ndash; run bufferSwitch from inside the JACK callback itself, with a futex handshake to a Wine thread that supplies the Win32 thread context.</em></p>
+<p>The direct callback path gives ASIO applications the same single-period latency as a native JACK client. The idea, in one sentence: <em>don&rsquo;t run the ASIO bufferSwitch on a separate Wine thread that reads from a buffer the JACK callback wrote &ndash; run bufferSwitch from inside the JACK callback itself, with a futex handshake to a Wine thread that supplies the Win32 thread context.</em></p>
 
-<h3 id="the-problem-phase-f-solves">The problem Phase F solves</h3>
+<h3 id="the-problem-this-path-solves">The problem this path solves</h3>
 
 <p>The pre-Phase-F (slow-path) ASIO chain looks like this:</p>
 
@@ -790,11 +786,11 @@ Next JACK process callback (at time t+period):
 
 <p>The data the host wrote at <code>t+epsilon</code> doesn&rsquo;t come out of JACK until <code>t+period</code>. That&rsquo;s an entire JACK period of added output latency, on top of whatever the JACK period itself is. For a 64-frame period at 48 kHz that&rsquo;s an extra 1.3 ms; for 256 frames it&rsquo;s 5.3 ms. ASIO drivers with their own JACK clients (wineasio) don&rsquo;t have this added period because they run bufferSwitch <em>inside</em> the JACK callback; the WASAPI ring buffer is what costs the period.</p>
 
-<p>Phase F removes the period.</p>
+<p>The direct callback path removes the period.</p>
 
-<h3 id="the-phase-f-architecture">The Phase F architecture</h3>
+<h3 id="the-direct-callback-architecture">The direct callback architecture</h3>
 
-<p>Phase F adds a small registration interface between <code>nspaASIO</code> and <code>winejack.drv</code>. When <code>nspaASIO::createBuffers</code> runs and the conditions are met (float32, JACK rate, channel count fits), nspaASIO calls a winejack-private Unix-side function that registers the ASIO callback&rsquo;s buffer pointers and a handshake state. From that point on, the JACK process callback knows about the ASIO stream and dispatches it in-band.</p>
+<p>The direct callback path adds a small registration interface between <code>nspaASIO</code> and <code>winejack.drv</code>. When <code>nspaASIO::createBuffers</code> runs and the conditions are met (float32, JACK rate, channel count fits), nspaASIO calls a winejack-private Unix-side function that registers the ASIO callback&rsquo;s buffer pointers and a handshake state. From that point on, the JACK process callback knows about the ASIO stream and dispatches it in-band.</p>
 
 <p>Inside one JACK period:</p>
 
@@ -820,7 +816,7 @@ play_thread (thread T_play, Wine, SCHED_FIFO):
 
 <p>There is one structural complication. The JACK callback runs on a Unix thread (<code>pthread</code>-managed by libjack). The play_thread is a Wine PE thread, and the <code>bufferSwitch</code> callback is Win32 code that requires a valid Wine thread context (TEB, TLS, exception handling). The futex handshake has to bridge those two worlds.</p>
 
-<p>A PE thread cannot call <code>syscall(SYS_futex)</code> directly; the syscall path goes through the Wine NT layer. To work around this, Phase F adds four new entries to the audio function table in <code>mmdevapi/unixlib.h</code>:</p>
+<p>A PE thread cannot call <code>syscall(SYS_futex)</code> directly; the syscall path goes through the Wine NT layer. To work around this, the direct callback path adds four new entries to the audio function table in <code>mmdevapi/unixlib.h</code>:</p>
 
 <ul>
 <li><code>register_asio</code> &ndash; nspaASIO&rsquo;s <code>createBuffers</code> calls this with the buffer pointers and channel count</li>
@@ -920,9 +916,9 @@ play_thread (thread T_play, Wine, SCHED_FIFO):
 
 <h3 id="why-the-play_thread-is-needed-at-all">Why the play_thread is needed at all</h3>
 
-<p>A reasonable question is why Phase F doesn&rsquo;t just call <code>bufferSwitch</code> directly from the JACK process callback, with no play_thread. The answer is the Win32 thread context. ASIO host code (the DAW&rsquo;s audio engine, the plugin chain, the VSTs) expects a valid Wine thread when it runs &ndash; it allocates from the heap, takes critical sections, calls Win32 APIs. The JACK process thread is a Unix <code>pthread</code> created by libjack and has no Wine context. Constructing one on the fly from a JACK callback is risky &ndash; signal masks, TLS, exception scopes all have to be set up correctly, and any mistake takes down the host.</p>
+<p>A reasonable question is why this path doesn&rsquo;t just call <code>bufferSwitch</code> directly from the JACK process callback, with no play_thread. The answer is the Win32 thread context. ASIO host code (the DAW&rsquo;s audio engine, the plugin chain, the VSTs) expects a valid Wine thread when it runs &ndash; it allocates from the heap, takes critical sections, calls Win32 APIs. The JACK process thread is a Unix <code>pthread</code> created by libjack and has no Wine context. Constructing one on the fly from a JACK callback is risky &ndash; signal masks, TLS, exception scopes all have to be set up correctly, and any mistake takes down the host.</p>
 
-<p><code>wineasio</code> does take this approach (it uses <code>jack_set_thread_creator</code> to construct Wine threads from JACK&rsquo;s thread spawner), but it predates the modern Wine PE/Unix split and operates in a different threading model. The Phase F design preserves the cleaner split: Unix code stays Unix, PE code stays PE, the futex bridges them. The play_thread is a small, persistent Wine thread whose only job is to wake on a futex, run <code>bufferSwitch</code>, and signal another futex. It is cheap, predictable, and stays out of the way of the JACK callback.</p>
+<p><code>wineasio</code> does take this approach (it uses <code>jack_set_thread_creator</code> to construct Wine threads from JACK&rsquo;s thread spawner), but it predates the modern Wine PE/Unix split and operates in a different threading model. The direct callback design preserves the cleaner split: Unix code stays Unix, PE code stays PE, the futex bridges them. The play_thread is a small, persistent Wine thread whose only job is to wake on a futex, run <code>bufferSwitch</code>, and signal another futex. It is cheap, predictable, and stays out of the way of the JACK callback.</p>
 
 <h3 id="priority-configuration">Priority configuration</h3>
 
@@ -945,9 +941,9 @@ play_thread (thread T_play, Wine, SCHED_FIFO):
     .state { fill: #1f2335; stroke: #e0af68; stroke-width: 2.2; }
     .state-err { fill: #2a1a1a; stroke: #f7768e; stroke-width: 1.8; }
     .legend { fill: #24283b; stroke: #3b4261; stroke-width: 1; }
-    .conn { stroke: #bb9af7; stroke-width: 1.8; }
-    .conn-err { stroke: #f7768e; stroke-width: 1.5; stroke-dasharray: 6 3; }
-    .conn-loop { stroke: #bb9af7; stroke-width: 1.8; fill: none; }
+    .conn { stroke: #bb9af7; stroke-width: 1.15; }
+    .conn-err { stroke: #f7768e; stroke-width: 1.15; stroke-dasharray: 6 3; }
+    .conn-loop { stroke: #bb9af7; stroke-width: 1.15; fill: none; }
   </style>
 
   <text x="460" y="26" text-anchor="middle" class="lbl-hdr">Phase F handshake state machine -- one period</text>
@@ -1012,15 +1008,15 @@ play_thread (thread T_play, Wine, SCHED_FIFO):
 
 <h3 id="fallback">Fallback</h3>
 
-<p>If Phase F registration fails &ndash; non-float32 format, channel mismatch, bug in the registration path &ndash; nspaASIO falls back to the WASAPI slow path described in Section 8. The application still works, just with one extra period of latency. There is no version of the code where the application sees an error because of Phase F unavailability; Phase F is a strict performance enhancement on top of a working WASAPI fallback.</p>
+<p>If direct callback registration fails &ndash; non-float32 format, channel mismatch, bug in the registration path &ndash; nspaASIO falls back to the WASAPI slow path described in Section 8. The application still works, just with one extra period of latency. There is no version of the code where the application sees an error because this path is unavailable; it is a strict performance enhancement on top of a working WASAPI fallback.</p>
 
-<p>The driver description seen by the DAW is just &ldquo;nspaASIO&rdquo; regardless of which path is active. There is no &ldquo;Phase F&rdquo; string in the DAW-visible UI; the distinction is internal only.</p>
+<p>The driver description seen by the DAW is just &ldquo;nspaASIO&rdquo; regardless of which path is active. There is no special internal-name string in the DAW-visible UI; the distinction is internal only.</p>
 
-<h3 id="what-phase-d-became">What Phase D became</h3>
+<h3 id="earlier-direct-buffer-design">Earlier direct-buffer design</h3>
 
-<p>The earlier per-channel direct-buffer plan &ndash; Phase D in the rework roadmap &ndash; was the design where nspaASIO and winejack agreed on per-channel float32 buffer pointers and exchanged data without any interleave step. nspaASIO&rsquo;s play_thread would copy ASIO channels into winejack&rsquo;s per-channel buffers; winejack&rsquo;s RT callback would copy from those into JACK port buffers; total cost two memcpys per channel per period, no format conversion.</p>
+<p>The earlier per-channel direct-buffer plan was the design where nspaASIO and winejack agreed on per-channel float32 buffer pointers and exchanged data without any interleave step. nspaASIO&rsquo;s play_thread would copy ASIO channels into winejack&rsquo;s per-channel buffers; winejack&rsquo;s RT callback would copy from those into JACK port buffers; total cost two memcpys per channel per period, no format conversion.</p>
 
-<p>Phase F is strictly better than Phase D for the ASIO case because it removes the period of latency that Phase D could not. Phase D existed in a partial form (the fast-path per-channel double buffers in Section 6 are descended from it), but the nspaASIO-side direct-buffer access was superseded by Phase F before it was completed. The fast path on the WASAPI exclusive side remains &ndash; it serves any non-ASIO exclusive WASAPI stream that meets the criteria.</p>
+<p>The direct callback path is strictly better for the ASIO case because it removes the period of latency that the earlier design could not. The earlier design existed in a partial form (the fast-path per-channel double buffers in Section 6 are descended from it), but the nspaASIO-side direct-buffer access was superseded before it was completed. The fast path on the WASAPI exclusive side remains &ndash; it serves any non-ASIO exclusive WASAPI stream that meets the criteria.</p>
 
 <h2 id="10-intentionally-unimplemented-surfaces">10. Intentionally unimplemented surfaces</h2>
 

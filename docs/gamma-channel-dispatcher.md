@@ -1,9 +1,5 @@
 # Wine-NSPA -- Gamma Channel Dispatcher
 
-Wine 11.6 + NSPA RT patchset | Kernel 6.19.x-rt with NTSync channels + aggregate-wait + TRY_RECV2 | 2026-05-01
-Author: Jordan Johnston
-Status: production dispatcher architecture; aggregate-wait Phase 3, post-1011 TRY_RECV2 burst-drain, and the immediate hot-path tuning follow-ons are all part of the shipped path.
-
 This page explains the current wineserver request path for a Wine process: how requests enter the gamma channel, how the dispatcher owns the reply path, and how the post-1010 aggregate-wait loop fits into that design.
 
 ## Table of Contents
@@ -15,7 +11,7 @@ This page explains the current wineserver request path for a Wine process: how r
 5. [Sender State Machine](#5-sender-state-machine)
 6. [Dispatcher State Machine](#6-dispatcher-state-machine)
 7. [Priority-Inheritance Semantics](#7-priority-inheritance-semantics)
-8. [Phase B Lock-Drop Integration](#8-phase-b-lock-drop-integration)
+8. [Open-path Lock-Drop Integration](#8-open-path-lock-drop-integration)
 9. [Thread-Token Pass-Through (T1/T2/T3)](#9-thread-token-pass-through-t1t2t3)
 10. [NT Semantics Preservation](#10-nt-semantics-preservation)
 11. [Validation and Performance](#11-validation-and-performance)
@@ -750,7 +746,7 @@ Key invariants:
 - **Same-thread completion.** The same RT dispatcher thread receives
   the request, drains the CQE, and issues `CHANNEL_REPLY`.
 - **`global_lock` remains the only server lock the dispatcher takes.**
-  Phase 3 changes the wait primitive and completion ownership; it does
+  The aggregate-wait dispatcher changes the wait primitive and completion ownership; it does
   not change handler locking discipline.
 - **The process-membership check stays.** A received thread token or
   payload TID must still resolve to a thread that belongs to the
@@ -854,9 +850,9 @@ the channel landed.
 
 ---
 
-## 8. Phase B Lock-Drop Integration
+## 8. Open-path Lock-Drop Integration
 
-Phase B is the second-most important integration consumer of gamma.
+The open-path lock-drop is the second-most important integration consumer of gamma.
 It lives in `server/nspa/fd_lockdrop.c` and reshapes how the
 dispatcher cooperates with slow filesystem syscalls.
 
@@ -875,7 +871,7 @@ a futex syscall lookup is now stuck behind the GUI thread's
 multi-millisecond `LoadLibrary` chain. That is a reliable xrun on
 drum-track-load-while-playing.
 
-### 8.2 The Phase B fix
+### 8.2 The lock-drop fix
 
 `nspa_openat_lockdrop` (line 47) reorganises the openat critical
 section into a "drop, syscall, re-acquire" pattern:
@@ -904,7 +900,7 @@ While the lock is dropped the dispatcher's priority is whatever the
 kernel last boosted it to (the pending sender's prio). Any other
 sender -- including the audio thread -- can have its request popped
 by a different mechanism... except there isn't one: the dispatcher
-is in the middle of *this* handler. Phase B is therefore narrower
+is in the middle of *this* handler. The open-path lock-drop is therefore narrower
 than its name suggests: it lets the **kernel** schedule other
 processes' threads (and the host's RT audio path) while we are
 blocked in `openat()`, but it does not let other entries in this
@@ -937,14 +933,14 @@ restore `current->error`, drop refs.
 
 ### 8.4 Gating
 
-Phase B is **default-on as of 2026-04-26**, gated by
+The open-path lock-drop is **default-on as of 2026-04-26**, gated by
 `NSPA_OPENFD_LOCKDROP=0` for A/B testing or as a panic switch.
 Originally shipped default-off after a host lockup on the first
 validation run; the lockup was eventually traced to the ntsync
 driver's `kfree`-under-`raw_spinlock_t` bug (fixed in
-`ntsync-patches/1006-ntsync-rt-alloc-hoist.patch`), not Phase B
+`ntsync-patches/1006-ntsync-rt-alloc-hoist.patch`), not the lock-drop
 itself. Re-validated post-1006 with Ableton drum-track-load-while-
-playing -- the file-open-burst workload Phase B targets -- with
+playing -- the file-open burst this path targets -- with
 clean results.
 
 The cached env-var read at lines 67-79 follows the same one-shot
@@ -1076,7 +1072,7 @@ but Wine's own conformance tests do) see the same values.
 - Native ntsync suite: **3 PASS / 0 FAIL** (`test-event-set-pi`,
   `test-channel-recv-exclusive`, `test-aggregate-wait`).
 - `test-aggregate-wait`: **9/9 PASS**, including the channel-notify
-  and channel-PI propagation sub-tests added for the Phase 3 path, and
+  and channel-PI propagation sub-tests added for the aggregate-wait path, and
   the kitchen-sink path with **86,528 wakes / 0 timeouts / 0 errors**.
 - PE matrix: **24 PASS / 0 FAIL / 0 TIMEOUT** after adding
   `dispatcher-burst` to the baseline + RT runner.
@@ -1295,9 +1291,9 @@ this discipline applies to its own future evolution as well.
 | `wine/server/nspa/shmem_channel.c` | 158-390 | dispatcher context + aggregate-wait loop + legacy fallback loop |
 | `wine/server/nspa/shmem_channel.c` | 474-581 | dispatcher create/destroy path, shutdown eventfd lifetime |
 | `wine/server/nspa/shmem_channel.c` | 310-340 | T2 thread-token register/deregister |
-| `wine/server/nspa/uring.h` | -- | per-process `nspa_uring_instance` API consumed by Phase 2 / Phase 3 |
+| `wine/server/nspa/uring.h` | -- | per-process `nspa_uring_instance` API consumed by the dispatcher-owned ring and aggregate-wait path |
 | `wine/server/nspa/shmem_channel.h` | 1-48 | Public header |
-| `wine/server/nspa/fd_lockdrop.c` | 47-125 | Phase B `nspa_openat_lockdrop` -- lock-drop integration |
+| `wine/server/nspa/fd_lockdrop.c` | 47-125 | `nspa_openat_lockdrop` -- open-path lock-drop integration |
 | `wine/nspa/docs/gamma-dispatcher-audit-and-split-plan.md` | -- | Audit + future router/handler split plan |
 | `wine/nspa/docs/wine-nspa-lockup-audit-20260427.md` | -- | F1-F9 + MR1-MR8 lockup-investigation findings |
 | `wine/nspa/docs/ntsync-rt-audit.md` | -- | ntsync 1007/1008/1009 audit |
@@ -1309,7 +1305,7 @@ this discipline applies to its own future evolution as well.
 | `drivers/misc/ntsync.c` | -- | Channel object plus aggregate-wait registration / wake path |
 | `ntsync-patches/1004-ntsync-channel.patch` | -- | Channel object + core ioctls |
 | `ntsync-patches/1005-ntsync-channel-thread-token.patch` | -- | RECV2 + REGISTER_THREAD + DEREGISTER_THREAD |
-| `ntsync-patches/1006-ntsync-rt-alloc-hoist.patch` | -- | kfree-under-raw_spinlock fix; unblocked Phase B default-on |
+| `ntsync-patches/1006-ntsync-rt-alloc-hoist.patch` | -- | kfree-under-raw_spinlock fix; unblocked open-path lock-drop default-on |
 | `ntsync-patches/1007-ntsync-channel-exclusive-recv.patch` | -- | Channel exclusive recv -- priority inversion fix |
 | `ntsync-patches/1008-ntsync-event-set-pi-deferred-boost.patch` | -- | Deferred boost machinery (consumed by REPLY) |
 | `ntsync-patches/1009-ntsync-channel-entry-refcount.patch` | -- | refcount_t on `ntsync_channel_entry` (KASAN UAF fix) |
@@ -1323,7 +1319,7 @@ this discipline applies to its own future evolution as well.
 | `project_gamma_dispatcher_audit_and_split_plan.md` | 2026-04-26 audit + T1/T2/T3 + router/handler split plan |
 | `project_msg_ring_v2_mr1_mr2_mr4_shipped_20260427.md` | MR1/MR2/MR4 + Ableton run-3 config |
 | `project_ntsync_session_20260427_results.md` | 30M-ops cumulative validation, 4 bugs fixed |
-| `project_ntsync_kfree_under_raw_spinlock.md` | 1006 alloc-hoist (unblocked Phase B default-on) |
+| `project_ntsync_kfree_under_raw_spinlock.md` | 1006 alloc-hoist (unblocked open-path lock-drop default-on) |
 | `feedback_dont_shotgun_audit_into_unfound_bug.md` | KASAN-first / audit-second discipline |
 
 ### 14.4 Predecessor docs

@@ -1,9 +1,5 @@
 # Wine-NSPA -- Two-Tier Win32 Hook Chain Cache
 
-Wine 11.6 + NSPA bypass surface | shmem-published, seqlock-bound | 2026-04-25
-Author: Jordan Johnston
-Status: design and implementation reference for the shipped Tier 1/Tier 2 hook cache.
-
 This page covers how hook presence and hook-chain snapshots are published from wineserver into queue-local shared memory so clients can answer common hook queries without RPCs.
 
 ## Table of Contents

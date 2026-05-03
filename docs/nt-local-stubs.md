@@ -1,9 +1,5 @@
 # Wine-NSPA -- NT-local stubs
 
-Wine 11.6 + NSPA RT patchset | Kernel 6.19.x-rt with NTSync PI | 2026-05-02
-Author: Jordan Johnston
-Status: architectural pattern reference for the shipped client-local NT bypasses, now including anonymous events and sched-hosted timer dispatch.
-
 This page explains the NT-local stub pattern itself: what gets moved into the client process, how cross-process arbitration is still preserved, and how the shipped stubs fit into the broader decomposition story.
 
 ## Table of Contents

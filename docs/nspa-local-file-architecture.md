@@ -1,9 +1,5 @@
 # Wine-NSPA -- Local-File Bypass Architecture
 
-Wine 11.6 + NSPA RT patchset | Kernel 6.19.x-rt with NTSync PI | 2026-04-23
-Author: Jordan Johnston
-Status: design and implementation reference for the shipped read-only regular-file local-open bypass.
-
 This page covers the `NtCreateFile` local-fast-path itself, the local handle table and inode-sharing rules behind it, and the lazy-promotion path back into wineserver when server-owned state becomes necessary.
 
 ## Table of Contents
@@ -22,7 +18,7 @@ This page covers the `NtCreateFile` local-fast-path itself, the local handle tab
 12. [Debug Gating](#12-debug-gating)
 13. [Results & Profiler Numbers](#13-results--profiler-numbers)
 14. [Known Gaps & Roadmap](#14-known-gaps--roadmap)
-15. [Phase History](#15-phase-history)
+15. [History](#15-history)
 
 ---
 
@@ -61,7 +57,7 @@ Other candidate workloads with similar profiles: plugin scanners (hundreds of VS
 - **Per-process table, not process-shared.** Local handles are invalid in any other process. The table is a plain linked list under a PI mutex -- no shared memory, no cross-process lookups. Cross-process handle duplication falls back to promotion through the server.
 - **Shared inode table for sharing arbitration.** The only thing multiple processes need to agree on is *sharing*: if another process opens a file with `FILE_SHARE_NONE` we must honour that. A server-published shmem region carries `(dev, inode) -> (aggregate-access, aggregate-sharing, refcount)` so client-side arbitration matches what server-side `check_sharing` would enforce.
 - **Lazy promotion.** On first API that genuinely needs a server-visible handle (`NtQueryInformationFile`, `NtDuplicateObject`, `NtCreateSection`, ...), the bypass does a single `nspa_create_file_from_unix_fd` RPC that hands the unix fd to the server and gets back a real server handle. Subsequent calls on the same local handle reuse the cached promoted handle.
-- **RT-safe fast path.** Once the table + inode shmem are warm, the bypass open path is `stat()` + linked-list-walk-under-lock + `open()` + list insert -- no syscall other than the two that are inherent to the work. No lazy-init on the hot path (see Phase 1A.9 init-fix).
+- **RT-safe fast path.** Once the table + inode shmem are warm, the bypass open path is `stat()` + linked-list-walk-under-lock + `open()` + list insert -- no syscall other than the two that are inherent to the work. No lazy-init remains on the hot path.
 - **Transparent fallback.** Every disqualifier returns `STATUS_NOT_SUPPORTED` and the caller falls through to the normal `server_create_file` path. Anything the bypass doesn't handle is handled by vanilla Wine unchanged.
 - **Tight correctness envelope.** Only `FILE_OPEN` / `FILE_OPEN_IF`-on-existing-file dispositions, only read-only access masks, only regular files, only synchronous (`FILE_SYNCHRONOUS_IO_*`) opens. Anything outside the envelope goes to the server.
 
@@ -714,7 +710,7 @@ None of these has a profile-visible cost today; keep them on the server path.
 
 ---
 
-## 15. Phase History
+## 15. History
 
 | Phase | Commit | Scope |
 |---|---|---|

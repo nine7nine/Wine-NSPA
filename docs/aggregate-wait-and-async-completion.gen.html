@@ -108,17 +108,11 @@
 <div class="page-nav"><a href="index.html">Docs Home</a></div>
 <h1 id="wine-nspa--aggregate-wait-and-async-completion">Wine-NSPA &ndash; Aggregate-Wait and Async Completion</h1>
 
-<p>Wine 11.6 + NSPA RT patchset | Kernel patch 1010 + Gamma dispatcher Phase 2/3 | 2026-04-30
-Author: Jordan Johnston</p>
-
 <p>This page documents the <strong>landed</strong> aggregate-wait slice in Wine-NSPA:
-kernel patch <strong>1010</strong> (<code>NTSYNC_IOC_AGGREGATE_WAIT</code>) plus the first
-userspace consumer shape that uses it, namely dispatcher <strong>Phase 2</strong>
-(per-process dispatcher-owned <code>io_uring</code>) and <strong>Phase 3</strong> (gamma waits
-on channel + uring eventfd + shutdown eventfd and drains CQEs inline on
-the same RT thread).</p>
-
-<p><strong>Status:</strong> shipped and validated. <code>NSPA_AGG_WAIT</code> is <strong>default-on</strong> as of 2026-04-29. The 2026-04-30 follow-ons (<code>NSPA_ENABLE_ASYNC_CREATE_FILE=1</code> and, on 1011 kernels, <code>NSPA_TRY_RECV2=1</code>) now ship on top of this same foundation.</p>
+the <code>NTSYNC_IOC_AGGREGATE_WAIT</code> kernel primitive plus the first
+userspace consumer shape that uses it: the gamma dispatcher&rsquo;s
+per-process <code>io_uring</code> ownership model and its same-thread
+aggregate-wait receive / CQE-drain / reply loop.</p>
 
 <hr />
 
@@ -126,13 +120,12 @@ the same RT thread).</p>
 
 <ol>
 <li><a href="#1-overview">Overview</a></li>
-<li><a href="#2-scope-of-this-page">Scope of this page</a></li>
-<li><a href="#3-why-the-old-bridge-was-wrong">Why the old bridge was wrong</a></li>
-<li><a href="#4-kernel-patch-1010">Kernel patch 1010</a></li>
-<li><a href="#5-wine-nspa-phase-2-and-phase-3">Wine-NSPA Phase 2 and Phase 3</a></li>
-<li><a href="#6-validation-and-deployment">Validation and deployment</a></li>
-<li><a href="#7-relationship-to-the-broader-decomposition-plan">Relationship to the broader decomposition plan</a></li>
-<li><a href="#8-references">References</a></li>
+<li><a href="#2-why-the-old-bridge-was-wrong">Why the old bridge was wrong</a></li>
+<li><a href="#3-aggregate-wait-kernel-primitive">Aggregate-wait kernel primitive</a></li>
+<li><a href="#4-dispatcher-owned-iouring-and-same-thread-completion">Dispatcher-owned <code>io_uring</code> and same-thread completion</a></li>
+<li><a href="#5-validation-and-deployment">Validation and deployment</a></li>
+<li><a href="#6-relationship-to-the-broader-decomposition-plan">Relationship to the broader decomposition plan</a></li>
+<li><a href="#7-references">References</a></li>
 </ol>
 
 
@@ -145,8 +138,8 @@ dispatcher block on request traffic, deferred-completion wakeups, and
 teardown wakeups in one place while keeping receive, CQE drain, and
 reply signaling on the same RT thread.</p>
 
-<p>That is the architectural role of patch 1010 plus the dispatcher Phase
-2/3 userspace work. Gamma already gave Wine-NSPA the correct
+<p>That is the architectural role of aggregate-wait plus the dispatcher&rsquo;s
+ring-ownership and same-thread completion work. Gamma already gave Wine-NSPA the correct
 <strong>request-side</strong> priority inheritance story: client threads do
 <code>CHANNEL_SEND_PI</code>, the kernel enqueues by priority, and the wineserver
 dispatcher runs the handler at the right effective priority. What gamma
@@ -156,8 +149,8 @@ lacked was the matching <strong>async completion-side</strong> wait primitive.</
 site. That proved the basic mechanism but broke the more important invariant: the thread
 that received the request was no longer the thread that completed and replied to it.</p>
 
-<p>Patch 1010 and the accompanying dispatcher restructure fix that. The dispatcher now owns
-all three parts of the async path:</p>
+<p>The aggregate-wait kernel extension and the accompanying dispatcher restructure fix that.
+The dispatcher now owns all three parts of the async path:</p>
 
 <ol>
 <li>receive request from the channel</li>
@@ -215,25 +208,7 @@ all three parts of the async path:</p>
 
 <hr />
 
-<h2 id="2-scope-of-this-page">2. Scope of this page</h2>
-
-<p>This page stays focused on the 1010 / Phase 2 / Phase 3 slice itself:
-the kernel wait primitive, the dispatcher-owned ring, and the
-same-thread completion/reply invariant that those pieces established.</p>
-
-<p>The later follow-ons are intentionally not expanded here. Phase 4 async
-<code>create_file</code> is a later consumer of the same dispatcher-owned ring, and
-1011 <code>TRY_RECV2</code> is a later queue-drain optimization on top of the
-already-landed dispatcher shape. Those are part of the current shipped
-system, but they belong in the pages that track the dispatcher hot path
-and current production state:
-<a href="gamma-channel-dispatcher.gen.html">gamma-channel-dispatcher</a>,
-<a href="io_uring-architecture.gen.html">io_uring-architecture</a>, and
-<a href="current-state.gen.html">current-state</a>.</p>
-
-<hr />
-
-<h2 id="3-why-the-old-bridge-was-wrong">3. Why the old bridge was wrong</h2>
+<h2 id="2-why-the-old-bridge-was-wrong">2. Why the old bridge was wrong</h2>
 
 <p>The rejected shape was:</p>
 
@@ -241,7 +216,7 @@ and current production state:
 <svg width="100%" viewBox="0 0 980 430" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
   <style>
     .bg { fill: #1a1b26; }
-    .lane { stroke: #3b4261; stroke-width: 1.2; stroke-dasharray: 6,4; }
+    .lane { stroke: #3b4261; stroke-width: 0.9; stroke-dasharray: 6,4; }
     .box { fill: #24283b; stroke: #7aa2f7; stroke-width: 2; rx: 8; }
     .bad { fill: #2a1a1a; stroke: #f7768e; stroke-width: 2; rx: 8; }
     .note { fill: #2a2418; stroke: #e0af68; stroke-width: 1.8; rx: 8; }
@@ -250,7 +225,7 @@ and current production state:
     .h { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
     .r { fill: #f7768e; font: bold 10px 'JetBrains Mono', monospace; }
     .y { fill: #e0af68; font: bold 10px 'JetBrains Mono', monospace; }
-    .line { stroke: #c0caf5; stroke-width: 1.4; fill: none; }
+    .line { stroke: #c0caf5; stroke-width: 1.15; fill: none; }
   </style>
   <defs>
     <marker id="badArrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
@@ -270,7 +245,7 @@ and current production state:
   <text x="250" y="120" text-anchor="middle" class="t">`CHANNEL_RECV2`</text>
   <text x="250" y="140" text-anchor="middle" class="s">dispatcher owns request entry</text>
 
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="250" y1="154" x2="250" y2="182" class="line" marker-end="url(#badArrow)"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="250" y1="154" x2="250" y2="182" class="line"/>
 
   <rect x="120" y="182" width="260" height="78" class="box" rx="6"/>
   <text x="250" y="206" text-anchor="middle" class="t">handler submits SQE</text>
@@ -281,7 +256,7 @@ and current production state:
   <text x="730" y="120" text-anchor="middle" class="t">`main_loop_epoll`</text>
   <text x="730" y="140" text-anchor="middle" class="s">main thread owns uring wake</text>
 
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="730" y1="154" x2="730" y2="182" class="line" marker-end="url(#badArrow)"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="730" y1="154" x2="730" y2="182" class="line"/>
 
   <rect x="600" y="182" width="260" height="92" class="bad" rx="6"/>
   <text x="730" y="206" text-anchor="middle" class="t">CQE arrives later</text>
@@ -290,10 +265,10 @@ and current production state:
   <text x="730" y="262" text-anchor="middle" class="s">`CHANNEL_REPLY` issued cross-thread</text>
 
   <text x="490" y="172" text-anchor="middle" class="y">ownership jump after SQE submit</text>
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="380" y1="221" x2="600" y2="221" class="line" marker-end="url(#badArrow)"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="380" y1="221" x2="600" y2="221" class="line"/>
   <text x="490" y="238" text-anchor="middle" class="s">completion timing now depends on the main-thread wake path</text>
 
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="730" y1="274" x2="730" y2="316" class="line" marker-end="url(#badArrow)"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="730" y1="274" x2="730" y2="316" class="line"/>
   <rect x="170" y="326" width="640" height="58" class="note" rx="6"/>
   <text x="490" y="348" text-anchor="middle" class="y">Why it was rejected</text>
   <text x="490" y="364" text-anchor="middle" class="s">request receive, CQE drain, and reply signaling no longer live on one RT thread</text>
@@ -318,7 +293,7 @@ but timing-sensitive application behavior did not.</p>
 
 <hr />
 
-<h2 id="4-kernel-patch-1010">4. Kernel patch 1010</h2>
+<h2 id="3-aggregate-wait-kernel-primitive">3. Aggregate-wait kernel primitive</h2>
 
 <p>Patch 1010 adds <code>NTSYNC_IOC_AGGREGATE_WAIT</code>: a heterogeneous wait that combines
 NTSync object sources, pollable fd sources, and an optional absolute deadline.</p>
@@ -338,7 +313,7 @@ NTSync object sources, pollable fd sources, and an optional absolute deadline.</
     .h { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
     .g { fill: #9ece6a; font: bold 10px 'JetBrains Mono', monospace; }
     .v { fill: #bb9af7; font: bold 10px 'JetBrains Mono', monospace; }
-    .line { stroke: #c0caf5; stroke-width: 1.4; fill: none; }
+    .line { stroke: #c0caf5; stroke-width: 1.15; fill: none; }
   </style>
   <defs>
     <marker id="aggArrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
@@ -369,8 +344,8 @@ NTSync object sources, pollable fd sources, and an optional absolute deadline.</
   <text x="810" y="160" text-anchor="middle" class="t">future fd-poll / timer wake sources</text>
   <text x="810" y="178" text-anchor="middle" class="s">poll semantics, no intrinsic PI owner</text>
 
-  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M290 147 C320 147, 340 147, 370 147" class="line" marker-end="url(#aggArrow)"/>
-  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M690 147 C660 147, 640 147, 610 147" class="line" marker-end="url(#aggArrow)"/>
+  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M290 147 C320 147, 340 147, 370 147" class="line"/>
+  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M690 147 C660 147, 640 147, 610 147" class="line"/>
 
   <rect x="160" y="286" width="660" height="74" class="note" rx="6"/>
   <text x="490" y="312" text-anchor="middle" class="t">Kernel follow-ups required for production stability</text>
@@ -428,11 +403,11 @@ without pretending the code lost its rollback path.</p>
 
 <hr />
 
-<h2 id="5-wine-nspa-phase-2-and-phase-3">5. Wine-NSPA Phase 2 and Phase 3</h2>
+<h2 id="4-dispatcher-owned-io_uring-and-same-thread-completion">4. Dispatcher-owned <code>io_uring</code> and same-thread completion</h2>
 
-<h3 id="51-phase-2-dispatcher-owned-io_uring">5.1 Phase 2: dispatcher-owned <code>io_uring</code></h3>
+<h3 id="41-dispatcher-owned-io_uring">4.1 Dispatcher-owned <code>io_uring</code></h3>
 
-<p>Phase 2 did not make handlers async by itself. It put the ring and its state in the
+<p>This step did not make handlers async by itself. It put the ring and its state in the
 correct ownership domain first.</p>
 
 <p>The old global-ring direction was abandoned. The landed design keeps one
@@ -458,7 +433,7 @@ struct nspa_dispatcher_ctx {
 </ul>
 
 
-<h3 id="52-phase-3-aggregate-wait-dispatcher-loop">5.2 Phase 3: aggregate-wait dispatcher loop</h3>
+<h3 id="42-aggregate-wait-dispatcher-loop">4.2 Aggregate-wait dispatcher loop</h3>
 
 <p>The dispatcher now waits on three sources:</p>
 
@@ -483,7 +458,7 @@ struct nspa_dispatcher_ctx {
     .g { fill: #9ece6a; font: bold 10px 'JetBrains Mono', monospace; }
     .v { fill: #bb9af7; font: bold 10px 'JetBrains Mono', monospace; }
     .y { fill: #e0af68; font: bold 10px 'JetBrains Mono', monospace; }
-    .line { stroke: #c0caf5; stroke-width: 1.4; fill: none; }
+    .line { stroke: #c0caf5; stroke-width: 1.15; fill: none; }
   </style>
   <defs>
     <marker id="dispArrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
@@ -492,7 +467,7 @@ struct nspa_dispatcher_ctx {
   </defs>
 
   <rect x="0" y="0" width="980" height="560" class="bg" rx="6"/>
-  <text x="490" y="28" text-anchor="middle" class="h">Phase 3 dispatcher topology</text>
+  <text x="490" y="28" text-anchor="middle" class="h">Dispatcher aggregate-wait topology</text>
 
   <rect x="290" y="70" width="400" height="84" class="ctx" rx="6"/>
   <text x="490" y="98" text-anchor="middle" class="v">Dispatcher context</text>
@@ -517,9 +492,9 @@ struct nspa_dispatcher_ctx {
   <text x="775" y="280" text-anchor="middle" class="s">aggregate-wait returns</text>
   <text x="775" y="298" text-anchor="middle" class="s">dispatcher drains and frees its own context</text>
 
-  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M490 154 L205 212" class="line" marker-end="url(#dispArrow)"/>
-  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M490 154 L490 212" class="line" marker-end="url(#dispArrow)"/>
-  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M490 154 L775 212" class="line" marker-end="url(#dispArrow)"/>
+  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M490 154 L205 212" class="line"/>
+  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M490 154 L490 212" class="line"/>
+  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M490 154 L775 212" class="line"/>
 
   <rect x="160" y="392" width="660" height="94" class="note" rx="6"/>
   <text x="490" y="418" text-anchor="middle" class="y">Operational invariants</text>
@@ -529,7 +504,7 @@ struct nspa_dispatcher_ctx {
 </div>
 
 
-<h3 id="53-dispatcher-behavior">5.3 Dispatcher behavior</h3>
+<h3 id="43-dispatcher-behavior">4.3 Dispatcher behavior</h3>
 
 <p>The loop is now:</p>
 
@@ -562,13 +537,13 @@ struct nspa_dispatcher_ctx {
 </ol>
 
 
-<h3 id="54-fallback-behavior">5.4 Fallback behavior</h3>
+<h3 id="44-fallback-behavior">4.4 Fallback behavior</h3>
 
 <p>Userspace still handles two older-kernel shapes:</p>
 
 <ul>
-<li><strong>no patch 1010</strong>: aggregate-wait returns <code>-ENOTTY</code>, dispatcher permanently falls back to direct <code>CHANNEL_RECV2</code></li>
-<li><strong>no patch 1005</strong>: <code>CHANNEL_RECV2</code> returns <code>-ENOTTY</code>, dispatcher falls back to legacy <code>CHANNEL_RECV</code></li>
+<li><strong>no aggregate-wait support</strong>: aggregate-wait returns <code>-ENOTTY</code>, dispatcher permanently falls back to direct <code>CHANNEL_RECV2</code></li>
+<li><strong>no thread-token receive support</strong>: <code>CHANNEL_RECV2</code> returns <code>-ENOTTY</code>, dispatcher falls back to legacy <code>CHANNEL_RECV</code></li>
 </ul>
 
 
@@ -588,7 +563,7 @@ struct nspa_dispatcher_ctx {
     .g { fill: #9ece6a; font: bold 10px 'JetBrains Mono', monospace; }
     .v { fill: #bb9af7; font: bold 10px 'JetBrains Mono', monospace; }
     .y { fill: #e0af68; font: bold 10px 'JetBrains Mono', monospace; }
-    .line { stroke: #c0caf5; stroke-width: 1.4; fill: none; }
+    .line { stroke: #c0caf5; stroke-width: 1.15; fill: none; }
   </style>
   <defs>
     <marker id="rollArrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
@@ -610,17 +585,17 @@ struct nspa_dispatcher_ctx {
 
   <rect x="390" y="178" width="200" height="92" class="note" rx="6"/>
   <text x="490" y="204" text-anchor="middle" class="t">if `-ENOTTY`</text>
-  <text x="490" y="224" text-anchor="middle" class="s">kernel lacks patch 1010</text>
+  <text x="490" y="224" text-anchor="middle" class="s">kernel lacks aggregate-wait support</text>
   <text x="490" y="242" text-anchor="middle" class="s">disable aggregate-wait for this dispatcher</text>
 
   <rect x="650" y="178" width="260" height="92" class="done" rx="6"/>
   <text x="780" y="204" text-anchor="middle" class="g">2. use direct `CHANNEL_RECV2` loop</text>
   <text x="780" y="224" text-anchor="middle" class="s">channel transport still intact</text>
-  <text x="780" y="242" text-anchor="middle" class="s">legacy pre-1010 dispatcher wait shape</text>
+  <text x="780" y="242" text-anchor="middle" class="s">older dispatcher wait shape</text>
 
   <rect x="390" y="300" width="200" height="92" class="note" rx="6"/>
   <text x="490" y="326" text-anchor="middle" class="t">if `CHANNEL_RECV2` returns `-ENOTTY`</text>
-  <text x="490" y="346" text-anchor="middle" class="s">kernel lacks patch 1005 thread-token support</text>
+  <text x="490" y="346" text-anchor="middle" class="s">kernel lacks thread-token receive support</text>
   <text x="490" y="364" text-anchor="middle" class="s">disable `RECV2` for this dispatcher</text>
 
   <rect x="650" y="300" width="260" height="92" class="warn" rx="6"/>
@@ -628,12 +603,12 @@ struct nspa_dispatcher_ctx {
   <text x="780" y="346" text-anchor="middle" class="s">oldest supported channel shape</text>
   <text x="780" y="364" text-anchor="middle" class="s">no thread-token carried in the receive result</text>
 
-  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M490 132 L200 178" class="line" marker-end="url(#rollArrow)"/>
-  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M490 132 L780 178" class="line" marker-end="url(#rollArrow)"/>
-  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M330 224 L390 224" class="line" marker-end="url(#rollArrow)"/>
-  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M590 224 L650 224" class="line" marker-end="url(#rollArrow)"/>
-  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M780 270 L780 300" class="line" marker-end="url(#rollArrow)"/>
-  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M590 346 L650 346" class="line" marker-end="url(#rollArrow)"/>
+  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M490 132 L200 178" class="line"/>
+  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M490 132 L780 178" class="line"/>
+  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M330 224 L390 224" class="line"/>
+  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M590 224 L650 224" class="line"/>
+  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M780 270 L780 300" class="line"/>
+  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M590 346 L650 346" class="line"/>
 
   <rect x="70" y="300" width="260" height="92" class="curr" rx="6"/>
   <text x="200" y="326" text-anchor="middle" class="v">steady-state production loop</text>
@@ -645,7 +620,7 @@ struct nspa_dispatcher_ctx {
 
 <hr />
 
-<h2 id="6-validation-and-deployment">6. Validation and deployment</h2>
+<h2 id="5-validation-and-deployment">5. Validation and deployment</h2>
 
 <h3 id="production-state">Production state</h3>
 
@@ -663,7 +638,7 @@ struct nspa_dispatcher_ctx {
 </tr>
 <tr>
 <td> Wine userspace state </td>
-<td> Phase 2 + Phase 3 landed; Phase 4 <code>create_file</code> now uses the same ring </td>
+<td> Dispatcher-owned ring and aggregate-wait loop are landed; async <code>CreateFile</code> now uses the same ring </td>
 </tr>
 <tr>
 <td> Default gate </td>
@@ -716,7 +691,7 @@ struct nspa_dispatcher_ctx {
 <td> PASS </td>
 </tr>
 <tr>
-<td> Phase 3 default-on under Ableton </td>
+<td> Aggregate-wait default-on under Ableton </td>
 <td> PASS </td>
 </tr>
 </tbody>
@@ -730,7 +705,7 @@ boost state is established. The production module includes those corrections.</p
 
 <hr />
 
-<h2 id="7-relationship-to-the-broader-decomposition-plan">7. Relationship to the broader decomposition plan</h2>
+<h2 id="6-relationship-to-the-broader-decomposition-plan">6. Relationship to the broader decomposition plan</h2>
 
 <p>The public decomposition plan still has queued work in front of it, but the aggregate-wait
 story is no longer purely hypothetical.</p>
@@ -767,7 +742,7 @@ needs to prove the syscall shape from scratch; it can build on a production cons
 
 <hr />
 
-<h2 id="8-references">8. References</h2>
+<h2 id="7-references">7. References</h2>
 
 <ul>
 <li><code>wine/server/nspa/shmem_channel.c</code> — dispatcher context, aggregate-wait loop, shutdown path</li>
@@ -778,9 +753,9 @@ needs to prove the syscall shape from scratch; it can build on a production cons
 <ul>
 <li><code>1879e2c</code> — ntsync 1010 first cut</li>
 <li><code>072bfee</code> — SEND_PI any_waiters fallback + wake-after-boost reorder</li>
-<li><code>8cc157c</code> — userspace Phase 2 per-process uring infrastructure</li>
-<li><code>f21c6e1</code> — userspace Phase 3 aggregate-wait dispatcher</li>
-<li><code>b36e36d</code> — Phase 3 default-on</li>
+<li><code>8cc157c</code> — userspace per-process uring infrastructure</li>
+<li><code>f21c6e1</code> — userspace aggregate-wait dispatcher</li>
+<li><code>b36e36d</code> — aggregate-wait default-on</li>
 </ul>
 </li>
 <li>In-tree handoff:

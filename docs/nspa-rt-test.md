@@ -1,11 +1,8 @@
 # Wine-NSPA RT Test Harness
 
-**Date:** 2026-05-02
-**Author:** Jordan Johnston
-**Kernel:** `6.19.11-rt1-1-nspa` (PREEMPT_RT_FULL)
-**ntsync module:** `srcversion 10124FB81FDC76797EF1F91`
-**Wine:** 11.6 + NSPA RT patchset
-**Status:** public test-harness reference; the last full published matrix remains Layer 1 native suite 3 PASS / 0 FAIL and Layer 2 PE matrix 24 PASS / 0 FAIL / 0 TIMEOUT as of 2026-04-30. The 2026-05-02 shipped follow-ons are covered by targeted validators rather than a new full-suite publish.
+This page documents the public Wine-NSPA validation harness: the native ntsync
+suite, the PE-side matrix, and the targeted follow-on validators that cover the
+ newest shipped scheduler, event, socket, and dispatcher work.
 
 ## Table of Contents
 
@@ -171,7 +168,7 @@ of the Wine-NSPA stack. Each PE subcommand targets specific components.
   <text x="710" y="78" class="rt-label-cyn" text-anchor="middle">io_uring + gamma</text>
   <text x="710" y="92" class="rt-label-sm" text-anchor="middle">socket-io</text>
   <text x="710" y="104" class="rt-label-sm" text-anchor="middle">dispatcher-burst</text>
-  <text x="710" y="116" class="rt-label-sm" text-anchor="middle">Phase 4 create_file</text>
+  <text x="710" y="116" class="rt-label-sm" text-anchor="middle">async CreateFile</text>
 
   <rect x="30" y="160" width="820" height="130" class="rt-region"/>
   <text x="50" y="178" class="rt-label-blu">Wine ntdll Unix layer</text>
@@ -202,7 +199,7 @@ of the Wine-NSPA stack. Each PE subcommand targets specific components.
   <text x="617" y="214" class="rt-label-sm" text-anchor="middle">per-thread rings</text>
   <text x="617" y="226" class="rt-label-sm" text-anchor="middle">TLS pool allocator</text>
   <text x="617" y="238" class="rt-label-sm" text-anchor="middle">COOP_TASKRUN</text>
-  <text x="617" y="250" class="rt-label-sm" text-anchor="middle">Phase 1 file I/O bypass</text>
+  <text x="617" y="250" class="rt-label-sm" text-anchor="middle">file I/O bypass</text>
 
   <rect x="710" y="185" width="120" height="90" rx="6" class="rt-box-ntdll"/>
   <text x="770" y="200" class="rt-label-blu" text-anchor="middle">process.c</text>
@@ -325,7 +322,7 @@ Each PE subcommand targets a specific cross-section of the stack:
 | 8 | `ntsync` | 5 sub-tests: rapid mutex, PI, prio, chain, WFMO | per-sub PASS/FAIL, wait times | /dev/ntsync driver |
 | 9 | `socket-io` | TCP loopback: immediate + deferred socket path | latency (us) p50/p95/p99/max, msgs/sec | io_uring socket SQE path |
 | 10 | `srw-bench` | SRW lock contention benchmark | acquire latency (ns) p50/p99/max, ops/sec | sync.c SRW |
-| 11 | `dispatcher-burst` | Gamma dispatcher A/B harness (`CreateFile` / `CloseHandle` on `NUL`) | burst ops/sec, worst max ns, steady avg ns | gamma dispatcher + Phase 4 `create_file` |
+| 11 | `dispatcher-burst` | Gamma dispatcher A/B harness (`CreateFile` / `CloseHandle` on `NUL`) | burst ops/sec, worst max ns, steady avg ns | gamma dispatcher + async `CreateFile` |
 | 12 | `child-quickexit` | Internal helper for fork-mutex | exit code 42 | (internal) |
 | 13 | `help` | Usage display | -- | -- |
 
@@ -422,9 +419,9 @@ PASS criteria: all 5 sub-tests plus 5a-5d PASS.
 TCP loopback pair, per-message recv latency via overlapped WSARecv. The sender
 side of the same harness also exercises the shipped `SENDMSG` path.
 
-- **Phase A immediate:** sender sends *before* receiver calls WSARecv.
+- **Immediate case:** sender sends *before* receiver calls WSARecv.
   Exercises `try_recv` fast path.
-- **Phase B deferred:** receiver calls WSARecv *before* sender sends.
+- **Deferred case:** receiver calls WSARecv *before* sender sends.
   Forces the async wait path: WSARecv returns `WSA_IO_PENDING`. On the
   current shipped build this exercises the true socket-SQE path:
   `IORING_OP_RECVMSG` on recv, `IORING_OP_SENDMSG` on send, plus the

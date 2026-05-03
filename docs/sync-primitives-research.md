@@ -1,14 +1,7 @@
 # Sync Primitives Research: SRW Spin, Adaptive CS, Condvar PI
 
-> **Status: RESEARCH ARCHIVE -- 2026-04-15.**
->
-> Background research informing CS-PI / condvar-PI / SRW-spin design choices.
-> Retained as a record of the design space exploration.
-
----
-
-**Date:** 2026-04-15
-**Status:** B (SRW spin) and C1 (pi_cond requeue-PI) IMPLEMENTED. A (CS DYNAMIC_SPIN) planned. C2 (SRW PI) deferred.
+Historical research archive retained as background for the CS-PI,
+condvar-PI, and SRW-spin design choices.
 
 ---
 

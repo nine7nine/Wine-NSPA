@@ -108,10 +108,6 @@
 <div class="page-nav"><a href="index.html">Docs Home</a></div>
 <h1 id="wine-nspa--local-file-bypass-architecture">Wine-NSPA &ndash; Local-File Bypass Architecture</h1>
 
-<p>Wine 11.6 + NSPA RT patchset | Kernel 6.19.x-rt with NTSync PI | 2026-04-23
-Author: Jordan Johnston
-Status: design and implementation reference for the shipped read-only regular-file local-open bypass.</p>
-
 <p>This page covers the <code>NtCreateFile</code> local-fast-path itself, the local handle table and inode-sharing rules behind it, and the lazy-promotion path back into wineserver when server-owned state becomes necessary.</p>
 
 <h2 id="table-of-contents">Table of Contents</h2>
@@ -131,7 +127,7 @@ Status: design and implementation reference for the shipped read-only regular-fi
 <li><a href="#12-debug-gating">Debug Gating</a></li>
 <li><a href="#13-results--profiler-numbers">Results &amp; Profiler Numbers</a></li>
 <li><a href="#14-known-gaps--roadmap">Known Gaps &amp; Roadmap</a></li>
-<li><a href="#15-phase-history">Phase History</a></li>
+<li><a href="#15-history">History</a></li>
 </ol>
 
 
@@ -200,7 +196,7 @@ Status: design and implementation reference for the shipped read-only regular-fi
 <li><strong>Per-process table, not process-shared.</strong> Local handles are invalid in any other process. The table is a plain linked list under a PI mutex &ndash; no shared memory, no cross-process lookups. Cross-process handle duplication falls back to promotion through the server.</li>
 <li><strong>Shared inode table for sharing arbitration.</strong> The only thing multiple processes need to agree on is <em>sharing</em>: if another process opens a file with <code>FILE_SHARE_NONE</code> we must honour that. A server-published shmem region carries <code>(dev, inode) -&gt; (aggregate-access, aggregate-sharing, refcount)</code> so client-side arbitration matches what server-side <code>check_sharing</code> would enforce.</li>
 <li><strong>Lazy promotion.</strong> On first API that genuinely needs a server-visible handle (<code>NtQueryInformationFile</code>, <code>NtDuplicateObject</code>, <code>NtCreateSection</code>, &hellip;), the bypass does a single <code>nspa_create_file_from_unix_fd</code> RPC that hands the unix fd to the server and gets back a real server handle. Subsequent calls on the same local handle reuse the cached promoted handle.</li>
-<li><strong>RT-safe fast path.</strong> Once the table + inode shmem are warm, the bypass open path is <code>stat()</code> + linked-list-walk-under-lock + <code>open()</code> + list insert &ndash; no syscall other than the two that are inherent to the work. No lazy-init on the hot path (see Phase 1A.9 init-fix).</li>
+<li><strong>RT-safe fast path.</strong> Once the table + inode shmem are warm, the bypass open path is <code>stat()</code> + linked-list-walk-under-lock + <code>open()</code> + list insert &ndash; no syscall other than the two that are inherent to the work. No lazy-init remains on the hot path.</li>
 <li><strong>Transparent fallback.</strong> Every disqualifier returns <code>STATUS_NOT_SUPPORTED</code> and the caller falls through to the normal <code>server_create_file</code> path. Anything the bypass doesn&rsquo;t handle is handled by vanilla Wine unchanged.</li>
 <li><strong>Tight correctness envelope.</strong> Only <code>FILE_OPEN</code> / <code>FILE_OPEN_IF</code>-on-existing-file dispositions, only read-only access masks, only regular files, only synchronous (<code>FILE_SYNCHRONOUS_IO_*</code>) opens. Anything outside the envelope goes to the server.</li>
 </ul>
@@ -225,7 +221,7 @@ Status: design and implementation reference for the shipped read-only regular-fi
     .label-red { fill: #f7768e; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .label-yellow { fill: #e0af68; font-size: 10px; font-family: 'JetBrains Mono', monospace; }
     .label-muted { fill: #a9b1d6; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
-    .divider { stroke: #3b4261; stroke-width: 1; stroke-dasharray: 8,4; }
+    .divider { stroke: #3b4261; stroke-width: 0.9; stroke-dasharray: 8,4; }
   </style>
   <defs>
     <marker id="lfA" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M0,0 L8,3 L0,6" fill="#c8d0e8"/></marker>
@@ -240,29 +236,29 @@ Status: design and implementation reference for the shipped read-only regular-fi
   <!-- LEFT -->
   <rect x="40" y="45" width="340" height="28" class="box-vanilla" rx="6"/>
   <text x="210" y="64" text-anchor="middle" class="label">NtCreateFile (ntdll unix)</text>
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="210" y1="73" x2="210" y2="93" stroke="#f7768e" stroke-width="1.5" marker-end="url(#lfR)"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="210" y1="73" x2="210" y2="93" stroke="#f7768e" stroke-width="1.5"/>
 
   <rect x="60" y="95" width="300" height="28" class="box-server" rx="6"/>
   <text x="210" y="114" text-anchor="middle" class="label-red">SERVER: create_file request</text>
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="210" y1="123" x2="210" y2="143" stroke="#f7768e" stroke-width="1.5" marker-end="url(#lfR)"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="210" y1="123" x2="210" y2="143" stroke="#f7768e" stroke-width="1.5"/>
 
   <rect x="60" y="145" width="300" height="60" class="box-server" rx="6"/>
   <text x="210" y="163" text-anchor="middle" class="label-red">open(), stat(), check_sharing</text>
   <text x="210" y="180" text-anchor="middle" class="label-red">alloc struct fd + struct file</text>
   <text x="210" y="197" text-anchor="middle" class="label-muted">global_lock held during sharing arbitration</text>
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="210" y1="205" x2="210" y2="225" stroke="#f7768e" stroke-width="1.5" marker-end="url(#lfR)"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="210" y1="205" x2="210" y2="225" stroke="#f7768e" stroke-width="1.5"/>
 
   <rect x="60" y="227" width="300" height="28" class="box-server" rx="6"/>
   <text x="210" y="246" text-anchor="middle" class="label-red">alloc_handle (server range)</text>
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="210" y1="255" x2="210" y2="275" stroke="#9aa5ce" stroke-width="1" marker-end="url(#lfA)"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="210" y1="255" x2="210" y2="275" stroke="#9aa5ce" stroke-width="1"/>
 
   <rect x="40" y="277" width="340" height="28" class="box-vanilla" rx="6"/>
   <text x="210" y="296" text-anchor="middle" class="label">reply: server handle 0x14</text>
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="210" y1="305" x2="210" y2="325" stroke="#9aa5ce" stroke-width="1" marker-end="url(#lfA)"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="210" y1="305" x2="210" y2="325" stroke="#9aa5ce" stroke-width="1"/>
 
   <rect x="40" y="327" width="340" height="28" class="box-vanilla" rx="6"/>
   <text x="210" y="346" text-anchor="middle" class="label">NtReadFile: another server RTT</text>
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="210" y1="355" x2="210" y2="375" stroke="#f7768e" stroke-width="1.5" marker-end="url(#lfR)"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="210" y1="355" x2="210" y2="375" stroke="#f7768e" stroke-width="1.5"/>
 
   <rect x="60" y="377" width="300" height="42" class="box-server" rx="6"/>
   <text x="210" y="395" text-anchor="middle" class="label-red">get_handle_fd -> SCM_RIGHTS</text>
@@ -275,30 +271,30 @@ Status: design and implementation reference for the shipped read-only regular-fi
   <!-- RIGHT -->
   <rect x="520" y="45" width="340" height="28" class="box-nspa" rx="6"/>
   <text x="690" y="64" text-anchor="middle" class="label">NtCreateFile (ntdll unix)</text>
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="690" y1="73" x2="690" y2="93" stroke="#9ece6a" stroke-width="1.5" marker-end="url(#lfG)"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="690" y1="73" x2="690" y2="93" stroke="#9ece6a" stroke-width="1.5"/>
 
   <rect x="540" y="95" width="300" height="28" class="box-new" rx="6"/>
   <text x="690" y="114" text-anchor="middle" class="label-green">nspa_local_file_try_bypass</text>
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="690" y1="123" x2="690" y2="143" stroke="#9ece6a" stroke-width="1.5" marker-end="url(#lfG)"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="690" y1="123" x2="690" y2="143" stroke="#9ece6a" stroke-width="1.5"/>
 
   <rect x="540" y="145" width="300" height="75" class="box-new" rx="6"/>
   <text x="690" y="163" text-anchor="middle" class="label-green">stat() -&gt; (dev, inode)</text>
   <text x="690" y="180" text-anchor="middle" class="label-green">check_and_publish via shmem table</text>
   <text x="690" y="197" text-anchor="middle" class="label-green">open() O_RDONLY</text>
   <text x="690" y="214" text-anchor="middle" class="label-muted">per-bucket PI mutex, no server call</text>
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="690" y1="220" x2="690" y2="240" stroke="#9ece6a" stroke-width="1.5" marker-end="url(#lfG)"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="690" y1="220" x2="690" y2="240" stroke="#9ece6a" stroke-width="1.5"/>
 
   <rect x="540" y="242" width="300" height="28" class="box-new" rx="6"/>
   <text x="690" y="261" text-anchor="middle" class="label-green">alloc local handle (0x7FFF xxxx)</text>
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="690" y1="270" x2="690" y2="290" stroke="#9ece6a" stroke-width="1.5" marker-end="url(#lfG)"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="690" y1="270" x2="690" y2="290" stroke="#9ece6a" stroke-width="1.5"/>
 
   <rect x="540" y="292" width="300" height="28" class="box-nspa" rx="6"/>
   <text x="690" y="311" text-anchor="middle" class="label">return local handle</text>
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="690" y1="320" x2="690" y2="340" stroke="#9aa5ce" stroke-width="1" marker-end="url(#lfA)"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="690" y1="320" x2="690" y2="340" stroke="#9aa5ce" stroke-width="1"/>
 
   <rect x="520" y="342" width="340" height="28" class="box-nspa" rx="6"/>
   <text x="690" y="361" text-anchor="middle" class="label">NtReadFile(local_handle)</text>
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="690" y1="370" x2="690" y2="390" stroke="#9ece6a" stroke-width="1.5" marker-end="url(#lfG)"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="690" y1="370" x2="690" y2="390" stroke="#9ece6a" stroke-width="1.5"/>
 
   <rect x="540" y="392" width="300" height="42" class="box-new" rx="6"/>
   <text x="690" y="410" text-anchor="middle" class="label-green">server_get_unix_fd fast path</text>
@@ -392,7 +388,7 @@ struct nspa_local_open {
     .lf-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .lf-red { fill: #f7768e; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .lf-violet { fill: #bb9af7; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
-    .lf-line { stroke: #c0caf5; stroke-width: 1.4; }
+    .lf-line { stroke: #c0caf5; stroke-width: 1.15; }
   </style>
   <defs>
     <marker id="lfShareArrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
@@ -435,10 +431,10 @@ struct nspa_local_open {
   <text x="780" y="294" text-anchor="middle" class="lf-label">overflow or unsupported case</text>
   <text x="780" y="312" text-anchor="middle" class="lf-small">server create_file path remains exact</text>
 
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="270" y1="132" x2="335" y2="132" class="lf-line" marker-end="url(#lfShareArrow)"/>
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="270" y1="286" x2="335" y2="286" class="lf-line" marker-end="url(#lfShareArrow)"/>
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="670" y1="132" x2="605" y2="132" class="lf-line" marker-end="url(#lfShareArrow)"/>
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="605" y1="286" x2="670" y2="286" class="lf-line" marker-end="url(#lfShareArrow)"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="270" y1="132" x2="335" y2="132" class="lf-line"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="270" y1="286" x2="335" y2="286" class="lf-line"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="670" y1="132" x2="605" y2="132" class="lf-line"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="605" y1="286" x2="670" y2="286" class="lf-line"/>
   <text x="470" y="380" text-anchor="middle" class="lf-small">the table is not a data path cache; it is a compatibility contract</text>
   <text x="470" y="396" text-anchor="middle" class="lf-small">so local opens and server opens enforce one sharing model</text>
 </svg>
@@ -511,7 +507,7 @@ HANDLE nspa_promote_if_local( HANDLE h );
     .lp-title { fill: #7aa2f7; font-size: 14px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .lp-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .lp-red { fill: #f7768e; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
-    .lp-line { stroke: #c0caf5; stroke-width: 1.4; }
+    .lp-line { stroke: #c0caf5; stroke-width: 1.15; }
   </style>
   <defs>
     <marker id="lpArrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
@@ -534,8 +530,8 @@ HANDLE nspa_promote_if_local( HANDLE h );
   <text x="750" y="104" text-anchor="middle" class="lp-green">already promoted?</text>
   <text x="750" y="124" text-anchor="middle" class="lp-small">reuse cached server handle if yes</text>
 
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="300" y1="110" x2="360" y2="110" class="lp-line" marker-end="url(#lpArrow)"/>
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="580" y1="110" x2="640" y2="110" class="lp-line" marker-end="url(#lpArrow)"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="300" y1="110" x2="360" y2="110" class="lp-line"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="580" y1="110" x2="640" y2="110" class="lp-line"/>
 
   <rect x="70" y="208" width="250" height="140" class="lp-fast" rx="6"/>
   <text x="195" y="234" text-anchor="middle" class="lp-green">stays local</text>
@@ -558,10 +554,10 @@ HANDLE nspa_promote_if_local( HANDLE h );
   <text x="745" y="296" text-anchor="middle" class="lp-small">cache `server_handle` in LF entry</text>
   <text x="745" y="320" text-anchor="middle" class="lp-small">all later calls reuse it</text>
 
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="470" y1="142" x2="195" y2="208" class="lp-line" marker-end="url(#lpArrow)"/>
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="470" y1="142" x2="470" y2="208" class="lp-line" marker-end="url(#lpArrow)"/>
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="750" y1="142" x2="745" y2="208" class="lp-line" marker-end="url(#lpArrow)"/>
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="595" y1="278" x2="620" y2="278" class="lp-line" marker-end="url(#lpArrow)"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="470" y1="142" x2="195" y2="208" class="lp-line"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="470" y1="142" x2="470" y2="208" class="lp-line"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="750" y1="142" x2="745" y2="208" class="lp-line"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="595" y1="278" x2="620" y2="278" class="lp-line"/>
 
   <text x="470" y="384" text-anchor="middle" class="lp-small">this is why lazy promotion wins on workloads like Ableton:</text>
   <text x="470" y="400" text-anchor="middle" class="lp-small">most opens die on the left-hand path and never pay the server transition</text>
@@ -619,18 +615,18 @@ remaining sync-parity gaps at the boundary.</p>
   <rect x="340" y="50" width="240" height="32" class="box-api" rx="6"/>
   <text x="460" y="70" text-anchor="middle" class="label">app: CreateFileA(...)</text>
 
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="460" y1="82" x2="460" y2="102" stroke="#c8d0e8" stroke-width="1.5" marker-end="url(#df1)"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="460" y1="82" x2="460" y2="102" stroke="#c8d0e8" stroke-width="1.5"/>
 
   <rect x="320" y="104" width="280" height="52" class="box-gate" rx="6"/>
   <text x="460" y="124" text-anchor="middle" class="label-yellow">eligibility gate (file.c:4706)</text>
   <text x="460" y="142" text-anchor="middle" class="label-muted">disposition FILE_OPEN|FILE_OPEN_IF, sync, read-only</text>
 
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="320" y1="130" x2="140" y2="200" stroke="#f7768e" stroke-width="1.5" marker-end="url(#df3)"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="320" y1="130" x2="140" y2="200" stroke="#f7768e" stroke-width="1.5"/>
   <text x="180" y="170" class="label-red" text-anchor="start">fail gate</text>
   <rect x="40" y="200" width="200" height="32" class="box-slow" rx="6"/>
   <text x="140" y="220" text-anchor="middle" class="label-red">server create_file RTT</text>
 
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="460" y1="156" x2="460" y2="180" stroke="#9ece6a" stroke-width="1.5" marker-end="url(#df2)"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="460" y1="156" x2="460" y2="180" stroke="#9ece6a" stroke-width="1.5"/>
 
   <rect x="320" y="182" width="280" height="76" class="box-fast" rx="6"/>
   <text x="460" y="202" text-anchor="middle" class="label-green">nspa_local_file_try_bypass</text>
@@ -638,22 +634,22 @@ remaining sync-parity gaps at the boundary.</p>
   <text x="460" y="236" text-anchor="middle" class="label-sm">check_and_publish via inode shmem</text>
   <text x="460" y="252" text-anchor="middle" class="label-sm">open() + table_add</text>
 
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="320" y1="240" x2="160" y2="290" stroke="#f7768e" stroke-width="1.5" marker-end="url(#df3)"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="320" y1="240" x2="160" y2="290" stroke="#f7768e" stroke-width="1.5"/>
   <text x="200" y="270" class="label-red" text-anchor="start">SHARING_VIOLATION or NOT_SUPPORTED</text>
 
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="460" y1="258" x2="460" y2="282" stroke="#9ece6a" stroke-width="1.5" marker-end="url(#df2)"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="460" y1="258" x2="460" y2="282" stroke="#9ece6a" stroke-width="1.5"/>
 
   <rect x="340" y="284" width="240" height="32" class="box-api" rx="6"/>
   <text x="460" y="304" text-anchor="middle" class="label">local handle 0x7FFFC4xx</text>
 
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="460" y1="316" x2="460" y2="340" stroke="#c8d0e8" stroke-width="1.5" marker-end="url(#df1)"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="460" y1="316" x2="460" y2="340" stroke="#c8d0e8" stroke-width="1.5"/>
 
   <rect x="100" y="342" width="720" height="42" class="box-api" rx="6"/>
   <text x="460" y="360" text-anchor="middle" class="label">app uses the handle: NtReadFile / NtQuery* / NtSet* / NtFsCtl / NtDeviceIoCtl / ...</text>
   <text x="460" y="376" text-anchor="middle" class="label-muted">every NT-API entry point checks nspa_local_file_is_local_handle</text>
 
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="300" y1="384" x2="200" y2="410" stroke="#9ece6a" stroke-width="1.5" marker-end="url(#df2)"/>
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="620" y1="384" x2="720" y2="410" stroke="#9ece6a" stroke-width="1.5" marker-end="url(#df2)"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="300" y1="384" x2="200" y2="410" stroke="#9ece6a" stroke-width="1.5"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="620" y1="384" x2="720" y2="410" stroke="#9ece6a" stroke-width="1.5"/>
 
   <rect x="60" y="412" width="280" height="52" class="box-fast" rx="6"/>
   <text x="200" y="432" text-anchor="middle" class="label-green">NtReadFile / NtWriteFile</text>
@@ -663,12 +659,12 @@ remaining sync-parity gaps at the boundary.</p>
   <text x="720" y="432" text-anchor="middle" class="label-green">NtQuery*InformationFile etc</text>
   <text x="720" y="450" text-anchor="middle" class="label-sm">nspa_promote_if_local -&gt; server RPC</text>
 
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="720" y1="464" x2="720" y2="486" stroke="#f7768e" stroke-width="1" marker-end="url(#df3)"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="720" y1="464" x2="720" y2="486" stroke="#f7768e" stroke-width="1"/>
   <rect x="580" y="488" width="280" height="42" class="box-slow" rx="6"/>
   <text x="720" y="506" text-anchor="middle" class="label-red">nspa_create_file_from_unix_fd</text>
   <text x="720" y="520" text-anchor="middle" class="label-muted">one-time per local handle; cached</text>
 
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="460" y1="556" x2="460" y2="580" stroke="#c8d0e8" stroke-width="1" marker-end="url(#df1)"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="460" y1="556" x2="460" y2="580" stroke="#c8d0e8" stroke-width="1"/>
   <rect x="340" y="582" width="240" height="42" class="box-fast" rx="6"/>
   <text x="460" y="600" text-anchor="middle" class="label-green">NtClose (local path)</text>
   <text x="460" y="616" text-anchor="middle" class="label-muted">close(fd) + remove entry + server close if promoted</text>
@@ -1100,7 +1096,7 @@ NSPA_TRACE_ENABLED_FN(LF_TRACE_SRV)
 
 <hr />
 
-<h2 id="15-phase-history">15. Phase History</h2>
+<h2 id="15-history">15. History</h2>
 
 <table>
 <thead>

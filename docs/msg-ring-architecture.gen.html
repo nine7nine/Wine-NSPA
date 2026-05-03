@@ -108,15 +108,6 @@
 <div class="page-nav"><a href="index.html">Docs Home</a></div>
 <h1 id="wine-nspa--message-ring-architecture">Wine-NSPA — Message Ring Architecture</h1>
 
-<p><strong>Date:</strong> 2026-05-01
-<strong>Author:</strong> Jordan Johnston
-<strong>Kernel:</strong> <code>6.19.11-rt1-1-nspa</code> with NTSync PI (<code>10124FB81FDC76797EF1F91</code>)
-<strong>Subsystem source:</strong> <code>wine/dlls/win32u/nspa/msg_ring.c</code> (1633 LOC),
-<code>wine/server/protocol.def</code> (slot definitions, lines 1020-1214),
-<code>wine/server/nspa/redraw_ring.c</code> (87 LOC server drain),
-<code>wine/dlls/win32u/dce.c</code> (paint cache fastpath).
-<strong>Status:</strong> design and implementation reference for the same-process message-ring family, including shipped POST/SEND/REPLY paths and later hardening work.</p>
-
 <p>This page explains how the message rings replace same-process wineserver message traffic, how the reply and paint-cache pieces fit into the same substrate, and where the paused <code>get_message</code> work sits.</p>
 
 <hr />
@@ -124,7 +115,7 @@
 <h2 id="table-of-contents">Table of Contents</h2>
 
 <ol>
-<li><a href="#1-abstract">Abstract</a></li>
+<li><a href="#1-overview">Overview</a></li>
 <li><a href="#2-architecture-overview">Architecture overview</a></li>
 <li><a href="#3-ring-layout-in-shared-memory">Ring layout in shared memory</a></li>
 <li><a href="#4-memfd-lifecycle">Memfd lifecycle</a></li>
@@ -134,19 +125,19 @@
 <li><a href="#8-reply-slot-generation-discriminator-mr1">Reply-slot generation discriminator (MR1)</a></li>
 <li><a href="#9-cross-process-futex-mr2">Cross-process futex (MR2)</a></li>
 <li><a href="#10-wake-loss-rollback-mr4">Wake-loss rollback (MR4)</a></li>
-<li><a href="#11-phase-a-redraw_window-push-ring">Phase A — <code>redraw_window</code> push ring</a></li>
-<li><a href="#12-phase-b10-paint-cache-fastpath">Phase B1.0 — paint cache fastpath</a></li>
-<li><a href="#13-phase-c-get_message-bypass-paused">Phase C — <code>get_message</code> bypass (paused)</a></li>
+<li><a href="#11-redraw_window-push-ring"><code>redraw_window</code> push ring</a></li>
+<li><a href="#12-paint-cache-fast-path">Paint cache fast path</a></li>
+<li><a href="#13-direct-get_message-bypass-paused">Direct <code>get_message</code> bypass (paused)</a></li>
 <li><a href="#14-nspa_shm_retry_guard"><code>NSPA_SHM_RETRY_GUARD</code> — bounded retry primitive</a></li>
 <li><a href="#15-footnote-why-memfd">Footnote — why memfd, not session shmem</a></li>
-<li><a href="#16-phase-history">Phase history</a></li>
+<li><a href="#16-history">History</a></li>
 <li><a href="#17-references">References</a></li>
 </ol>
 
 
 <hr />
 
-<h2 id="1-abstract">1. Abstract</h2>
+<h2 id="1-overview">1. Overview</h2>
 
 <p>Wine&rsquo;s windowing model routes every <code>PostMessage</code> / <code>SendMessage</code> call
 through the wineserver: the sender writes a request, the server allocates
@@ -181,9 +172,9 @@ space and handle table).</p>
 
 <p>This document is the canonical reference for the entire ring family.
 The original POST / SEND / REPLY ring landed first (2026-04, see
-<a href="#16-phase-history">§16 Phase history</a>). Subsequent additions —
-Phase A <code>redraw_window</code> push, Phase B1.0 paint cache, Phase C
-<code>get_message</code> bypass, and the MR1 / MR2 / MR4 audit fix-pack from
+<a href="#16-history">§16 history</a>). Subsequent additions —
+the <code>redraw_window</code> push ring, the paint cache fast path, the direct
+<code>get_message</code> bypass work, and the MR1 / MR2 / MR4 audit fix-pack from
 2026-04-27 — extend or harden the same substrate. They share the
 per-queue memfd, the slot state machine, the cache discipline, and the
 fast-path atomics. The doc treats them as one evolving design rather
@@ -253,11 +244,11 @@ dominates this profile.</p>
 <td> <strong>Compatible, independent.</strong> Different bottleneck, different ring. </td>
 </tr>
 <tr>
-<td> Phase A redraw push ring </td>
+<td> <code>redraw_window</code> push ring </td>
 <td> Shares the per-queue memfd. The ring is co-located in <code>nspa_queue_bypass_shm_t</code> so the existing fd-passing protocol carries it for free. </td>
 </tr>
 <tr>
-<td> Phase B1.0 paint cache </td>
+<td> paint cache fast path </td>
 <td> Reads <code>queue_shm</code>, not the message ring; co-resident in the same fastpath taxonomy. </td>
 </tr>
 </tbody>
@@ -283,7 +274,7 @@ dominates this profile.</p>
     .label-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .label-red { fill: #f7768e; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .label-muted { fill: #a9b1d6; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
-    .divider { stroke: #3b4261; stroke-width: 1; stroke-dasharray: 8,4; }
+    .divider { stroke: #3b4261; stroke-width: 0.9; stroke-dasharray: 8,4; }
   </style>
 
   <text x="220" y="24" class="label-accent" text-anchor="middle">Vanilla Wine (server-mediated)</text>
@@ -1621,11 +1612,11 @@ handles &ldquo;no reply arrived&rdquo; as a first-class failure mode.</p>
 
 <hr />
 
-<h2 id="11-phase-a--redraw_window-push-ring">11. Phase A — <code>redraw_window</code> push ring</h2>
+<h2 id="11-redraw_window-push-ring">11. <code>redraw_window</code> push ring</h2>
 
 <h3 id="111-status">11.1 Status</h3>
 
-<p><strong>Shipped, default-on.</strong> Phase A landed in wine commit <code>72d7a9055a8</code>
+<p><strong>Shipped, default-on.</strong> The redraw push ring landed in wine commit <code>72d7a9055a8</code>
 (2026-04-25). Eliminates the synchronous <code>redraw_window</code> round-trip on
 the hot UI path.</p>
 
@@ -1633,11 +1624,11 @@ the hot UI path.</p>
 
 <p><code>RedrawWindow</code> is one-way (no <code>@REPLY</code>): the client just tells the
 server &ldquo;this window plus this region are dirty; flush invalidation
-state appropriately&rdquo;. Pre-Phase-A, every <code>RedrawWindow</code> was a full
+state appropriately&rdquo;. Before the push-ring landing, every <code>RedrawWindow</code> was a full
 RTT: client → server → handler runs <code>redraw_window()</code> → reply. Ableton
 playback hit ~10,930 redraw_window RTTs / 120 s of GUI workload.</p>
 
-<p>Phase A converts this to a one-way push ring. Client appends an entry
+<p>The push-ring implementation converts this to a one-way push ring. Client appends an entry
 to a per-queue ring slot; server drains lazily on its next request
 handler dispatch from the same queue.</p>
 
@@ -1770,7 +1761,7 @@ failed, tight-loop repainted, eventually wedged KWin/X11. Same shape
 as the gamma offset corruption fix — different mechanism. Fixed by
 snapshot/restore.</p>
 
-<h3 id="116-empirical-results-phase-a-ship">11.6 Empirical results (Phase A ship)</h3>
+<h3 id="116-empirical-results">11.6 Empirical results</h3>
 
 <p>Ableton Live 12 Lite, gamma + Tier 1+2 hook + Phase A, ~120 s with
 demo song + menus + window-move:</p>
@@ -1821,15 +1812,14 @@ RPC path. Default-on; flag is for bisection only.</p>
 
 <hr />
 
-<h2 id="12-phase-b10--paint-cache-fastpath">12. Phase B1.0 — paint cache fastpath</h2>
+<h2 id="12-paint-cache-fast-path">12. Paint cache fast path</h2>
 
 <h3 id="121-status">12.1 Status</h3>
 
-<p><strong>Default-OFF; opt-in via <code>NSPA_ENABLE_PAINT_CACHE=1</code>.</strong> The fastpath
-is shipped at <code>dlls/win32u/dce.c:1648-1685</code>. Validated in two clean
-Ableton runs on 2026-04-28 (run-3 default-off, run-4 default-on past
-the historical 5-min lockup threshold). One more validation run is
-queued before flipping default-on; see <a href="#127-current-status-toward-default-on">§12.7</a>.</p>
+<p><strong>Shipped, default-on.</strong> The fast path is shipped at
+<code>dlls/win32u/dce.c:1648-1685</code>, and <code>NSPA_ENABLE_PAINT_CACHE=0</code> is now
+the diagnostic opt-out. The older rollout history is kept below only
+for traceability.</p>
 
 <h3 id="122-rationale">12.2 Rationale</h3>
 
@@ -1905,7 +1895,7 @@ the seqlock retry loop; on retry exhaustion, falls back to RPC.</p>
     .pc-title { fill: #7aa2f7; font-size: 14px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .pc-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .pc-red { fill: #f7768e; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
-    .pc-line { stroke: #c0caf5; stroke-width: 1.4; }
+    .pc-line { stroke: #c0caf5; stroke-width: 1.15; }
   </style>
   <defs>
     <marker id="pcArrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
@@ -1914,7 +1904,7 @@ the seqlock retry loop; on retry exhaustion, falls back to RPC.</p>
   </defs>
 
   <rect x="0" y="0" width="940" height="420" class="pc-bg" rx="6"/>
-  <text x="470" y="28" text-anchor="middle" class="pc-title">Phase B1.0 paint cache: queue-level "nothing dirty" proof before the legacy RPC</text>
+  <text x="470" y="28" text-anchor="middle" class="pc-title">Paint cache fast path: queue-level "nothing dirty" proof before the legacy RPC</text>
 
   <rect x="70" y="86" width="230" height="88" class="pc-box" rx="6"/>
   <text x="185" y="112" text-anchor="middle" class="pc-label">caller: `get_update_flags(hwnd)`</text>
@@ -1933,8 +1923,8 @@ the seqlock retry loop; on retry exhaustion, falls back to RPC.</p>
   <text x="755" y="138" text-anchor="middle" class="pc-label">`SERVER_START_REQ(get_update_region)`</text>
   <text x="755" y="156" text-anchor="middle" class="pc-small">taken when one queue bit is insufficient</text>
 
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="300" y1="130" x2="355" y2="130" class="pc-line" marker-end="url(#pcArrow)"/>
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="585" y1="130" x2="640" y2="130" class="pc-line" marker-end="url(#pcArrow)"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="300" y1="130" x2="355" y2="130" class="pc-line"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="585" y1="130" x2="640" y2="130" class="pc-line"/>
 
   <rect x="120" y="254" width="260" height="96" class="pc-fast" rx="6"/>
   <text x="250" y="280" text-anchor="middle" class="pc-green">fastpath hit</text>
@@ -1946,8 +1936,8 @@ the seqlock retry loop; on retry exhaustion, falls back to RPC.</p>
   <text x="690" y="306" text-anchor="middle" class="pc-label">`QS_PAINT` set, foreign hwnd, or shm not ready</text>
   <text x="690" y="324" text-anchor="middle" class="pc-small">RPC preserves exact per-window semantics</text>
 
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="470" y1="194" x2="250" y2="254" class="pc-line" marker-end="url(#pcArrow)"/>
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="470" y1="194" x2="690" y2="254" class="pc-line" marker-end="url(#pcArrow)"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="470" y1="194" x2="250" y2="254" class="pc-line"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="470" y1="194" x2="690" y2="254" class="pc-line"/>
 
   <text x="470" y="380" text-anchor="middle" class="pc-small">the cache is intentionally coarse: it only proves the "definitely no paint" case;</text>
   <text x="470" y="396" text-anchor="middle" class="pc-small">falls back whenever a queue-level bit cannot answer</text>
@@ -1986,81 +1976,18 @@ process — measurable cost on Ableton&rsquo;s polling UI thread (~3,227 calls
 per session even with paint-cache disabled, since the miss counter sat
 outside the disabled-check). Gated post-<code>f4a1671973b</code>.</p>
 
-<h3 id="126-default-off-history">12.6 Default-OFF history</h3>
+<h3 id="126-historical-note">12.6 Historical note</h3>
 
-<p>The fastpath was originally shipped default-on (commit <code>70d55350bef</code>,
-2026-04-26) but reverted same day after Ableton reproducibly locked
-up in userspace ~5 min into a session with paint-cache enabled (kernel
-never faulted; pure userspace deadlock). The mechanism was unexplained
-at the time. Reverted in <code>4f2c29bb1b2</code> to gate behind
-<code>NSPA_ENABLE_PAINT_CACHE=1</code>.</p>
-
-<h3 id="127-current-status-toward-default-on">12.7 Current status toward default-on</h3>
-
-<p>The 2026-04-27 audit failed to identify the F5 paint-cache deadlock
-mechanism by code review. Empirical evidence pointed at a slow-build
-state-machine corruption rather than an obvious lock cycle. The audit
-flagged the most-likely-suspects:
-- a class of message types that reach the fastpath but were never
-  tested in the validation workload,
-- a hook chain that interacts with the cache&rsquo;s notion of &ldquo;QS_PAINT
-  clear&rdquo;,
-- a server-side state machine whose seqlock is mutated mid-read.</p>
-
-<p>The MR1 + MR2 + MR4 fix-pack landed 2026-04-27. On 2026-04-28, run-4
-was performed with <code>NSPA_ENABLE_PAINT_CACHE=1</code> and the historical
-5-min lockup was cleared without incident. Multiple drum-track
-load-while-playing cycles, audio clean throughout, Ableton exited
-cleanly.</p>
-
-<p><strong>Working hypothesis:</strong> MR1 (reply-slot ABA) was driving F5. Reasoning:
-paint-cache amplifies the rate of cross-thread sync sends because it
-skips the wineserver round-trip, so any caller that follows up with
-a <code>SendMessage</code> on a related window sees a higher volume of
-fastpath-skipped + sync-send pairings. An ABA-driven misdelivered
-LRESULT under that volume would build up state-machine corruption
-faster than the off-paint-cache baseline, eventually reaching a
-deadlock state where one thread is waiting for a signal that was
-misdirected to a different correlation.</p>
-
-<p>MR4 (POST wake-loss) is a secondary candidate: paint-cache enables a
-path where queue_shm changes are observed via shmem rather than RPC,
-increasing the chance that a wake delivered via
-<code>wine_server_signal_internal_sync</code> matters for forward progress.</p>
-
-<p>Cannot be definitively confirmed without a from-scratch repro on the
-pre-fix wine binary while bpftrace-armed — and that&rsquo;s not worth the
-cost given the matching fix set and the clean post-fix validation run.</p>
-
-<p><strong>DO NOT flip paint-cache default-on yet.</strong> Per
-<code>feedback_validate_before_default_on.md</code> (NSPA project memory):
-&ldquo;redraw-ring discipline; B1.0 lockup happened because default-on flip
-skipped behavioural validation.&rdquo; One clean run is necessary but not
-sufficient. Required before flipping default-on:</p>
-
-<ul>
-<li>One more clean run, ideally on a different day / cold start.</li>
-<li>Long-soak run (>30 min) — the prior 5-min lockup was a &ldquo;build-up&rdquo;
-pattern; a longer run gives the system more chances to surface a
-slower variant.</li>
-<li>One additional Ableton workload (record arming, plugin scan, freeze
-track) to vary the load shape from &ldquo;demo playback + drum-load&rdquo; alone.</li>
-</ul>
-
-
-<p>Until those clear, paint-cache stays opt-in via env var.</p>
-
-<h3 id="128-opt-in">12.8 Opt-in</h3>
-
-<pre><code class="code-block">NSPA_ENABLE_PAINT_CACHE=1
-</code></pre>
-
-<p>Default-OFF. Disabled via <code>NSPA_DISABLE_PAINT_CACHE=1</code> if a future
-B1.x default-on flip is layered.</p>
+<p>The fast path was temporarily reverted during its first rollout and
+later re-enabled after the MR1 / MR2 / MR4 hardening pass removed the
+message-path corruption that had been blamed on paint-cache. That
+history matters for traceability, but the current shipped behavior is
+simple: paint-cache is on by default and <code>NSPA_ENABLE_PAINT_CACHE=0</code>
+forces the older RPC path for A/B testing.</p>
 
 <hr />
 
-<h2 id="13-phase-c--get_message-bypass-paused">13. Phase C — <code>get_message</code> bypass (paused)</h2>
+<h2 id="13-direct-get_message-bypass-paused">13. Direct <code>get_message</code> bypass (paused)</h2>
 
 <h3 id="131-status">13.1 Status</h3>
 
@@ -2073,7 +2000,7 @@ The actual coverage extension is queued.</p>
 <h3 id="132-what-remains-uncovered">13.2 What remains uncovered</h3>
 
 <p><code>dlls/win32u/nspa/msg_ring.c</code> drains <em>cross-thread</em> <code>PostMessage</code> and
-<code>SendMessage</code> to the recipient&rsquo;s per-queue ring. Post-Phase-A there is
+<code>SendMessage</code> to the recipient&rsquo;s per-queue ring. After the shipped push-ring landing there is
 still residual <code>get_message</code> traffic — about 29.7k RPCs / 120 s of
 Ableton playback. Inspection candidates (from the handoff doc):</p>
 
@@ -2110,7 +2037,7 @@ bootstrapped yet (early in process startup).</li>
     .gm-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .gm-red { fill: #f7768e; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .gm-violet { fill: #bb9af7; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
-    .gm-line { stroke: #c0caf5; stroke-width: 1.4; }
+    .gm-line { stroke: #c0caf5; stroke-width: 1.15; }
   </style>
   <defs>
     <marker id="gmArrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
@@ -2119,7 +2046,7 @@ bootstrapped yet (early in process startup).</li>
   </defs>
 
   <rect x="0" y="0" width="940" height="430" class="gm-bg" rx="6"/>
-  <text x="470" y="28" text-anchor="middle" class="gm-title">Phase C target: collapse the residual `get_message` traffic that still crosses wineserver</text>
+  <text x="470" y="28" text-anchor="middle" class="gm-title">Queued direct `get_message` goal: shrink the residual traffic that still crosses wineserver</text>
 
   <rect x="70" y="88" width="250" height="108" class="gm-fast" rx="6"/>
   <text x="195" y="114" text-anchor="middle" class="gm-green">Already bypassed</text>
@@ -2135,13 +2062,13 @@ bootstrapped yet (early in process startup).</li>
   <text x="470" y="178" text-anchor="middle" class="gm-small">smaller buckets stay on authoritative path</text>
 
   <rect x="620" y="88" width="250" height="108" class="gm-wip" rx="6"/>
-  <text x="745" y="114" text-anchor="middle" class="gm-violet">Phase C direction</text>
+  <text x="745" y="114" text-anchor="middle" class="gm-violet">Queued direction</text>
   <text x="745" y="140" text-anchor="middle" class="gm-label">new server-side push category in queue shm</text>
   <text x="745" y="158" text-anchor="middle" class="gm-small">co-locate with existing bypass region</text>
   <text x="745" y="176" text-anchor="middle" class="gm-small">leave hard cases on RPC fallback</text>
 
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="320" y1="142" x2="345" y2="142" class="gm-line" marker-end="url(#gmArrow)"/>
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="595" y1="142" x2="620" y2="142" class="gm-line" marker-end="url(#gmArrow)"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="320" y1="142" x2="345" y2="142" class="gm-line"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="595" y1="142" x2="620" y2="142" class="gm-line"/>
 
   <rect x="140" y="274" width="220" height="92" class="gm-box" rx="6"/>
   <text x="250" y="300" text-anchor="middle" class="gm-label">keep local semantics</text>
@@ -2153,8 +2080,8 @@ bootstrapped yet (early in process startup).</li>
   <text x="690" y="326" text-anchor="middle" class="gm-small">goal is fewer `get_message` RTTs, not zero corner cases</text>
   <text x="690" y="344" text-anchor="middle" class="gm-small">fallback remains the correctness envelope</text>
 
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="470" y1="218" x2="250" y2="274" class="gm-line" marker-end="url(#gmArrow)"/>
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="470" y1="218" x2="690" y2="274" class="gm-line" marker-end="url(#gmArrow)"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="470" y1="218" x2="250" y2="274" class="gm-line"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="470" y1="218" x2="690" y2="274" class="gm-line"/>
 </svg>
 </div>
 
@@ -2238,7 +2165,7 @@ line of NSPA-flavored logic per audit §4.1 plus the NSPA reorg style
 <tbody>
 <tr>
 <td> <code>dlls/win32u/dce.c:1670</code> </td>
-<td> paint cache fastpath (default OFF) </td>
+<td> paint cache fast path (default ON, <code>=0</code> opt-out) </td>
 <td> <code>return FALSE;</code> (force RPC) </td>
 </tr>
 <tr>
@@ -2380,14 +2307,14 @@ this footnote.</p>
 
 <hr />
 
-<h2 id="16-phase-history">16. Phase history</h2>
+<h2 id="16-history">16. History</h2>
 
 <h3 id="161-original-postsendreply-ring">16.1 Original POST/SEND/REPLY ring</h3>
 
 <table>
 <thead>
 <tr>
-<th> Phase </th>
+<th> Step </th>
 <th> Wine commit </th>
 <th> Outcome </th>
 </tr>
@@ -2442,12 +2369,12 @@ this footnote.</p>
 </table>
 
 
-<h3 id="162-phase-a--redraw_window-push-ring">16.2 Phase A — <code>redraw_window</code> push ring</h3>
+<h3 id="162-redraw_window-push-ring">16.2 <code>redraw_window</code> push ring</h3>
 
 <table>
 <thead>
 <tr>
-<th> Phase </th>
+<th> Step </th>
 <th> Wine commit </th>
 <th> Outcome </th>
 </tr>
@@ -2455,19 +2382,19 @@ this footnote.</p>
 <tbody>
 <tr>
 <td> <code>72d7a9055a8</code> </td>
-<td> Phase A — redraw_window push ring </td>
+<td> redraw_window push ring </td>
 <td> 10,930 -> 0 RPCs / 120 s; default-on </td>
 </tr>
 </tbody>
 </table>
 
 
-<h3 id="163-phase-b10--paint-cache-fastpath">16.3 Phase B1.0 — paint cache fastpath</h3>
+<h3 id="163-paint-cache-fast-path">16.3 Paint cache fast path</h3>
 
 <table>
 <thead>
 <tr>
-<th> Phase </th>
+<th> Step </th>
 <th> Wine commit </th>
 <th> Outcome </th>
 </tr>
@@ -2475,18 +2402,18 @@ this footnote.</p>
 <tbody>
 <tr>
 <td> <code>c763761b928</code> </td>
-<td> B1.0 paint-cache implementation + diag </td>
-<td> Default-OFF; opt-in </td>
+<td> paint-cache implementation + diag </td>
+<td> initial rollout </td>
 </tr>
 <tr>
 <td> <code>70d55350bef</code> </td>
-<td> B1.0 default-on flip post-1006 </td>
+<td> default-on flip post-1006 </td>
 <td> Locked Ableton at ~5 min; reverted same day </td>
 </tr>
 <tr>
 <td> <code>4f2c29bb1b2</code> </td>
-<td> B1.0 revert paint-cache default to OFF </td>
-<td> Stays opt-in via <code>NSPA_ENABLE_PAINT_CACHE=1</code> </td>
+<td> temporary revert </td>
+<td> Rolled back while the hardening work was still incomplete </td>
 </tr>
 <tr>
 <td> <code>f4a1671973b</code> </td>
@@ -2498,11 +2425,16 @@ this footnote.</p>
 <td> run-4 2026-04-28 with paint-cache on </td>
 <td> PASS past historical 5-min lockup; F5 likely fixed by MR1/MR4 </td>
 </tr>
+<tr>
+<td> (current) </td>
+<td> shipped default-on state </td>
+<td> <code>NSPA_ENABLE_PAINT_CACHE=0</code> is the diagnostic opt-out </td>
+</tr>
 </tbody>
 </table>
 
 
-<h3 id="164-phase-c--get_message-bypass">16.4 Phase C — <code>get_message</code> bypass</h3>
+<h3 id="164-direct-get_message-bypass">16.4 Direct <code>get_message</code> bypass</h3>
 
 <table>
 <thead>

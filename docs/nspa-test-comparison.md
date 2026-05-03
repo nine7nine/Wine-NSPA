@@ -1,10 +1,5 @@
 # Wine-NSPA -- Full Suite Comparison Report
 
-**Date:** 2026-05-02
-**Author:** Jordan Johnston
-**Kernel:** `6.19.11-rt1-1-nspa` (PREEMPT_RT_FULL, production)
-**ntsync module:** `srcversion 10124FB81FDC76797EF1F91`
-**Wine:** 11.6 + NSPA RT patchset
 Baseline = `WINEDEBUG=-all` only |
 RT = `NSPA_RT_PRIO=80 NSPA_RT_POLICY=FF WINEPRELOADREMAPVDSO=force`
 
@@ -18,7 +13,7 @@ historical snapshots.
 
 | Version | Date | Highlight |
 |---------|------|-----------|
-| v3 -> v4 | 2026-04-15 | NTSync PI v2 kernel fixes; io_uring socket bypass landed (later renumbered to Phase 2) |
+| v3 -> v4 | 2026-04-15 | NTSync PI v2 kernel fixes; io_uring socket bypass landed |
 | v4 -> v5 | 2026-04-15 | msvcrt SIMD + SRW spin + pi_cond requeue-PI |
 | v5 -> v6 | 2026-04-16/17 | (incremental tuning, stable matrix) |
 | **v6 -> v7** | **2026-04-28** | **Native ntsync stress suite added; ~370M ops zero KASAN; PE matrix 22/22 stable** |
@@ -42,8 +37,8 @@ full-suite matrix version. So the current matrix version remains v8.
 | Area | Validation surface | Published result |
 |------|--------------------|------------------|
 | client scheduler + RT timer migrations | `run-rt-probe-validation.sh` | `10/10 PASS`; Ableton boot / library / project / playback PASS; net `-1` helper thread per process |
-| anonymous local events default-on | Ableton playback smoke vs Phase 4.5 baseline | system CPU `40-57%` -> `~35%` during playback (`~15-20%` reduction); thread count and wineserver CPU unchanged |
-| socket `RECVMSG` / `SENDMSG` default-on | `socket-io` deferred path + Ableton smoke | throughput `+6.5%`; p99 latency `-6.8%`; `0/2000` failures; Ableton clean at `63` threads with zero new errors vs Phase 4.6 baseline |
+| anonymous local events default-on | Ableton playback smoke vs earlier shipped event baseline | system CPU `40-57%` -> `~35%` during playback (`~15-20%` reduction); thread count and wineserver CPU unchanged |
+| socket `RECVMSG` / `SENDMSG` default-on | `socket-io` deferred path + Ableton smoke | throughput `+6.5%`; p99 latency `-6.8%`; `0/2000` failures; Ableton clean at `63` threads with zero new errors vs earlier shipped socket baseline |
 
 ### Reading this with the rest of the docs
 
@@ -99,7 +94,7 @@ present).
 | ntsync-d12 | PASS | PASS | same, depth 12, 8 rapid threads |
 | socket-io | PASS* | PASS* | current build functionally green on the socket path |
 | condvar-pi | PASS | PASS | Win32 condvar PI bridge stable |
-| dispatcher-burst | PASS | PASS | gamma dispatcher A/B harness for `TRY_RECV2` + Phase 4 `CreateFile` |
+| dispatcher-burst | PASS | PASS | gamma dispatcher A/B harness for `TRY_RECV2` + async `CreateFile` |
 
 **24 PASS / 0 FAIL / 0 TIMEOUT** (12 tests x 2 modes).
 
@@ -141,7 +136,7 @@ harness was added in v8.
 |------|--------|--------|
 | Kernel | 1011 `NTSYNC_IOC_CHANNEL_TRY_RECV2` shipped | non-blocking channel dequeue for post-dispatch burst drain |
 | Userspace | `NSPA_TRY_RECV2=1` default-on | drains multiple entries per `AGG_WAIT` under burst load |
-| Userspace | `NSPA_ENABLE_ASYNC_CREATE_FILE=1` default-on | Phase 4 removes the `open()` lock-drop CS from the audio xrun path |
+| Userspace | `NSPA_ENABLE_ASYNC_CREATE_FILE=1` default-on | removes the `open()` lock-drop CS from the audio xrun path |
 | Userspace | `NSPA_FLUSH_THROTTLE_MS=8` default-on | recovers ~5.4 percentage points of MainThread CPU under busy Ableton |
 | Test surface | `dispatcher-burst` added to Layer 2 | first PE-side gamma / dispatcher coverage |
 

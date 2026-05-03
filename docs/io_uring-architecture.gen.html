@@ -108,12 +108,6 @@
 <div class="page-nav"><a href="index.html">Docs Home</a></div>
 <h1 id="wine-nspa--io_uring-io-architecture">Wine-NSPA &ndash; io_uring I/O Architecture</h1>
 
-<p><strong>Date:</strong> 2026-05-02
-<strong>Author:</strong> Jordan Johnston
-<strong>Kernel:</strong> <code>6.19.11-rt1-1-nspa</code> (PREEMPT_RT_FULL)
-<strong>Wine:</strong> 11.6 + NSPA RT patchset
-<strong>Status:</strong> shipped design reference; Phase 1 file I/O, dispatcher-owned async <code>CreateFile</code>, and Phase 4.8 socket RECVMSG / SENDMSG are all live. The remaining non-<code>io_uring</code> server-managed surfaces are documented here only to explain the current boundary.</p>
-
 <p>This page explains where <code>io_uring</code> fits in Wine-NSPA, what has already landed
 for file and socket I/O, and which surfaces remain outside the <code>io_uring</code>
 boundary because they are still fundamentally server-managed.</p>
@@ -121,29 +115,29 @@ boundary because they are still fundamentally server-managed.</p>
 <h2 id="table-of-contents">Table of Contents</h2>
 
 <ol>
-<li><a href="#1-status-as-of-2026-05-02">Status as of 2026-05-02</a></li>
-<li><a href="#2-overview">Overview</a></li>
+<li><a href="#1-overview">Overview</a></li>
+<li><a href="#2-integration-boundary">Integration boundary</a></li>
 <li><a href="#3-design-principles">Design Principles</a></li>
 <li><a href="#4-io-architecture-before-and-after">I/O Architecture: Before and After</a></li>
-<li><a href="#5-phase-1-file-io-bypass-shipped">Phase 1: File I/O Bypass (shipped)</a></li>
-<li><a href="#6-phase-48-socket-recvmsg--sendmsg-shipped">Phase 4.8: Socket RECVMSG / SENDMSG (shipped)</a></li>
+<li><a href="#5-file-io-bypass">File I/O bypass</a></li>
+<li><a href="#6-socket-recvsend-path">Socket recv/send path</a></li>
 <li><a href="#7-what-stays-outside-iouring">What stays outside <code>io_uring</code></a></li>
 <li><a href="#8-file-manifest">File Manifest</a></li>
-<li><a href="#9-status-summary">Status Summary</a></li>
+<li><a href="#9-implementation-summary">Implementation summary</a></li>
 </ol>
 
 
 <hr />
 
-<h2 id="1-status-as-of-2026-05-02">1. Status as of 2026-05-02</h2>
+<h2 id="1-overview">1. Overview</h2>
 
 <p>The <code>io_uring</code> story is now broader than the original file-I/O landing.
 Three pieces are shipped in production:</p>
 
 <ul>
-<li><strong>Phase 1:</strong> sync poll replacement plus async file read/write on the PE side</li>
-<li><strong>Phase 4:</strong> dispatcher-owned async <code>CreateFile</code> on the per-process server ring</li>
-<li><strong>Phase 4.8 A+B:</strong> PE-side socket <code>RECVMSG</code> / <code>SENDMSG</code>, default on via
+<li>sync poll replacement plus async file read/write on the PE side</li>
+<li>dispatcher-owned async <code>CreateFile</code> on the per-process server ring</li>
+<li>PE-side socket <code>RECVMSG</code> / <code>SENDMSG</code>, default on via
 <code>NSPA_URING_RECV=1</code> and <code>NSPA_URING_SEND=1</code></li>
 </ul>
 
@@ -153,12 +147,11 @@ Three pieces are shipped in production:</p>
 server-managed surfaces and compose with the local-event fix instead of
 replacing it.</p>
 
-<h3 id="phase-status-table">Phase Status Table</h3>
+<h3 id="shipped-surface-summary">Shipped surface summary</h3>
 
 <table>
 <thead>
 <tr>
-<th> Phase </th>
 <th> Surface </th>
 <th> Status </th>
 <th> Default </th>
@@ -167,42 +160,36 @@ replacing it.</p>
 </thead>
 <tbody>
 <tr>
-<td> Phase 1 </td>
 <td> Sync poll + async file I/O </td>
 <td> <strong>Shipped</strong> </td>
 <td> On </td>
 <td> <code>NtReadFile</code> / <code>NtWriteFile</code> async bypass + sync poll replacement; pool allocator (TLS, 32 ops); CQE drain at <code>server_select</code> / <code>server_wait</code> </td>
 </tr>
 <tr>
-<td> Phase 4 </td>
 <td> Dispatcher-owned async <code>CreateFile</code> </td>
 <td> <strong>Shipped</strong> </td>
 <td> On </td>
 <td> <code>NSPA_ENABLE_ASYNC_CREATE_FILE=1</code>; routes <code>CreateFile</code> through the per-process ring and removes the <code>open()</code> lock-drop CS from the audio xrun path </td>
 </tr>
 <tr>
-<td> Phase 4.8 A </td>
 <td> Socket recv </td>
 <td> <strong>Shipped</strong> </td>
 <td> On </td>
 <td> <code>NSPA_URING_RECV=1</code>; <code>recv_socket</code> submits <code>IORING_OP_RECVMSG</code> on the deferred path </td>
 </tr>
 <tr>
-<td> Phase 4.8 B </td>
 <td> Socket send </td>
 <td> <strong>Shipped</strong> </td>
 <td> On </td>
 <td> <code>NSPA_URING_SEND=1</code>; <code>send_socket</code> submits <code>IORING_OP_SENDMSG</code> on the deferred path </td>
 </tr>
 <tr>
-<td> Phase 4.8 C </td>
 <td> <code>NtFlushBuffersFile</code> FSYNC </td>
 <td> <strong>Dropped</strong> </td>
 <td> &ndash; </td>
 <td> disk path is already synchronous <code>fsync()</code>; no meaningful <code>io_uring</code> win </td>
 </tr>
 <tr>
-<td> Phase 4.8 D </td>
 <td> anonymous pipes / inotify </td>
 <td> <strong>Dropped</strong> </td>
 <td> &ndash; </td>
@@ -212,11 +199,11 @@ replacing it.</p>
 </table>
 
 
-<h3 id="delta-from-the-2026-04-15-plan">Delta from the 2026-04-15 plan</h3>
+<h3 id="boundary-changes-since-the-first-public-draft">Boundary changes since the first public draft</h3>
 
 <ul>
-<li>Phases 1 and 2 of the 2026-04-15 plan (sync poll replacement, async
-file I/O bypass) have collapsed into a single shipped Phase 1.</li>
+<li>The original sync poll replacement and async file I/O work now read
+as one shipped file-I/O slice.</li>
 <li>Socket work is no longer theoretical follow-on work. The data path is
 shipped on the PE side via <code>RECVMSG</code> / <code>SENDMSG</code>.</li>
 <li>Pipes and named events did <strong>not</strong> become <code>io_uring</code> work. Their remaining
@@ -226,7 +213,7 @@ completion story is handled by other server-managed mechanisms.</li>
 
 <hr />
 
-<h2 id="2-overview">2. Overview</h2>
+<h2 id="2-integration-boundary">2. Integration boundary</h2>
 
 <p>This document is the <code>io_uring</code> design and implementation reference for
 Wine-NSPA. It covers the integration boundary, per-thread ring model,
@@ -336,8 +323,8 @@ submit path. Initialized once at ring setup.</li>
     .ur-label-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .ur-label-yellow { fill: #e0af68; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
     .ur-label-cyan { fill: #7dcfff; font-size: 10px; font-family: 'JetBrains Mono', monospace; }
-    .ur-arrow { stroke: #9aa5ce; stroke-width: 1.5; fill: none; }
-    .ur-arrow-green { stroke: #9ece6a; stroke-width: 2; fill: none; }
+    .ur-arrow { stroke: #9aa5ce; stroke-width: 1.15; fill: none; }
+    .ur-arrow-green { stroke: #9ece6a; stroke-width: 1.15; fill: none; }
   </style>
 
   <text x="390" y="20" class="ur-label-yellow" text-anchor="middle">Per-Thread io_uring Ring + Pool Allocator (TLS)</text>
@@ -362,7 +349,7 @@ submit path. Initialized once at ring setup.</li>
   <rect x="500" y="65" width="250" height="85" rx="6" class="ur-box"/>
   <text x="625" y="82" class="ur-label" text-anchor="middle">ring_initialized (bool)</text>
   <text x="625" y="95" class="ur-label-sm" text-anchor="middle">ring_init_failed (bool)</text>
-  <text x="625" y="108" class="ur-label-green" text-anchor="middle">ring_efd (eventfd, Phase 2/3)</text>
+  <text x="625" y="108" class="ur-label-green" text-anchor="middle">ring_efd (eventfd for dispatcher-owned completion)</text>
   <text x="625" y="123" class="ur-label-sm" text-anchor="middle">ensure_ring(): lazy init</text>
   <text x="625" y="136" class="ur-label-sm" text-anchor="middle">+ op_pool_init() + eventfd()</text>
   <text x="625" y="146" class="ur-label-sm" text-anchor="middle">+ IORING_REGISTER_EVENTFD</text>
@@ -486,10 +473,10 @@ write-watch safety. Only the poll wait is replaced.</p>
 
 <hr />
 
-<h2 id="5-phase-1-file-io-bypass-shipped">5. Phase 1: File I/O Bypass (shipped)</h2>
+<h2 id="5-file-io-bypass">5. File I/O bypass</h2>
 
-<p><strong>Status: Shipped, default-on. Single combined phase covering sync poll
-replacement and async <code>NtReadFile</code>/<code>NtWriteFile</code> bypass.</strong></p>
+<p><strong>Shipped, default-on.</strong> Single combined implementation covering sync poll
+replacement and async <code>NtReadFile</code> / <code>NtWriteFile</code> bypass.</p>
 
 <h3 id="what-changed">What Changed</h3>
 
@@ -586,9 +573,9 @@ fallback for an edge case that rarely occurs in practice.</p>
 
 <hr />
 
-<h2 id="6-phase-48-socket-recvmsg--sendmsg-shipped">6. Phase 4.8: Socket RECVMSG / SENDMSG (shipped)</h2>
+<h2 id="6-socket-recvsend-path">6. Socket recv/send path</h2>
 
-<p><strong>Status: Shipped, default-on.</strong></p>
+<p><strong>Shipped, default-on.</strong></p>
 
 <p>The socket path now uses true socket SQEs on the deferred async path:</p>
 
@@ -629,7 +616,7 @@ result back once</li>
     .sr-v { fill: #bb9af7; font: bold 10px 'JetBrains Mono', monospace; }
     .sr-g { fill: #9ece6a; font: bold 10px 'JetBrains Mono', monospace; }
     .sr-y { fill: #e0af68; font: bold 10px 'JetBrains Mono', monospace; }
-    .sr-line { stroke: #c0caf5; stroke-width: 1.5; fill: none; }
+    .sr-line { stroke: #c0caf5; stroke-width: 1.15; fill: none; }
   </style>
   <defs>
     <marker id="srArrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
@@ -655,8 +642,8 @@ result back once</li>
   <text x="780" y="142" text-anchor="middle" class="sr-s">socket readiness and data move</text>
   <text x="780" y="160" text-anchor="middle" class="sr-s">CQE fires on completion</text>
 
-  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M270 134 L360 134" class="sr-line" marker-end="url(#srArrow)"/>
-  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M580 134 L670 134" class="sr-line" marker-end="url(#srArrow)"/>
+  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M270 134 L360 134" class="sr-line"/>
+  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M580 134 L670 134" class="sr-line"/>
 
   <rect x="210" y="236" width="520" height="62" class="sr-note" rx="6"/>
   <text x="470" y="262" text-anchor="middle" class="sr-y">Single completion path</text>
@@ -775,7 +762,7 @@ with <code>io_uring</code>.</p>
 <tr>
 <td> <code>dlls/ntdll/unix/file.c</code> </td>
 <td> ~30 </td>
-<td> Phase 1: sync poll + async read/write bypass </td>
+<td> sync poll + async read/write bypass </td>
 </tr>
 <tr>
 <td> <code>dlls/ntdll/unix/socket.c</code> </td>
@@ -824,7 +811,7 @@ with <code>io_uring</code>.</p>
 
 <hr />
 
-<h2 id="9-status-summary">9. Status Summary</h2>
+<h2 id="9-implementation-summary">9. Implementation summary</h2>
 
 <table>
 <thead>
@@ -846,29 +833,29 @@ with <code>io_uring</code>.</p>
 <td> RT-safe, zero malloc in submit path </td>
 </tr>
 <tr>
-<td> Phase 1: sync poll + async file I/O </td>
+<td> sync poll + async file I/O </td>
 <td> Shipped, default-on </td>
 <td> <code>NtReadFile</code> / <code>NtWriteFile</code> </td>
 </tr>
 <tr>
-<td> Phase 4: async <code>CreateFile</code> via dispatcher ring </td>
+<td> async <code>CreateFile</code> via dispatcher ring </td>
 <td> Shipped, default-on </td>
 <td> <code>NSPA_ENABLE_ASYNC_CREATE_FILE=1</code>; server-side consumer on the per-process ring </td>
 </tr>
 <tr>
-<td> Phase 4.8 A+B: socket I/O (deferred path) </td>
+<td> socket I/O (deferred path) </td>
 <td> Shipped, default-on </td>
 <td> <code>NSPA_URING_RECV=1</code>, <code>NSPA_URING_SEND=1</code>; validated on <code>socket-io</code> and Ableton </td>
 </tr>
 <tr>
-<td> Phase 4.8 C/D follow-ons </td>
+<td> dropped follow-ons </td>
 <td> Dropped </td>
 <td> not worthwhile or blocked by server-managed architecture </td>
 </tr>
 <tr>
 <td> E2 bitmap (server <code>sock.c</code>) </td>
 <td> Shipped </td>
-<td> Engaged when Phase 2 client-poll bit is set </td>
+<td> engaged when the client-owned socket poll path is active </td>
 </tr>
 <tr>
 <td> ntsync <code>uring_fd</code> extension </td>

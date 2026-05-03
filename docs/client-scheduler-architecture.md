@@ -1,11 +1,5 @@
 # Wine-NSPA -- Client Scheduler Architecture
 
-**Date:** 2026-05-02
-**Author:** Jordan Johnston
-**Kernel:** `6.19.11-rt1-1-nspa` (PREEMPT_RT_FULL)
-**Wine:** 11.6 + NSPA RT patchset
-**Status:** shipped architecture reference for the spawn-main carry, the `ntdll_sched` substrate, and the live default-class and RT-class scheduler consumers.
-
 This page explains the client-side scheduler infrastructure that landed on
 2026-05-02: the spawn-main thread split, the per-process `ntdll_sched`
 dispatch loops, the lazy RT-class sched thread, and the first consumers now

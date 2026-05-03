@@ -1,19 +1,12 @@
 # Wine Window Decoration Feedback Loop -- Investigation Report
 
-> **Status: INVESTIGATION COMPLETE -- 2026-04-13.**
->
-> X11 path: fixed (removed `WS_EX_LAYERED` MWM exclusion).
-> Wayland path: `GetWindowStyleMasks` added but untested.
->
-> Retained as historical record of the analysis.
-
----
+Historical investigation retained for reference. X11 was fixed by removing the
+`WS_EX_LAYERED` MWM exclusion. The Wayland path has additional probing but
+remains unvalidated.
 
 **Bug:** WineHQ bug 57955 -- maximized/resized window decorations oscillate
 **Affects:** All compositors (KDE/KWin, GNOME/Mutter), both X11 and Wayland drivers, also Wine desktop mode
 **Regression range:** Wine 8.21 -> late 9.0-rc (likely commit `cb1c03b926c`, Wine 9.16)
-**Date:** 2026-04-14
-
 ---
 
 ## The Bug

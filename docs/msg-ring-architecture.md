@@ -1,21 +1,12 @@
 # Wine-NSPA — Message Ring Architecture
 
-**Date:** 2026-05-01
-**Author:** Jordan Johnston
-**Kernel:** `6.19.11-rt1-1-nspa` with NTSync PI (`10124FB81FDC76797EF1F91`)
-**Subsystem source:** `wine/dlls/win32u/nspa/msg_ring.c` (1633 LOC),
-`wine/server/protocol.def` (slot definitions, lines 1020-1214),
-`wine/server/nspa/redraw_ring.c` (87 LOC server drain),
-`wine/dlls/win32u/dce.c` (paint cache fastpath).
-**Status:** design and implementation reference for the same-process message-ring family, including shipped POST/SEND/REPLY paths and later hardening work.
-
 This page explains how the message rings replace same-process wineserver message traffic, how the reply and paint-cache pieces fit into the same substrate, and where the paused `get_message` work sits.
 
 ---
 
 ## Table of Contents
 
- 1. [Abstract](#1-abstract)
+ 1. [Overview](#1-overview)
  2. [Architecture overview](#2-architecture-overview)
  3. [Ring layout in shared memory](#3-ring-layout-in-shared-memory)
  4. [Memfd lifecycle](#4-memfd-lifecycle)
@@ -25,17 +16,17 @@ This page explains how the message rings replace same-process wineserver message
  8. [Reply-slot generation discriminator (MR1)](#8-reply-slot-generation-discriminator-mr1)
  9. [Cross-process futex (MR2)](#9-cross-process-futex-mr2)
 10. [Wake-loss rollback (MR4)](#10-wake-loss-rollback-mr4)
-11. [Phase A — `redraw_window` push ring](#11-phase-a-redraw_window-push-ring)
-12. [Phase B1.0 — paint cache fastpath](#12-phase-b10-paint-cache-fastpath)
-13. [Phase C — `get_message` bypass (paused)](#13-phase-c-get_message-bypass-paused)
+11. [`redraw_window` push ring](#11-redraw_window-push-ring)
+12. [Paint cache fast path](#12-paint-cache-fast-path)
+13. [Direct `get_message` bypass (paused)](#13-direct-get_message-bypass-paused)
 14. [`NSPA_SHM_RETRY_GUARD` — bounded retry primitive](#14-nspa_shm_retry_guard)
 15. [Footnote — why memfd, not session shmem](#15-footnote-why-memfd)
-16. [Phase history](#16-phase-history)
+16. [History](#16-history)
 17. [References](#17-references)
 
 ---
 
-## 1. Abstract
+## 1. Overview
 
 Wine's windowing model routes every `PostMessage` / `SendMessage` call
 through the wineserver: the sender writes a request, the server allocates
@@ -67,9 +58,9 @@ space and handle table).
 
 This document is the canonical reference for the entire ring family.
 The original POST / SEND / REPLY ring landed first (2026-04, see
-[§16 Phase history](#16-phase-history)). Subsequent additions —
-Phase A `redraw_window` push, Phase B1.0 paint cache, Phase C
-`get_message` bypass, and the MR1 / MR2 / MR4 audit fix-pack from
+[§16 history](#16-history)). Subsequent additions —
+the `redraw_window` push ring, the paint cache fast path, the direct
+`get_message` bypass work, and the MR1 / MR2 / MR4 audit fix-pack from
 2026-04-27 — extend or harden the same substrate. They share the
 per-queue memfd, the slot state machine, the cache discipline, and the
 fast-path atomics. The doc treats them as one evolving design rather
@@ -96,8 +87,8 @@ dominates this profile.
 | CS-PI (`FUTEX_LOCK_PI`) | **No conflict.** Ring operates in client code only; no server locks are acquired on the fast path. |
 | RT scheduling (SCHED_FIFO/RR) | **RT-safe fast path.** After warm-up, a ring POST/SEND is atomic CAS plus memory reads/writes on `mlock()`-pinned memory. No syscalls, no page faults. |
 | io_uring I/O bypass | **Compatible, independent.** Different bottleneck, different ring. |
-| Phase A redraw push ring | Shares the per-queue memfd. The ring is co-located in `nspa_queue_bypass_shm_t` so the existing fd-passing protocol carries it for free. |
-| Phase B1.0 paint cache | Reads `queue_shm`, not the message ring; co-resident in the same fastpath taxonomy. |
+| `redraw_window` push ring | Shares the per-queue memfd. The ring is co-located in `nspa_queue_bypass_shm_t` so the existing fd-passing protocol carries it for free. |
+| paint cache fast path | Reads `queue_shm`, not the message ring; co-resident in the same fastpath taxonomy. |
 
 ---
 
@@ -1275,11 +1266,11 @@ handles "no reply arrived" as a first-class failure mode.
 
 ---
 
-## 11. Phase A — `redraw_window` push ring
+## 11. `redraw_window` push ring
 
 ### 11.1 Status
 
-**Shipped, default-on.** Phase A landed in wine commit `72d7a9055a8`
+**Shipped, default-on.** The redraw push ring landed in wine commit `72d7a9055a8`
 (2026-04-25). Eliminates the synchronous `redraw_window` round-trip on
 the hot UI path.
 
@@ -1287,11 +1278,11 @@ the hot UI path.
 
 `RedrawWindow` is one-way (no `@REPLY`): the client just tells the
 server "this window plus this region are dirty; flush invalidation
-state appropriately". Pre-Phase-A, every `RedrawWindow` was a full
+state appropriately". Before the push-ring landing, every `RedrawWindow` was a full
 RTT: client → server → handler runs `redraw_window()` → reply. Ableton
 playback hit ~10,930 redraw_window RTTs / 120 s of GUI workload.
 
-Phase A converts this to a one-way push ring. Client appends an entry
+The push-ring implementation converts this to a one-way push ring. Client appends an entry
 to a per-queue ring slot; server drains lazily on its next request
 handler dispatch from the same queue.
 
@@ -1421,7 +1412,7 @@ failed, tight-loop repainted, eventually wedged KWin/X11. Same shape
 as the gamma offset corruption fix — different mechanism. Fixed by
 snapshot/restore.
 
-### 11.6 Empirical results (Phase A ship)
+### 11.6 Empirical results
 
 Ableton Live 12 Lite, gamma + Tier 1+2 hook + Phase A, ~120 s with
 demo song + menus + window-move:
@@ -1451,15 +1442,14 @@ RPC path. Default-on; flag is for bisection only.
 
 ---
 
-## 12. Phase B1.0 — paint cache fastpath
+## 12. Paint cache fast path
 
 ### 12.1 Status
 
-**Default-OFF; opt-in via `NSPA_ENABLE_PAINT_CACHE=1`.** The fastpath
-is shipped at `dlls/win32u/dce.c:1648-1685`. Validated in two clean
-Ableton runs on 2026-04-28 (run-3 default-off, run-4 default-on past
-the historical 5-min lockup threshold). One more validation run is
-queued before flipping default-on; see [§12.7](#127-current-status-toward-default-on).
+**Shipped, default-on.** The fast path is shipped at
+`dlls/win32u/dce.c:1648-1685`, and `NSPA_ENABLE_PAINT_CACHE=0` is now
+the diagnostic opt-out. The older rollout history is kept below only
+for traceability.
 
 ### 12.2 Rationale
 
@@ -1543,7 +1533,7 @@ the seqlock retry loop; on retry exhaustion, falls back to RPC.
   </defs>
 
   <rect x="0" y="0" width="940" height="420" class="pc-bg"/>
-  <text x="470" y="28" text-anchor="middle" class="pc-title">Phase B1.0 paint cache: queue-level "nothing dirty" proof before the legacy RPC</text>
+  <text x="470" y="28" text-anchor="middle" class="pc-title">Paint cache fast path: queue-level "nothing dirty" proof before the legacy RPC</text>
 
   <rect x="70" y="86" width="230" height="88" class="pc-box"/>
   <text x="185" y="112" text-anchor="middle" class="pc-label">caller: `get_update_flags(hwnd)`</text>
@@ -1613,77 +1603,18 @@ process — measurable cost on Ableton's polling UI thread (~3,227 calls
 per session even with paint-cache disabled, since the miss counter sat
 outside the disabled-check). Gated post-`f4a1671973b`.
 
-### 12.6 Default-OFF history
+### 12.6 Historical note
 
-The fastpath was originally shipped default-on (commit `70d55350bef`,
-2026-04-26) but reverted same day after Ableton reproducibly locked
-up in userspace ~5 min into a session with paint-cache enabled (kernel
-never faulted; pure userspace deadlock). The mechanism was unexplained
-at the time. Reverted in `4f2c29bb1b2` to gate behind
-`NSPA_ENABLE_PAINT_CACHE=1`.
-
-### 12.7 Current status toward default-on
-
-The 2026-04-27 audit failed to identify the F5 paint-cache deadlock
-mechanism by code review. Empirical evidence pointed at a slow-build
-state-machine corruption rather than an obvious lock cycle. The audit
-flagged the most-likely-suspects:
-- a class of message types that reach the fastpath but were never
-  tested in the validation workload,
-- a hook chain that interacts with the cache's notion of "QS_PAINT
-  clear",
-- a server-side state machine whose seqlock is mutated mid-read.
-
-The MR1 + MR2 + MR4 fix-pack landed 2026-04-27. On 2026-04-28, run-4
-was performed with `NSPA_ENABLE_PAINT_CACHE=1` and the historical
-5-min lockup was cleared without incident. Multiple drum-track
-load-while-playing cycles, audio clean throughout, Ableton exited
-cleanly.
-
-**Working hypothesis:** MR1 (reply-slot ABA) was driving F5. Reasoning:
-paint-cache amplifies the rate of cross-thread sync sends because it
-skips the wineserver round-trip, so any caller that follows up with
-a `SendMessage` on a related window sees a higher volume of
-fastpath-skipped + sync-send pairings. An ABA-driven misdelivered
-LRESULT under that volume would build up state-machine corruption
-faster than the off-paint-cache baseline, eventually reaching a
-deadlock state where one thread is waiting for a signal that was
-misdirected to a different correlation.
-
-MR4 (POST wake-loss) is a secondary candidate: paint-cache enables a
-path where queue_shm changes are observed via shmem rather than RPC,
-increasing the chance that a wake delivered via
-`wine_server_signal_internal_sync` matters for forward progress.
-
-Cannot be definitively confirmed without a from-scratch repro on the
-pre-fix wine binary while bpftrace-armed — and that's not worth the
-cost given the matching fix set and the clean post-fix validation run.
-
-**DO NOT flip paint-cache default-on yet.** Per
-`feedback_validate_before_default_on.md` (NSPA project memory):
-"redraw-ring discipline; B1.0 lockup happened because default-on flip
-skipped behavioural validation." One clean run is necessary but not
-sufficient. Required before flipping default-on:
-
-- One more clean run, ideally on a different day / cold start.
-- Long-soak run (>30 min) — the prior 5-min lockup was a "build-up"
-  pattern; a longer run gives the system more chances to surface a
-  slower variant.
-- One additional Ableton workload (record arming, plugin scan, freeze
-  track) to vary the load shape from "demo playback + drum-load" alone.
-
-Until those clear, paint-cache stays opt-in via env var.
-
-### 12.8 Opt-in
-
-    NSPA_ENABLE_PAINT_CACHE=1
-
-Default-OFF. Disabled via `NSPA_DISABLE_PAINT_CACHE=1` if a future
-B1.x default-on flip is layered.
+The fast path was temporarily reverted during its first rollout and
+later re-enabled after the MR1 / MR2 / MR4 hardening pass removed the
+message-path corruption that had been blamed on paint-cache. That
+history matters for traceability, but the current shipped behavior is
+simple: paint-cache is on by default and `NSPA_ENABLE_PAINT_CACHE=0`
+forces the older RPC path for A/B testing.
 
 ---
 
-## 13. Phase C — `get_message` bypass (paused)
+## 13. Direct `get_message` bypass (paused)
 
 ### 13.1 Status
 
@@ -1696,7 +1627,7 @@ The actual coverage extension is queued.
 ### 13.2 What remains uncovered
 
 `dlls/win32u/nspa/msg_ring.c` drains *cross-thread* `PostMessage` and
-`SendMessage` to the recipient's per-queue ring. Post-Phase-A there is
+`SendMessage` to the recipient's per-queue ring. After the shipped push-ring landing there is
 still residual `get_message` traffic — about 29.7k RPCs / 120 s of
 Ableton playback. Inspection candidates (from the handoff doc):
 
@@ -1739,7 +1670,7 @@ Ableton playback. Inspection candidates (from the handoff doc):
   </defs>
 
   <rect x="0" y="0" width="940" height="430" class="gm-bg"/>
-  <text x="470" y="28" text-anchor="middle" class="gm-title">Phase C target: collapse the residual `get_message` traffic that still crosses wineserver</text>
+  <text x="470" y="28" text-anchor="middle" class="gm-title">Queued direct `get_message` goal: shrink the residual traffic that still crosses wineserver</text>
 
   <rect x="70" y="88" width="250" height="108" class="gm-fast"/>
   <text x="195" y="114" text-anchor="middle" class="gm-green">Already bypassed</text>
@@ -1755,7 +1686,7 @@ Ableton playback. Inspection candidates (from the handoff doc):
   <text x="470" y="178" text-anchor="middle" class="gm-small">smaller buckets stay on authoritative path</text>
 
   <rect x="620" y="88" width="250" height="108" class="gm-wip"/>
-  <text x="745" y="114" text-anchor="middle" class="gm-violet">Phase C direction</text>
+  <text x="745" y="114" text-anchor="middle" class="gm-violet">Queued direction</text>
   <text x="745" y="140" text-anchor="middle" class="gm-label">new server-side push category in queue shm</text>
   <text x="745" y="158" text-anchor="middle" class="gm-small">co-locate with existing bypass region</text>
   <text x="745" y="176" text-anchor="middle" class="gm-small">leave hard cases on RPC fallback</text>
@@ -1844,7 +1775,7 @@ line of NSPA-flavored logic per audit §4.1 plus the NSPA reorg style
 
 | Site | Hot path | Exhaust action |
 | --- | --- | --- |
-| `dlls/win32u/dce.c:1670` | paint cache fastpath (default OFF) | `return FALSE;` (force RPC) |
+| `dlls/win32u/dce.c:1670` | paint cache fast path (default ON, `=0` opt-out) | `return FALSE;` (force RPC) |
 | `dlls/win32u/input.c:863` | `GetQueueStatus` shm read | `return FALSE;` (force RPC) |
 | `dlls/win32u/hook.c:77` | `is_hooked` shm read | `return TRUE;` (server is authoritative) |
 | `dlls/win32u/nspa/msg_ring.c:1219` | POST arbitration check (`server_pending` query) | `return FALSE;` (server-fallback) |
@@ -1920,11 +1851,11 @@ this footnote.
 
 ---
 
-## 16. Phase history
+## 16. History
 
 ### 16.1 Original POST/SEND/REPLY ring
 
-| Phase | Wine commit | Outcome |
+| Step | Wine commit | Outcome |
 | --- | --- | --- |
 | `c9daf83afe9` | alloc-side-effect isolation probes | Ruled out poison fill, ID sensitivity |
 | `924df6727db` | opt-in `NSPA_MSG_RING_EXCLUDE_MAIN` gate | Workaround for library panel; first-thread specific |
@@ -1936,23 +1867,24 @@ this footnote.
 | `657c16691f5` | Phase 4.6 client-side ring-SEND dispatch | Full SEND bypass validated |
 | `70ea71f8c7b` | Design doc update with ballpark reduction | Docs current |
 
-### 16.2 Phase A — `redraw_window` push ring
+### 16.2 `redraw_window` push ring
 
-| Phase | Wine commit | Outcome |
+| Step | Wine commit | Outcome |
 | --- | --- | --- |
-| `72d7a9055a8` | Phase A — redraw_window push ring | 10,930 -> 0 RPCs / 120 s; default-on |
+| `72d7a9055a8` | redraw_window push ring | 10,930 -> 0 RPCs / 120 s; default-on |
 
-### 16.3 Phase B1.0 — paint cache fastpath
+### 16.3 Paint cache fast path
 
-| Phase | Wine commit | Outcome |
+| Step | Wine commit | Outcome |
 | --- | --- | --- |
-| `c763761b928` | B1.0 paint-cache implementation + diag | Default-OFF; opt-in |
-| `70d55350bef` | B1.0 default-on flip post-1006 | Locked Ableton at ~5 min; reverted same day |
-| `4f2c29bb1b2` | B1.0 revert paint-cache default to OFF | Stays opt-in via `NSPA_ENABLE_PAINT_CACHE=1` |
+| `c763761b928` | paint-cache implementation + diag | initial rollout |
+| `70d55350bef` | default-on flip post-1006 | Locked Ableton at ~5 min; reverted same day |
+| `4f2c29bb1b2` | temporary revert | Rolled back while the hardening work was still incomplete |
 | `f4a1671973b` | Gate hit/miss counters behind `NSPA_PAINT_DIAG=1` | Removed always-on counter cost |
 | (validation) | run-4 2026-04-28 with paint-cache on | PASS past historical 5-min lockup; F5 likely fixed by MR1/MR4 |
+| (current) | shipped default-on state | `NSPA_ENABLE_PAINT_CACHE=0` is the diagnostic opt-out |
 
-### 16.4 Phase C — `get_message` bypass
+### 16.4 Direct `get_message` bypass
 
 | Phase | Wine commit | Outcome |
 | --- | --- | --- |

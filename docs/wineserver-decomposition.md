@@ -1,14 +1,10 @@
-# Wine-NSPA -- Wineserver Decomposition: The Long-Horizon Plan
-
-Wine 11.6 + NSPA RT patchset | Kernel 6.19.x-rt with NTSync PI | 2026-05-02
-Author: Jordan Johnston
-Status: long-horizon architecture plan; aggregate-wait is already a shipped slice, and the 2026-05-02 client-scheduler, local-event, timer, and socket follow-ons further narrowed the residual wineserver surface. The broader timer/fd-poll splits remain roadmap work.
+# Wine-NSPA -- Wineserver Decomposition
 
 This page explains the residual wineserver architecture problem after the existing bypasses, which decomposition slices have already landed, and which ones are still roadmap material.
 
 ## Table of Contents
 
-1. [What this doc is](#1-what-this-doc-is)
+1. [Overview](#1-overview)
 2. [Where wineserver is today](#2-where-wineserver-is-today)
 3. [Two complementary directions](#3-two-complementary-directions)
     - 3.1 [Priority inheritance across the splits](#31-priority-inheritance-across-the-splits)
@@ -21,16 +17,16 @@ This page explains the residual wineserver architecture problem after the existi
     - 5.3 [FD polling thread split](#53-fd-polling-thread-split)
     - 5.4 [Lock partitioning](#54-lock-partitioning)
 6. [What MUST stay in wineserver](#6-what-must-stay-in-wineserver)
-7. [Phasing](#7-phasing)
+7. [Shipped slices and remaining roadmap](#7-shipped-slices-and-remaining-roadmap)
 8. [Why this isn't a full rewrite](#8-why-this-isnt-a-full-rewrite)
     - 8.1 [The validation discipline](#81-the-validation-discipline)
 9. [Open questions](#9-open-questions)
-10. [Phase ladder diagram](#10-phase-ladder-diagram)
+10. [Decomposition ladder](#10-decomposition-ladder)
 11. [Cross-references](#11-cross-references)
 
 ---
 
-## 1. What this doc is
+## 1. Overview
 
 The NSPA bypass catalog describes the trajectories along which NT-API state moves *out* of wineserver. This doc is the other half: what eventually happens to wineserver itself, after enough state has migrated.
 
@@ -42,10 +38,10 @@ A few framing notes before getting into the details:
 
 - This is not a rewrite plan. The premise is that wineserver as a process continues to exist and continues to be the source of truth for a small set of irreducibly-cross-process semantics (process and thread lifecycle, named-object directories, handle inheritance). What changes is what's *inside* it.
 - This is not a "kill the global_lock" plan in isolation. Lock partitioning is a late-stage step, not the opening move. Each earlier step is independently valuable and reduces the audit surface for later lock work.
-- This is not chronological reading. Phase 1 and Phase 2 are already shipped (`open_fd` lock-drop default-on, NTSync §2.1 thread-token pass-through default-on), and one kernel/userspace slice that used to live under Phase 3 is now also shipped: NTSync aggregate-wait plus the gamma dispatcher consumer. Since the first public draft, more client-side work also shipped around the plan rather than inside wineserver itself: spawn-main + `ntdll_sched`, anonymous local events default-on, sched-hosted `local_timer` / `local_wm_timer`, and socket `RECVMSG` / `SENDMSG`. The phase table in section 7 is the canonical status; the body sections describe each component split in isolation.
+- This is not chronological reading. Several decomposition-adjacent slices are already shipped: `open_fd` lock-drop default-on, thread-token pass-through default-on, aggregate-wait plus the gamma dispatcher consumer, spawn-main + `ntdll_sched`, anonymous local events default-on, sched-hosted `local_timer` / `local_wm_timer`, and socket `RECVMSG` / `SENDMSG`. The roadmap table in section 7 is the canonical status; the body sections describe each component split in isolation.
 - This is not a one-author plan. Several pieces (the gamma dispatcher itself, NTSync's PI machinery, the open_fd lock-drop framing) emerged from the kernel + wineserver co-design sessions and have been shaped over many iterations under real-workload validation. The road map here reflects what those iterations have converged on, not a top-down architectural mandate.
 
-The audience this doc is written for: a developer who has read the bypass overview, has skimmed the gamma-channel-dispatcher and ntsync-driver docs, and wants to understand the architectural arc that the bypass work *enables*. If you're implementing a single bypass and want a checklist, read the bypass detail doc for that bypass; if you're implementing a single phase from this road map, read the in-tree handoff doc (`wine/nspa/docs/wineserver-decomposition-plan.md`) which has line-level kernel landmarks. This doc is the why, not the how.
+The audience this doc is written for: a developer who has read the bypass overview, has skimmed the gamma-channel-dispatcher and ntsync-driver docs, and wants to understand the architectural arc that the bypass work *enables*. If you're implementing a single bypass and want a checklist, read the bypass detail doc for that bypass; if you're implementing one roadmap slice from this page, read the in-tree handoff doc (`wine/nspa/docs/wineserver-decomposition-plan.md`) which has line-level kernel landmarks. This doc is the why, not the how.
 
 The main 2026-05-02 correction is scope: some of the work this page once
 treated as "future wineserver-internal decomposition pressure" is now
@@ -68,13 +64,13 @@ Wineserver runs two RT threads in current NSPA configurations. Both serialize on
 | Gamma channel dispatcher (1 per client process) | SCHED_FIFO | `nspa_srv_rt_prio` (64) | yes, around handler dispatch | `NTSYNC_IOC_CHANNEL_RECV` (futex-backed) |
 | (no separate timer thread today) | -- | -- | -- | timers handled inside main loop's `get_next_timeout` |
 
-The shape worth noting: the main loop's wait primitive is `poll()` / `epoll_wait()` bounded by `get_next_timeout()`. The same syscall returns either when an fd is ready *or* when the next NT timer is due. Time-driven and event-driven processing are conflated into one wait primitive. That conflation is the seam Phase 3 is going to split along.
+The shape worth noting: the main loop's wait primitive is `poll()` / `epoll_wait()` bounded by `get_next_timeout()`. The same syscall returns either when an fd is ready *or* when the next NT timer is due. Time-driven and event-driven processing are conflated into one wait primitive. That conflation is the seam the remaining thread split would separate.
 
 What changed since the first draft is where the pressure comes from. A chunk
 of timer and event traffic no longer reaches wineserver at all:
 `nspa_local_timer` and `nspa_local_wm_timer` now dispatch on the client
 `wine-sched-rt` host when eligible, and anonymous local events default to a
-client-range fast path. So the remaining Phase 3 timer split is about the
+client-range fast path. So the remaining timer split is about the
 residual server-owned timer queue, not the whole timer surface.
 
 The dispatcher pthread runs one per *client process*: the kernel-mediated request channel (the "gamma channel" -- see `gamma-channel-dispatcher.md`) replaces the older per-thread request dispatcher fan-out. So if a Wine application has 50 threads, there is still exactly one dispatcher pthread in wineserver handling all of them, and that dispatcher takes `global_lock` once per request.
@@ -93,7 +89,7 @@ A perf capture from 2026-04-26 (PREEMPT_RT, Ableton steady-state playback worklo
 
 All of those run under `global_lock`. The wineserver process itself sits around 1% CPU at steady state -- it's a very lightly loaded process by throughput. But the question for an RT workload isn't "how busy is the server" -- it's *latency under contention*, which is exactly what a single global lock tilts against. Every handler runs to completion under the lock; the variance of "how long is the lock held" propagates into every other request.
 
-The `open_fd` lock-drop work shipped in Phase 1 attacked one specific instance of this -- the long lock-holder during `openat` -- and it measurably improved drum-track-load-while-playing because it carved out a window where the lock could be released around the slow syscall. Similar surgical fixes exist elsewhere, but the lock-drop pattern is fundamentally a workaround for the wrong-grain-of-locking problem. The real fix is to either move the work out (bypasses) or split the lock (Phase 4).
+The `open_fd` lock-drop work attacked one specific instance of this -- the long lock-holder during `openat` -- and it measurably improved drum-track-load-while-playing because it carved out a window where the lock could be released around the slow syscall. Similar surgical fixes exist elsewhere, but the lock-drop pattern is fundamentally a workaround for the wrong-grain-of-locking problem. The real fix is to either move the work out (bypasses) or split the lock later.
 
 ---
 
@@ -113,9 +109,9 @@ This is the doc for direction B. The two directions interact in a specific way: 
 
 Direction A reduces the amount of state still owned by wineserver. Direction B reduces the dispatch and locking cost of the state that remains. The ordering matters: reducing the residual surface first lowers the risk and audit cost of later server-internal restructuring.
 
-There is a third direction worth naming explicitly even though it's not a separate workstream: **lock discipline inside existing handlers.** The Phase B `open_fd` lock-drop is the canonical example -- a single handler that holds `global_lock` across a slow blocking syscall, fixed by carefully releasing the lock around the syscall and reacquiring with a generation check. That kind of work doesn't move state out (Direction A) and doesn't restructure the threading (Direction B); it just reduces the lock-hold duration of one specific handler. It's surgical and labour-intensive, but several handlers benefit from it and the wins are immediate. It compounds with both other directions: a handler whose lock-hold has been minimized is a smaller obstacle once aggregate-wait or lock partitioning lands.
+There is a third direction worth naming explicitly even though it's not a separate workstream: **lock discipline inside existing handlers.** The `open_fd` lock-drop is the canonical example -- a single handler that holds `global_lock` across a slow blocking syscall, fixed by carefully releasing the lock around the syscall and reacquiring with a generation check. That kind of work doesn't move state out (Direction A) and doesn't restructure the threading (Direction B); it just reduces the lock-hold duration of one specific handler. It's surgical and labour-intensive, but several handlers benefit from it and the wins are immediate. It compounds with both other directions: a handler whose lock-hold has been minimized is a smaller obstacle once aggregate-wait or lock partitioning lands.
 
-The decomposition arc treats lock-discipline patches as Phase 1 -- "individually surgical fixes to the worst lock-holders" -- and otherwise leaves them as ongoing work that ships independently. The Phase 1 row in the phase table represents the entire family, not just `open_fd`.
+The decomposition arc treats lock-discipline patches as the first landed slice -- "individually surgical fixes to the worst lock-holders" -- and otherwise leaves them as ongoing work that ships independently. The first row in the roadmap table represents the entire family, not just `open_fd`.
 
 <div class="diagram-container">
 <svg width="100%" viewBox="0 0 940 540" xmlns="http://www.w3.org/2000/svg">
@@ -224,7 +220,7 @@ NTSync is the kernel module NSPA owns and extends (`ntsync-patches/`, `ntsync-dr
 
 ### 4.1 Thread-token pass-through (shipped)
 
-Status: **shipped 2026-04-26** (T1/T2/T3, default-on as of post-1006 unblocking). Listed here for completeness; the implementation is described in `gamma-channel-dispatcher.md`.
+This piece is **shipped** (2026-04-26) and listed here for completeness; the implementation is described in `gamma-channel-dispatcher.md`.
 
 The problem this solved: every channel request, the dispatcher called `get_thread_from_id((thread_id_t)recv.payload_off)` which called `get_ptid_entry(id)`, an indexed array lookup with a possible cache miss in `process.c:547`. At 10% of dispatcher CPU in steady-state playback, this was meaningful overhead and -- more importantly -- a cache-miss-prone source of latency variance on every channel request.
 
@@ -236,7 +232,7 @@ The trust model -- which generalizes to 4.2 -- is "wineserver is trusted by the 
 
 ### 4.2 Aggregate-wait primitive (shipped slice)
 
-Status: **kernel primitive + first userspace consumer shipped 2026-04-29**. The broader decomposition consumers (timer-thread split + FD poll thread split) remain queued, but `NTSYNC_IOC_AGGREGATE_WAIT` itself is no longer hypothetical and is already default-on in the gamma dispatcher via `NSPA_AGG_WAIT`.
+The kernel primitive plus its first userspace consumer are **shipped** (2026-04-29). The broader decomposition consumers still remain queued, but `NTSYNC_IOC_AGGREGATE_WAIT` itself is no longer hypothetical and is already default-on in the gamma dispatcher via `NSPA_AGG_WAIT`.
 
 The problem: wineserver's main loop today waits via `poll()` / `epoll_wait()` over wineserver fds. It does *not* compose with NTSync object waits. The dispatcher pthread waits via `NTSYNC_IOC_CHANNEL_RECV` (futex-backed); it does *not* compose with fd readiness or NT timer deadlines. Each thread has exactly one wait primitive and one shape of wakeup, and the two shapes can't merge into a single waiter.
 
@@ -268,7 +264,7 @@ These four splits describe the userspace side of the road map. They are independ
 
 ### 5.1 Timer thread split
 
-Status: **queued for Phase 3, but narrower than before**. Behaviour-preserving structural change; still the first safe server-internal split.
+This work is **still queued**, but narrower than before. It remains the first safe server-internal split because it preserves handler behaviour while changing only the wait ownership.
 
 Today, wineserver's main loop computes `get_next_timeout()` from the head of the residual NT timer queue, passes that timeout to `poll()`, and processes timer expirations when poll returns due to timeout (rather than fd readiness). That couples timer-driven wakeups to fd-driven wakeups in the same syscall.
 
@@ -298,7 +294,7 @@ A subtlety worth flagging: NT timer semantics are mutable. NT code can create, m
 
 ### 5.2 Router / handler split
 
-Status: **queued for Phase 4** (long horizon). Pays its design cost as state migrates out.
+This work is **queued for the later routing stage**. It only starts paying for itself as more state migrates out of wineserver.
 
 Today, the gamma dispatcher pthread does `CHANNEL_RECV → grab global_lock → read_request_shm → run handler → release lock → CHANNEL_REPLY` in a tight loop. Every request takes the lock. Most requests touch only a small subset of wineserver state.
 
@@ -317,7 +313,7 @@ The risk of the split itself is low (it's mechanical). The actual hard work is t
 
 ### 5.3 FD polling thread split
 
-Status: **queued for Phase 3**. Decision contingent on PREEMPT_RT epoll experiment outcome, but the remaining scope is smaller now that PE-side sockets already bypass through client `io_uring` SQEs.
+This work is **still queued**. The decision depends on the PREEMPT_RT epoll experiment, and the remaining scope is smaller now that PE-side sockets already bypass through client `io_uring` SQEs.
 
 Today, the main loop is RT and spends most of its time blocked in `poll()` or `epoll_wait()`. The wait itself doesn't actually need RT priority -- only the *response* to the wait does. RT priority matters for the work that happens after the wait returns, not for the act of sleeping in the kernel.
 
@@ -343,7 +339,7 @@ The other risk is the PREEMPT_RT epoll behavior. If epoll on PREEMPT_RT is adequ
 
 ### 5.4 Lock partitioning
 
-Status: **long horizon, Phase 4**. Don't start until 2-3 subsystems have already been pruned.
+This is **long-horizon work**. It should not start until 2-3 subsystems have already been pruned away from the old lock domain.
 
 Current lock state: one `global_lock` (a `pi_mutex_t`) covers all wineserver state. Every handler takes it. The lock is a serialization point for every Win32 process running on the system.
 
@@ -437,27 +433,27 @@ This list is also why the strategy is "decompose, not delete." A from-scratch re
 
 ---
 
-## 7. Phasing
+## 7. Shipped slices and remaining roadmap
 
-The single canonical phase table for the decomposition arc. This table covers the four phases of decomposition itself; bypass trajectories are tracked separately in their own subsystem docs.
+The single canonical roadmap table for the decomposition arc. It covers the main decomposition slices; bypass trajectories are tracked separately in their own subsystem docs.
 
-| Phase | Items | Status |
+| Slice | Items | Status |
 |---|---|---|
-| 1 | Phase B `open_fd` lock-drop | shipped default-on |
-| 2 | NTSync §2.1 thread-token pass-through (T1/T2/T3) | shipped default-on |
-| 3 | Residual timer thread split (5.1) + residual FD poll thread split (5.3), composed around shipped aggregate-wait (4.2) | queued |
-| 4 | Router/handler split (5.2) + lock partitioning (5.4) | long horizon |
+| 1 | `open_fd` lock-drop and related handler lock-discipline fixes | shipped default-on |
+| 2 | thread-token pass-through and gamma receive ownership cleanup | shipped default-on |
+| 3 | residual timer thread split (5.1) + residual FD poll thread split (5.3), composed around shipped aggregate-wait (4.2) | queued |
+| 4 | router/handler split (5.2) + lock partitioning (5.4) | long horizon |
 
-Each phase ships discrete, testable, revertible wins. The architecture direction stays clear (less wineserver, less `global_lock`, more event-driven RT primitives) but every phase is independently valuable.
+Each slice ships discrete, testable, revertible wins. The architecture direction stays clear (less wineserver, less `global_lock`, more event-driven RT primitives) but every slice is independently valuable.
 
 A few notes about the ordering:
 
-- Phase 1 (open_fd lock-drop) was a surgical fix targeted at one specific lock-holder pattern (long syscalls under `global_lock`). It's not a "decomposition" in the architectural sense; it's a targeted release of the lock around a known-slow critical section. Listed as Phase 1 because it was the first piece of decomposition-direction work to ship, and because the pattern it establishes (NSPA-side lock-discipline patches inside server handlers) generalizes to other long lock-holders we may identify later.
-- Phase 2 is the thread-token pass-through, shipped 2026-04-26 as T1+T2+T3 and flipped default-on after the post-1006 ntsync stabilization. It's a kernel + userspace co-design and the prototype for the kernel-side primitives that Phase 3 will need.
-- Phase 3 is still co-designed even though aggregate-wait itself already shipped. The remaining shape is one RT handler thread (running aggregate-wait over the gamma channel + the FD-event queue + the timer queue), one non-RT FD polling thread, and one timer thread. The syscall and the gamma consumer are now proven; the unresolved work is how the rest of wineserver composes around them. Since 2026-05-02, read this as the **residual** server-owned timer/fd set, not the whole timer/socket universe.
-- Phase 4 is the long horizon. Router/handler split pays as more bypasses ship; lock partitioning pays at the end. Don't start either until the bypass arc has materially shrunk the surface area.
+- Slice 1 (`open_fd` lock-drop) was a surgical fix targeted at one specific lock-holder pattern (long syscalls under `global_lock`). It's not a full architectural decomposition step; it's a targeted release of the lock around a known-slow critical section. It is listed first because it was the first decomposition-direction work to ship, and because the pattern it establishes (NSPA-side lock-discipline patches inside server handlers) generalizes to other long lock-holders we may identify later.
+- Slice 2 is thread-token pass-through, shipped 2026-04-26 and flipped default-on after the post-1006 ntsync stabilization. It's a kernel + userspace co-design and the prototype for the kernel-side primitives that the remaining splits will need.
+- Slice 3 is still co-designed even though aggregate-wait itself already shipped. The remaining shape is one RT handler thread (running aggregate-wait over the gamma channel + the FD-event queue + the timer queue), one non-RT FD polling thread, and one timer thread. The syscall and the gamma consumer are now proven; the unresolved work is how the rest of wineserver composes around them. Since 2026-05-02, read this as the **residual** server-owned timer/fd set, not the whole timer/socket universe.
+- Slice 4 is the long horizon. Router/handler split pays as more bypasses ship; lock partitioning pays at the end. Don't start either until the bypass arc has materially shrunk the surface area.
 
-Most importantly: each phase ships independently. There is no big-bang. If Phase 3 stalls, Phase 4 doesn't unblock anything that Phase 1+2 didn't already unblock; the bypasses keep shipping in parallel. The decomposition-arc and the bypass-arc are independently progressing, with each sometimes accelerating the other but neither blocking it.
+Most importantly: each slice ships independently. There is no big-bang. If slice 3 stalls, slice 4 doesn't unblock anything that slices 1 and 2 didn't already unblock; the bypasses keep shipping in parallel. The decomposition arc and the bypass arc are independently progressing, with each sometimes accelerating the other but neither blocking it.
 
 ---
 
@@ -467,11 +463,11 @@ The natural alternative to this plan is: rewrite wineserver from scratch with th
 
 There are real reasons NSPA chose decomposition over rewrite:
 
-- **Incremental migration ships value continuously.** Each phase ships a discrete, testable, revertible win. Phase 1 alone (open_fd lock-drop) measurably improved drum-track-load-while-playing. Phase 2 alone reclaims ~10% of dispatcher CPU. A rewrite has no intermediate value; it ships when it ships, and the integration risk is concentrated at the moment of swap-over.
+- **Incremental migration ships value continuously.** Each slice ships a discrete, testable, revertible win. `open_fd` lock-drop alone measurably improved drum-track-load-while-playing. Thread-token pass-through alone reclaims ~10% of dispatcher CPU. A rewrite has no intermediate value; it ships when it ships, and the integration risk is concentrated at the moment of swap-over.
 - **The existing handler bodies are correct.** Wine has decades of bugfixing inside the handler implementations -- corner cases, app compatibility, NT-quirk-of-the-month fixes. A rewrite has to re-port all of that, and "we missed a quirk" is a regression that's expensive to find. Decomposition reuses the handler bodies; only the dispatch and locking discipline around them changes.
-- **Each step is independently revertible.** If Phase 3 turns out to introduce a regression, the env-var gates flip off and Phase 2 + Phase 1 + the bypasses all keep working. Compare the cost of reverting one phase to the cost of rolling back from a unified rewrite that's already replaced the old wineserver.
+- **Each step is independently revertible.** If the residual thread split turns out to introduce a regression, the env-var gates flip off and the earlier shipped slices plus the bypasses all keep working. Compare the cost of reverting one slice to the cost of rolling back from a unified rewrite that's already replaced the old wineserver.
 - **The bypass arc shrinks the rewrite target.** By the time decomposition gets to lock partitioning, the surface that needs partitioning is much smaller than today's wineserver. A rewrite's target is fixed at the time the rewrite starts; a decomposition's target shrinks while the work is in progress.
-- **The direction is consistent at every step.** "Less wineserver, less global_lock, more event-driven RT primitives" is the same direction at every phase. The target architecture is refined incrementally instead of requiring a single up-front replacement design.
+- **The direction is consistent at every step.** "Less wineserver, less global_lock, more event-driven RT primitives" is the same direction at every slice. The target architecture is refined incrementally instead of requiring a single up-front replacement design.
 
 The cost of decomposition is a slight cost in design uniformity. Each phase has its own approach, its own gating env var, its own validation discipline. There's no single "wineserver 2.0" that you can point at; instead there's a wineserver that's been progressively reshaped. That is, on net, the right trade for a project that has to ship usable improvements continuously rather than commit to a multi-quarter rewrite.
 
@@ -479,31 +475,31 @@ A useful framing: bypasses and decomposition use the same incremental-migration 
 
 ### 8.1 The validation discipline
 
-A constraint that runs through the whole arc: each phase has to pass real-workload validation before it can flip default-on. The default workload is Ableton-on-PREEMPT_RT under realistic plugin load -- it exercises the message pump, the file I/O paths, the sync primitives, the timer paths, and the audio RT thread all simultaneously. If a change breaks Ableton or introduces measurable xrun regressions, it stays default-off until the cause is found and fixed.
+A constraint that runs through the whole arc: each slice has to pass real-workload validation before it can flip default-on. The default workload is Ableton-on-PREEMPT_RT under realistic plugin load -- it exercises the message pump, the file I/O paths, the sync primitives, the timer paths, and the audio RT thread all simultaneously. If a change breaks Ableton or introduces measurable xrun regressions, it stays default-off until the cause is found and fixed.
 
-This discipline has caught real bugs. The post-1006 ntsync work re-validated several "shipped" bypasses against a kernel module that finally didn't lock the host; the validation found that some of the lockup attribution had been wrong (Phase B `open_fd` was blamed for a lockup that turned out to be an unrelated NTSync slab corruption). Without re-validation under stable conditions, the wrong bypass would have stayed gated.
+This discipline has caught real bugs. The post-1006 ntsync work re-validated several "shipped" bypasses against a kernel module that finally didn't lock the host; the validation found that some of the lockup attribution had been wrong (`open_fd` lock-drop was blamed for a lockup that turned out to be an unrelated NTSync slab corruption). Without re-validation under stable conditions, the wrong bypass would have stayed gated.
 
-The implication for Phase 3: every component split needs its own gate (`NSPA_TIMER_THREAD_SPLIT=1`, `NSPA_FD_POLL_THREAD=1`, and so on), its own validation plan, and independent combination testing. `NSPA_AGG_WAIT` already followed that path and flipped default-on after validation; the remaining pieces should be held to the same discipline.
+The implication for the residual thread split: every component split needs its own gate (`NSPA_TIMER_THREAD_SPLIT=1`, `NSPA_FD_POLL_THREAD=1`, and so on), its own validation plan, and independent combination testing. `NSPA_AGG_WAIT` already followed that path and flipped default-on after validation; the remaining pieces should be held to the same discipline.
 
 ---
 
 ## 9. Open questions
 
-These are the unresolved design questions ahead of Phase 3. None block Phase 1 or Phase 2 (already shipped) but each one wants an answer before the corresponding piece of Phase 3 ships.
+These are the unresolved design questions ahead of the residual thread split. None block the already shipped slices, but each one wants an answer before the corresponding remaining piece ships.
 
-1. **NTSync trust model for thread-token registration.** Does the kernel hold a strong ref on the thread struct so the token is always valid when returned, or does wineserver clear the token atomically with thread destroy? The former is simpler; the latter has lower kernel memory footprint. Phase 2 chose "wineserver-side clear-on-destroy" on the strength of the register-before-first-send / deregister-after-last-reply invariant. The same question recurs for any future NTSync-side token registry (sections, timers, IOCP completions).
+1. **NTSync trust model for thread-token registration.** Does the kernel hold a strong ref on the thread struct so the token is always valid when returned, or does wineserver clear the token atomically with thread destroy? The former is simpler; the latter has lower kernel memory footprint. The shipped thread-token pass-through chose "wineserver-side clear-on-destroy" on the strength of the register-before-first-send / deregister-after-last-reply invariant. The same question recurs for any future NTSync-side token registry (sections, timers, IOCP completions).
 2. **Aggregate-wait fairness.** If multiple sources are ready simultaneously, how are they ordered? For NTSync-object sources, "priority of the waker" is the obvious answer (it's how SEND_PI / SET_PI already work). For FD readiness, there is no waker priority. The aggregate-wait API needs a tie-break rule -- probably "object sources first, ordered by waker priority; FD sources second, ordered by registration order" -- but the call has not been made.
 3. **Timer thread vs NT timer mutability.** NT timers can be created, modified, or destroyed at any time. The timer thread needs to react to deadline changes between iterations. Two clean signals: `pthread_kill(timer_thread, SIGRTMIN)` to interrupt `clock_nanosleep` and force recompute, or have the timer thread also wait on a futex that fires on add/cancel. Aggregate-wait (4.2) makes this trivial: the timer thread waits on `(NT timer queue head deadline, futex on add/cancel)` and reacts to whichever fires. So this is partially a question of "does timer-split land before aggregate-wait or after?"
 4. **Strangler vs growth.** As the wineserver-decomposition direction continues, do we keep wineserver largely stable while pruning, or actively rewrite the parts that remain? The default recommendation is strangler -- keep the existing handler bodies, change only the dispatch and locking. But there are individual subsystems where a partial rewrite of the *handler* (not the architecture) might be cleaner once it's been pruned to a small surface. That call is per-subsystem and shouldn't be made up front.
-5. **PREEMPT_RT epoll experiment outcome.** `NSPA_DISABLE_EPOLL` (`90231fc8d21`) lets us A/B plain `poll()` vs `epoll_wait()` on PREEMPT_RT without rebuilding. If epoll behaves cleanly under the workload, the urgency on the FD poll thread split (5.3) drops; if it shows priority inversions on its internal RT-mutex-converted locks, the split moves up the priority list. The experiment should land before Phase 3 design is finalized.
+5. **PREEMPT_RT epoll experiment outcome.** `NSPA_DISABLE_EPOLL` (`90231fc8d21`) lets us A/B plain `poll()` vs `epoll_wait()` on PREEMPT_RT without rebuilding. If epoll behaves cleanly under the workload, the urgency on the FD poll thread split (5.3) drops; if it shows priority inversions on its internal RT-mutex-converted locks, the split moves up the priority list. The experiment should land before the residual-thread design is finalized.
 6. **Where does `inproc_sync` fit?** The in-tree `server/inproc_sync.c` already handles a class of intra-process sync operations without round-tripping through the dispatcher. Some of its design lessons -- per-process state, ioctl-direct dispatch -- generalize to other request types, and the question is whether `inproc_sync` becomes a model for further router/handler-split fast paths or stays a one-off.
 7. **Handler queue priority discipline.** If the gamma dispatcher splits into router + handler tiers (5.2), the handoff queue between them needs a priority-respecting drain order. NTSync gives us PI on the channel; once a request is on a userspace queue inside wineserver, PI doesn't automatically follow. The queue drain probably needs to use NTSync as its waiter primitive (an event per handler, signalled from the router) so PI re-applies on the handoff. Not a blocker; a design detail.
 
 ---
 
-## 10. Phase ladder diagram
+## 10. Decomposition ladder
 
-A vertical phase ladder. Phases 1 and 2 are below the line ("done"); Phases 3 and 4 are above the line ("ahead"). The components of each phase are listed inside the phase block.
+A vertical decomposition ladder. The bottom two rungs are shipped; the upper two are the queued and long-horizon work. The components of each rung are listed inside the block.
 
 <div class="diagram-container">
 <svg width="100%" viewBox="0 0 940 720" xmlns="http://www.w3.org/2000/svg">
@@ -527,24 +523,24 @@ A vertical phase ladder. Phases 1 and 2 are below the line ("done"); Phases 3 an
   </style>
 
   <rect x="0" y="0" width="940" height="720" class="bg"/>
-  <text x="470" y="28" text-anchor="middle" class="title">Wineserver decomposition phase ladder</text>
+  <text x="470" y="28" text-anchor="middle" class="title">Wineserver decomposition ladder</text>
   <text x="470" y="48" text-anchor="middle" class="label-mut">bottom = shipped, top = horizon</text>
 
   <line x1="470" y1="80" x2="470" y2="660" class="rail"/>
 
-  <text x="220" y="78" text-anchor="middle" class="header">PHASE</text>
+  <text x="220" y="78" text-anchor="middle" class="header">SLICE</text>
   <text x="720" y="78" text-anchor="middle" class="header">COMPONENTS</text>
 
   <line x1="60" y1="86" x2="880" y2="86" class="axis"/>
 
   <rect x="100" y="540" width="240" height="100" rx="6" class="phase-done"/>
-  <text x="220" y="568" text-anchor="middle" class="label-grn">Phase 1</text>
+  <text x="220" y="568" text-anchor="middle" class="label-grn">Slice 1</text>
   <text x="220" y="588" text-anchor="middle" class="label-cyan">SHIPPED</text>
   <text x="220" y="610" text-anchor="middle" class="label-mut">default-on 2026-04-26</text>
   <text x="220" y="628" text-anchor="middle" class="label-mut">surgical lock release</text>
 
   <rect x="500" y="540" width="380" height="100" rx="6" class="phase-done"/>
-  <text x="690" y="568" text-anchor="middle" class="label">Phase B open_fd lock-drop</text>
+  <text x="690" y="568" text-anchor="middle" class="label">open_fd lock-drop</text>
   <text x="690" y="590" text-anchor="middle" class="label-sm">release global_lock around openat (long syscall)</text>
   <text x="690" y="610" text-anchor="middle" class="label-sm">drum-track-load-while-playing xrun fix</text>
   <text x="690" y="628" text-anchor="middle" class="label-sm">pattern: NSPA-side lock-discipline patches in handlers</text>
@@ -552,7 +548,7 @@ A vertical phase ladder. Phases 1 and 2 are below the line ("done"); Phases 3 an
   <line x1="340" y1="590" x2="500" y2="590" class="axis"/>
 
   <rect x="100" y="400" width="240" height="100" rx="6" class="phase-done"/>
-  <text x="220" y="428" text-anchor="middle" class="label-grn">Phase 2</text>
+  <text x="220" y="428" text-anchor="middle" class="label-grn">Slice 2</text>
   <text x="220" y="448" text-anchor="middle" class="label-cyan">SHIPPED</text>
   <text x="220" y="470" text-anchor="middle" class="label-mut">default-on 2026-04-26</text>
   <text x="220" y="488" text-anchor="middle" class="label-mut">first NTSync extension</text>
@@ -566,7 +562,7 @@ A vertical phase ladder. Phases 1 and 2 are below the line ("done"); Phases 3 an
   <line x1="340" y1="450" x2="500" y2="450" class="axis"/>
 
   <rect x="100" y="240" width="240" height="120" rx="6" class="phase-curr"/>
-  <text x="220" y="270" text-anchor="middle" class="label-yel">Phase 3</text>
+  <text x="220" y="270" text-anchor="middle" class="label-yel">Slice 3</text>
   <text x="220" y="290" text-anchor="middle" class="label-cyan">QUEUED</text>
   <text x="220" y="312" text-anchor="middle" class="label-mut">co-designed thread split</text>
   <text x="220" y="330" text-anchor="middle" class="label-mut">+ kernel primitive</text>
@@ -583,7 +579,7 @@ A vertical phase ladder. Phases 1 and 2 are below the line ("done"); Phases 3 an
   <line x1="340" y1="300" x2="500" y2="300" class="axis"/>
 
   <rect x="100" y="100" width="240" height="120" rx="6" class="phase-far"/>
-  <text x="220" y="130" text-anchor="middle" class="label-pur">Phase 4</text>
+  <text x="220" y="130" text-anchor="middle" class="label-pur">Slice 4</text>
   <text x="220" y="150" text-anchor="middle" class="label-cyan">LONG HORIZON</text>
   <text x="220" y="172" text-anchor="middle" class="label-mut">begins after 2-3 subsystems</text>
   <text x="220" y="190" text-anchor="middle" class="label-mut">have moved out via bypasses</text>
@@ -601,16 +597,16 @@ A vertical phase ladder. Phases 1 and 2 are below the line ("done"); Phases 3 an
 </svg>
 </div>
 
-The visual point of the ladder: the bottom two phases are done, the middle phase is the next major piece of architectural work, and the top phase only starts once the bypass arc has shrunk the surface enough to make it tractable. Each rung is independently valuable; nothing requires the rung above it before it can ship.
+The visual point of the ladder: the bottom two slices are done, the middle slice is the next major piece of architectural work, and the top slice only starts once the bypass arc has shrunk the surface enough to make it tractable. Each rung is independently valuable; nothing requires the rung above it before it can ship.
 
 ---
 
 ## 11. Cross-references
 
 - `client-scheduler-architecture.md` -- the shipped per-process scheduler host that already absorbed eligible local timer work and narrowed the remaining wineserver timer problem.
-- `gamma-channel-dispatcher.md` -- the existing gamma dispatcher, which 5.2's router/handler split decomposes. Also the home of the Phase 2 thread-token pass-through implementation.
+- `gamma-channel-dispatcher.md` -- the existing gamma dispatcher, which 5.2's router/handler split decomposes. Also the home of the shipped thread-token pass-through implementation.
 - `nt-local-stubs.md` -- the architectural pattern for client-resident handlers. Section 6's "what stays in wineserver" defines the floor that nt-local stubs and bypasses converge toward.
 - `ntsync-driver.gen.html` -- the kernel module that hosts the NTSync primitives. Section 4's extensions live in this module's patch series.
 - `nspa-local-file-architecture.gen.html`, `msg-ring-architecture.gen.html`, `io_uring-architecture.gen.html`, `cs-pi.gen.html`, `condvar-pi-requeue.gen.html` -- the per-subsystem detail docs whose work composes with the decomposition arc.
 - `architecture.gen.html` -- the integrated NSPA architecture overview; this doc is the wineserver-internals lens of that architecture.
-- In-tree handoff: `wine/nspa/docs/wineserver-decomposition-plan.md` -- the session-handoff version of this plan, with line-level kernel landmarks and active-session details. Use that doc when implementing Phase 3 / Phase 4; use this doc when reasoning about the trajectory.
+- In-tree handoff: `wine/nspa/docs/wineserver-decomposition-plan.md` -- the session-handoff version of this plan, with line-level kernel landmarks and active-session details. Use that doc when implementing the queued and long-horizon splits; use this doc when reasoning about the trajectory.

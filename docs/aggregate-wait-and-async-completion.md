@@ -1,29 +1,22 @@
 # Wine-NSPA -- Aggregate-Wait and Async Completion
 
-Wine 11.6 + NSPA RT patchset | Kernel patch 1010 + Gamma dispatcher Phase 2/3 | 2026-04-30
-Author: Jordan Johnston
-
 This page documents the **landed** aggregate-wait slice in Wine-NSPA:
-kernel patch **1010** (`NTSYNC_IOC_AGGREGATE_WAIT`) plus the first
-userspace consumer shape that uses it, namely dispatcher **Phase 2**
-(per-process dispatcher-owned `io_uring`) and **Phase 3** (gamma waits
-on channel + uring eventfd + shutdown eventfd and drains CQEs inline on
-the same RT thread).
-
-**Status:** shipped and validated. `NSPA_AGG_WAIT` is **default-on** as of 2026-04-29. The 2026-04-30 follow-ons (`NSPA_ENABLE_ASYNC_CREATE_FILE=1` and, on 1011 kernels, `NSPA_TRY_RECV2=1`) now ship on top of this same foundation.
+the `NTSYNC_IOC_AGGREGATE_WAIT` kernel primitive plus the first
+userspace consumer shape that uses it: the gamma dispatcher's
+per-process `io_uring` ownership model and its same-thread
+aggregate-wait receive / CQE-drain / reply loop.
 
 ---
 
 ## Table of Contents
 
 1. [Overview](#1-overview)
-2. [Scope of this page](#2-scope-of-this-page)
-3. [Why the old bridge was wrong](#3-why-the-old-bridge-was-wrong)
-4. [Kernel patch 1010](#4-kernel-patch-1010)
-5. [Wine-NSPA Phase 2 and Phase 3](#5-wine-nspa-phase-2-and-phase-3)
-6. [Validation and deployment](#6-validation-and-deployment)
-7. [Relationship to the broader decomposition plan](#7-relationship-to-the-broader-decomposition-plan)
-8. [References](#8-references)
+2. [Why the old bridge was wrong](#2-why-the-old-bridge-was-wrong)
+3. [Aggregate-wait kernel primitive](#3-aggregate-wait-kernel-primitive)
+4. [Dispatcher-owned `io_uring` and same-thread completion](#4-dispatcher-owned-iouring-and-same-thread-completion)
+5. [Validation and deployment](#5-validation-and-deployment)
+6. [Relationship to the broader decomposition plan](#6-relationship-to-the-broader-decomposition-plan)
+7. [References](#7-references)
 
 ---
 
@@ -34,8 +27,8 @@ dispatcher block on request traffic, deferred-completion wakeups, and
 teardown wakeups in one place while keeping receive, CQE drain, and
 reply signaling on the same RT thread.
 
-That is the architectural role of patch 1010 plus the dispatcher Phase
-2/3 userspace work. Gamma already gave Wine-NSPA the correct
+That is the architectural role of aggregate-wait plus the dispatcher's
+ring-ownership and same-thread completion work. Gamma already gave Wine-NSPA the correct
 **request-side** priority inheritance story: client threads do
 `CHANNEL_SEND_PI`, the kernel enqueues by priority, and the wineserver
 dispatcher runs the handler at the right effective priority. What gamma
@@ -45,8 +38,8 @@ The first async-completion prototype used the wineserver main thread as the CQE 
 site. That proved the basic mechanism but broke the more important invariant: the thread
 that received the request was no longer the thread that completed and replied to it.
 
-Patch 1010 and the accompanying dispatcher restructure fix that. The dispatcher now owns
-all three parts of the async path:
+The aggregate-wait kernel extension and the accompanying dispatcher restructure fix that.
+The dispatcher now owns all three parts of the async path:
 
 1. receive request from the channel
 2. submit deferred work to its per-process `io_uring`
@@ -67,25 +60,7 @@ The same RT thread handles the full lifecycle.
 
 ---
 
-## 2. Scope of this page
-
-This page stays focused on the 1010 / Phase 2 / Phase 3 slice itself:
-the kernel wait primitive, the dispatcher-owned ring, and the
-same-thread completion/reply invariant that those pieces established.
-
-The later follow-ons are intentionally not expanded here. Phase 4 async
-`create_file` is a later consumer of the same dispatcher-owned ring, and
-1011 `TRY_RECV2` is a later queue-drain optimization on top of the
-already-landed dispatcher shape. Those are part of the current shipped
-system, but they belong in the pages that track the dispatcher hot path
-and current production state:
-[gamma-channel-dispatcher](gamma-channel-dispatcher.gen.html),
-[io_uring-architecture](io_uring-architecture.gen.html), and
-[current-state](current-state.gen.html).
-
----
-
-## 3. Why the old bridge was wrong
+## 2. Why the old bridge was wrong
 
 The rejected shape was:
 
@@ -166,7 +141,7 @@ but timing-sensitive application behavior did not.
 
 ---
 
-## 4. Kernel patch 1010
+## 3. Aggregate-wait kernel primitive
 
 Patch 1010 adds `NTSYNC_IOC_AGGREGATE_WAIT`: a heterogeneous wait that combines
 NTSync object sources, pollable fd sources, and an optional absolute deadline.
@@ -271,11 +246,11 @@ without pretending the code lost its rollback path.
 
 ---
 
-## 5. Wine-NSPA Phase 2 and Phase 3
+## 4. Dispatcher-owned `io_uring` and same-thread completion
 
-### 5.1 Phase 2: dispatcher-owned `io_uring`
+### 4.1 Dispatcher-owned `io_uring`
 
-Phase 2 did not make handlers async by itself. It put the ring and its state in the
+This step did not make handlers async by itself. It put the ring and its state in the
 correct ownership domain first.
 
 The old global-ring direction was abandoned. The landed design keeps one
@@ -297,7 +272,7 @@ Key properties:
 - ring lifecycle ends with the dispatcher that owns it
 - `shutdown_efd` gives the aggregate-wait path an explicit teardown wakeup
 
-### 5.2 Phase 3: aggregate-wait dispatcher loop
+### 4.2 Aggregate-wait dispatcher loop
 
 The dispatcher now waits on three sources:
 
@@ -328,7 +303,7 @@ The dispatcher now waits on three sources:
   </defs>
 
   <rect x="0" y="0" width="980" height="560" class="bg"/>
-  <text x="490" y="28" text-anchor="middle" class="h">Phase 3 dispatcher topology</text>
+  <text x="490" y="28" text-anchor="middle" class="h">Dispatcher aggregate-wait topology</text>
 
   <rect x="290" y="70" width="400" height="84" class="ctx"/>
   <text x="490" y="98" text-anchor="middle" class="v">Dispatcher context</text>
@@ -364,7 +339,7 @@ The dispatcher now waits on three sources:
 </svg>
 </div>
 
-### 5.3 Dispatcher behavior
+### 4.3 Dispatcher behavior
 
 The loop is now:
 
@@ -382,12 +357,12 @@ The loop is now:
 5. if the fired source is `shutdown_efd`:
    - exit cleanly and free the dispatcher-owned context
 
-### 5.4 Fallback behavior
+### 4.4 Fallback behavior
 
 Userspace still handles two older-kernel shapes:
 
-- **no patch 1010**: aggregate-wait returns `-ENOTTY`, dispatcher permanently falls back to direct `CHANNEL_RECV2`
-- **no patch 1005**: `CHANNEL_RECV2` returns `-ENOTTY`, dispatcher falls back to legacy `CHANNEL_RECV`
+- **no aggregate-wait support**: aggregate-wait returns `-ENOTTY`, dispatcher permanently falls back to direct `CHANNEL_RECV2`
+- **no thread-token receive support**: `CHANNEL_RECV2` returns `-ENOTTY`, dispatcher falls back to legacy `CHANNEL_RECV`
 
 That logic is runtime feature detection, not a release ladder:
 
@@ -427,17 +402,17 @@ That logic is runtime feature detection, not a release ladder:
 
   <rect x="390" y="178" width="200" height="92" class="note"/>
   <text x="490" y="204" text-anchor="middle" class="t">if `-ENOTTY`</text>
-  <text x="490" y="224" text-anchor="middle" class="s">kernel lacks patch 1010</text>
+  <text x="490" y="224" text-anchor="middle" class="s">kernel lacks aggregate-wait support</text>
   <text x="490" y="242" text-anchor="middle" class="s">disable aggregate-wait for this dispatcher</text>
 
   <rect x="650" y="178" width="260" height="92" class="done"/>
   <text x="780" y="204" text-anchor="middle" class="g">2. use direct `CHANNEL_RECV2` loop</text>
   <text x="780" y="224" text-anchor="middle" class="s">channel transport still intact</text>
-  <text x="780" y="242" text-anchor="middle" class="s">legacy pre-1010 dispatcher wait shape</text>
+  <text x="780" y="242" text-anchor="middle" class="s">older dispatcher wait shape</text>
 
   <rect x="390" y="300" width="200" height="92" class="note"/>
   <text x="490" y="326" text-anchor="middle" class="t">if `CHANNEL_RECV2` returns `-ENOTTY`</text>
-  <text x="490" y="346" text-anchor="middle" class="s">kernel lacks patch 1005 thread-token support</text>
+  <text x="490" y="346" text-anchor="middle" class="s">kernel lacks thread-token receive support</text>
   <text x="490" y="364" text-anchor="middle" class="s">disable `RECV2` for this dispatcher</text>
 
   <rect x="650" y="300" width="260" height="92" class="warn"/>
@@ -461,14 +436,14 @@ That logic is runtime feature detection, not a release ladder:
 
 ---
 
-## 6. Validation and deployment
+## 5. Validation and deployment
 
 ### Production state
 
 | Item | Value |
 |---|---|
 | Kernel module srcversion | `10124FB81FDC76797EF1F91` |
-| Wine userspace state | Phase 2 + Phase 3 landed; Phase 4 `create_file` now uses the same ring |
+| Wine userspace state | Dispatcher-owned ring and aggregate-wait loop are landed; async `CreateFile` now uses the same ring |
 | Default gate | `NSPA_AGG_WAIT=1` |
 | Opt-out | `NSPA_AGG_WAIT=0` |
 | Follow-on gates on top of this base | `NSPA_ENABLE_ASYNC_CREATE_FILE=1`; `NSPA_TRY_RECV2=1` on 1011 kernels |
@@ -483,7 +458,7 @@ That logic is runtime feature detection, not a release ladder:
 | 30k stress + full native ntsync suite | PASS, dmesg clean |
 | PE matrix | 24 PASS / 0 FAIL / 0 TIMEOUT, including `dispatcher-burst` |
 | Ableton level 2/3 with `NSPA_AGG_WAIT=1` | PASS |
-| Phase 3 default-on under Ableton | PASS |
+| Aggregate-wait default-on under Ableton | PASS |
 
 The follow-up kernel fixes in `072bfee` matter here. The first 1010 cut exposed exactly
 the kind of PI edge that the dispatcher cannot tolerate: an aggregate-waiting dispatcher
@@ -492,7 +467,7 @@ boost state is established. The production module includes those corrections.
 
 ---
 
-## 7. Relationship to the broader decomposition plan
+## 6. Relationship to the broader decomposition plan
 
 The public decomposition plan still has queued work in front of it, but the aggregate-wait
 story is no longer purely hypothetical.
@@ -520,7 +495,7 @@ needs to prove the syscall shape from scratch; it can build on a production cons
 
 ---
 
-## 8. References
+## 7. References
 
 - `wine/server/nspa/shmem_channel.c` — dispatcher context, aggregate-wait loop, shutdown path
 - `wine/server/nspa/uring.h` — per-process `nspa_uring_instance` public surface
@@ -528,8 +503,8 @@ needs to prove the syscall shape from scratch; it can build on a production cons
 - Superproject commits:
   - `1879e2c` — ntsync 1010 first cut
   - `072bfee` — SEND_PI any_waiters fallback + wake-after-boost reorder
-  - `8cc157c` — userspace Phase 2 per-process uring infrastructure
-  - `f21c6e1` — userspace Phase 3 aggregate-wait dispatcher
-  - `b36e36d` — Phase 3 default-on
+  - `8cc157c` — userspace per-process uring infrastructure
+  - `f21c6e1` — userspace aggregate-wait dispatcher
+  - `b36e36d` — aggregate-wait default-on
 - In-tree handoff:
   - `wine/nspa/docs/session-handoff-20260429-phase-4.md`

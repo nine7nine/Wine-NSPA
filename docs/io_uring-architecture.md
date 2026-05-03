@@ -1,37 +1,31 @@
 # Wine-NSPA -- io_uring I/O Architecture
 
-**Date:** 2026-05-02
-**Author:** Jordan Johnston
-**Kernel:** `6.19.11-rt1-1-nspa` (PREEMPT_RT_FULL)
-**Wine:** 11.6 + NSPA RT patchset
-**Status:** shipped design reference; Phase 1 file I/O, dispatcher-owned async `CreateFile`, and Phase 4.8 socket RECVMSG / SENDMSG are all live. The remaining non-`io_uring` server-managed surfaces are documented here only to explain the current boundary.
-
 This page explains where `io_uring` fits in Wine-NSPA, what has already landed
 for file and socket I/O, and which surfaces remain outside the `io_uring`
 boundary because they are still fundamentally server-managed.
 
 ## Table of Contents
 
-1. [Status as of 2026-05-02](#1-status-as-of-2026-05-02)
-2. [Overview](#2-overview)
+1. [Overview](#1-overview)
+2. [Integration boundary](#2-integration-boundary)
 3. [Design Principles](#3-design-principles)
 4. [I/O Architecture: Before and After](#4-io-architecture-before-and-after)
-5. [Phase 1: File I/O Bypass (shipped)](#5-phase-1-file-io-bypass-shipped)
-6. [Phase 4.8: Socket RECVMSG / SENDMSG (shipped)](#6-phase-48-socket-recvmsg--sendmsg-shipped)
+5. [File I/O bypass](#5-file-io-bypass)
+6. [Socket recv/send path](#6-socket-recvsend-path)
 7. [What stays outside `io_uring`](#7-what-stays-outside-iouring)
 8. [File Manifest](#8-file-manifest)
-9. [Status Summary](#9-status-summary)
+9. [Implementation summary](#9-implementation-summary)
 
 ---
 
-## 1. Status as of 2026-05-02
+## 1. Overview
 
 The `io_uring` story is now broader than the original file-I/O landing.
 Three pieces are shipped in production:
 
-- **Phase 1:** sync poll replacement plus async file read/write on the PE side
-- **Phase 4:** dispatcher-owned async `CreateFile` on the per-process server ring
-- **Phase 4.8 A+B:** PE-side socket `RECVMSG` / `SENDMSG`, default on via
+- sync poll replacement plus async file read/write on the PE side
+- dispatcher-owned async `CreateFile` on the per-process server ring
+- PE-side socket `RECVMSG` / `SENDMSG`, default on via
   `NSPA_URING_RECV=1` and `NSPA_URING_SEND=1`
 
 The important boundary correction from 2026-05-02 is that `io_uring` does
@@ -39,21 +33,21 @@ The important boundary correction from 2026-05-02 is that `io_uring` does
 server-managed surfaces and compose with the local-event fix instead of
 replacing it.
 
-### Phase Status Table
+### Shipped surface summary
 
-| Phase | Surface | Status | Default | Notes |
-|-------|---------|--------|---------|-------|
-| Phase 1 | Sync poll + async file I/O | **Shipped** | On | `NtReadFile` / `NtWriteFile` async bypass + sync poll replacement; pool allocator (TLS, 32 ops); CQE drain at `server_select` / `server_wait` |
-| Phase 4 | Dispatcher-owned async `CreateFile` | **Shipped** | On | `NSPA_ENABLE_ASYNC_CREATE_FILE=1`; routes `CreateFile` through the per-process ring and removes the `open()` lock-drop CS from the audio xrun path |
-| Phase 4.8 A | Socket recv | **Shipped** | On | `NSPA_URING_RECV=1`; `recv_socket` submits `IORING_OP_RECVMSG` on the deferred path |
-| Phase 4.8 B | Socket send | **Shipped** | On | `NSPA_URING_SEND=1`; `send_socket` submits `IORING_OP_SENDMSG` on the deferred path |
-| Phase 4.8 C | `NtFlushBuffersFile` FSYNC | **Dropped** | -- | disk path is already synchronous `fsync()`; no meaningful `io_uring` win |
-| Phase 4.8 D | anonymous pipes / inotify | **Dropped** | -- | both blocked by existing server-managed infrastructure shape |
+| Surface | Status | Default | Notes |
+|-------|--------|---------|-------|
+| Sync poll + async file I/O | **Shipped** | On | `NtReadFile` / `NtWriteFile` async bypass + sync poll replacement; pool allocator (TLS, 32 ops); CQE drain at `server_select` / `server_wait` |
+| Dispatcher-owned async `CreateFile` | **Shipped** | On | `NSPA_ENABLE_ASYNC_CREATE_FILE=1`; routes `CreateFile` through the per-process ring and removes the `open()` lock-drop CS from the audio xrun path |
+| Socket recv | **Shipped** | On | `NSPA_URING_RECV=1`; `recv_socket` submits `IORING_OP_RECVMSG` on the deferred path |
+| Socket send | **Shipped** | On | `NSPA_URING_SEND=1`; `send_socket` submits `IORING_OP_SENDMSG` on the deferred path |
+| `NtFlushBuffersFile` FSYNC | **Dropped** | -- | disk path is already synchronous `fsync()`; no meaningful `io_uring` win |
+| anonymous pipes / inotify | **Dropped** | -- | both blocked by existing server-managed infrastructure shape |
 
-### Delta from the 2026-04-15 plan
+### Boundary changes since the first public draft
 
-- Phases 1 and 2 of the 2026-04-15 plan (sync poll replacement, async
-  file I/O bypass) have collapsed into a single shipped Phase 1.
+- The original sync poll replacement and async file I/O work now read
+  as one shipped file-I/O slice.
 - Socket work is no longer theoretical follow-on work. The data path is
   shipped on the PE side via `RECVMSG` / `SENDMSG`.
 - Pipes and named events did **not** become `io_uring` work. Their remaining
@@ -61,7 +55,7 @@ replacing it.
 
 ---
 
-## 2. Overview
+## 2. Integration boundary
 
 This document is the `io_uring` design and implementation reference for
 Wine-NSPA. It covers the integration boundary, per-thread ring model,
@@ -167,7 +161,7 @@ thin call-site conditionals in existing files.
   <rect x="500" y="65" width="250" height="85" rx="6" class="ur-box"/>
   <text x="625" y="82" class="ur-label" text-anchor="middle">ring_initialized (bool)</text>
   <text x="625" y="95" class="ur-label-sm" text-anchor="middle">ring_init_failed (bool)</text>
-  <text x="625" y="108" class="ur-label-green" text-anchor="middle">ring_efd (eventfd, Phase 2/3)</text>
+  <text x="625" y="108" class="ur-label-green" text-anchor="middle">ring_efd (eventfd for dispatcher-owned completion)</text>
   <text x="625" y="123" class="ur-label-sm" text-anchor="middle">ensure_ring(): lazy init</text>
   <text x="625" y="136" class="ur-label-sm" text-anchor="middle">+ op_pool_init() + eventfd()</text>
   <text x="625" y="146" class="ur-label-sm" text-anchor="middle">+ IORING_REGISTER_EVENTFD</text>
@@ -287,10 +281,10 @@ write-watch safety. Only the poll wait is replaced.
 
 ---
 
-## 5. Phase 1: File I/O Bypass (shipped)
+## 5. File I/O bypass
 
-**Status: Shipped, default-on. Single combined phase covering sync poll
-replacement and async `NtReadFile`/`NtWriteFile` bypass.**
+**Shipped, default-on.** Single combined implementation covering sync poll
+replacement and async `NtReadFile` / `NtWriteFile` bypass.
 
 ### What Changed
 
@@ -353,9 +347,9 @@ fallback for an edge case that rarely occurs in practice.
 
 ---
 
-## 6. Phase 4.8: Socket RECVMSG / SENDMSG (shipped)
+## 6. Socket recv/send path
 
-**Status: Shipped, default-on.**
+**Shipped, default-on.**
 
 The socket path now uses true socket SQEs on the deferred async path:
 
@@ -480,7 +474,7 @@ with `io_uring`.
 | File | Changed Lines | Purpose |
 |------|--------------|---------|
 | `dlls/ntdll/unix/unix_private.h` | +30 | io_uring function declarations, bitmap helpers |
-| `dlls/ntdll/unix/file.c` | ~30 | Phase 1: sync poll + async read/write bypass |
+| `dlls/ntdll/unix/file.c` | ~30 | sync poll + async read/write bypass |
 | `dlls/ntdll/unix/socket.c` | ~120 | shipped socket path: ALERTED interception, RECVMSG / SENDMSG CQE handlers, bitmap set/clear |
 | `dlls/ntdll/unix/sync.c` | ~40 | ntsync uring_fd retry loop, deferred completion flush |
 | `dlls/ntdll/unix/server.c` | +2 | Completion drain at server_select/server_wait |
@@ -497,17 +491,17 @@ with `io_uring`.
 
 ---
 
-## 9. Status Summary
+## 9. Implementation summary
 
 | Component | Status | Notes |
 |-----------|--------|-------|
 | io_uring ring management | Shipped | Per-thread, lazy init |
 | Pool allocator (TLS, 32 ops) | Shipped | RT-safe, zero malloc in submit path |
-| Phase 1: sync poll + async file I/O | Shipped, default-on | `NtReadFile` / `NtWriteFile` |
-| Phase 4: async `CreateFile` via dispatcher ring | Shipped, default-on | `NSPA_ENABLE_ASYNC_CREATE_FILE=1`; server-side consumer on the per-process ring |
-| Phase 4.8 A+B: socket I/O (deferred path) | Shipped, default-on | `NSPA_URING_RECV=1`, `NSPA_URING_SEND=1`; validated on `socket-io` and Ableton |
-| Phase 4.8 C/D follow-ons | Dropped | not worthwhile or blocked by server-managed architecture |
-| E2 bitmap (server `sock.c`) | Shipped | Engaged when Phase 2 client-poll bit is set |
+| sync poll + async file I/O | Shipped, default-on | `NtReadFile` / `NtWriteFile` |
+| async `CreateFile` via dispatcher ring | Shipped, default-on | `NSPA_ENABLE_ASYNC_CREATE_FILE=1`; server-side consumer on the per-process ring |
+| socket I/O (deferred path) | Shipped, default-on | `NSPA_URING_RECV=1`, `NSPA_URING_SEND=1`; validated on `socket-io` and Ableton |
+| dropped follow-ons | Dropped | not worthwhile or blocked by server-managed architecture |
+| E2 bitmap (server `sock.c`) | Shipped | engaged when the client-owned socket poll path is active |
 | ntsync `uring_fd` extension | Shipped (kernel patch) | Wakes ntsync waits on CQE |
 | ntsync PI v2 + audit fixes | Shipped (kernel patch) | Module srcversion `10124FB81FDC76797EF1F91` |
 | Audit §4.1 retry-loop hardening | Shipped (wine) | Superproject `a7e34c7` |

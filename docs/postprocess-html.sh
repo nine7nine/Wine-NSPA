@@ -44,6 +44,10 @@ postprocess_one() {
                 \#(?:8c92b3|565f89|545c7e|3b4261)
             }{$1 . "#a9b1d6"}egxsi;
 
+            $svg =~ s/(\.[A-Za-z0-9_-]*?(?:line|conn|arrow)[A-Za-z0-9_-]*\s*\{[^}]*?\bstroke-width:\s*)(?:2(?:\.0+)?|1\.[4-9][0-9]*)/$1 . "1.15"/egxsi;
+
+            $svg =~ s/(\.[A-Za-z0-9_-]*?(?:lane|divider|axis|dash|rail)[A-Za-z0-9_-]*\s*\{[^}]*?\bstroke-width:\s*)(?:2(?:\.0+)?|1(?:\.[0-9]+)?)/$1 . "0.9"/egxsi;
+
             $svg =~ s{
                 (<(?:text|tspan)\b[^>]*\bfill=")
                 \#(?:8c92b3|565f89|545c7e|3b4261)
@@ -71,6 +75,8 @@ postprocess_one() {
                 ([^>]*?)
                 (/?)>
             }{qq{<$1 vector-effect="non-scaling-stroke"$2$3>}}egxsi;
+
+            $svg =~ s/\smarker-(?:start|mid|end)="[^"]*"//gsi;
 
             # Last-resort overflow guard: shrink very long single-line
             # SVG text a little so diagrams degrade toward "fits" rather

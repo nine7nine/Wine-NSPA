@@ -108,10 +108,6 @@
 <div class="page-nav"><a href="index.html">Docs Home</a></div>
 <h1 id="wine-nspa--gamma-channel-dispatcher">Wine-NSPA &ndash; Gamma Channel Dispatcher</h1>
 
-<p>Wine 11.6 + NSPA RT patchset | Kernel 6.19.x-rt with NTSync channels + aggregate-wait + TRY_RECV2 | 2026-05-01
-Author: Jordan Johnston
-Status: production dispatcher architecture; aggregate-wait Phase 3, post-1011 TRY_RECV2 burst-drain, and the immediate hot-path tuning follow-ons are all part of the shipped path.</p>
-
 <p>This page explains the current wineserver request path for a Wine process: how requests enter the gamma channel, how the dispatcher owns the reply path, and how the post-1010 aggregate-wait loop fits into that design.</p>
 
 <h2 id="table-of-contents">Table of Contents</h2>
@@ -124,7 +120,7 @@ Status: production dispatcher architecture; aggregate-wait Phase 3, post-1011 TR
 <li><a href="#5-sender-state-machine">Sender State Machine</a></li>
 <li><a href="#6-dispatcher-state-machine">Dispatcher State Machine</a></li>
 <li><a href="#7-priority-inheritance-semantics">Priority-Inheritance Semantics</a></li>
-<li><a href="#8-phase-b-lock-drop-integration">Phase B Lock-Drop Integration</a></li>
+<li><a href="#8-open-path-lock-drop-integration">Open-path Lock-Drop Integration</a></li>
 <li><a href="#9-thread-token-pass-through-t1t2t3">Thread-Token Pass-Through (T1/T2/T3)</a></li>
 <li><a href="#10-nt-semantics-preservation">NT Semantics Preservation</a></li>
 <li><a href="#11-validation-and-performance">Validation and Performance</a></li>
@@ -258,10 +254,10 @@ shmem window.</p>
     .gc-pur    { fill: #bb9af7; font-size: 11px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .gc-grn    { fill: #9ece6a; font-size: 11px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .gc-yel    { fill: #e0af68; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
-    .gc-arrow-b { stroke: #7aa2f7; stroke-width: 1.8; fill: none; }
-    .gc-arrow-p { stroke: #bb9af7; stroke-width: 1.8; fill: none; }
-    .gc-arrow-g { stroke: #9ece6a; stroke-width: 1.8; fill: none; }
-    .gc-arrow-y { stroke: #e0af68; stroke-width: 1.6; fill: none; stroke-dasharray: 5,4; }
+    .gc-arrow-b { stroke: #7aa2f7; stroke-width: 1.15; fill: none; }
+    .gc-arrow-p { stroke: #bb9af7; stroke-width: 1.15; fill: none; }
+    .gc-arrow-g { stroke: #9ece6a; stroke-width: 1.15; fill: none; }
+    .gc-arrow-y { stroke: #e0af68; stroke-width: 1.15; fill: none; stroke-dasharray: 5,4; }
   </style>
 
   <rect x="0" y="0" width="960" height="380" class="gc-bg" rx="6"/>
@@ -353,7 +349,7 @@ channel work with <code>TRY_RECV2</code> before it sleeps again.</p>
     .ga-g { fill: #9ece6a; font: bold 10px 'JetBrains Mono', monospace; }
     .ga-v { fill: #bb9af7; font: bold 10px 'JetBrains Mono', monospace; }
     .ga-y { fill: #e0af68; font: bold 10px 'JetBrains Mono', monospace; }
-    .ga-line { stroke: #c0caf5; stroke-width: 1.4; fill: none; }
+    .ga-line { stroke: #c0caf5; stroke-width: 1.15; fill: none; }
   </style>
   <defs>
     <marker id="gaArrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
@@ -390,9 +386,9 @@ channel work with <code>TRY_RECV2</code> before it sleeps again.</p>
   <text x="785" y="296" text-anchor="middle" class="ga-s">dispatcher closes ring state</text>
   <text x="785" y="314" text-anchor="middle" class="ga-s">dispatcher frees its own context and exits</text>
 
-  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M490 154 L195 210" class="ga-line" marker-end="url(#gaArrow)"/>
-  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M490 154 L490 210" class="ga-line" marker-end="url(#gaArrow)"/>
-  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M490 154 L785 210" class="ga-line" marker-end="url(#gaArrow)"/>
+  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M490 154 L195 210" class="ga-line"/>
+  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M490 154 L490 210" class="ga-line"/>
+  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M490 154 L785 210" class="ga-line"/>
 
   <rect x="180" y="390" width="620" height="90" class="ga-note" rx="6"/>
   <text x="490" y="416" text-anchor="middle" class="ga-y">Load-bearing invariant</text>
@@ -416,7 +412,7 @@ only carries scheduling metadata and reply ownership:</p>
     .gr-kernel { fill: #1f2535; stroke: #bb9af7; stroke-width: 1.8; rx: 8; }
     .gr-server { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
     .gr-note { fill: #2a2418; stroke: #e0af68; stroke-width: 1.6; rx: 8; }
-    .gr-lane { stroke: #3b4261; stroke-width: 1; stroke-dasharray: 6,4; }
+    .gr-lane { stroke: #3b4261; stroke-width: 0.9; stroke-dasharray: 6,4; }
     .gr-h { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
     .gr-t { fill: #c0caf5; font: 11px 'JetBrains Mono', monospace; }
     .gr-s { fill: #a9b1d6; font: 9px 'JetBrains Mono', monospace; }
@@ -424,7 +420,7 @@ only carries scheduling metadata and reply ownership:</p>
     .gr-g { fill: #9ece6a; font: bold 10px 'JetBrains Mono', monospace; }
     .gr-v { fill: #bb9af7; font: bold 10px 'JetBrains Mono', monospace; }
     .gr-y { fill: #e0af68; font: bold 10px 'JetBrains Mono', monospace; }
-    .gr-line { stroke: #c0caf5; stroke-width: 1.5; fill: none; }
+    .gr-line { stroke: #c0caf5; stroke-width: 1.15; fill: none; }
   </style>
   <defs>
     <marker id="grArrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
@@ -451,44 +447,44 @@ only carries scheduling metadata and reply ownership:</p>
   <text x="160" y="190" text-anchor="middle" class="gr-t">1. build request</text>
   <text x="160" y="206" text-anchor="middle" class="gr-s">copy header and payload into `request_shm`</text>
 
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="160" y1="216" x2="160" y2="244" class="gr-line" marker-end="url(#grArrow)"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="160" y1="216" x2="160" y2="244" class="gr-line"/>
 
   <rect x="60" y="244" width="200" height="54" class="gr-client" rx="6"/>
   <text x="160" y="266" text-anchor="middle" class="gr-b">2. `SEND_PI`</text>
   <text x="160" y="284" text-anchor="middle" class="gr-s">submit metadata, boost dispatcher, block sender</text>
 
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="260" y1="271" x2="390" y2="271" class="gr-line" marker-end="url(#grArrow)"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="260" y1="271" x2="390" y2="271" class="gr-line"/>
 
   <rect x="390" y="244" width="200" height="54" class="gr-kernel" rx="6"/>
   <text x="490" y="266" text-anchor="middle" class="gr-v">channel entry queued</text>
   <text x="490" y="284" text-anchor="middle" class="gr-s">tid, prio, payload_off, thread_token</text>
 
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="490" y1="298" x2="490" y2="336" class="gr-line" marker-end="url(#grArrow)"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="490" y1="298" x2="490" y2="336" class="gr-line"/>
 
   <rect x="390" y="336" width="200" height="54" class="gr-kernel" rx="6"/>
   <text x="490" y="358" text-anchor="middle" class="gr-v">3. `RECV2` dequeues winner</text>
   <text x="490" y="376" text-anchor="middle" class="gr-s">burst mode may continue with `TRY_RECV2`</text>
 
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="590" y1="363" x2="720" y2="363" class="gr-line" marker-end="url(#grArrow)"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="590" y1="363" x2="720" y2="363" class="gr-line"/>
 
   <rect x="720" y="336" width="200" height="54" class="gr-server" rx="6"/>
   <text x="820" y="358" text-anchor="middle" class="gr-g">4. handler runs</text>
   <text x="820" y="376" text-anchor="middle" class="gr-s">reads `request_shm`, writes reply bytes back</text>
 
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="820" y1="390" x2="820" y2="428" class="gr-line" marker-end="url(#grArrow)"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="820" y1="390" x2="820" y2="428" class="gr-line"/>
 
   <rect x="720" y="428" width="200" height="48" class="gr-server" rx="6"/>
   <text x="820" y="450" text-anchor="middle" class="gr-g">5. `REPLY(entry_id)`</text>
   <text x="820" y="466" text-anchor="middle" class="gr-s">same thread completes wake + reply signal</text>
 
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="720" y1="452" x2="590" y2="452" class="gr-line" marker-end="url(#grArrow)"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="720" y1="452" x2="590" y2="452" class="gr-line"/>
 
   <rect x="390" y="428" width="200" height="48" class="gr-kernel" rx="6"/>
   <text x="490" y="450" text-anchor="middle" class="gr-v">reply ownership returns</text>
   <text x="490" y="466" text-anchor="middle" class="gr-s">kernel wakes sender and drains / re-applies PI</text>
 
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="490" y1="476" x2="490" y2="514" class="gr-line" marker-end="url(#grArrow)"/>
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="390" y1="514" x2="260" y2="514" class="gr-line" marker-end="url(#grArrow)"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="490" y1="476" x2="490" y2="514" class="gr-line"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="390" y1="514" x2="260" y2="514" class="gr-line"/>
 
   <rect x="60" y="490" width="200" height="48" class="gr-client" rx="6"/>
   <text x="160" y="512" text-anchor="middle" class="gr-b">6. sender resumes</text>
@@ -519,7 +515,7 @@ returning to <code>AGG_WAIT</code>.</p>
     .gd-kernel { fill: #1a1a2a; stroke: #bb9af7; stroke-width: 2;   rx: 6; }
     .gd-server { fill: #24283b; stroke: #9ece6a; stroke-width: 2;   rx: 6; }
     .gd-shmem  { fill: #2a2418; stroke: #e0af68; stroke-width: 1.5; rx: 6; }
-    .gd-lane   { fill: none;    stroke: #3b4261; stroke-width: 1; stroke-dasharray: 6,4; }
+    .gd-lane   { fill: none;    stroke: #3b4261; stroke-width: 0.9; stroke-dasharray: 6,4; }
     .gd-title  { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
     .gd-h      { fill: #c0caf5; font: bold 11px 'JetBrains Mono', monospace; }
     .gd-l      { fill: #c0caf5; font: 10px 'JetBrains Mono', monospace; }
@@ -963,7 +959,7 @@ production shape.</p>
 <li><strong>Same-thread completion.</strong> The same RT dispatcher thread receives
 the request, drains the CQE, and issues <code>CHANNEL_REPLY</code>.</li>
 <li><strong><code>global_lock</code> remains the only server lock the dispatcher takes.</strong>
-Phase 3 changes the wait primitive and completion ownership; it does
+The aggregate-wait dispatcher changes the wait primitive and completion ownership; it does
 not change handler locking discipline.</li>
 <li><strong>The process-membership check stays.</strong> A received thread token or
 payload TID must still resolve to a thread that belongs to the
@@ -1093,9 +1089,9 @@ the channel landed.</p>
 
 <hr />
 
-<h2 id="8-phase-b-lock-drop-integration">8. Phase B Lock-Drop Integration</h2>
+<h2 id="8-open-path-lock-drop-integration">8. Open-path Lock-Drop Integration</h2>
 
-<p>Phase B is the second-most important integration consumer of gamma.
+<p>The open-path lock-drop is the second-most important integration consumer of gamma.
 It lives in <code>server/nspa/fd_lockdrop.c</code> and reshapes how the
 dispatcher cooperates with slow filesystem syscalls.</p>
 
@@ -1114,7 +1110,7 @@ a futex syscall lookup is now stuck behind the GUI thread&rsquo;s
 multi-millisecond <code>LoadLibrary</code> chain. That is a reliable xrun on
 drum-track-load-while-playing.</p>
 
-<h3 id="82-the-phase-b-fix">8.2 The Phase B fix</h3>
+<h3 id="82-the-lock-drop-fix">8.2 The lock-drop fix</h3>
 
 <p><code>nspa_openat_lockdrop</code> (line 47) reorganises the openat critical
 section into a &ldquo;drop, syscall, re-acquire&rdquo; pattern:</p>
@@ -1144,7 +1140,7 @@ section into a &ldquo;drop, syscall, re-acquire&rdquo; pattern:</p>
 kernel last boosted it to (the pending sender&rsquo;s prio). Any other
 sender &ndash; including the audio thread &ndash; can have its request popped
 by a different mechanism&hellip; except there isn&rsquo;t one: the dispatcher
-is in the middle of <em>this</em> handler. Phase B is therefore narrower
+is in the middle of <em>this</em> handler. The open-path lock-drop is therefore narrower
 than its name suggests: it lets the <strong>kernel</strong> schedule other
 processes' threads (and the host&rsquo;s RT audio path) while we are
 blocked in <code>openat()</code>, but it does not let other entries in this
@@ -1201,14 +1197,14 @@ restore <code>current-&gt;error</code>, drop refs.</p>
 
 <h3 id="84-gating">8.4 Gating</h3>
 
-<p>Phase B is <strong>default-on as of 2026-04-26</strong>, gated by
+<p>The open-path lock-drop is <strong>default-on as of 2026-04-26</strong>, gated by
 <code>NSPA_OPENFD_LOCKDROP=0</code> for A/B testing or as a panic switch.
 Originally shipped default-off after a host lockup on the first
 validation run; the lockup was eventually traced to the ntsync
 driver&rsquo;s <code>kfree</code>-under-<code>raw_spinlock_t</code> bug (fixed in
-<code>ntsync-patches/1006-ntsync-rt-alloc-hoist.patch</code>), not Phase B
+<code>ntsync-patches/1006-ntsync-rt-alloc-hoist.patch</code>), not the lock-drop
 itself. Re-validated post-1006 with Ableton drum-track-load-while-
-playing &ndash; the file-open-burst workload Phase B targets &ndash; with
+playing &ndash; the file-open burst this path targets &ndash; with
 clean results.</p>
 
 <p>The cached env-var read at lines 67-79 follows the same one-shot
@@ -1369,7 +1365,7 @@ but Wine&rsquo;s own conformance tests do) see the same values.</p>
 <li>Native ntsync suite: <strong>3 PASS / 0 FAIL</strong> (<code>test-event-set-pi</code>,
 <code>test-channel-recv-exclusive</code>, <code>test-aggregate-wait</code>).</li>
 <li><code>test-aggregate-wait</code>: <strong>9/9 PASS</strong>, including the channel-notify
-and channel-PI propagation sub-tests added for the Phase 3 path, and
+and channel-PI propagation sub-tests added for the aggregate-wait path, and
 the kitchen-sink path with <strong>86,528 wakes / 0 timeouts / 0 errors</strong>.</li>
 <li>PE matrix: <strong>24 PASS / 0 FAIL / 0 TIMEOUT</strong> after adding
 <code>dispatcher-burst</code> to the baseline + RT runner.</li>
@@ -1728,7 +1724,7 @@ this discipline applies to its own future evolution as well.</p>
 <tr>
 <td> <code>wine/server/nspa/uring.h</code> </td>
 <td> &ndash; </td>
-<td> per-process <code>nspa_uring_instance</code> API consumed by Phase 2 / Phase 3 </td>
+<td> per-process <code>nspa_uring_instance</code> API consumed by the dispatcher-owned ring and aggregate-wait path </td>
 </tr>
 <tr>
 <td> <code>wine/server/nspa/shmem_channel.h</code> </td>
@@ -1738,7 +1734,7 @@ this discipline applies to its own future evolution as well.</p>
 <tr>
 <td> <code>wine/server/nspa/fd_lockdrop.c</code> </td>
 <td> 47-125 </td>
-<td> Phase B <code>nspa_openat_lockdrop</code> &ndash; lock-drop integration </td>
+<td> <code>nspa_openat_lockdrop</code> &ndash; open-path lock-drop integration </td>
 </tr>
 <tr>
 <td> <code>wine/nspa/docs/gamma-dispatcher-audit-and-split-plan.md</code> </td>
@@ -1788,7 +1784,7 @@ this discipline applies to its own future evolution as well.</p>
 <tr>
 <td> <code>ntsync-patches/1006-ntsync-rt-alloc-hoist.patch</code> </td>
 <td> &ndash; </td>
-<td> kfree-under-raw_spinlock fix; unblocked Phase B default-on </td>
+<td> kfree-under-raw_spinlock fix; unblocked open-path lock-drop default-on </td>
 </tr>
 <tr>
 <td> <code>ntsync-patches/1007-ntsync-channel-exclusive-recv.patch</code> </td>
@@ -1843,7 +1839,7 @@ this discipline applies to its own future evolution as well.</p>
 </tr>
 <tr>
 <td> <code>project_ntsync_kfree_under_raw_spinlock.md</code> </td>
-<td> 1006 alloc-hoist (unblocked Phase B default-on) </td>
+<td> 1006 alloc-hoist (unblocked open-path lock-drop default-on) </td>
 </tr>
 <tr>
 <td> <code>feedback_dont_shotgun_audit_into_unfound_bug.md</code> </td>

@@ -203,6 +203,7 @@ if [[ ${#files[@]} -eq 0 ]]; then
 fi
 
 echo "md2html: converting ${#files[@]} file(s)"
+bash "$(cd "$(dirname "$0")" && pwd)/lint-md.sh" "${files[@]}"
 for f in "${files[@]}"; do
     [[ -f "$f" ]] || { echo "  skip: $f (not found)"; continue; }
     convert_one "$f"

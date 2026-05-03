@@ -1,9 +1,5 @@
 # Wine-NSPA -- Win32 Condvar PI (Requeue-PI)
 
-Wine 11.6 + NSPA RT patchset | Kernel 6.19.x-rt with NTSync PI | 2026-04-16
-Author: Jordan Johnston
-Status: shipped 2026-04-16; validated against ~370M mixed-load operations through 2026-04-28 and the current 2026-04-30 PE matrix (`24 PASS / 0 FAIL / 0 TIMEOUT`).
-
 This page is the design and implementation reference for the Win32 condvar PI bridge, including the requeue-PI syscall pairing, correctness envelope, and validation results.
 
 ---
