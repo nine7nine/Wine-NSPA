@@ -122,7 +122,7 @@ remaining work that is still ahead.</p>
 <li><a href="#3-active-subsystems">Active subsystems</a></li>
 <li><a href="#4-validation-and-performance">Validation and performance</a></li>
 <li><a href="#5-open-work-in-priority-order">Open work, in priority order</a></li>
-<li><a href="#6-recent-landed-arc-2026-04-30-to-2026-05-02">Recent landed arc</a></li>
+<li><a href="#6-recent-landed-arc-2026-04-30-to-2026-05-03">Recent landed arc</a></li>
 <li><a href="#7-configuration-reference">Configuration reference</a></li>
 <li><a href="#8-doc-index">Doc index</a></li>
 </ol>
@@ -132,8 +132,8 @@ remaining work that is still ahead.</p>
 
 <h2 id="1-overview">1. Overview</h2>
 
-<p>The public 2026-05-02 state is no longer just &ldquo;aggregate-wait plus a faster
-dispatcher&rdquo;. Three larger client-side follow-ons shipped on top of that base:</p>
+<p>The public 2026-05-03 state is no longer just &ldquo;aggregate-wait plus a faster
+dispatcher&rdquo;. Four larger client-side follow-ons now sit on top of that base:</p>
 
 <ul>
 <li>the <strong>spawn-main + <code>ntdll_sched</code> substrate</strong>, now default-on as the per-process
@@ -143,6 +143,9 @@ anonymous events now client-range by default and the timer dispatchers moved
 onto the shared RT sched host when RT is available</li>
 <li>the <strong>socket <code>io_uring</code> RECVMSG / SENDMSG path</strong>, now default-on through
 <code>NSPA_URING_RECV=1</code> and <code>NSPA_URING_SEND=1</code></li>
+<li>the <strong>local section and widened local-file path</strong>, which now keeps eligible
+file-backed sections client-side and retires more file metadata, flush, EOF,
+directory, and write-class traffic from wineserver</li>
 </ul>
 
 
@@ -233,7 +236,7 @@ paths are disabled.</p>
 </tr>
 <tr>
 <td> Memory surface </td>
-<td> large pages, current-process <code>QueryWorkingSetEx</code>, and working-set quota bookkeeping shipped </td>
+<td> client-side local sections, large pages, current-process <code>QueryWorkingSetEx</code>, and working-set quota bookkeeping shipped </td>
 </tr>
 <tr>
 <td> Local sync path </td>
@@ -504,7 +507,71 @@ stub chatter no longer buries the logs.</p>
 </table>
 
 
-<h3 id="28-validation-baseline-against-10124fb81fdc76797ef1f91">2.8 Validation baseline against <code>10124FB81FDC76797EF1F91</code></h3>
+<h3 id="28-2026-05-03-local-file-and-section-follow-ons">2.8 2026-05-03 local-file and section follow-ons</h3>
+
+<table>
+<thead>
+<tr>
+<th> Feature </th>
+<th> Default </th>
+<th> Override </th>
+<th> Shipped effect </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> local-file bypass </td>
+<td> ON </td>
+<td> <code>NSPA_DISABLE_LOCAL_FILES=1</code> </td>
+<td> widened open envelope now covers more regular-file traffic without a wineserver <code>create_file</code> round-trip </td>
+</tr>
+<tr>
+<td> local dir-mint path </td>
+<td> ON </td>
+<td> <code>NSPA_ENABLE_LOCAL_DIR=0</code> </td>
+<td> explicit directory opens stay client-side instead of forcing the older directory fallback </td>
+</tr>
+<tr>
+<td> local sections </td>
+<td> ON </td>
+<td> <code>NSPA_LOCAL_SECTION=0</code> </td>
+<td> eligible unnamed file-backed sections can create / map / query / unmap / close locally, with same-process duplicate promoted only when it crosses a real server-handle boundary </td>
+</tr>
+</tbody>
+</table>
+
+
+<p>Supporting shipped changes in the same arc:</p>
+
+<table>
+<thead>
+<tr>
+<th> Change </th>
+<th> Effect </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> widened local open dispositions and access masks </td>
+<td> <code>create_file</code> handler count <code>7,845</code> -> <code>5,658</code> (<code>-28%</code>), handler time <code>137 ms</code> -> <code>50 ms</code> (<code>-64%</code>) on the compared run </td>
+</tr>
+<tr>
+<td> local-section default-on flip </td>
+<td> <code>nspa_create_mapping_from_unix_fd</code> count <code>2,664</code> -> <code>~800</code> (<code>-70%</code>); total wineserver handler time <code>1,991 ms</code> -> <code>1,077 ms</code> on the cleanest run </td>
+</tr>
+<tr>
+<td> duplicate-unix-fd at section creation </td>
+<td> <code>CreateFile -&gt; CreateFileMapping -&gt; CloseHandle(file) -&gt; MapViewOfFile</code> stays clean; no EBADF / mapping failures </td>
+</tr>
+<tr>
+<td> local <code>FileEndOfFileInformation</code> path </td>
+<td> grow stays local, unmapped shrink stays local, mapped shrink still returns <code>STATUS_USER_MAPPED_FILE</code>; direct handler-time saving <code>~8 ms / snapshot</code> </td>
+</tr>
+</tbody>
+</table>
+
+
+<h3 id="29-validation-baseline-against-10124fb81fdc76797ef1f91">2.9 Validation baseline against <code>10124FB81FDC76797EF1F91</code></h3>
 
 <table>
 <thead>
@@ -675,10 +742,10 @@ own correctness proof and gate.</p>
 <td> Header-only <code>rtpi.h</code> forwarder into the vendored library copy. </td>
 </tr>
 <tr>
-<td> <strong>NT-local file</strong> (<code>nspa_local_file</code>) </td>
+<td> <strong>NT-local file and sections</strong> (<code>nspa_local_file</code> + local sections) </td>
 <td> Shipped </td>
 <td> ON </td>
-<td> <code>NtCreateFile</code> bypass for unix-name-resolvable paths, with 2026-04-30 sync-parity fixes for directory promotion and <code>FILE_MAPPING_WRITE</code> sharing. </td>
+<td> <code>NtCreateFile</code> bypass for bounded regular-file and explicit-directory opens, selected downstream metadata / flush / EOF paths, and client-side unnamed file-backed sections on top of local-file handles. </td>
 </tr>
 <tr>
 <td> <strong>Client scheduler</strong> (<code>wine-sched</code> / <code>wine-sched-rt</code>) </td>
@@ -726,7 +793,7 @@ own correctness proof and gate.</p>
 <td> <strong>Memory and large pages</strong> </td>
 <td> Shipped </td>
 <td> ON where supported </td>
-<td> <code>GetLargePageMinimum</code>, <code>VirtualAlloc(MEM_LARGE_PAGES)</code>, <code>CreateFileMapping(SEC_LARGE_PAGES)</code>, current-process <code>QueryWorkingSetEx</code>, and working-set quota bookkeeping are live with no NSPA gate. </td>
+<td> client-side local sections, <code>GetLargePageMinimum</code>, <code>VirtualAlloc(MEM_LARGE_PAGES)</code>, <code>CreateFileMapping(SEC_LARGE_PAGES)</code>, current-process <code>QueryWorkingSetEx</code>, and working-set quota bookkeeping are live with no global NSPA gate. </td>
 </tr>
 <tr>
 <td> <strong>Direct <code>get_message</code> bypass</strong> </td>
@@ -828,7 +895,7 @@ own correctness proof and gate.</p>
   </style>
 
   <rect x="0" y="0" width="940" height="500" class="cs-bg" rx="6"/>
-  <text x="470" y="28" text-anchor="middle" class="cs-title">2026-05-02 deployment board: shipped state, diagnostics, and remaining work</text>
+  <text x="470" y="28" text-anchor="middle" class="cs-title">2026-05-03 deployment board: shipped state, diagnostics, and remaining work</text>
 
   <rect x="50" y="70" width="250" height="150" class="cs-green" rx="6"/>
   <text x="175" y="96" text-anchor="middle" class="cs-tag-green">Kernel / sync substrate</text>
@@ -840,7 +907,7 @@ own correctness proof and gate.</p>
   <rect x="345" y="70" width="250" height="150" class="cs-green" rx="6"/>
   <text x="470" y="96" text-anchor="middle" class="cs-tag-green">Client-side bypasses</text>
   <text x="470" y="122" text-anchor="middle" class="cs-label">gamma + spawn-main + local events</text>
-  <text x="470" y="140" text-anchor="middle" class="cs-small">local-file, sched-hosted timers, hook cache, msg-ring v1</text>
+  <text x="470" y="140" text-anchor="middle" class="cs-small">local-file, local sections, sched-hosted timers, hook cache, msg-ring v1</text>
   <text x="470" y="164" text-anchor="middle" class="cs-label">socket uring + async create_file shipped</text>
   <text x="470" y="182" text-anchor="middle" class="cs-small">more client-side work avoids wineserver entirely</text>
 
@@ -899,11 +966,11 @@ path directly.</li>
 </ul>
 
 
-<p>The 2026-05-02 work did not publish a new full-suite version. What it added was
-targeted validation for the newly-landed scheduler, timer, event, and socket
-surfaces.</p>
+<p>The 2026-05-02 and 2026-05-03 work did not publish a new full-suite version.
+What it added was targeted validation for the newly-landed scheduler, timer,
+event, socket, local-file, and local-section surfaces.</p>
 
-<h3 id="42-targeted-2026-05-02-validation">4.2 Targeted 2026-05-02 validation</h3>
+<h3 id="42-targeted-2026-05-02-and-2026-05-03-validation">4.2 Targeted 2026-05-02 and 2026-05-03 validation</h3>
 
 <table>
 <thead>
@@ -963,6 +1030,16 @@ surfaces.</p>
 <td> socket RECVMSG / SENDMSG default-ON </td>
 <td> Ableton boot + library + playback </td>
 <td> clean; <code>63</code> threads, zero new errors vs the earlier socket baseline </td>
+</tr>
+<tr>
+<td> local sections default-ON </td>
+<td> DirectWrite-style <code>CreateFile -&gt; CreateFileMapping -&gt; CloseHandle(file) -&gt; MapViewOfFile</code> </td>
+<td> clean; no EBADF / mapping failures </td>
+</tr>
+<tr>
+<td> widened local-file path </td>
+<td> workload comparison </td>
+<td> <code>create_file</code> count <code>7,845</code> -> <code>5,658</code>, handler time <code>137 ms</code> -> <code>50 ms</code> </td>
 </tr>
 </tbody>
 </table>
@@ -1098,7 +1175,7 @@ surfaces.</p>
 </table>
 
 
-<h4 id="2026-05-02-feature-specific-wins">2026-05-02 feature-specific wins</h4>
+<h4 id="2026-05-02-and-2026-05-03-feature-specific-wins">2026-05-02 and 2026-05-03 feature-specific wins</h4>
 
 <table>
 <thead>
@@ -1116,6 +1193,14 @@ surfaces.</p>
 <td> socket RECVMSG / SENDMSG </td>
 <td> <code>socket-io</code> deferred path <code>+6.5%</code> throughput, <code>-6.8%</code> p99 latency, <code>0/2000</code> failures </td>
 </tr>
+<tr>
+<td> local sections </td>
+<td> <code>nspa_create_mapping_from_unix_fd</code> count <code>2,664</code> -> <code>~800</code> (<code>-70%</code>); total wineserver handler time <code>1,991 ms</code> -> <code>1,077 ms</code> on the cleanest run </td>
+</tr>
+<tr>
+<td> local-file EOF path </td>
+<td> direct handler-time saving <code>~8 ms / snapshot</code>, plus eligible <code>ftruncate()</code> no longer blocks the wineserver loop inline </td>
+</tr>
 </tbody>
 </table>
 
@@ -1124,8 +1209,8 @@ surfaces.</p>
 
 <ul>
 <li>The last published full PE matrix is still the 2026-04-30 <code>24 PASS / 0 FAIL /
-0 TIMEOUT</code> run. The 2026-05-02 features are covered by targeted validation,
-not a new full-suite publish yet.</li>
+0 TIMEOUT</code> run. The 2026-05-02 and 2026-05-03 features are covered by
+targeted validation, not a new full-suite publish yet.</li>
 <li>Local events default-ON still exposes a known cosmetic log line in some
 Ableton runs: <code>wined3d_cs_destroy</code> &ldquo;Closing present event failed&rdquo;. It is not
 currently associated with a functional failure or resource leak.</li>
@@ -1141,10 +1226,10 @@ smoke level 0 + 1 only.</li>
 <ol>
 <li><strong>Longer paint-cache soak</strong> — different day / cold start plus a
 longer runtime window so the default-on path has a cleaner public record.</li>
-<li><strong>Full-suite rerun against the 2026-05-02 stack</strong> — the last published
+<li><strong>Full-suite rerun against the 2026-05-03 stack</strong> — the last published
 matrix is still v8 / 2026-04-30; the new scheduler / event / socket surfaces
 deserve a fresh public matrix.</li>
-<li><strong>Longer local-event and 4.8 socket soak</strong> — targeted validations are clean;
+<li><strong>Longer local-event, local-section, and socket soak</strong> — targeted validations are clean;
 hours-scale default-on runtime is still worth publishing.</li>
 <li><strong><code>wine_sechost_service</code> device-IRP poll</strong> — still the next obvious
 high-frequency bypass candidate.</li>
@@ -1159,7 +1244,7 @@ timer/fd-poll/router splits remain longer-horizon work.</li>
 
 <hr />
 
-<h2 id="6-recent-landed-arc-2026-04-30-to-2026-05-02">6. Recent landed arc (2026-04-30 to 2026-05-02)</h2>
+<h2 id="6-recent-landed-arc-2026-04-30-to-2026-05-03">6. Recent landed arc (2026-04-30 to 2026-05-03)</h2>
 
 <table>
 <thead>
@@ -1209,6 +1294,16 @@ timer/fd-poll/router splits remain longer-horizon work.</li>
 <td> 2026-05-02 </td>
 <td> socket RECVMSG / SENDMSG default ON </td>
 <td> <code>socket-io</code> deferred path gets a real <code>io_uring</code> data path, not just poll interception </td>
+</tr>
+<tr>
+<td> 2026-05-03 </td>
+<td> widened local-file envelope </td>
+<td> more regular-file, directory, metadata, flush, and EOF traffic stays client-side </td>
+</tr>
+<tr>
+<td> 2026-05-03 </td>
+<td> local sections default ON </td>
+<td> eligible unnamed file-backed sections stay client-side for create / map / query / unmap / close </td>
 </tr>
 </tbody>
 </table>
@@ -1291,6 +1386,18 @@ timer/fd-poll/router splits remain longer-horizon work.</li>
 <tr>
 <td> <code>NSPA_ENABLE_PAINT_CACHE=1</code> </td>
 <td> msg-ring paint cache. <strong>Default ON.</strong> Set <code>0</code> to force the older RPC path for A/B testing. </td>
+</tr>
+<tr>
+<td> <code>NSPA_DISABLE_LOCAL_FILES=1</code> </td>
+<td> Disables the local-file bypass entirely and forces <code>NtCreateFile</code> back through wineserver. </td>
+</tr>
+<tr>
+<td> <code>NSPA_ENABLE_LOCAL_DIR=0</code> </td>
+<td> Disables the explicit directory-mint path while leaving the rest of the local-file bypass on. </td>
+</tr>
+<tr>
+<td> <code>NSPA_LOCAL_SECTION=0</code> </td>
+<td> Disables client-side local sections and forces eligible file-backed sections back through wineserver. </td>
 </tr>
 <tr>
 <td> <code>NSPA_DISABLE_EPOLL=1</code> </td>
@@ -1390,7 +1497,7 @@ REALTIME-class priorities scale linearly below it.</p>
 <tbody>
 <tr>
 <td> <code>current-state.md</code> </td>
-<td> This document — state of the art on 2026-05-02 </td>
+<td> This document — state of the art on 2026-05-03 </td>
 </tr>
 <tr>
 <td> <code>client-scheduler-architecture.gen.html</code> </td>
@@ -1419,6 +1526,10 @@ REALTIME-class priorities scale linearly below it.</p>
 <tr>
 <td> <code>io_uring-architecture.gen.html</code> </td>
 <td> <code>io_uring</code> integration for file I/O, async <code>CreateFile</code>, and shipped socket RECVMSG / SENDMSG </td>
+</tr>
+<tr>
+<td> <code>local-section-architecture.gen.html</code> </td>
+<td> client-side file-backed sections built on top of local-file handles </td>
 </tr>
 <tr>
 <td> <code>msg-ring-architecture.gen.html</code> </td>
@@ -1460,14 +1571,14 @@ REALTIME-class priorities scale linearly below it.</p>
 </table>
 
 
-<p>The architecture-heavy pieces added through 2026-05-02 are now covered
+<p>The architecture-heavy pieces added through 2026-05-03 are now covered
 in the public docs set, including the client scheduler, local events,
 socket <code>io_uring</code>, gamma, aggregate-wait, hook cache, local-file,
-msg-ring, and the decomposition notes.</p>
+local sections, msg-ring, and the decomposition notes.</p>
 
 <hr />
 
-<p><em>Generated 2026-05-03. State board reflects the shipped 2026-05-02 set. ntsync <code>10124FB81FDC76797EF1F91</code>, kernel
+<p><em>Generated 2026-05-03. State board reflects the shipped 2026-05-03 set. ntsync <code>10124FB81FDC76797EF1F91</code>, kernel
 <code>6.19.11-rt1-1-nspa</code>.</em></p>
 
 <script>

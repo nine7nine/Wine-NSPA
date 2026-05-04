@@ -1,0 +1,607 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Wine-NSPA -- Local Section Bypass</title>
+<style>
+  :root {
+    --bg: #1a1b26; --fg: #c0caf5; --accent: #7aa2f7;
+    --green: #9ece6a; --red: #f7768e; --yellow: #e0af68;
+    --surface: #24283b; --border: #3b4261; --muted: #8c92b3;
+    --purple: #bb9af7; --orange: #ff9e64; --cyan: #7dcfff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+    background: var(--bg); color: var(--fg);
+    max-width: 1100px; margin: 0 auto; padding: 2rem 1.5rem;
+    line-height: 1.7;
+  }
+  .page-nav {
+    display: flex;
+    justify-content: flex-end;
+    margin-bottom: 0.5rem;
+  }
+  .page-nav a {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.35rem 0.7rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: rgba(36, 40, 59, 0.9);
+    color: var(--accent);
+    font-size: 0.78rem;
+    line-height: 1;
+  }
+  .page-nav a:hover {
+    background: var(--surface);
+    color: var(--cyan);
+    text-decoration: none;
+  }
+  h1 { color: var(--accent); font-size: 1.5rem; margin: 1.5rem 0 0.5rem; }
+  h2 { color: var(--accent); font-size: 1.2rem; margin: 2rem 0 0.75rem;
+       border-bottom: 1px solid var(--border); padding-bottom: 0.3rem; }
+  h3 { color: var(--yellow); font-size: 1rem; margin: 1.25rem 0 0.5rem; }
+  h4 { color: var(--cyan); font-size: 0.95rem; margin: 1rem 0 0.4rem; }
+  p, li { font-size: 0.85rem; margin-bottom: 0.5rem; }
+  ul, ol { padding-left: 1.5rem; margin-bottom: 0.75rem; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  table {
+    width: 100%; border-collapse: collapse;
+    margin: 0.75rem 0 1rem; font-size: 0.8rem;
+  }
+  th, td {
+    padding: 0.4rem 0.75rem; text-align: left;
+    border: 1px solid var(--border);
+  }
+  th { background: var(--surface); color: var(--accent); font-weight: 600; }
+  td { background: var(--bg); }
+  code {
+    background: var(--surface); padding: 0.15rem 0.4rem;
+    border-radius: 3px; font-size: 0.82rem; color: var(--cyan);
+  }
+  pre {
+    background: var(--surface); padding: 1rem 1.1rem; border-radius: 8px;
+    overflow-x: auto; margin: 0.75rem 0 1rem;
+    border: 1px solid var(--border);
+  }
+  pre code {
+    display: block; background: transparent; padding: 0;
+    font-size: 0.8rem; color: inherit;
+  }
+  pre code.hljs,
+  code.hljs {
+    background: transparent;
+    padding: 0;
+  }
+  blockquote {
+    background: var(--surface); border-left: 3px solid var(--accent);
+    padding: 0.75rem 1rem; margin: 1rem 0; border-radius: 0 4px 4px 0;
+    font-size: 0.82rem;
+  }
+  blockquote strong { color: var(--yellow); }
+  hr { border: none; border-top: 1px solid var(--border); margin: 2rem 0; }
+  strong { color: var(--fg); }
+  em { color: var(--muted); font-style: italic; }
+  .diagram-container {
+    display: flex; justify-content: center;
+    margin: 1.25rem auto 1.5rem; padding: 0.75rem;
+    background: rgba(36, 40, 59, 0.55);
+    border: 1px solid var(--border); border-radius: 10px;
+    overflow-x: auto;
+  }
+  .diagram-container svg {
+    display: block;
+    width: 100% !important;
+    max-width: 100%;
+    height: auto !important;
+    margin: 0 auto;
+    flex: 0 0 auto;
+  }
+</style>
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/tokyo-night-dark.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
+</head><body>
+<div class="page-nav"><a href="index.html">Docs Home</a></div>
+<h1 id="wine-nspa--local-section-bypass">Wine-NSPA &ndash; Local Section Bypass</h1>
+
+<p>This page covers the shipped client-side section path built on top of the
+local-file bypass: eligible file-backed sections are created, mapped, queried,
+unmapped, and closed inside the client process, with honest fallback when the
+call crosses into server-owned or cross-process semantics.</p>
+
+<h2 id="table-of-contents">Table of Contents</h2>
+
+<ol>
+<li><a href="#1-overview">Overview</a></li>
+<li><a href="#2-what-is-shipped">What is shipped</a></li>
+<li><a href="#3-eligibility-and-fallback">Eligibility and fallback</a></li>
+<li><a href="#4-handle-range-and-section-table">Handle range and section table</a></li>
+<li><a href="#5-section-lifecycle">Section lifecycle</a></li>
+<li><a href="#6-duplicatehandle-and-ownership-boundaries">DuplicateHandle and ownership boundaries</a></li>
+<li><a href="#7-sharing-arbitration-and-mapping-bits">Sharing arbitration and mapping bits</a></li>
+<li><a href="#8-validation-and-observed-effect">Validation and observed effect</a></li>
+<li><a href="#9-implementation-map">Implementation map</a></li>
+<li><a href="#10-related-docs">Related docs</a></li>
+</ol>
+
+
+<hr />
+
+<h2 id="1-overview">1. Overview</h2>
+
+<p>Wine-NSPA no longer has to mint a wineserver section object for every eligible
+<code>CreateFileMapping</code> on a local-file handle. The client process can now keep a
+bounded section table of its own, duplicate the unix fd at section-creation
+time, and service the common same-process view lifecycle without a server
+round-trip.</p>
+
+<p>The feature sits on top of the local-file bypass rather than replacing it. A
+local file handle still owns pathname resolution, open semantics, and the
+cross-process sharing aggregate. The local section path reuses that file handle
+state to build an unnamed file-backed section, then publishes mapping bits back
+into the same aggregate so later file operations still see correct
+<code>STATUS_USER_MAPPED_FILE</code> and sharing behavior.</p>
+
+<p>The current boundary is intentionally narrow:</p>
+
+<ul>
+<li>file-backed sections only</li>
+<li>unnamed sections only</li>
+<li>same-process mapping / query / close lifecycle only</li>
+<li>same-process <code>DuplicateHandle</code> is supported by promoting to a server section</li>
+<li>cross-process duplication still falls back cleanly instead of guessing</li>
+</ul>
+
+
+<p>That is enough to retire a large volume of mapping RPC traffic from the common
+case while leaving the hard cross-process edge cases on the authoritative
+server path.</p>
+
+<hr />
+
+<h2 id="2-what-is-shipped">2. What is shipped</h2>
+
+<table>
+<thead>
+<tr>
+<th> Surface </th>
+<th> Shipped behavior </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> <code>NtCreateSection</code> </td>
+<td> Eligible file-backed mappings on local-file handles can mint a client-side section handle instead of calling wineserver. </td>
+</tr>
+<tr>
+<td> <code>NtMapViewOfSection</code> / <code>NtMapViewOfSectionEx</code> </td>
+<td> Same-process maps on local section handles install the view directly in the client process. </td>
+</tr>
+<tr>
+<td> <code>NtUnmapViewOfSectionEx</code> </td>
+<td> Local section views unmap without a server hop. </td>
+</tr>
+<tr>
+<td> <code>NtQuerySection</code> </td>
+<td> <code>SectionBasicInformation</code> is answered locally; image-only queries still fall back or return the honest non-image status where appropriate. </td>
+</tr>
+<tr>
+<td> <code>NtClose</code> </td>
+<td> Local section close tears down local views and releases the duplicated unix fd; if a same-process duplicate already promoted the section, the cached server handle is also released. </td>
+</tr>
+<tr>
+<td> <code>NtDuplicateObject</code> </td>
+<td> Same-process duplicate of a local section promotes once to a server section, caches that server handle, and then lets the duplicate proceed. </td>
+</tr>
+<tr>
+<td> File/section coherence </td>
+<td> Mapping bits are published into the local-file aggregate so later share checks and <code>FileEndOfFileInformation</code> handling still see active mappings. </td>
+</tr>
+</tbody>
+</table>
+
+
+<p>The gate is default-on. Set <code>NSPA_LOCAL_SECTION=0</code> to disable the client-side
+section path and force eligible calls back through wineserver.</p>
+
+<hr />
+
+<h2 id="3-eligibility-and-fallback">3. Eligibility and fallback</h2>
+
+<p>The local section path is deliberately smaller than the full NT section
+surface. A section stays local only when all of the following are true:</p>
+
+<ul>
+<li>the backing handle is a local-file handle</li>
+<li>the section is file-backed</li>
+<li>the section is unnamed</li>
+<li>the section is not <code>SEC_IMAGE</code></li>
+<li>the section is not <code>SEC_LARGE_PAGES</code></li>
+<li>the later map/query/close operations stay in the same process</li>
+</ul>
+
+
+<p>Anything outside that envelope falls back to the normal server path. That keeps
+the feature easy to reason about and avoids pretending that cross-process
+namespace or image-loader semantics can be reconstructed client-side.</p>
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 960 360" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
+  <style>
+    .ls-bg { fill: #1a1b26; }
+    .ls-box { fill: #24283b; stroke: #7aa2f7; stroke-width: 1.6; rx: 8; }
+    .ls-good { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
+    .ls-warn { fill: #2a2418; stroke: #e0af68; stroke-width: 1.8; rx: 8; }
+    .ls-stop { fill: #2a1a1a; stroke: #f7768e; stroke-width: 1.8; rx: 8; }
+    .ls-line-b { stroke: #7aa2f7; stroke-width: 1.3; fill: none; }
+    .ls-line-g { stroke: #9ece6a; stroke-width: 1.3; fill: none; }
+    .ls-line-y { stroke: #e0af68; stroke-width: 1.3; fill: none; }
+    .ls-title { fill: #7aa2f7; font-size: 14px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .ls-label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+    .ls-small { fill: #a9b1d6; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+    .ls-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .ls-red { fill: #f7768e; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .ls-yellow { fill: #e0af68; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+  </style>
+
+  <rect x="0" y="0" width="960" height="360" class="ls-bg" rx="6"/>
+  <text x="480" y="28" text-anchor="middle" class="ls-title">Local section eligibility and fallback</text>
+
+  <rect x="360" y="56" width="240" height="48" class="ls-box" rx="6"/>
+  <text x="480" y="76" text-anchor="middle" class="ls-label">`NtCreateSection(file_handle, ...)`</text>
+  <text x="480" y="92" text-anchor="middle" class="ls-small">section request reaches ntdll unix layer</text>
+
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="480" y1="104" x2="480" y2="128" class="ls-line-b"/>
+
+  <rect x="290" y="130" width="380" height="86" class="ls-good" rx="6"/>
+  <text x="480" y="152" text-anchor="middle" class="ls-green">local-section gate</text>
+  <text x="480" y="172" text-anchor="middle" class="ls-label">local-file handle + file-backed + unnamed</text>
+  <text x="480" y="190" text-anchor="middle" class="ls-label">not `SEC_IMAGE`, not `SEC_LARGE_PAGES`</text>
+  <text x="480" y="206" text-anchor="middle" class="ls-small">otherwise fall through to the normal server section path</text>
+
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="290" y1="176" x2="118" y2="176" class="ls-line-y"/>
+  <text x="128" y="166" class="ls-yellow">ineligible</text>
+  <rect x="40" y="150" width="220" height="54" class="ls-stop" rx="6"/>
+  <text x="150" y="172" text-anchor="middle" class="ls-red">wineserver section path</text>
+  <text x="150" y="188" text-anchor="middle" class="ls-small">keeps image, named, and large-page cases honest</text>
+
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="480" y1="216" x2="480" y2="238" class="ls-line-g"/>
+
+  <rect x="315" y="240" width="330" height="56" class="ls-good" rx="6"/>
+  <text x="480" y="262" text-anchor="middle" class="ls-green">mint local section handle</text>
+  <text x="480" y="278" text-anchor="middle" class="ls-label">duplicate unix fd, publish mapping bits, return client-range handle</text>
+
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="480" y1="296" x2="480" y2="320" class="ls-line-g"/>
+
+  <rect x="280" y="322" width="400" height="28" class="ls-box" rx="6"/>
+  <text x="480" y="341" text-anchor="middle" class="ls-label">same-process map / query / unmap / close stay local until a server boundary is crossed</text>
+</svg>
+</div>
+
+
+<hr />
+
+<h2 id="4-handle-range-and-section-table">4. Handle range and section table</h2>
+
+<p>Local section handles live in their own client-private range:</p>
+
+<ul>
+<li>local sections: <code>[0x7FFF8000, 0x7FFFC000)</code></li>
+<li>local files: <code>[0x7FFFC000, 0x80000000)</code></li>
+</ul>
+
+
+<p>That split matters because later APIs can distinguish a local section from a
+local file with a cheap range check before they decide which local table to
+consult.</p>
+
+<p>Each local section entry keeps:</p>
+
+<ul>
+<li>the local section handle returned to the app</li>
+<li>the duplicated unix fd that outlives the original file handle</li>
+<li>the original local-file handle and backing <code>(dev, inode)</code> identity</li>
+<li>current mapping bits published into the local-file aggregate</li>
+<li>the cached promoted server handle, if same-process duplication already
+crossed the server boundary</li>
+<li>the list of active local views so <code>NtUnmapViewOfSectionEx</code> and <code>NtClose</code> can
+tear them down coherently</li>
+</ul>
+
+
+<p>The table is process-local and protected by its own PI mutex. Cross-process
+coordination is not done through the section table itself; only the mapping
+effects are published into the shared local-file aggregate.</p>
+
+<hr />
+
+<h2 id="5-section-lifecycle">5. Section lifecycle</h2>
+
+<p>The local section lifecycle is a same-process fast path from creation to final
+close. The main change versus the older path is that the unix fd is duplicated
+at section creation time, so the mapping can survive a later <code>CloseHandle()</code> on
+the original file handle.</p>
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 960 430" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
+  <style>
+    .life-bg { fill: #1a1b26; }
+    .life-box { fill: #24283b; stroke: #7aa2f7; stroke-width: 1.6; rx: 8; }
+    .life-good { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
+    .life-warn { fill: #2a2418; stroke: #e0af68; stroke-width: 1.8; rx: 8; }
+    .life-line-g { stroke: #9ece6a; stroke-width: 1.3; fill: none; }
+    .life-line-b { stroke: #7aa2f7; stroke-width: 1.3; fill: none; }
+    .life-line-y { stroke: #e0af68; stroke-width: 1.3; fill: none; }
+    .life-title { fill: #7aa2f7; font-size: 14px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .life-label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+    .life-small { fill: #a9b1d6; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+    .life-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .life-yellow { fill: #e0af68; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+  </style>
+
+  <rect x="0" y="0" width="960" height="430" class="life-bg" rx="6"/>
+  <text x="480" y="26" text-anchor="middle" class="life-title">Local section lifecycle</text>
+
+  <rect x="50" y="90" width="180" height="70" class="life-box" rx="6"/>
+  <text x="140" y="116" text-anchor="middle" class="life-label">local-file handle</text>
+  <text x="140" y="134" text-anchor="middle" class="life-small">pathname + sharing state already owned locally</text>
+
+  <rect x="280" y="90" width="190" height="92" class="life-good" rx="6"/>
+  <text x="375" y="114" text-anchor="middle" class="life-green">create local section</text>
+  <text x="375" y="134" text-anchor="middle" class="life-label">duplicate unix fd</text>
+  <text x="375" y="152" text-anchor="middle" class="life-label">allocate section handle</text>
+  <text x="375" y="168" text-anchor="middle" class="life-small">publish `FILE_MAPPING_*` bits</text>
+
+  <rect x="520" y="90" width="190" height="92" class="life-good" rx="6"/>
+  <text x="615" y="114" text-anchor="middle" class="life-green">map and use view</text>
+  <text x="615" y="134" text-anchor="middle" class="life-label">`NtMapViewOfSection`</text>
+  <text x="615" y="152" text-anchor="middle" class="life-label">tracks local view metadata</text>
+  <text x="615" y="168" text-anchor="middle" class="life-small">no server section object involved</text>
+
+  <rect x="760" y="90" width="150" height="92" class="life-box" rx="6"/>
+  <text x="835" y="118" text-anchor="middle" class="life-label">local queries</text>
+  <text x="835" y="136" text-anchor="middle" class="life-small">`NtQuerySection` basic info</text>
+  <text x="835" y="152" text-anchor="middle" class="life-small">`NtUnmapViewOfSectionEx`</text>
+  <text x="835" y="168" text-anchor="middle" class="life-small">local close bookkeeping</text>
+
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="230" y1="125" x2="280" y2="125" class="life-line-b"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="470" y1="136" x2="520" y2="136" class="life-line-g"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="710" y1="136" x2="760" y2="136" class="life-line-b"/>
+
+  <rect x="160" y="260" width="300" height="96" class="life-warn" rx="6"/>
+  <text x="310" y="286" text-anchor="middle" class="life-yellow">file handle can close earlier</text>
+  <text x="310" y="308" text-anchor="middle" class="life-label">`CreateFile -> CreateFileMapping -> CloseHandle(file)`</text>
+  <text x="310" y="326" text-anchor="middle" class="life-small">section keeps its own duplicated unix fd</text>
+  <text x="310" y="342" text-anchor="middle" class="life-small">later map still succeeds</text>
+
+  <rect x="500" y="260" width="300" height="96" class="life-good" rx="6"/>
+  <text x="650" y="286" text-anchor="middle" class="life-green">final section close</text>
+  <text x="650" y="308" text-anchor="middle" class="life-label">unmap remaining local views</text>
+  <text x="650" y="326" text-anchor="middle" class="life-label">clear mapping bits and release fd</text>
+  <text x="650" y="342" text-anchor="middle" class="life-small">also closes cached server handle if same-process DUP promoted earlier</text>
+
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="375" y1="182" x2="375" y2="232" class="life-line-y"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="615" y1="182" x2="615" y2="232" class="life-line-g"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="375" y1="232" x2="310" y2="260" class="life-line-y"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="615" y1="232" x2="650" y2="260" class="life-line-g"/>
+</svg>
+</div>
+
+
+<p>Two points are worth calling out:</p>
+
+<ul>
+<li><code>CloseHandle(file)</code> no longer invalidates the later map path for an eligible
+local section, because the section owns its own duplicated unix fd.</li>
+<li>mapping and unmapping stay client-side, but they still update shared mapping
+state so later file operations do not silently violate Windows semantics.</li>
+</ul>
+
+
+<hr />
+
+<h2 id="6-duplicatehandle-and-ownership-boundaries">6. DuplicateHandle and ownership boundaries</h2>
+
+<p>The local section path is same-process first. That is deliberate.</p>
+
+<p>When <code>NtDuplicateObject()</code> sees a local section handle and both the source and
+destination process are the current process, it promotes the section once to a
+server section, caches that promoted handle on the local entry, and then lets
+the duplicate proceed through the normal server machinery.</p>
+
+<p>When the duplicate crosses a process boundary, the client-side section handle
+stops being a valid abstraction. The server does not have access to the remote
+process&rsquo;s private section table, so the current shipped behavior is to fall
+through cleanly rather than invent cross-process state. That produces the right
+failure instead of a confusing partially-working handle.</p>
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 960 350" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
+  <style>
+    .dup-bg { fill: #1a1b26; }
+    .dup-box { fill: #24283b; stroke: #7aa2f7; stroke-width: 1.6; rx: 8; }
+    .dup-good { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
+    .dup-warn { fill: #2a2418; stroke: #e0af68; stroke-width: 1.8; rx: 8; }
+    .dup-stop { fill: #2a1a1a; stroke: #f7768e; stroke-width: 1.8; rx: 8; }
+    .dup-line-g { stroke: #9ece6a; stroke-width: 1.3; fill: none; }
+    .dup-line-y { stroke: #e0af68; stroke-width: 1.3; fill: none; }
+    .dup-line-r { stroke: #f7768e; stroke-width: 1.3; fill: none; }
+    .dup-title { fill: #7aa2f7; font-size: 14px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .dup-label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+    .dup-small { fill: #a9b1d6; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+    .dup-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .dup-yellow { fill: #e0af68; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .dup-red { fill: #f7768e; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+  </style>
+
+  <rect x="0" y="0" width="960" height="350" class="dup-bg" rx="6"/>
+  <text x="480" y="26" text-anchor="middle" class="dup-title">DuplicateHandle boundary</text>
+
+  <rect x="375" y="56" width="210" height="48" class="dup-box" rx="6"/>
+  <text x="480" y="76" text-anchor="middle" class="dup-label">local section handle</text>
+  <text x="480" y="92" text-anchor="middle" class="dup-small">client-private source handle</text>
+
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="480" y1="104" x2="480" y2="132" class="dup-line-y"/>
+
+  <rect x="310" y="134" width="340" height="60" class="dup-warn" rx="6"/>
+  <text x="480" y="156" text-anchor="middle" class="dup-yellow">`NtDuplicateObject(source, dest, ...)`</text>
+  <text x="480" y="174" text-anchor="middle" class="dup-small">decision point depends on whether the destination is the current process</text>
+
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="310" y1="164" x2="150" y2="164" class="dup-line-g"/>
+  <text x="160" y="154" class="dup-green">same process</text>
+  <rect x="40" y="136" width="220" height="86" class="dup-good" rx="6"/>
+  <text x="150" y="160" text-anchor="middle" class="dup-green">promote once, then duplicate</text>
+  <text x="150" y="178" text-anchor="middle" class="dup-label">server section handle cached locally</text>
+  <text x="150" y="194" text-anchor="middle" class="dup-small">later local close releases both local and promoted state</text>
+
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="650" y1="164" x2="810" y2="164" class="dup-line-r"/>
+  <text x="820" y="154" class="dup-red">other process</text>
+  <rect x="700" y="136" width="220" height="86" class="dup-stop" rx="6"/>
+  <text x="810" y="160" text-anchor="middle" class="dup-red">fall back cleanly</text>
+  <text x="810" y="178" text-anchor="middle" class="dup-label">remote process cannot see the private section table</text>
+  <text x="810" y="194" text-anchor="middle" class="dup-small">current shipped boundary is honest failure, not partial emulation</text>
+</svg>
+</div>
+
+
+<p>This is one of the key differences between a local optimization and a fake
+object namespace. The local section handle is a process-local implementation
+detail until the call explicitly crosses into server-owned handle semantics.</p>
+
+<hr />
+
+<h2 id="7-sharing-arbitration-and-mapping-bits">7. Sharing arbitration and mapping bits</h2>
+
+<p>The local section path stays correct by feeding its mapping state back into the
+same shared aggregate that local-file already uses for open and sharing
+arbitration.</p>
+
+<p>When a local section is created:</p>
+
+<ul>
+<li>the client identifies the backing <code>(dev, inode)</code> from the local-file entry</li>
+<li>the section publishes <code>FILE_MAPPING_WRITE</code>, <code>FILE_MAPPING_IMAGE</code>, or
+<code>FILE_MAPPING_ACCESS</code> bits into the shared aggregate, matching the mapping
+shape</li>
+<li>the section keeps those bits live until the last local view and the section
+itself are gone</li>
+</ul>
+
+
+<p>That shared publication matters for two reasons:</p>
+
+<ul>
+<li>later opens and share checks still see mapping state even though the section
+never became a wineserver object in the common case</li>
+<li><code>FileEndOfFileInformation</code> can still reject a shrink with
+<code>STATUS_USER_MAPPED_FILE</code> when a mapped section is active</li>
+</ul>
+
+
+<p>This is the architectural seam between the file path and the section path: the
+file table owns the cross-process aggregate, and the section table reuses it
+instead of inventing a second source of truth.</p>
+
+<hr />
+
+<h2 id="8-validation-and-observed-effect">8. Validation and observed effect</h2>
+
+<p>The shipped local section path was validated on the real workload that exposed
+the old cost: repeated file mapping and view traffic during app startup and UI
+initialization.</p>
+
+<p>Key observed results from the landed implementation:</p>
+
+<ul>
+<li>DirectWrite-style shape is clean:
+<code>CreateFile -&gt; CreateFileMapping -&gt; CloseHandle(file) -&gt; MapViewOfFile</code></li>
+<li><code>nspa_create_mapping_from_unix_fd</code> count dropped from <code>2,664</code> to <code>~800</code>
+(<code>-70%</code>)</li>
+<li><code>get_mapping_info</code> and <code>unmap_view</code> dropped out of the top sampled symbols</li>
+<li>total wineserver handler time moved from <code>1,991 ms</code> to <code>1,077 ms</code> on the
+cleanest run of that comparison</li>
+<li>same-process duplicate is handled correctly</li>
+<li>cross-process duplicate returns a clean <code>STATUS_INVALID_HANDLE</code> instead of an
+inconsistent handle state</li>
+</ul>
+
+
+<p>The companion local-file follow-ons matter here too. Because mapping bits are
+published into the shared aggregate, later file-side changes like local
+<code>FileEndOfFileInformation</code> handling can preserve the same mapped-file boundary
+without reintroducing a mandatory section RPC.</p>
+
+<hr />
+
+<h2 id="9-implementation-map">9. Implementation map</h2>
+
+<table>
+<thead>
+<tr>
+<th> Path </th>
+<th> Role </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> <code>dlls/ntdll/unix/nspa/local_file.c</code> </td>
+<td> local section table, handle range, create path, mapping-bit publication, same-process duplicate support </td>
+</tr>
+<tr>
+<td> <code>dlls/ntdll/unix/sync.c</code> </td>
+<td> <code>NtCreateSection</code> / <code>NtCreateSectionEx</code> entrypoint hooks </td>
+</tr>
+<tr>
+<td> <code>dlls/ntdll/unix/virtual.c</code> </td>
+<td> <code>NtMapViewOfSection</code>, <code>NtMapViewOfSectionEx</code>, local unmap, view tagging, and <code>NtQuerySection</code> support </td>
+</tr>
+<tr>
+<td> <code>dlls/ntdll/unix/server.c</code> </td>
+<td> <code>NtDuplicateObject</code> promotion boundary and <code>NtClose</code> teardown </td>
+</tr>
+<tr>
+<td> <code>dlls/ntdll/unix/unix_private.h</code> </td>
+<td> shared declarations for local-file and local-section helpers </td>
+</tr>
+</tbody>
+</table>
+
+
+<p>The design intentionally stays inside existing Wine layers:</p>
+
+<ul>
+<li><code>sync.c</code> decides whether section creation can stay local</li>
+<li><code>virtual.c</code> owns view installation and teardown</li>
+<li><code>server.c</code> remains the place where an explicit server-handle boundary is
+crossed</li>
+</ul>
+
+
+<p>That keeps the patch understandable and reduces the number of call sites that
+need to know about the feature.</p>
+
+<hr />
+
+<h2 id="10-related-docs">10. Related docs</h2>
+
+<ul>
+<li><a href="nspa-local-file-architecture.gen.html">Local-File Bypass Architecture</a></li>
+<li><a href="memory-and-large-pages.gen.html">Memory, Sections, Large Pages, and Working-Set Support</a></li>
+<li><a href="nt-local-stubs.gen.html">NT Local Stubs</a></li>
+<li><a href="architecture.gen.html">Architecture Overview</a></li>
+<li><a href="current-state.gen.html">State of The Art</a></li>
+</ul>
+
+
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+  document.querySelectorAll("pre code").forEach(function (block) {
+    hljs.highlightElement(block);
+  });
+});
+</script>
+</body></html>

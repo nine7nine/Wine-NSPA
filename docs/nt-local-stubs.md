@@ -42,12 +42,12 @@ arbitration is required. Each stub picks an NT surface, owns its own
 data structures (a private handle range, a per-process table, a shmem
 region, a dispatcher thread), and short-circuits the server when it can.
 
-The pattern is already shipping. As of 2026-05-02 there are four live
+The pattern is already shipping. As of 2026-05-03 there are four live
 NT-local stub surfaces in tree:
 
 | Stub | NT surface | Lives in |
 |---|---|---|
-| `nspa_local_file` | `NtCreateFile` (read-only regulars) + downstream `NtReadFile`, `NtClose`, `NtQueryInformationFile`, `NtCreateSection`, `NtDuplicateObject` routing | `dlls/ntdll/unix/nspa/local_file.c` |
+| `nspa_local_file` | bounded `NtCreateFile` for regular files and explicit directories, plus downstream file ops and local file-backed sections | `dlls/ntdll/unix/nspa/local_file.c` |
 | local event fast path | anonymous `NtCreateEvent` with server-aware async-completion signaling | `dlls/ntdll/unix/sync.c` + `server/nspa/inproc_event_table.c` |
 | `nspa_local_timer` | `NtCreateTimer` / `NtSetTimer` / `NtCancelTimer` / `NtQueryTimer` (anonymous) | `dlls/ntdll/unix/nspa/local_timer.c` |
 | `nspa_local_wm_timer` | `NtUserSetTimer` / `NtUserSetSystemTimer` / `NtUserKillTimer` / `WM_TIMER` posting | `dlls/win32u/nspa/local_wm_timer.c` |
@@ -176,10 +176,10 @@ The five invariants every stub honours:
    call is made under the stub's lock. (See §6.)
 4. **Feature gate.** Every stub has a default-on or default-off env
    var (`NSPA_DISABLE_LOCAL_TIMERS`, `NSPA_DISABLE_LOCAL_WM_TIMERS`,
-   `NSPA_LOCAL_FILES`, etc.). When the gate is off the stub returns
-   `STATUS_NOT_SUPPORTED` from its first entry point and the original
-   server path is used unchanged. This is the bisection mechanism
-   when something regresses.
+   `NSPA_DISABLE_LOCAL_FILES`, `NSPA_NT_LOCAL_EVENT`, etc.). When the
+   gate is off the stub returns `STATUS_NOT_SUPPORTED` from its first
+   entry point and the original server path is used unchanged. This is
+   the bisection mechanism when something regresses.
 5. **Never observable to the app.** A correctness regression in a stub
    would be caught by Win32 semantics tests, not app-visible behaviour
    shifts. The bypass is an optimisation; it does not relax NT
@@ -224,9 +224,9 @@ in §4 of the decomposition plan: cross-process object naming, process /
 thread lifecycle, handle inheritance, and NT-specific path resolution.
 
 **Practical wins happen before the lock dissolves.** Consider Ableton's
-startup profile: ~28,500 file opens in the first session boot, of which
-the vast majority are read-only regular-file opens of DLL manifests,
-`.pyc` files, and theme resources. Every one of those round-trips into
+startup profile: ~28,500 file opens in the first session boot, dominated by
+regular-file and directory traffic for DLL manifests, `.pyc` files, theme
+resources, and library indexes. Every one of those round-trips into
 the server today, holds the global lock during sharing arbitration, and
 returns. The local-file bypass eliminates the round-trip for the
 eligible subset; lock contention drops because the server is not
@@ -460,11 +460,12 @@ locking.
 
 ## 7. Currently shipped stubs
 
-### 7.1 `nspa_local_file` -- `NtCreateFile` bypass
+### 7.1 `nspa_local_file` -- local file handles and local sections
 
-**Surface:** `NtCreateFile` for read-only regular-file opens, plus
-downstream `NtReadFile` / `NtClose` / `NtQueryInformationFile` /
-`NtCreateSection` / `NtDuplicateObject` routing through promotion.
+**Surface:** bounded `NtCreateFile` for regular files and explicit directory
+opens, plus downstream `NtReadFile` / `NtWriteFile` / selected
+`NtQueryInformationFile` / `NtSetInformationFile` / `NtFlushBuffersFileEx`
+paths, and client-side file-backed sections for the same-process common case.
 
 **Files:**
 
@@ -478,12 +479,13 @@ downstream `NtReadFile` / `NtClose` / `NtQueryInformationFile` /
 Called from `dlls/ntdll/unix/file.c:4717` inside `NtCreateFile`,
 right after path resolution.
 
-**Eligibility predicate:** `FILE_OPEN` or `FILE_OPEN_IF`-on-existing,
-`access` is read-only after `GENERIC_*` expansion, `options` does
-not include `FILE_DIRECTORY_FILE` / `FILE_DELETE_ON_CLOSE` / open-by-id,
-no `attr->RootDirectory`, no security descriptor, target is `S_ISREG`.
-Encoded in the categoriser at `local_file.c:281-345`. Anything else
-returns `STATUS_NOT_SUPPORTED` and falls through.
+**Eligibility predicate:** bounded regular-file and explicit-directory opens:
+no loader-owned image path, no root-directory or custom security-descriptor
+shape, no open-by-id, no delete-on-close, and only the dispositions and access
+masks the local table knows how to preserve correctly. The shipped envelope is
+materially broader than the first public draft: it includes common write-class
+opens, explicit `FILE_DIRECTORY_FILE` cases, selected metadata updates, common
+flush paths, and local `FileEndOfFileInformation`.
 
 **Private handle range:** `[0x7FFFC000, 0x80000000)` (16 KiB window,
 4096 handles), excluding `0x7FFFFFFF` for `CURRENT_PROCESS`. Range
@@ -497,6 +499,13 @@ a single `pi_mutex_t nspa_lf_opens_mutex`. Each entry caches:
 - access / sharing bits
 - the original NT path string for `GetFinalPathNameByHandle`
 - the lazy-promoted server handle (0 until first promote)
+
+**Local sections on top:** eligible unnamed file-backed sections now get a
+second client-private handle range of their own. The section duplicates the
+backing unix fd at creation time, publishes `FILE_MAPPING_*` bits back into the
+same local-file sharing aggregate, and can then map, query, unmap, and close
+inside the client process. Same-process `DuplicateHandle` promotes once to a
+server section; cross-process duplication remains an honest server boundary.
 
 **Cross-process arbitration:** server-allocated memfd-backed shmem
 region of `nspa_inode_bucket_t` buckets. Each bucket has a PSHARED
@@ -514,15 +523,19 @@ before any further work. Reads are seqlock-bounded with 8-retry cap.
 
 **Lazy promotion:** `nspa_local_file_get_or_promote_server_handle`
 mints a server handle via `nspa_create_file_from_unix_fd` RPC and
-caches it. Long tail of NT-API surface (info classes, section creation,
-duplication) routes through the promoted handle.
+caches it. Long-tail NT surfaces still route through that promoted
+handle, but eligible file-backed sections no longer force an immediate
+promote just to exist.
 
-**Feature gate:** `NSPA_LOCAL_FILES=1` (shipped; set `NSPA_LOCAL_FILES=0`
-to force the legacy wineserver path for diagnostic A/B).
+**Feature gates:**
 
-**Dedicated reference:** `nspa-local-file-architecture.gen.html` --
-the per-stub deep dive. Read it for the full design rationale,
-sharing-arbitration semantics, eligibility matrix, and Phase history.
+- `NSPA_DISABLE_LOCAL_FILES=1` disables the local-file bypass entirely
+- `NSPA_ENABLE_LOCAL_DIR=0` disables the explicit directory-mint path
+- `NSPA_LOCAL_SECTION=0` disables the client-side local-section path
+
+**Dedicated references:** [Local-File Bypass Architecture](nspa-local-file-architecture.gen.html)
+for the file-handle path and [Local Section Bypass](local-section-architecture.gen.html)
+for the section lifecycle and duplicate boundary.
 
 ### 7.2 anonymous local events -- `NtCreateEvent` fast path
 

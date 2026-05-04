@@ -2,7 +2,7 @@
 <html lang="en"><head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Wine-NSPA -- Memory, Large Pages, and Working-Set Support</title>
+<title>Wine-NSPA -- Memory, Sections, Large Pages, and Working-Set Support</title>
 <style>
   :root {
     --bg: #1a1b26; --fg: #c0caf5; --accent: #7aa2f7;
@@ -106,24 +106,25 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
 </head><body>
 <div class="page-nav"><a href="index.html">Docs Home</a></div>
-<h1 id="wine-nspa--memory-large-pages-and-working-set-support">Wine-NSPA &ndash; Memory, Large Pages, and Working-Set Support</h1>
+<h1 id="wine-nspa--memory-sections-large-pages-and-working-set-support">Wine-NSPA &ndash; Memory, Sections, Large Pages, and Working-Set Support</h1>
 
-<p>This page covers the shipped Wine-NSPA memory surface: large-page allocation,
-large-page file mappings, current-process working-set reporting, working-set
-quota bookkeeping, and the shared-memory backing choices used by the major
-bypass subsystems.</p>
+<p>This page covers the shipped Wine-NSPA memory surface: client-side local
+sections, large-page allocation, large-page file mappings, current-process
+working-set reporting, working-set quota bookkeeping, and the shared-memory
+backing choices used by the major bypass subsystems.</p>
 
 <h2 id="table-of-contents">Table of Contents</h2>
 
 <ol>
 <li><a href="#1-overview">Overview</a></li>
 <li><a href="#2-what-is-shipped">What is shipped</a></li>
-<li><a href="#3-large-page-allocation-and-mapping">Large-page allocation and mapping</a></li>
-<li><a href="#4-working-set-reporting-and-quota-semantics">Working-set reporting and quota semantics</a></li>
-<li><a href="#5-shared-memory-backing-choices">Shared-memory backing choices</a></li>
-<li><a href="#6-validation-surface">Validation surface</a></li>
-<li><a href="#7-implementation-map">Implementation map</a></li>
-<li><a href="#8-related-docs">Related docs</a></li>
+<li><a href="#3-client-side-sections">Client-side sections</a></li>
+<li><a href="#4-large-page-allocation-and-mapping">Large-page allocation and mapping</a></li>
+<li><a href="#5-working-set-reporting-and-quota-semantics">Working-set reporting and quota semantics</a></li>
+<li><a href="#6-shared-memory-backing-choices">Shared-memory backing choices</a></li>
+<li><a href="#7-validation-surface">Validation surface</a></li>
+<li><a href="#8-implementation-map">Implementation map</a></li>
+<li><a href="#9-related-docs">Related docs</a></li>
 </ol>
 
 
@@ -137,6 +138,7 @@ hugepage patches&rdquo; and it is not just &ldquo;memfd everywhere.&rdquo;</p>
 <p>Three distinct pieces are shipped:</p>
 
 <ul>
+<li>client-side file-backed sections built on top of local-file handles</li>
 <li>large-page support for anonymous and section-backed mappings</li>
 <li>working-set reporting plus working-set quota bookkeeping</li>
 <li>selective shared-memory backing choices for bypass state</li>
@@ -144,10 +146,12 @@ hugepage patches&rdquo; and it is not just &ldquo;memfd everywhere.&rdquo;</p>
 
 
 <p>The important design point is that these pieces solve different problems.
-Large pages reduce TLB pressure on hot mappings. Working-set reporting makes
-the Windows-visible memory surface honest enough for tools and tests.
-Dedicated shared-memory backends keep bypass subsystems off the wineserver hot
-path without forcing every shared region through one mechanism.</p>
+Client-side sections reduce mapping RPC traffic on same-process file-backed
+mapping workloads. Large pages reduce TLB pressure on hot mappings.
+Working-set reporting makes the Windows-visible memory surface honest enough
+for tools and tests. Dedicated shared-memory backends keep bypass subsystems
+off the wineserver hot path without forcing every shared region through one
+mechanism.</p>
 
 <hr />
 
@@ -178,6 +182,10 @@ path without forcing every shared region through one mechanism.</p>
 <td> Privilege-gated, backed through large-page-capable <code>memfd_create()</code> on the wineserver side, and mapped with large-page alignment rules. </td>
 </tr>
 <tr>
+<td> local file-backed sections </td>
+<td> Eligible unnamed file-backed sections on local-file handles can stay client-side for create / map / unmap / query / close, with same-process duplicate promoted only when the call crosses a real server-handle boundary. </td>
+</tr>
+<tr>
 <td> <code>QueryWorkingSetEx()</code> </td>
 <td> Current-process reporting is live, including <code>LargePage</code> flag reporting. Preferred path is <code>PAGEMAP_SCAN</code>; fallback is <code>/proc/self/pagemap</code>. </td>
 </tr>
@@ -199,7 +207,37 @@ path without forcing every shared region through one mechanism.</p>
 
 <hr />
 
-<h2 id="3-large-page-allocation-and-mapping">3. Large-page allocation and mapping</h2>
+<h2 id="3-client-side-sections">3. Client-side sections</h2>
+
+<p>The new client-side section path sits between local-file handles and the
+traditional wineserver mapping-object path.</p>
+
+<p>Eligible unnamed file-backed sections on local-file handles can now:</p>
+
+<ul>
+<li>allocate a client-private section handle</li>
+<li>duplicate the backing unix fd at section creation time</li>
+<li>map, unmap, query, and close the section locally in the same process</li>
+<li>publish <code>FILE_MAPPING_*</code> bits back into the local-file aggregate so later
+share checks and end-of-file changes still see active mappings</li>
+</ul>
+
+
+<p>This is a memory feature as much as a file feature. It changes how Windows
+section objects are represented, how views are installed, and how file-mapping
+state is reflected back into the rest of the process.</p>
+
+<p>The main boundary is still the same one the local-file path already uses:
+cross-process or namespace-visible semantics remain on the server side.
+Same-process mapping is the fast path. Cross-process duplication is not
+guessed at.</p>
+
+<p>For the full lifecycle and ownership rules, see
+<a href="local-section-architecture.gen.html">Local Section Bypass</a>.</p>
+
+<hr />
+
+<h2 id="4-large-page-allocation-and-mapping">4. Large-page allocation and mapping</h2>
 
 <p>Large-page support has two entry paths: anonymous allocation and section-backed
 mapping. Both start from Windows-visible APIs, but the backing shape differs.</p>
@@ -288,7 +326,7 @@ from allocation to reporting.</p>
 
 <hr />
 
-<h2 id="4-working-set-reporting-and-quota-semantics">4. Working-set reporting and quota semantics</h2>
+<h2 id="5-working-set-reporting-and-quota-semantics">5. Working-set reporting and quota semantics</h2>
 
 <p>Working-set support is deliberately split into two levels:</p>
 
@@ -357,7 +395,7 @@ full Windows-style working-set manager. It has not.</p>
 
 <hr />
 
-<h2 id="5-shared-memory-backing-choices">5. Shared-memory backing choices</h2>
+<h2 id="6-shared-memory-backing-choices">6. Shared-memory backing choices</h2>
 
 <p>The tree uses several shared-memory backends, and they are chosen per
 subsystem instead of by one global rule.</p>
@@ -436,7 +474,7 @@ performance goals are different.</p>
 
 <hr />
 
-<h2 id="6-validation-surface">6. Validation surface</h2>
+<h2 id="7-validation-surface">7. Validation surface</h2>
 
 <p>The public <code>large-pages</code> PE harness now covers more than one call shape:</p>
 
@@ -450,12 +488,16 @@ performance goals are different.</p>
 
 
 <p>That means the public test surface now validates both the allocation path and
-the Windows-visible reporting path. The relevant public harness documentation
-lives on <code>nspa-rt-test.gen.html</code>.</p>
+the Windows-visible reporting path. Local sections are currently validated
+through the shipped workload path rather than a dedicated PE harness:
+<code>CreateFile -&gt; CreateFileMapping -&gt; CloseHandle(file) -&gt; MapViewOfFile</code> is
+clean on the local path and materially reduces mapping RPC traffic.</p>
+
+<p>The relevant public harness documentation lives on <code>nspa-rt-test.gen.html</code>.</p>
 
 <hr />
 
-<h2 id="7-implementation-map">7. Implementation map</h2>
+<h2 id="8-implementation-map">8. Implementation map</h2>
 
 <table>
 <thead>
@@ -465,6 +507,14 @@ lives on <code>nspa-rt-test.gen.html</code>.</p>
 </tr>
 </thead>
 <tbody>
+<tr>
+<td> <code>dlls/ntdll/unix/nspa/local_file.c</code> </td>
+<td> local-file table plus local-section table, handle ranges, mapping-bit publication </td>
+</tr>
+<tr>
+<td> <code>dlls/ntdll/unix/sync.c</code> / <code>dlls/ntdll/unix/virtual.c</code> </td>
+<td> section creation, map / unmap / query hooks, and large-page / view semantics </td>
+</tr>
 <tr>
 <td> <code>server/mapping.c</code> </td>
 <td> hugepage inventory scan, <code>LargePageMinimum</code> publication, <code>SEC_LARGE_PAGES</code> privilege gate, large-page section backing </td>
@@ -503,9 +553,10 @@ lives on <code>nspa-rt-test.gen.html</code>.</p>
 
 <hr />
 
-<h2 id="8-related-docs">8. Related docs</h2>
+<h2 id="9-related-docs">9. Related docs</h2>
 
 <ul>
+<li><a href="local-section-architecture.gen.html">Local Section Bypass</a></li>
 <li><a href="architecture.gen.html">Architecture Overview</a></li>
 <li><a href="nspa-rt-test.gen.html">RT Test Harness</a></li>
 <li><a href="msg-ring-architecture.gen.html">Message Ring Architecture</a></li>

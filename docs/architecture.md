@@ -92,7 +92,7 @@ exceeded.
 
   <rect x="430" y="105" width="180" height="40" class="box-hot"/>
   <text x="520" y="123" text-anchor="middle" class="lbl-yel">NT-local stubs</text>
-  <text x="520" y="137" text-anchor="middle" class="lbl-mut">file / event / timer / wm_timer</text>
+  <text x="520" y="137" text-anchor="middle" class="lbl-mut">file / section / event / timers</text>
 
   <rect x="620" y="105" width="120" height="40" class="box"/>
   <text x="680" y="123" text-anchor="middle" class="lbl-sm">winejack.drv</text>
@@ -267,20 +267,20 @@ and retained as reference material only.
 
 The NT-local stubs pattern moves NT-API state from wineserver-resident storage
 into client-resident storage. The pattern: the client maintains its own state
-for a class of NT objects (regular-file handles, anonymous events, timers,
-WM_TIMER tuples), processes operations locally, and lazily promotes the state
-back to a server-visible handle only when an API genuinely needs server-side
-handle semantics (`DuplicateHandle`, `CreateProcess` inheritance,
-`NtCreateSection` from a file handle). The stub answers the common case
-locally; the server stays the authority for the long tail.
+for a class of NT objects (file handles, local sections, anonymous events,
+timers, WM_TIMER tuples), processes operations locally, and lazily promotes the
+state back to a server-visible handle only when an API genuinely needs
+server-side handle semantics (`DuplicateHandle`, `CreateProcess` inheritance,
+cross-process visibility). The stub answers the common case locally; the server
+stays the authority for the long tail.
 
-Shipped surfaces now include `nspa_local_file`, anonymous local events,
-`nspa_local_timer`, and `nspa_local_wm_timer`. The timer work was extended on
-2026-05-02 so anonymous timers now piggyback on the local-event base and the
-timer dispatchers can run on the shared RT sched host instead of dedicated
-helper threads.
+Shipped surfaces now include `nspa_local_file` plus local sections,
+anonymous local events, `nspa_local_timer`, and `nspa_local_wm_timer`.
+The timer work was extended on 2026-05-02 so anonymous timers now piggyback on
+the local-event base and the timer dispatchers can run on the shared RT sched
+host instead of dedicated helper threads.
 
-**Detail: see [nt-local-stubs](nt-local-stubs.gen.html), [nspa-local-file-architecture](nspa-local-file-architecture.gen.html).**
+**Detail: see [nt-local-stubs](nt-local-stubs.gen.html), [nspa-local-file-architecture](nspa-local-file-architecture.gen.html), [local-section-architecture](local-section-architecture.gen.html).**
 
 ### 3.4 Client scheduler
 
@@ -318,7 +318,13 @@ NSPA caches the hook chain in a per-process shmem region (Tier 1 = "is there any
 
 ### 3.7 File I/O
 
-File I/O is two related stories. The **open path** is owned by `nspa_local_file` (see §3.3): regular-file `NtCreateFile` calls are serviced client-side via `stat() + open()`, with sharing arbitration preserved through a server-published `(dev, inode) -> sharing-state` shmem region. Only API surfaces that genuinely need a server-visible handle trigger lazy promotion.
+File I/O is two related stories. The **open path** is owned by `nspa_local_file`
+(see §3.3): a bounded set of regular-file and explicit-directory `NtCreateFile`
+calls are serviced client-side via `stat()` / `lstat()` + `open()`, with
+sharing arbitration preserved through a server-published
+`(dev, inode) -> sharing-state` shmem region. Only API surfaces that genuinely
+need a server-visible file handle trigger lazy promotion, and eligible unnamed
+file-backed sections can now stay local too.
 
 The **data-plane path** is owned by `io_uring`: regular-file reads and writes
 submit directly to a per-thread ring, async `CreateFile` can route through the
@@ -328,29 +334,30 @@ because the unix fd held by the local-file table is the same fd the ring path
 operates on.
 
 What remains outside `io_uring` is the genuinely server-managed surface:
-named pipes, named events, and the parts of the async model that still depend
-on server-owned pseudo-fds or object naming.
+named pipes, named events, cross-process section / handle boundaries, and the
+parts of the async model that still depend on server-owned pseudo-fds or object
+naming.
 
-**Detail: see [io_uring-architecture](io_uring-architecture.gen.html), [nspa-local-file-architecture](nspa-local-file-architecture.gen.html).**
+**Detail: see [io_uring-architecture](io_uring-architecture.gen.html), [nspa-local-file-architecture](nspa-local-file-architecture.gen.html), [local-section-architecture](local-section-architecture.gen.html).**
 
 ### 3.8 Memory and shared-state backing
 
 Wine-NSPA's memory surface is broader than "large pages exist." The shipped
-tree now has three memory stories that matter architecturally: large-page
-anonymous allocation and section-backed mappings, current-process
-`QueryWorkingSetEx()` reporting plus working-set quota bookkeeping, and the
-selective use of dedicated `memfd` backends for bypass state such as msg-ring
-and local-file inode arbitration.
+tree now has four memory stories that matter architecturally: client-side local
+sections, large-page anonymous allocation and large-page server-backed
+mappings, current-process `QueryWorkingSetEx()` reporting plus working-set
+quota bookkeeping, and the selective use of dedicated `memfd` backends for
+bypass state such as msg-ring and local-file inode arbitration.
 
 Those pieces are related because they all change how Wine exposes or backs
-memory, but they are not the same mechanism. Large pages are about page size
-and locking semantics. Working-set support is about what the Win32 memory
-surface reports and stores. `memfd` is about where bypass-owned shared state
-lives. Keeping those roles separate makes the design easier to reason about
-and avoids the common mistake of treating every shared region as "just more
-session shmem."
+memory, but they are not the same mechanism. Local sections are about keeping
+common file-backed views client-side. Large pages are about page size and
+locking semantics. Working-set support is about what the Win32 memory surface
+reports and stores. `memfd` is about where bypass-owned shared state lives.
+Keeping those roles separate makes the design easier to reason about and avoids
+the common mistake of treating every shared region as "just more session shmem."
 
-**Detail: see [memory-and-large-pages](memory-and-large-pages.gen.html), [msg-ring-architecture](msg-ring-architecture.gen.html), [nspa-local-file-architecture](nspa-local-file-architecture.gen.html).**
+**Detail: see [memory-and-large-pages](memory-and-large-pages.gen.html), [local-section-architecture](local-section-architecture.gen.html), [msg-ring-architecture](msg-ring-architecture.gen.html), [nspa-local-file-architecture](nspa-local-file-architecture.gen.html).**
 
 ### 3.9 Audio
 
@@ -368,9 +375,9 @@ Each bypass moves a specific class of NT-API state or I/O work out of wineserver
 
 The current topology covers the shipped bypass surfaces plus the
 residual wineserver floor (process/thread lifecycle, cross-process
-naming, path resolution, handle inheritance). As of 2026-05-02, the
+naming, path resolution, handle inheritance). As of 2026-05-03, the
 shipped/default-on set includes sync primitives, hook caching,
-NT-local regular-file open, local events, sched-hosted timer dispatch,
+NT-local file and section handling, local events, sched-hosted timer dispatch,
 the client scheduler substrate, `io_uring` regular-file I/O, gamma's
 aggregate-wait + `TRY_RECV2` dispatcher path, async `CreateFile`,
 socket `RECVMSG` / `SENDMSG`, msg-ring v1 same-process send/reply,
@@ -453,7 +460,8 @@ Master overview (this doc) plus dedicated subsystem pages.
 | `wineserver-decomposition.gen.html` | Long-horizon wineserver decomposition plan |
 | `gamma-channel-dispatcher.gen.html` | Per-process kernel-mediated wineserver IPC (gamma dispatcher) |
 | `nt-local-stubs.gen.html` | NT-local stubs architectural pattern |
-| `nspa-local-file-architecture.gen.html` | NT-local file (read-only regular-file `NtCreateFile` bypass) |
+| `local-section-architecture.gen.html` | client-side unnamed file-backed sections on top of local-file handles |
+| `nspa-local-file-architecture.gen.html` | NT-local file path for bounded regular-file and explicit-directory opens |
 | `msg-ring-architecture.gen.html` | Same-process message rings, redraw push ring, paint cache, and hardening history |
 | `memory-and-large-pages.gen.html` | large pages, working-set reporting, quota bookkeeping, and shared-memory backing choices |
 | `hook-cache.gen.html` | Tier 1+2 Win32 hook-chain cache |

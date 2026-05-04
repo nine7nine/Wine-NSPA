@@ -43,14 +43,17 @@ A few framing notes before getting into the details:
 
 The audience this doc is written for: a developer who has read the bypass overview, has skimmed the gamma-channel-dispatcher and ntsync-driver docs, and wants to understand the architectural arc that the bypass work *enables*. If you're implementing a single bypass and want a checklist, read the bypass detail doc for that bypass; if you're implementing one roadmap slice from this page, read the in-tree handoff doc (`wine/nspa/docs/wineserver-decomposition-plan.md`) which has line-level kernel landmarks. This doc is the why, not the how.
 
-The main 2026-05-02 correction is scope: some of the work this page once
+The main 2026-05-03 correction is scope: some of the work this page once
 treated as "future wineserver-internal decomposition pressure" is now
 already shipping client-side. Timer dispatch for eligible local timers and
 `WM_TIMER`s lives on the per-process scheduler host, anonymous events no
 longer require a server-created helper object by default, and PE-side socket
-deferred I/O is already on client `io_uring` rings. That does **not** make
-the decomposition plan obsolete. It means the residual wineserver problem is
-smaller and more concentrated than it was when this page was first drafted.
+deferred I/O is already on client `io_uring` rings. On top of that, local-file
+follow-ons and client-side local sections now retire more `create_file`,
+mapping, and metadata traffic before it ever becomes wineserver work. That
+does **not** make the decomposition plan obsolete. It means the residual
+wineserver problem is smaller and more concentrated than it was when this page
+was first drafted.
 
 ---
 
@@ -264,7 +267,7 @@ This work is **still queued**, but narrower than before. It remains the first sa
 
 Today, wineserver's main loop computes `get_next_timeout()` from the head of the residual NT timer queue, passes that timeout to `poll()`, and processes timer expirations when poll returns due to timeout (rather than fd readiness). That couples timer-driven wakeups to fd-driven wakeups in the same syscall.
 
-The scope correction after 2026-05-02 is important: this is no longer the
+The scope correction after 2026-05-03 is important: this is no longer the
 plan for **all** timer work. Eligible anonymous NT timers and eligible
 `WM_TIMER` dispatch already moved onto the client `wine-sched-rt` host. The
 remaining server-side split is about the timers that still genuinely belong
@@ -313,12 +316,13 @@ This work is **still queued**. The decision depends on the PREEMPT_RT epoll expe
 
 Today, the main loop is RT and spends most of its time blocked in `poll()` or `epoll_wait()`. The wait itself doesn't actually need RT priority -- only the *response* to the wait does. RT priority matters for the work that happens after the wait returns, not for the act of sleeping in the kernel.
 
-The 2026-05-02 shipped socket follow-ons narrow this split's motivation.
-Deferred socket recv/send no longer depend on wineserver fd wakeups in the
-common PE path because they already submit `IORING_OP_RECVMSG` /
-`IORING_OP_SENDMSG` from the client side. So the residual fd-poll split is
-about the server-owned descriptor set that remains after those client-side
-surfaces have peeled away.
+The 2026-05-02 and 2026-05-03 shipped follow-ons narrow this split's
+motivation. Deferred socket recv/send no longer depend on wineserver fd wakeups
+in the common PE path because they already submit `IORING_OP_RECVMSG` /
+`IORING_OP_SENDMSG` from the client side. Local sections and widened local-file
+handling also remove more file and mapping traffic from the server-owned
+descriptor set. So the residual fd-poll split is about the server-owned
+descriptors that remain after those client-side surfaces have peeled away.
 
 The proposal: separate the FD polling from the FD-event handling.
 
@@ -442,7 +446,7 @@ A few notes about the ordering:
 
 - Slice 1 (`open_fd` lock-drop) was a surgical fix targeted at one specific lock-holder pattern (long syscalls under `global_lock`). It's not a full architectural decomposition step; it's a targeted release of the lock around a known-slow critical section. It is listed first because it was the first decomposition-direction work to ship, and because the pattern it establishes (NSPA-side lock-discipline patches inside server handlers) generalizes to other long lock-holders we may identify later.
 - Slice 2 is thread-token pass-through, shipped 2026-04-26 and flipped default-on after the post-1006 ntsync stabilization. It's a kernel + userspace co-design and the prototype for the kernel-side primitives that the remaining splits will need.
-- Slice 3 is still co-designed even though aggregate-wait itself already shipped. The remaining shape is one RT handler thread (running aggregate-wait over the gamma channel + the FD-event queue + the timer queue), one non-RT FD polling thread, and one timer thread. The syscall and the gamma consumer are now proven; the unresolved work is how the rest of wineserver composes around them. Since 2026-05-02, read this as the **residual** server-owned timer/fd set, not the whole timer/socket universe.
+- Slice 3 is still co-designed even though aggregate-wait itself already shipped. The remaining shape is one RT handler thread (running aggregate-wait over the gamma channel + the FD-event queue + the timer queue), one non-RT FD polling thread, and one timer thread. The syscall and the gamma consumer are now proven; the unresolved work is how the rest of wineserver composes around them. Since 2026-05-03, read this as the **residual** server-owned timer/fd set, not the whole timer/socket/file-mapping universe.
 - Slice 4 is the long horizon. Router/handler split pays as more bypasses ship; lock partitioning pays at the end. Don't start either until the bypass arc has materially shrunk the surface area.
 
 Most importantly: each slice ships independently. There is no big-bang. If slice 3 stalls, slice 4 doesn't unblock anything that slices 1 and 2 didn't already unblock; the bypasses keep shipping in parallel. The decomposition arc and the bypass arc are independently progressing, with each sometimes accelerating the other but neither blocking it.

@@ -2,7 +2,8 @@
 
 This page documents the public Wine-NSPA validation harness: the native ntsync
 suite, the PE-side matrix, and the targeted follow-on validators that cover the
- newest shipped scheduler, event, socket, and dispatcher work.
+newest shipped scheduler, event, socket, local-file, local-section, and
+dispatcher work.
 
 ## Table of Contents
 
@@ -43,14 +44,20 @@ exercises `inproc_wait` -> ntsync ioctls directly and does **not** hit
 loop. `dispatcher-burst` is the first PE-side workload in the published
 matrix that covers that path.
 
-The 2026-05-02 shipped follow-ons did **not** introduce a new full matrix
-version. They were validated with targeted harnesses instead:
+The 2026-05-02 and 2026-05-03 shipped follow-ons did **not** introduce a new
+full matrix version. They were validated with targeted harnesses instead:
 
 - `run-rt-probe-validation.sh` covers the sched-hosted `local_timer` and
   `local_wm_timer` migrations and passed `10/10`
 - the existing `socket-io` PE subcommand now exercises the shipped
   `IORING_OP_RECVMSG` / `IORING_OP_SENDMSG` path and measured `+6.5%`
   deferred-path throughput, `-6.8%` p99 latency, `0/2000` failures
+- local-file and local-section follow-ons are validated today through the
+  real workload path rather than a dedicated PE subcommand: same-process
+  `CreateFile -> CreateFileMapping -> CloseHandle(file) -> MapViewOfFile`
+  stays clean, `nspa_create_mapping_from_unix_fd` drops `2,664` -> `~800`,
+  and widened local-file coverage cuts `create_file` handler count
+  `7,845` -> `5,658`
 - Ableton boot / library scan / project load / playback smoke covers the
   local-event default flip and the client-scheduler / socket carries under
   the real mixed workload
@@ -73,16 +80,19 @@ The PE binary runs in two modes:
 - **Layer 2 PE matrix:** 24 PASS / 0 FAIL / 0 TIMEOUT (12 tests x
   baseline + RT), including `dispatcher-burst`.
 
-### Targeted Follow-On Validators (2026-05-02)
+### Targeted Follow-On Validators (2026-05-02 and 2026-05-03)
 
 - **sched RT-probe script:** `run-rt-probe-validation.sh` -- `10/10 PASS`
   for the `wine-sched-rt` migration of `local_timer` and
   `local_wm_timer`
 - **socket deferred path:** `socket-io` continues to pass in baseline + RT
   while now exercising the shipped `RECVMSG` / `SENDMSG` SQE path
+- **local-file / local-section workload path:** same-process map-after-file-close
+  is clean; local-file and section carries reduce file and mapping traffic
+  without changing the published full-suite boundary
 - **real workload smoke:** Ableton boot / library scan / project load /
   playback remained clean after the client-scheduler, local-event, and
-  socket follow-ons
+  socket, local-file, and local-section follow-ons
 
 ### Build
 

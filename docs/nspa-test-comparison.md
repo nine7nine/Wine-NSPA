@@ -6,10 +6,10 @@ RT = `NSPA_RT_PRIO=80 NSPA_RT_POLICY=FF WINEPRELOADREMAPVDSO=force`
 This doc tracks Wine-NSPA test-suite evolution from v3 through v8. The
 current published full-suite snapshot remains v8 / 2026-04-30
 (1003-1011 kernel stack, 24 PASS / 0 FAIL / 0 TIMEOUT PE matrix,
-`dispatcher-burst` added). The shipped 2026-05-02 follow-ons below are
-validated by targeted harnesses and smoke runs rather than a new v9
-full-suite publish. Earlier version sections are retained below as
-historical snapshots.
+`dispatcher-burst` added). The shipped 2026-05-02 and 2026-05-03
+follow-ons below are validated by targeted harnesses and smoke runs
+rather than a new v9 full-suite publish. Earlier version sections are
+retained below as historical snapshots.
 
 | Version | Date | Highlight |
 |---------|------|-----------|
@@ -21,30 +21,33 @@ historical snapshots.
 
 ---
 
-## Post-v8 shipped follow-ons (2026-05-02) -- targeted validators, not a new matrix version
+## Post-v8 shipped follow-ons (2026-05-02 and 2026-05-03) -- targeted validators, not a new matrix version
 
 ### Why this is not labeled v9
 
 The public project has shipped meaningful new client-side work since v8:
 spawn-main + `ntdll_sched`, sched-hosted timer migrations, anonymous
-local events default-on, and socket `RECVMSG` / `SENDMSG` default-on.
-Those changes were validated with targeted harnesses and real-workload
-smoke, but they have **not** yet been rolled into a new published
-full-suite matrix version. So the current matrix version remains v8.
+local events default-on, socket `RECVMSG` / `SENDMSG` default-on, wider
+local-file coverage, and default-on local sections. Those changes were
+validated with targeted harnesses and real-workload smoke, but they have
+**not** yet been rolled into a new published full-suite matrix version.
+So the current matrix version remains v8.
 
-### Targeted 2026-05-02 results
+### Targeted 2026-05-02 and 2026-05-03 results
 
 | Area | Validation surface | Published result |
 |------|--------------------|------------------|
 | client scheduler + RT timer migrations | `run-rt-probe-validation.sh` | `10/10 PASS`; Ableton boot / library / project / playback PASS; net `-1` helper thread per process |
 | anonymous local events default-on | Ableton playback smoke vs earlier shipped event baseline | system CPU `40-57%` -> `~35%` during playback (`~15-20%` reduction); thread count and wineserver CPU unchanged |
 | socket `RECVMSG` / `SENDMSG` default-on | `socket-io` deferred path + Ableton smoke | throughput `+6.5%`; p99 latency `-6.8%`; `0/2000` failures; Ableton clean at `63` threads with zero new errors vs earlier shipped socket baseline |
+| local-file widening | workload comparison | `create_file` handler count `7,845` -> `5,658`; handler time `137 ms` -> `50 ms` |
+| local sections default-on | workload comparison | `nspa_create_mapping_from_unix_fd` count `2,664` -> `~800`; same-process map-after-file-close shape clean |
 
 ### Reading this with the rest of the docs
 
 Use this page for the current published matrix boundary. Use
 `current-state.gen.html` for the exact shipped defaults and targeted
-2026-05-02 validation numbers that landed after v8.
+2026-05-02 and 2026-05-03 validation numbers that landed after v8.
 
 ---
 

@@ -24,11 +24,38 @@ This page covers the `NtCreateFile` local-fast-path itself, the local handle tab
 
 ## 1. Overview
 
-Wine-NSPA's **local-file bypass** (`NSPA_LOCAL_FILES=1`) services read-only regular-file `NtCreateFile` calls entirely within the client process. Every eligible open would otherwise cost a full wineserver round-trip: the client builds a `create_file` request, the server allocates a `struct file` + inode tracking + handle entry, returns a server-visible handle, then every subsequent `NtReadFile` / `NtQueryInformationFile` / etc fires another round-trip. For an app like Ableton Live 12 Lite that does roughly **28,500 file opens in a single startup session** -- DLL manifests, `.pyc` files, theme resources, Live Library indexes -- those round-trips dominate startup profile and show up as real latency on the main thread.
+Wine-NSPA's **local-file bypass** services a large subset of `NtCreateFile`
+calls entirely within the client process. Every eligible open would otherwise
+cost a full wineserver round-trip: the client builds a `create_file` request,
+the server allocates a `struct file` plus inode tracking plus a handle-table
+entry, returns a server-visible handle, and later `NtReadFile`,
+`NtQueryInformationFile`, or `NtSetInformationFile` often pay more server
+traffic on top of that. For an app like Ableton Live 12 Lite that does roughly
+**28,500 file opens in a single startup session** -- DLL manifests, `.pyc`
+files, theme resources, Live Library indexes -- those round-trips dominate
+startup profile and show up as real latency on the main thread.
 
-The bypass routes eligible opens to a client-private handle range, maintains a per-process table that owns the unix fd, and exposes the unix fd to every Wine I/O path via a thin fast-path check inside `server_get_unix_fd`. When an API needs server-side state (section mapping, query-by-handle, inheritance), the bypass *lazily promotes* the local handle to a server-recognised handle on demand.
+The shipped path is broader than the earlier public draft. It now covers:
 
-The feature is invisible to Win32 applications: same `CreateFile` semantics, same sharing arbitration, same `io->Information = FILE_OPENED` return value, same behaviour on every downstream API. Apps see identical functional behaviour whether the bypass is enabled or not -- the difference is measurable only in profiler output and perceived startup latency.
+- regular-file opens with read-class and common write-class access
+- explicit directory opens on the local dir-mint path
+- selected downstream metadata, flush, and end-of-file operations without an
+  immediate promote
+- client-side file-backed sections built on top of local-file handles
+
+The bypass routes eligible opens to a client-private handle range, maintains a
+per-process table that owns the unix fd, and exposes the unix fd to every Wine
+I/O path via a thin fast-path check inside `server_get_unix_fd`. When a later
+API genuinely needs server-owned file state, the bypass lazily promotes the
+local handle to a server-recognized handle on demand. Eligible file-backed
+sections are now the main exception: they can stay local too, and are covered
+in detail on [Local Section Bypass](local-section-architecture.gen.html).
+
+The feature is invisible to Win32 applications: same `CreateFile` semantics,
+same sharing arbitration, same `IO_STATUS_BLOCK` results, and the same error
+codes at the server boundary. Apps see identical functional behavior whether
+the bypass is enabled or not -- the difference is measurable only in profiler
+output and perceived startup latency.
 
 ---
 
@@ -56,10 +83,10 @@ Other candidate workloads with similar profiles: plugin scanners (hundreds of VS
 - **Client-private handle range.** The bypass issues handles from a fixed high range `[0x7FFFC000, 0x80000000)` that is disjoint from the server's normal handle allocation (low-to-mid) and from the NTSync client-handle range. Any caller that does `nspa_local_file_is_local_handle(h)` can cheaply tell whether a handle is ours.
 - **Per-process table, not process-shared.** Local handles are invalid in any other process. The table is a plain linked list under a PI mutex -- no shared memory, no cross-process lookups. Cross-process handle duplication falls back to promotion through the server.
 - **Shared inode table for sharing arbitration.** The only thing multiple processes need to agree on is *sharing*: if another process opens a file with `FILE_SHARE_NONE` we must honour that. A server-published shmem region carries `(dev, inode) -> (aggregate-access, aggregate-sharing, refcount)` so client-side arbitration matches what server-side `check_sharing` would enforce.
-- **Lazy promotion.** On first API that genuinely needs a server-visible handle (`NtQueryInformationFile`, `NtDuplicateObject`, `NtCreateSection`, ...), the bypass does a single `nspa_create_file_from_unix_fd` RPC that hands the unix fd to the server and gets back a real server handle. Subsequent calls on the same local handle reuse the cached promoted handle.
+- **Lazy promotion.** On first API that genuinely needs a server-visible file handle, the bypass does a single `nspa_create_file_from_unix_fd` RPC that hands the unix fd to the server and gets back a real server handle. Subsequent calls on the same local handle reuse the cached promoted handle. Eligible file-backed sections are no longer part of that automatic promote set; they can stay local on their own section table.
 - **RT-safe fast path.** Once the table + inode shmem are warm, the bypass open path is `stat()` + linked-list-walk-under-lock + `open()` + list insert -- no syscall other than the two that are inherent to the work. No lazy-init remains on the hot path.
 - **Transparent fallback.** Every disqualifier returns `STATUS_NOT_SUPPORTED` and the caller falls through to the normal `server_create_file` path. Anything the bypass doesn't handle is handled by vanilla Wine unchanged.
-- **Tight correctness envelope.** Only `FILE_OPEN` / `FILE_OPEN_IF`-on-existing-file dispositions, only read-only access masks, only regular files, only synchronous (`FILE_SYNCHRONOUS_IO_*`) opens. Anything outside the envelope goes to the server.
+- **Tight correctness envelope.** The shipped envelope is broader than the first public draft but still bounded: local regular-file and explicit-directory opens, synchronous opens, bounded create / overwrite dispositions, common metadata updates, bounded flush / EOF changes, and local file-backed sections. Anything outside that envelope still goes to the server.
 
 ---
 
@@ -297,9 +324,12 @@ This lives in `nspa_local_file_check_sharing_algorithm()`. The server-side publi
 
 ## 7. Lazy Server-Handle Promotion
 
-The LF table returns a local-range handle to the application. Most Nt-API intercepts can service the call from the local unix fd directly (`NtReadFile`, `NtWriteFile`, `NtQueryInformationFile` for `FileBasicInformation` / `FilePositionInformation` / etc). But some APIs *require* a server-visible handle:
+The LF table returns a local-range handle to the application. Most Nt-API
+intercepts can service the call from the local unix fd directly
+(`NtReadFile`, `NtWriteFile`, `NtQueryInformationFile` for
+`FileBasicInformation` / `FilePositionInformation` / etc). Some APIs still
+*require* a server-visible file handle:
 
-- `NtCreateSection` -- section object lives on the server
 - `NtDuplicateObject` -- dup goes through `SERVER_START_REQ(dup_handle)`
 - `NtQueryInformationFile` for classes the server handles (e.g. `FileNameInformation`)
 - `NtQueryObject` -- `ObjectName` / `ObjectBasic` / `ObjectType` all server-side
@@ -370,7 +400,7 @@ This is Phase 1A.4.a lazy-promotion. The alternative -- eagerly promoting at min
 
   <rect x="345" y="208" width="250" height="140" class="lp-slow"/>
   <text x="470" y="234" text-anchor="middle" class="lp-red">promote now</text>
-  <text x="470" y="260" text-anchor="middle" class="lp-label">NtCreateSection / NtDuplicateObject</text>
+  <text x="470" y="260" text-anchor="middle" class="lp-label">server-only follow-on / same-process duplicate</text>
   <text x="470" y="278" text-anchor="middle" class="lp-small">NtQueryObject / server-side info classes</text>
   <text x="470" y="302" text-anchor="middle" class="lp-label">CreateProcess inheritance</text>
   <text x="470" y="320" text-anchor="middle" class="lp-small">crosses into server object model</text>
@@ -437,8 +467,8 @@ remaining sync-parity gaps at the boundary.
   <line x1="460" y1="82" x2="460" y2="102" stroke="#c8d0e8" stroke-width="1.5"/>
 
   <rect x="320" y="104" width="280" height="52" class="box-gate"/>
-  <text x="460" y="124" text-anchor="middle" class="label-yellow">eligibility gate (file.c:4706)</text>
-  <text x="460" y="142" text-anchor="middle" class="label-muted">disposition FILE_OPEN|FILE_OPEN_IF, sync, read-only</text>
+  <text x="460" y="124" text-anchor="middle" class="label-yellow">eligibility gate (file.c)</text>
+  <text x="460" y="142" text-anchor="middle" class="label-muted">regular file or explicit directory, sync, bounded access/disposition</text>
 
   <line x1="320" y1="130" x2="140" y2="200" stroke="#f7768e" stroke-width="1.5"/>
   <text x="180" y="170" class="label-red" text-anchor="start">fail gate</text>
@@ -449,7 +479,7 @@ remaining sync-parity gaps at the boundary.
 
   <rect x="320" y="182" width="280" height="76" class="box-fast"/>
   <text x="460" y="202" text-anchor="middle" class="label-green">nspa_local_file_try_bypass</text>
-  <text x="460" y="220" text-anchor="middle" class="label-sm">stat() + S_ISREG check</text>
+  <text x="460" y="220" text-anchor="middle" class="label-sm">stat()/lstat() + file-or-dir shape check</text>
   <text x="460" y="236" text-anchor="middle" class="label-sm">check_and_publish via inode shmem</text>
   <text x="460" y="252" text-anchor="middle" class="label-sm">open() + table_add</text>
 
@@ -475,8 +505,8 @@ remaining sync-parity gaps at the boundary.
   <text x="200" y="450" text-anchor="middle" class="label-sm">server_get_unix_fd fast path -&gt; pread(fd)</text>
 
   <rect x="580" y="412" width="280" height="52" class="box-fast"/>
-  <text x="720" y="432" text-anchor="middle" class="label-green">NtQuery*InformationFile etc</text>
-  <text x="720" y="450" text-anchor="middle" class="label-sm">nspa_promote_if_local -&gt; server RPC</text>
+  <text x="720" y="432" text-anchor="middle" class="label-green">query / set / section follow-ons</text>
+  <text x="720" y="450" text-anchor="middle" class="label-sm">many stay local; server promote only when state truly leaves the local envelope</text>
 
   <line x1="720" y1="464" x2="720" y2="486" stroke="#f7768e" stroke-width="1"/>
   <rect x="580" y="488" width="280" height="42" class="box-slow"/>
@@ -494,39 +524,34 @@ remaining sync-parity gaps at the boundary.
 
 ## 9. Eligibility Criteria
 
-The bypass accepts only a tightly-scoped subset. The eligibility gate in `file.c`'s `NtCreateFile`:
+The file bypass now covers a bounded but materially broader subset than the
+earlier public draft.
 
-```c
-if (!loader_open &&
-    !attr->RootDirectory && !attr->SecurityDescriptor &&
-    (disposition == FILE_OPEN || disposition == FILE_OPEN_IF) &&
-    !(options & (FILE_OPEN_BY_FILE_ID | FILE_DIRECTORY_FILE | FILE_DELETE_ON_CLOSE)) &&
-    (options & (FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT)) &&
-    !(access & ~(FILE_READ_DATA | FILE_READ_ATTRIBUTES | FILE_READ_EA |
-                 READ_CONTROL | SYNCHRONIZE | GENERIC_READ)))
-{
-    NTSTATUS bypass = nspa_local_file_try_bypass( ... );
-    if (bypass == STATUS_SUCCESS) return STATUS_SUCCESS;
-    if (bypass == STATUS_SHARING_VIOLATION) { status = bypass; goto done; }
-    /* STATUS_NOT_SUPPORTED -> fall through */
-}
-```
+Accepted shapes today:
 
-Disqualifiers and their reasons:
+| Shape | Current behavior |
+|---|---|
+| regular-file opens | local fast path for read-class and common write-class access |
+| explicit directory opens | local dir-mint path when the request is honestly a directory |
+| create / overwrite dispositions | bounded local coverage for `FILE_OPEN`, `FILE_OPEN_IF`, `FILE_CREATE`, `FILE_OVERWRITE`, `FILE_OVERWRITE_IF`, and `FILE_SUPERSEDE` |
+| common follow-on file ops | selected `NtQueryInformationFile`, `NtSetInformationFile`, `NtFlushBuffersFileEx`, and `FileEndOfFileInformation` cases stay local |
+| file-backed sections | eligible unnamed same-process sections can stay local instead of forcing an immediate promote |
+
+The important disqualifiers are still the same kind of boundary checks:
 
 | Condition | Why rejected |
 |---|---|
-| `loader_open` (`.dll` / `.drv` / `.sys` / `.exe`) | Wine's loader owns its own open path for these; we don't want to race with it. |
-| `attr->RootDirectory != 0` | Relative opens would need `openat()` against a server-handle root -- not worth the complexity. |
-| `attr->SecurityDescriptor != 0` | Custom SD means the caller wants server-enforced access control. |
-| `disposition != FILE_OPEN` && `!= FILE_OPEN_IF` | Create / overwrite / supersede need server-side atomicity on existence checks. |
-| `options & FILE_OPEN_BY_FILE_ID` | Open-by-ID walks the server's inode -> name mapping. |
-| `options & FILE_DIRECTORY_FILE` | Directories use `NtQueryDirectoryFile` streaming -- different bypass target, not in scope. |
-| `options & FILE_DELETE_ON_CLOSE` | Atomic-delete semantics need server ordering. |
-| `options` lacks any `FILE_SYNCHRONOUS_IO_*` flag | OVERLAPPED opens route through `register_async_file_read` which takes the handle to the server -- local handle would fail STATUS_INVALID_HANDLE. |
-| Any access bit outside the read-only mask | Write access has sharing-arbitration corners we don't cover in MVP. |
+| loader-owned image opens | Wine's loader owns those semantics |
+| `attr->RootDirectory != 0` or custom security descriptor | these still want authoritative server-side path or security handling |
+| `FILE_OPEN_BY_FILE_ID` | relies on server-owned name / identity machinery |
+| `FILE_DELETE_ON_CLOSE` | delete ordering remains a server boundary |
+| unsupported async or server-only follow-on operation | falls back rather than faking semantics |
+| cross-process visibility requirements | local handles are process-private until explicitly promoted |
 
-`FILE_OPEN_FOR_BACKUP_INTENT`, `FILE_NO_INTERMEDIATE_BUFFERING`, `FILE_WRITE_THROUGH`, `FILE_OPEN_REPARSE_POINT`, `FILE_RANDOM_ACCESS`, `FILE_SEQUENTIAL_ONLY` are all *accepted* -- they either have no semantic we need to enforce client-side or map cleanly to `open()` flags.
+`FILE_OPEN_REPARSE_POINT`, `FILE_WRITE_THROUGH`, `FILE_RANDOM_ACCESS`,
+`FILE_SEQUENTIAL_ONLY`, `FILE_EXECUTE`, and `FILE_DELETE_CHILD` are no longer
+automatic disqualifiers when the surrounding open shape is otherwise within the
+local envelope.
 
 ---
 
@@ -542,24 +567,27 @@ Every handle-consuming NT API in ntdll/unix and server/ either:
 |---|---|---|
 | `NtCreateFile` | bypass dispatch | `dlls/ntdll/unix/file.c` |
 | `NtReadFile`, `NtWriteFile` | fast path via `server_get_unix_fd` | `dlls/ntdll/unix/file.c` |
-| `NtQueryInformationFile` | intercept + promote | `dlls/ntdll/unix/file.c` |
-| `NtSetInformationFile` | intercept + promote | `dlls/ntdll/unix/file.c` |
+| `NtQueryInformationFile` | local fast path for common info classes; promote only for server-owned cases | `dlls/ntdll/unix/file.c` |
+| `NtSetInformationFile` | local fast path for bounded classes like `FileBasicInformation` and unmapped `FileEndOfFileInformation`; promote otherwise | `dlls/ntdll/unix/file.c` |
 | `NtFsControlFile` | intercept + promote | `dlls/ntdll/unix/file.c` |
 | `NtDeviceIoControlFile` | intercept + promote | `dlls/ntdll/unix/file.c` |
-| `NtFlushBuffersFileEx` | intercept + promote | `dlls/ntdll/unix/file.c` |
+| `NtFlushBuffersFileEx` | local `fsync` / `fdatasync` path where possible; promote only for server-only cases | `dlls/ntdll/unix/file.c` |
 | `NtCancelIoFile`, `NtCancelSynchronousIoFile` | intercept + promote | `dlls/ntdll/unix/file.c` |
 | `NtLockFile` | intercept + promote | `dlls/ntdll/unix/file.c` |
 | `NtQueryVolumeInformationFile` | intercept + promote | `dlls/ntdll/unix/file.c` |
 | `NtQueryObject` | intercept + traced promote | `dlls/ntdll/unix/file.c` |
 | `NtSetInformationObject` | intercept + promote | `dlls/ntdll/unix/file.c` |
-| `NtCreateSection` | dedicated `nspa_create_mapping_from_unix_fd` RPC | `dlls/ntdll/unix/sync.c` |
-| `NtDuplicateObject` (same-process) | intercept + promote + DUPLICATE_CLOSE_SOURCE LF cleanup | `dlls/ntdll/unix/server.c` |
+| `NtCreateSection` | local section fast path for eligible file-backed mappings; server fallback otherwise | `dlls/ntdll/unix/sync.c` |
+| `NtMapViewOfSection` / `NtMapViewOfSectionEx` | local section fast path for local section handles | `dlls/ntdll/unix/virtual.c` |
+| `NtUnmapViewOfSectionEx` | local section fast path for local section views | `dlls/ntdll/unix/virtual.c` |
+| `NtQuerySection` | local basic-info path for local section handles | `dlls/ntdll/unix/virtual.c` |
+| `NtDuplicateObject` (same-process) | local-file promote for file handles; one-time promote for local section handles before same-process duplicate | `dlls/ntdll/unix/server.c` |
 | `NtCompareObjects` | intercept + promote (both args) | `dlls/ntdll/unix/server.c` |
 | `NtQuerySecurityObject` | intercept + promote | `dlls/ntdll/unix/security.c` |
 | `NtSetSecurityObject` | intercept + promote | `dlls/ntdll/unix/security.c` |
 | `NtMakePermanentObject` | intercept + promote | `dlls/ntdll/unix/sync.c` |
 | `NtMakeTemporaryObject` | intercept + promote | `dlls/ntdll/unix/sync.c` |
-| `NtClose` | LF close path (close fd + remove entry + server-close promoted) | `dlls/ntdll/unix/server.c` |
+| `NtClose` | LF close path plus local section close path | `dlls/ntdll/unix/server.c` |
 | `CreateProcess` inheritance (legacy `bInheritHandles=TRUE`) | `nspa_local_file_promote_inheritable` before `new_process` RPC | `dlls/ntdll/unix/process.c` |
 | `CreateProcess` inheritance (STARTUPINFOEX `PS_ATTRIBUTE_HANDLE_LIST`) | **deferred** -- synchronous promote-per-handle introduced a one-frame menu-paint delay; proper fix is batched promote RPC | `dlls/ntdll/unix/process.c` |
 
@@ -588,9 +616,10 @@ server/nspa/
 
 Upstream diffs against vanilla Wine are narrow:
 
-- `dlls/ntdll/unix/file.c`: eligibility gate (8 lines) + 10 one-line intercept calls
-- `dlls/ntdll/unix/server.c`: one call to `nspa_local_file_try_get_unix_fd()`, one promote in `NtDuplicateObject`, one LF-close entry in `NtClose`
-- `dlls/ntdll/unix/sync.c`: LF-handle branch in `NtCreateSection`, two promote lines in `NtMake{Permanent,Temporary}Object`
+- `dlls/ntdll/unix/file.c`: eligibility gate plus one-line intercept calls for the local-file surface
+- `dlls/ntdll/unix/server.c`: `nspa_local_file_try_get_unix_fd()`, promote logic in `NtDuplicateObject`, LF close path, and local section close support
+- `dlls/ntdll/unix/sync.c`: local-file and local-section `NtCreateSection` handling, plus two promote lines in `NtMake{Permanent,Temporary}Object`
+- `dlls/ntdll/unix/virtual.c`: local section map / unmap / query hooks
 - `dlls/ntdll/unix/security.c`: two promote lines
 - `dlls/ntdll/unix/process.c`: `alloc_handle_list` was extended (prong A, currently deferred -- see §14) + `nspa_local_file_promote_inheritable()` call before `new_process` RPC
 - `server/file.c`: one call to `nspa_lf_trace_promote()` inside the existing `nspa_create_file_from_unix_fd` handler
@@ -633,6 +662,20 @@ NSPA_TRACE_ENABLED_FN(LF_TRACE_SRV)
 ---
 
 ## 13. Results & Profiler Numbers
+
+### 13.1 Later shipped follow-ons
+
+The original public numbers on this page captured the first local-file bring-up.
+The shipped feature set is broader now, and the later follow-ons moved more
+traffic off wineserver:
+
+| Follow-on | Observed effect |
+|---|---|
+| widened local open envelope | `create_file` count `7,845` -> `5,658` (`-28%`), handler time `137 ms` -> `50 ms` (`-64%`) on the compared run |
+| local sections default-on | `nspa_create_mapping_from_unix_fd` count `2,664` -> `~800` (`-70%`), with total wineserver handler time `1,991 ms` -> `1,077 ms` on the cleanest run |
+| local `FileEndOfFileInformation` path | direct handler-time saving `~8 ms / snapshot`, plus the caller no longer blocks the wineserver loop for eligible `ftruncate()` cases |
+
+### 13.2 Original full-stack playback snapshot
 
 Ableton Live 12 Lite, 95-second playback window, `NSPA_PROFILE=1` with all prod gates. Baseline is the pre-LF fullprod run (2026-04-21); "post-LF" is the 2026-04-23 run after the complete stack landed.
 
@@ -680,16 +723,21 @@ Proper fix options (ranked):
 
 The two fixes compose: **14.2's batched RPC is a prerequisite of 14.1.** Once `nspa_promote_local_handles` exists as a handler, 14.1 can reuse it on process A, driven by a new "remote promote" request where process B asks the server to wake A and invoke it. 14.1's complexity is then the wake mechanism, not the promote itself. Ship 14.2 first; 14.1 composes on top.
 
-### 14.3 Eligibility widening
+### 14.3 Remaining boundaries
 
-The current envelope captures the hot path. Anything outside it falls back cleanly. Worth widening only when a real workload demands:
+The current envelope already covers the high-volume surfaces that justified the
+feature. Anything outside it still falls back cleanly. The remaining boundary
+cases are the ones that still want an authoritative server path today:
 
-- `FILE_OVERWRITE_IF` / `FILE_SUPERSEDE` (cache writes, plugin DB updates)
-- Any write access (file saves, recorded audio, log append)
-- `FILE_DIRECTORY_FILE` (directory handles -- different primitive, `NtQueryDirectoryFile` streaming)
+- `FILE_DELETE_ON_CLOSE`
+- open-by-file-id
+- full directory enumeration (`NtQueryDirectoryFile`)
 - `FILE_DELETE_ON_CLOSE` (temp-file semantics)
+- cross-process duplication and inheritance corner cases that still require a
+  real server handle at the boundary
 
-None of these has a profile-visible cost today; keep them on the server path.
+None of these has been worth forcing client-side yet; keep them on the server
+path until a workload demonstrates otherwise.
 
 ---
 

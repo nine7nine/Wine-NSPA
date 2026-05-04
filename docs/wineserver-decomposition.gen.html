@@ -173,14 +173,17 @@
 
 <p>The audience this doc is written for: a developer who has read the bypass overview, has skimmed the gamma-channel-dispatcher and ntsync-driver docs, and wants to understand the architectural arc that the bypass work <em>enables</em>. If you&rsquo;re implementing a single bypass and want a checklist, read the bypass detail doc for that bypass; if you&rsquo;re implementing one roadmap slice from this page, read the in-tree handoff doc (<code>wine/nspa/docs/wineserver-decomposition-plan.md</code>) which has line-level kernel landmarks. This doc is the why, not the how.</p>
 
-<p>The main 2026-05-02 correction is scope: some of the work this page once
+<p>The main 2026-05-03 correction is scope: some of the work this page once
 treated as &ldquo;future wineserver-internal decomposition pressure&rdquo; is now
 already shipping client-side. Timer dispatch for eligible local timers and
 <code>WM_TIMER</code>s lives on the per-process scheduler host, anonymous events no
 longer require a server-created helper object by default, and PE-side socket
-deferred I/O is already on client <code>io_uring</code> rings. That does <strong>not</strong> make
-the decomposition plan obsolete. It means the residual wineserver problem is
-smaller and more concentrated than it was when this page was first drafted.</p>
+deferred I/O is already on client <code>io_uring</code> rings. On top of that, local-file
+follow-ons and client-side local sections now retire more <code>create_file</code>,
+mapping, and metadata traffic before it ever becomes wineserver work. That
+does <strong>not</strong> make the decomposition plan obsolete. It means the residual
+wineserver problem is smaller and more concentrated than it was when this page
+was first drafted.</p>
 
 <hr />
 
@@ -440,7 +443,7 @@ residual server-owned timer queue, not the whole timer surface.</p>
 
 <p>Today, wineserver&rsquo;s main loop computes <code>get_next_timeout()</code> from the head of the residual NT timer queue, passes that timeout to <code>poll()</code>, and processes timer expirations when poll returns due to timeout (rather than fd readiness). That couples timer-driven wakeups to fd-driven wakeups in the same syscall.</p>
 
-<p>The scope correction after 2026-05-02 is important: this is no longer the
+<p>The scope correction after 2026-05-03 is important: this is no longer the
 plan for <strong>all</strong> timer work. Eligible anonymous NT timers and eligible
 <code>WM_TIMER</code> dispatch already moved onto the client <code>wine-sched-rt</code> host. The
 remaining server-side split is about the timers that still genuinely belong
@@ -498,12 +501,13 @@ to wineserver&rsquo;s authoritative domain.</p>
 
 <p>Today, the main loop is RT and spends most of its time blocked in <code>poll()</code> or <code>epoll_wait()</code>. The wait itself doesn&rsquo;t actually need RT priority &ndash; only the <em>response</em> to the wait does. RT priority matters for the work that happens after the wait returns, not for the act of sleeping in the kernel.</p>
 
-<p>The 2026-05-02 shipped socket follow-ons narrow this split&rsquo;s motivation.
-Deferred socket recv/send no longer depend on wineserver fd wakeups in the
-common PE path because they already submit <code>IORING_OP_RECVMSG</code> /
-<code>IORING_OP_SENDMSG</code> from the client side. So the residual fd-poll split is
-about the server-owned descriptor set that remains after those client-side
-surfaces have peeled away.</p>
+<p>The 2026-05-02 and 2026-05-03 shipped follow-ons narrow this split&rsquo;s
+motivation. Deferred socket recv/send no longer depend on wineserver fd wakeups
+in the common PE path because they already submit <code>IORING_OP_RECVMSG</code> /
+<code>IORING_OP_SENDMSG</code> from the client side. Local sections and widened local-file
+handling also remove more file and mapping traffic from the server-owned
+descriptor set. So the residual fd-poll split is about the server-owned
+descriptors that remain after those client-side surfaces have peeled away.</p>
 
 <p>The proposal: separate the FD polling from the FD-event handling.</p>
 
@@ -664,7 +668,7 @@ surfaces have peeled away.</p>
 <ul>
 <li>Slice 1 (<code>open_fd</code> lock-drop) was a surgical fix targeted at one specific lock-holder pattern (long syscalls under <code>global_lock</code>). It&rsquo;s not a full architectural decomposition step; it&rsquo;s a targeted release of the lock around a known-slow critical section. It is listed first because it was the first decomposition-direction work to ship, and because the pattern it establishes (NSPA-side lock-discipline patches inside server handlers) generalizes to other long lock-holders we may identify later.</li>
 <li>Slice 2 is thread-token pass-through, shipped 2026-04-26 and flipped default-on after the post-1006 ntsync stabilization. It&rsquo;s a kernel + userspace co-design and the prototype for the kernel-side primitives that the remaining splits will need.</li>
-<li>Slice 3 is still co-designed even though aggregate-wait itself already shipped. The remaining shape is one RT handler thread (running aggregate-wait over the gamma channel + the FD-event queue + the timer queue), one non-RT FD polling thread, and one timer thread. The syscall and the gamma consumer are now proven; the unresolved work is how the rest of wineserver composes around them. Since 2026-05-02, read this as the <strong>residual</strong> server-owned timer/fd set, not the whole timer/socket universe.</li>
+<li>Slice 3 is still co-designed even though aggregate-wait itself already shipped. The remaining shape is one RT handler thread (running aggregate-wait over the gamma channel + the FD-event queue + the timer queue), one non-RT FD polling thread, and one timer thread. The syscall and the gamma consumer are now proven; the unresolved work is how the rest of wineserver composes around them. Since 2026-05-03, read this as the <strong>residual</strong> server-owned timer/fd set, not the whole timer/socket/file-mapping universe.</li>
 <li>Slice 4 is the long horizon. Router/handler split pays as more bypasses ship; lock partitioning pays at the end. Don&rsquo;t start either until the bypass arc has materially shrunk the surface area.</li>
 </ul>
 
