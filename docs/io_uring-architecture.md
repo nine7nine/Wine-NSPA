@@ -141,7 +141,7 @@ thin call-site conditionals in existing files.
 
   <text x="390" y="20" class="ur-label-yellow" text-anchor="middle">Per-Thread io_uring Ring + Pool Allocator (TLS)</text>
 
-  <rect x="15" y="35" width="750" height="130" rx="6" fill="none" stroke="#3b4261" stroke-width="1" stroke-dasharray="5,3"/>
+  <rect x="15" y="35" width="750" height="130" rx="6" fill="none" stroke="#6b7398" stroke-width="1" stroke-dasharray="5,3"/>
   <text x="35" y="55" class="ur-label-yellow">Thread N (TLS)</text>
 
   <rect x="30" y="65" width="180" height="85" rx="6" class="ur-box-new"/>
@@ -384,13 +384,9 @@ machine, while the client owns readiness monitoring and the data move itself.
     .sr-v { fill: #bb9af7; font: bold 10px 'JetBrains Mono', monospace; }
     .sr-g { fill: #9ece6a; font: bold 10px 'JetBrains Mono', monospace; }
     .sr-y { fill: #e0af68; font: bold 10px 'JetBrains Mono', monospace; }
-    .sr-line { stroke: #c0caf5; stroke-width: 1.5; fill: none; }
+    .sr-line-v { stroke: #bb9af7; stroke-width: 1.5; fill: none; }
+    .sr-line-g { stroke: #9ece6a; stroke-width: 1.5; fill: none; }
   </style>
-  <defs>
-    <marker id="srArrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
-      <path d="M0,0 L8,3 L0,6" fill="#c0caf5"/>
-    </marker>
-  </defs>
 
   <rect x="0" y="0" width="940" height="420" class="sr-bg"/>
   <text x="470" y="28" text-anchor="middle" class="sr-h">Shipped socket path on the deferred async case</text>
@@ -410,12 +406,13 @@ machine, while the client owns readiness monitoring and the data move itself.
   <text x="780" y="142" text-anchor="middle" class="sr-s">socket readiness and data move</text>
   <text x="780" y="160" text-anchor="middle" class="sr-s">CQE fires on completion</text>
 
-  <path d="M270 134 L360 134" class="sr-line" marker-end="url(#srArrow)"/>
-  <path d="M580 134 L670 134" class="sr-line" marker-end="url(#srArrow)"/>
+  <line x1="270" y1="134" x2="360" y2="134" class="sr-line-v"/>
+  <line x1="580" y1="134" x2="670" y2="134" class="sr-line-g"/>
 
-  <rect x="210" y="236" width="520" height="62" class="sr-note"/>
+  <rect x="210" y="236" width="520" height="74" class="sr-note"/>
   <text x="470" y="262" text-anchor="middle" class="sr-y">Single completion path</text>
-  <text x="470" y="280" text-anchor="middle" class="sr-s">the CQE handler feeds Wine's normal async completion helpers and reports the final result once</text>
+  <text x="470" y="280" text-anchor="middle" class="sr-s">the CQE handler feeds Wine's normal async completion helpers</text>
+  <text x="470" y="294" text-anchor="middle" class="sr-s">and reports the final result once</text>
 </svg>
 </div>
 

@@ -14,7 +14,8 @@ This page is the system map for Wine-NSPA. Use it to understand the major layers
     - 3.5 [Message dispatch](#35-message-dispatch)
     - 3.6 [Hook chains](#36-hook-chains)
     - 3.7 [File I/O](#37-file-io)
-    - 3.8 [Audio](#38-audio)
+    - 3.8 [Memory and shared-state backing](#38-memory-and-shared-state-backing)
+    - 3.9 [Audio](#39-audio)
 4. [Bypass topology](#4-bypass-topology)
 5. [Wineserver residual design](#5-wineserver-residual-design)
 6. [RT priority mapping](#6-rt-priority-mapping)
@@ -332,7 +333,26 @@ on server-owned pseudo-fds or object naming.
 
 **Detail: see [io_uring-architecture](io_uring-architecture.gen.html), [nspa-local-file-architecture](nspa-local-file-architecture.gen.html).**
 
-### 3.8 Audio
+### 3.8 Memory and shared-state backing
+
+Wine-NSPA's memory surface is broader than "large pages exist." The shipped
+tree now has three memory stories that matter architecturally: large-page
+anonymous allocation and section-backed mappings, current-process
+`QueryWorkingSetEx()` reporting plus working-set quota bookkeeping, and the
+selective use of dedicated `memfd` backends for bypass state such as msg-ring
+and local-file inode arbitration.
+
+Those pieces are related because they all change how Wine exposes or backs
+memory, but they are not the same mechanism. Large pages are about page size
+and locking semantics. Working-set support is about what the Win32 memory
+surface reports and stores. `memfd` is about where bypass-owned shared state
+lives. Keeping those roles separate makes the design easier to reason about
+and avoids the common mistake of treating every shared region as "just more
+session shmem."
+
+**Detail: see [memory-and-large-pages](memory-and-large-pages.gen.html), [msg-ring-architecture](msg-ring-architecture.gen.html), [nspa-local-file-architecture](nspa-local-file-architecture.gen.html).**
+
+### 3.9 Audio
 
 Audio is delivered through `winejack.drv`, which routes both JACK-backed MIDI and WASAPI audio. `nspaASIO` layers ASIO on top of the same transport and provides the low-latency path: zero-latency `bufferSwitch` dispatch **inside** the JACK RT callback so the ASIO host and JACK callback execute on the same period boundary.
 
@@ -435,6 +455,7 @@ Master overview (this doc) plus dedicated subsystem pages.
 | `nt-local-stubs.gen.html` | NT-local stubs architectural pattern |
 | `nspa-local-file-architecture.gen.html` | NT-local file (read-only regular-file `NtCreateFile` bypass) |
 | `msg-ring-architecture.gen.html` | Same-process message rings, redraw push ring, paint cache, and hardening history |
+| `memory-and-large-pages.gen.html` | large pages, working-set reporting, quota bookkeeping, and shared-memory backing choices |
 | `hook-cache.gen.html` | Tier 1+2 Win32 hook-chain cache |
 | `ntsync-driver.gen.html` | NTSync kernel overlay plus Wine in-process sync path, including aggregate-wait and `TRY_RECV2` |
 | `cs-pi.gen.html` | Critical Section Priority Inheritance (Path A; v2.3) |

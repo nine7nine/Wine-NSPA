@@ -61,6 +61,21 @@ check_default_claims() {
     done
 }
 
+check_svg_source_rules() {
+    local file="$1"
+    local content
+
+    content=$(cat "$file")
+
+    if grep -Eq 'marker id=|marker-end=|marker-start=|marker-mid=' <<<"$content"; then
+        error "$file: source SVG still uses arrow markers; author plain connectors instead"
+    fi
+
+    if grep -Eq '#3b4261[^[:cntrl:]]*stroke-dasharray|stroke-dasharray[^[:cntrl:]]*#3b4261' <<<"$content"; then
+        warn "$file: source SVG still uses the older dark dashed guide color; prefer #6b7398"
+    fi
+}
+
 files=("$@")
 if [[ ${#files[@]} -eq 0 ]]; then
     files=(*.md)
@@ -70,6 +85,7 @@ for file in "${files[@]}"; do
     [[ -f "$file" ]] || continue
     check_top_structure "$file"
     check_default_claims "$file"
+    check_svg_source_rules "$file"
 done
 
 if (( err_count > 0 )); then

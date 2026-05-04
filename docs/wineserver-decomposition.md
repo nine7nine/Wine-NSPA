@@ -127,14 +127,10 @@ The decomposition arc treats lock-discipline patches as the first landed slice -
     .wd-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .wd-red { fill: #f7768e; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .wd-violet { fill: #bb9af7; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
-    .wd-axis { stroke: #3b4261; stroke-width: 1.2; stroke-dasharray: 6,4; }
-    .wd-line { stroke: #c0caf5; stroke-width: 1.4; }
+    .wd-axis { stroke: #6b7398; stroke-width: 1.2; stroke-dasharray: 6,4; }
+    .wd-line-g { stroke: #9ece6a; stroke-width: 1.4; }
+    .wd-line-v { stroke: #bb9af7; stroke-width: 1.4; }
   </style>
-  <defs>
-    <marker id="wdArrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
-      <path d="M0,0 L8,3 L0,6" fill="#c0caf5"/>
-    </marker>
-  </defs>
 
   <rect x="0" y="0" width="940" height="540" class="wd-bg"/>
   <text x="470" y="28" text-anchor="middle" class="wd-title">Wineserver decomposition arc: from one lock domain to a narrowed metadata core</text>
@@ -189,8 +185,8 @@ The decomposition arc treats lock-discipline patches as the first landed slice -
   <text x="765" y="388" text-anchor="middle" class="wd-small">named sync registration / NT path rules</text>
   <text x="765" y="406" text-anchor="middle" class="wd-small">lock partitioning only after surface shrinks</text>
 
-  <line x1="310" y1="278" x2="335" y2="278" class="wd-line" marker-end="url(#wdArrow)"/>
-  <line x1="605" y1="278" x2="630" y2="278" class="wd-line" marker-end="url(#wdArrow)"/>
+  <line x1="310" y1="278" x2="335" y2="278" class="wd-line-g"/>
+  <line x1="605" y1="278" x2="630" y2="278" class="wd-line-v"/>
   <line x1="320" y1="486" x2="620" y2="486" class="wd-axis"/>
   <text x="470" y="510" text-anchor="middle" class="wd-small">ordering: move state out first, then split waits/threads, then partition residual locks</text>
 </svg>
@@ -381,13 +377,9 @@ These are the surfaces for which wineserver remains the source of truth and whic
     .ms-title { fill: #7aa2f7; font-size: 14px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .ms-red { fill: #f7768e; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .ms-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
-    .ms-line { stroke: #c0caf5; stroke-width: 1.4; }
+    .ms-line-g { stroke: #9ece6a; stroke-width: 1.4; }
+    .ms-line-b { stroke: #7aa2f7; stroke-width: 1.4; }
   </style>
-  <defs>
-    <marker id="msArrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
-      <path d="M0,0 L8,3 L0,6" fill="#c0caf5"/>
-    </marker>
-  </defs>
 
   <rect x="0" y="0" width="940" height="420" class="ms-bg"/>
   <text x="470" y="28" text-anchor="middle" class="ms-title">What remains in wineserver after the bypass arc</text>
@@ -417,10 +409,10 @@ These are the surfaces for which wineserver remains the source of truth and whic
   <text x="780" y="212" text-anchor="middle" class="ms-label">future split points</text>
   <text x="780" y="232" text-anchor="middle" class="ms-small">aggregate-wait, handler tiers, lock partitions</text>
 
-  <line x1="260" y1="122" x2="330" y2="150" class="ms-line" marker-end="url(#msArrow)"/>
-  <line x1="260" y1="218" x2="330" y2="222" class="ms-line" marker-end="url(#msArrow)"/>
-  <line x1="680" y1="122" x2="610" y2="150" class="ms-line" marker-end="url(#msArrow)"/>
-  <line x1="680" y1="218" x2="610" y2="222" class="ms-line" marker-end="url(#msArrow)"/>
+  <line x1="260" y1="122" x2="330" y2="150" class="ms-line-g"/>
+  <line x1="260" y1="218" x2="330" y2="222" class="ms-line-g"/>
+  <line x1="680" y1="122" x2="610" y2="150" class="ms-line-b"/>
+  <line x1="680" y1="218" x2="610" y2="222" class="ms-line-b"/>
 
   <text x="470" y="332" text-anchor="middle" class="ms-small">design goal: the server stops being the default execution path and becomes</text>
   <text x="470" y="348" text-anchor="middle" class="ms-small">the authoritative broker for the small set of semantics that must stay centralized</text>
@@ -505,7 +497,7 @@ A vertical decomposition ladder. The bottom two rungs are shipped; the upper two
 <svg width="100%" viewBox="0 0 940 720" xmlns="http://www.w3.org/2000/svg">
   <style>
     .bg          { fill: #1a1b26; }
-    .axis        { stroke: #3b4261; stroke-width: 1; stroke-dasharray: 4,3; }
+    .axis        { stroke: #6b7398; stroke-width: 1; stroke-dasharray: 4,3; }
     .phase-done  { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.5; }
     .phase-curr  { fill: #2a2438; stroke: #e0af68; stroke-width: 2; }
     .phase-far   { fill: #1f2535; stroke: #565f89; stroke-width: 1; stroke-dasharray: 4,3; }

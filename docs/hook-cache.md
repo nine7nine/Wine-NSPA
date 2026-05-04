@@ -136,7 +136,7 @@ Tier 2 lives in `nspa_queue_bypass_shm_t`, NSPA's per-queue auxiliary shmem regi
   <text x="80" y="325" fill="#e0af68" font-family="monospace" font-size="13" font-weight="bold">[3] Legacy RPC fallback (vanilla Wine path)</text>
   <text x="80" y="345" fill="#c0caf5" font-family="monospace" font-size="11">    SERVER_START_REQ( start_hook_chain )</text>
   <text x="80" y="362" fill="#c0caf5" font-family="monospace" font-size="11">    while ( has_next ) SERVER_START_REQ( get_hook_info )   // one RPC per chain entry</text>
-  <text x="80" y="380" fill="#c0caf5" font-family="monospace" font-size="11">    SERVER_START_REQ( finish_hook_chain )  // skipped when tier1_active and queue-local-only</text>
+  <text x="80" y="380" fill="#c0caf5" font-family="monospace" font-size="11">    SERVER_START_REQ( finish_hook_chain )  // skipped for queue-local Tier 1 hits</text>
   <text x="80" y="400" fill="#bb9af7" font-family="monospace" font-size="11">    triggered by CAP overflow, global hooks, WINEVENT-out-of-context, or pool full.</text>
 
   <!-- Step 4: server publish side -->

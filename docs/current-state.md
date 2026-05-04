@@ -69,6 +69,7 @@ paths are disabled.
 | Client scheduler | spawn-main + `ntdll_sched`, default-class and RT-class consumers live |
 | Async file path | async `CreateFile`, default ON |
 | Async socket path | `io_uring` RECVMSG / SENDMSG, default ON |
+| Memory surface | large pages, current-process `QueryWorkingSetEx`, and working-set quota bookkeeping shipped |
 | Local sync path | anonymous events client-range by default; timers piggyback on that base |
 | X11 flush policy | `NSPA_FLUSH_THROTTLE_MS=8`, default ON |
 
@@ -204,6 +205,7 @@ own correctness proof and gate.
 | **Async local-file close queue** | Shipped | ON with sched enabled | eligible fully-shareable local-file closes defer unix `close()` + server `close_handle` onto `wine-sched`, removing close-path latency from the caller thread. |
 | **msg-ring v1 (POST/SEND/REPLY)** | Shipped | ON | Bounded mpmc shmem ring for `PostMessage` / `SendMessage` / reply between Wine threads in the same process. |
 | **msg-ring paint cache** | Shipped | ON | Cross-process redraw cache for `WM_PAINT`; `NSPA_ENABLE_PAINT_CACHE=0` is now the diagnostic opt-out, while the default shipped path stays on. |
+| **Memory and large pages** | Shipped | ON where supported | `GetLargePageMinimum`, `VirtualAlloc(MEM_LARGE_PAGES)`, `CreateFileMapping(SEC_LARGE_PAGES)`, current-process `QueryWorkingSetEx`, and working-set quota bookkeeping are live with no NSPA gate. |
 | **Direct `get_message` bypass** | **WIP, paused** | n/a | Remaining message-pump bypass piece; once it lands, window messages are fully out of wineserver. |
 | **`io_uring` file I/O bypass** | Shipped | ON when `NSPA_RT_PRIO` set | sync poll replacement plus async `NtReadFile` / `NtWriteFile` bypass on the PE side. |
 | **Aggregate-wait dispatcher** (`NSPA_AGG_WAIT`) | Shipped | ON | Per-process server-side `io_uring` infrastructure plus aggregate-wait dispatcher loop. Same RT thread receives requests, drains CQEs, and signals replies. |
@@ -235,16 +237,11 @@ own correctness proof and gate.
     .cs-tag-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .cs-tag-yellow { fill: #e0af68; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .cs-tag-violet { fill: #bb9af7; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
-    .cs-line { stroke: #c0caf5; stroke-width: 1.3; }
+    .cs-line { stroke: #7aa2f7; stroke-width: 1.3; }
   </style>
-  <defs>
-    <marker id="csArrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
-      <path d="M0,0 L8,3 L0,6" fill="#c0caf5"/>
-    </marker>
-  </defs>
 
   <rect x="0" y="0" width="940" height="500" class="cs-bg"/>
-  <text x="470" y="28" text-anchor="middle" class="cs-title">2026-05-02 deployment board: what is shipped, what is gated, and what is next</text>
+  <text x="470" y="28" text-anchor="middle" class="cs-title">2026-05-02 deployment board: shipped state, diagnostics, and remaining work</text>
 
   <rect x="50" y="70" width="250" height="150" class="cs-green"/>
   <text x="175" y="96" text-anchor="middle" class="cs-tag-green">Kernel / sync substrate</text>
@@ -268,11 +265,11 @@ own correctness proof and gate.
   <text x="765" y="182" text-anchor="middle" class="cs-small">bufferSwitch in JACK RT callback</text>
 
   <rect x="50" y="270" width="250" height="140" class="cs-gate"/>
-  <text x="175" y="296" text-anchor="middle" class="cs-tag-yellow">Gated / default-OFF</text>
-  <text x="175" y="322" text-anchor="middle" class="cs-label">paint-cache fastpath</text>
-  <text x="175" y="340" text-anchor="middle" class="cs-small">one clean run done; more validation required</text>
-  <text x="175" y="364" text-anchor="middle" class="cs-label">epoll A/B switch</text>
-  <text x="175" y="382" text-anchor="middle" class="cs-small">runtime measurement, not committed direction</text>
+  <text x="175" y="296" text-anchor="middle" class="cs-tag-yellow">Diagnostics / A-B</text>
+  <text x="175" y="322" text-anchor="middle" class="cs-label">force older paths for comparison</text>
+  <text x="175" y="340" text-anchor="middle" class="cs-small">env overrides keep local-file, paint-cache, gamma, and uring A/B-able</text>
+  <text x="175" y="364" text-anchor="middle" class="cs-label">runtime measurement toggles</text>
+  <text x="175" y="382" text-anchor="middle" class="cs-small">kept for validation and regression isolation, not as the shipped default</text>
 
   <rect x="345" y="270" width="250" height="140" class="cs-wip"/>
   <text x="470" y="296" text-anchor="middle" class="cs-tag-violet">Paused / queued</text>
@@ -285,13 +282,13 @@ own correctness proof and gate.
   <text x="765" y="296" text-anchor="middle" class="cs-tag-violet">Longer horizon</text>
   <text x="765" y="322" text-anchor="middle" class="cs-label">wineserver decomposition remainder</text>
   <text x="765" y="340" text-anchor="middle" class="cs-small">timer split + FD polling split around shipped aggregate-wait</text>
-  <text x="765" y="364" text-anchor="middle" class="cs-label">phase 4</text>
-  <text x="765" y="382" text-anchor="middle" class="cs-small">router/handler split + lock partitioning</text>
+  <text x="765" y="364" text-anchor="middle" class="cs-label">residual server split</text>
+  <text x="765" y="382" text-anchor="middle" class="cs-small">router / handler split plus lock partitioning</text>
 
-  <line x1="175" y1="220" x2="175" y2="270" class="cs-line" marker-end="url(#csArrow)"/>
-  <line x1="470" y1="220" x2="470" y2="270" class="cs-line" marker-end="url(#csArrow)"/>
-  <line x1="765" y1="220" x2="765" y2="270" class="cs-line" marker-end="url(#csArrow)"/>
-  <text x="470" y="456" text-anchor="middle" class="cs-small">top row = shipped state today; bottom row = remaining gates and roadmap pressure</text>
+  <line x1="175" y1="220" x2="175" y2="270" class="cs-line"/>
+  <line x1="470" y1="220" x2="470" y2="270" class="cs-line"/>
+  <line x1="765" y1="220" x2="765" y2="270" class="cs-line"/>
+  <text x="470" y="456" text-anchor="middle" class="cs-small">top row = shipped state today; bottom row = diagnostics and remaining architecture work</text>
 </svg>
 </div>
 
@@ -478,6 +475,7 @@ State boards and architecture deep-dives produced by the project:
 | `ntsync-driver.gen.html` | NTSync kernel overlay plus Wine in-process sync path, including aggregate-wait and `TRY_RECV2` |
 | `io_uring-architecture.gen.html` | `io_uring` integration for file I/O, async `CreateFile`, and shipped socket RECVMSG / SENDMSG |
 | `msg-ring-architecture.gen.html` | msg-ring v1 + v2 design notes |
+| `memory-and-large-pages.gen.html` | large pages, working-set reporting, working-set quota bookkeeping, and shared-memory backing choices |
 | `nspa-local-file-architecture.gen.html` | NT-local file bypass (`NtCreateFile` short-circuit) |
 | `nt-local-stubs.gen.html` | NT-local stub pattern, now including local events and sched-hosted timer dispatch |
 | `shmem-ipc.gen.html` | NSPA shmem IPC primitives (γ + redraw + paint-cache) |

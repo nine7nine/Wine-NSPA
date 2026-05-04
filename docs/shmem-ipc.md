@@ -47,7 +47,7 @@ This eliminates the socket round-trip but introduces two new challenges:
     .shm-lbl-y { fill: #e0af68; font-size: 10px; font-family: 'JetBrains Mono', monospace; }
     .shm-lbl-m { fill: #c0caf5; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
     .shm-lbl-c { fill: #7dcfff; font-size: 10px; font-family: 'JetBrains Mono', monospace; }
-    .shm-div { stroke: #3b4261; stroke-width: 1; stroke-dasharray: 8,4; }
+    .shm-div { stroke: #6b7398; stroke-width: 1; stroke-dasharray: 8,4; }
   </style>
 
   <!-- Headers -->
@@ -198,7 +198,7 @@ Each client thread that connects to the wineserver gets a dedicated **dispatcher
   <text x="715" y="130" text-anchor="middle" class="d-lbl-m">Holder boosted if contended</text>
 
   <!-- Client processes -->
-  <rect x="20" y="280" width="820" height="85" rx="6" fill="none" stroke="#3b4261" stroke-width="1" stroke-dasharray="5,3"/>
+  <rect x="20" y="280" width="820" height="85" rx="6" fill="none" stroke="#6b7398" stroke-width="1" stroke-dasharray="5,3"/>
   <text x="430" y="300" text-anchor="middle" class="d-lbl-y">Client Processes</text>
 
   <rect x="40" y="310" width="160" height="40" rx="6" class="d-box"/>
@@ -303,7 +303,7 @@ When an RT client thread (SCHED_FIFO) sends a request, it must boost the dispatc
 
   <!-- FUTEX_LOCK_PI deadlock scenario -->
   <rect x="20" y="225" width="740" height="45" rx="6" fill="#24283b" stroke="#f7768e" stroke-width="1.5"/>
-  <text x="390" y="244" text-anchor="middle" fill="#c0caf5" font-size="9">Deadlock: client A holds PI lock, client B boosts dispatcher, dispatcher blocks on A's PI lock</text>
+  <text x="390" y="244" text-anchor="middle" fill="#c0caf5" font-size="9">Deadlock: client A holds the PI lock while boosted dispatcher work blocks on it</text>
   <text x="390" y="260" text-anchor="middle" fill="#c0caf5" font-size="8">Manual boost avoids client↔dispatcher lock dependencies entirely</text>
 </svg>
 </div>

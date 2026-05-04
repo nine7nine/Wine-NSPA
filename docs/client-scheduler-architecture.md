@@ -53,13 +53,9 @@ threads per subsystem.
     .sc-g { fill: #9ece6a; font: bold 10px 'JetBrains Mono', monospace; }
     .sc-v { fill: #bb9af7; font: bold 10px 'JetBrains Mono', monospace; }
     .sc-y { fill: #e0af68; font: bold 10px 'JetBrains Mono', monospace; }
-    .sc-line { stroke: #c0caf5; stroke-width: 1.5; fill: none; }
+    .sc-line-g { stroke: #9ece6a; stroke-width: 1.5; fill: none; }
+    .sc-line-v { stroke: #bb9af7; stroke-width: 1.5; fill: none; }
   </style>
-  <defs>
-    <marker id="scArrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
-      <path d="M0,0 L8,3 L0,6" fill="#c0caf5"/>
-    </marker>
-  </defs>
 
   <rect x="0" y="0" width="960" height="420" class="sc-bg"/>
   <text x="480" y="28" text-anchor="middle" class="sc-h">Per-process thread model after spawn-main</text>
@@ -86,10 +82,10 @@ threads per subsystem.
   <text x="760" y="218" text-anchor="middle" class="sc-s">spawned on first RT-class registration</text>
   <text x="760" y="236" text-anchor="middle" class="sc-s">SCHED_FIFO at `NSPA_RT_PRIO - 1`</text>
 
-  <path d="M310 200 L370 200" class="sc-line" marker-end="url(#scArrow)"/>
+  <line x1="310" y1="200" x2="370" y2="200" class="sc-line-g"/>
   <text x="340" y="188" text-anchor="middle" class="sc-g">spawn-main split</text>
 
-  <path d="M590 200 L650 200" class="sc-line" marker-end="url(#scArrow)"/>
+  <line x1="590" y1="200" x2="650" y2="200" class="sc-line-v"/>
   <text x="620" y="188" text-anchor="middle" class="sc-v">RT-class only</text>
 
   <rect x="150" y="286" width="660" height="58" class="sc-note"/>
@@ -141,13 +137,9 @@ The scheduler implementation itself uses:
     .sm-g { fill: #9ece6a; font: bold 10px 'JetBrains Mono', monospace; }
     .sm-v { fill: #bb9af7; font: bold 10px 'JetBrains Mono', monospace; }
     .sm-y { fill: #e0af68; font: bold 10px 'JetBrains Mono', monospace; }
-    .sm-line { stroke: #c0caf5; stroke-width: 1.5; fill: none; }
+    .sm-line-g { stroke: #9ece6a; stroke-width: 1.5; fill: none; }
+    .sm-line-v { stroke: #bb9af7; stroke-width: 1.5; fill: none; }
   </style>
-  <defs>
-    <marker id="smArrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
-      <path d="M0,0 L8,3 L0,6" fill="#c0caf5"/>
-    </marker>
-  </defs>
 
   <rect x="0" y="0" width="960" height="420" class="sm-bg"/>
   <text x="480" y="28" text-anchor="middle" class="sm-h">`ntdll_sched` routing model</text>
@@ -183,10 +175,10 @@ The scheduler implementation itself uses:
   <text x="790" y="262" text-anchor="middle" class="sm-s">same dispatch core</text>
   <text x="790" y="280" text-anchor="middle" class="sm-s">RT-only consumers</text>
 
-  <path d="M280 140 L370 140" class="sm-line" marker-end="url(#smArrow)"/>
-  <path d="M280 258 L370 258" class="sm-line" marker-end="url(#smArrow)"/>
-  <path d="M590 140 L680 140" class="sm-line" marker-end="url(#smArrow)"/>
-  <path d="M590 258 L680 258" class="sm-line" marker-end="url(#smArrow)"/>
+  <line x1="280" y1="140" x2="370" y2="140" class="sm-line-g"/>
+  <line x1="280" y1="258" x2="370" y2="258" class="sm-line-v"/>
+  <line x1="590" y1="140" x2="680" y2="140" class="sm-line-g"/>
+  <line x1="590" y1="258" x2="680" y2="258" class="sm-line-v"/>
 
   <rect x="180" y="334" width="600" height="54" class="sm-note"/>
   <text x="480" y="362" text-anchor="middle" class="sm-y">Cancel and wake discipline</text>
@@ -300,13 +292,10 @@ This sampler remains default OFF.
     .cc-g { fill: #9ece6a; font: bold 10px 'JetBrains Mono', monospace; }
     .cc-v { fill: #bb9af7; font: bold 10px 'JetBrains Mono', monospace; }
     .cc-y { fill: #e0af68; font: bold 10px 'JetBrains Mono', monospace; }
-    .cc-line { stroke: #c0caf5; stroke-width: 1.5; fill: none; }
+    .cc-line-g { stroke: #9ece6a; stroke-width: 1.5; fill: none; }
+    .cc-line-v { stroke: #bb9af7; stroke-width: 1.5; fill: none; }
+    .cc-line-y { stroke: #e0af68; stroke-width: 1.5; fill: none; }
   </style>
-  <defs>
-    <marker id="ccArrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
-      <path d="M0,0 L8,3 L0,6" fill="#c0caf5"/>
-    </marker>
-  </defs>
 
   <rect x="0" y="0" width="960" height="430" class="cc-bg"/>
   <text x="480" y="28" text-anchor="middle" class="cc-h">Current shipped consumer map</text>
@@ -338,10 +327,10 @@ This sampler remains default OFF.
   <text x="815" y="220" text-anchor="middle" class="cc-s">legacy dedicated thread</text>
   <text x="815" y="236" text-anchor="middle" class="cc-s">or inline close if routing is unavailable</text>
 
-  <path d="M300 126 L410 150" class="cc-line" marker-end="url(#ccArrow)"/>
-  <path d="M300 236 L410 294" class="cc-line" marker-end="url(#ccArrow)"/>
-  <path d="M300 346 L410 182" class="cc-line" marker-end="url(#ccArrow)"/>
-  <path d="M630 294 L730 220" class="cc-line" marker-end="url(#ccArrow)"/>
+  <path d="M300 126 L410 150" class="cc-line-g"/>
+  <path d="M300 236 L410 294" class="cc-line-v"/>
+  <path d="M300 346 L410 182" class="cc-line-g"/>
+  <path d="M630 294 L730 220" class="cc-line-y"/>
 </svg>
 </div>
 

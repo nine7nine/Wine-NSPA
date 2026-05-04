@@ -66,7 +66,7 @@ The following diagram shows the complete acquire and release flow for both upstr
   <text x="720" y="66" text-anchor="middle" fill="#7dcfff" font-size="12" font-weight="bold">NSPA CS-PI (FUTEX_LOCK_PI)</text>
 
   <!-- Divider -->
-  <line x1="480" y1="45" x2="480" y2="900" stroke="#3b4261" stroke-width="1" stroke-dasharray="6,4"/>
+  <line x1="480" y1="45" x2="480" y2="900" stroke="#6b7398" stroke-width="1" stroke-dasharray="6,4"/>
 
   <!-- ============ UPSTREAM ACQUIRE ============ -->
   <!-- Entry -->
@@ -463,8 +463,8 @@ When the fast-path CAS fails (the futex word is non-zero, meaning another thread
 
   <!-- Result annotation -->
   <rect x="60" y="325" width="650" height="38" rx="6" fill="#152a1a" stroke="#9ece6a" stroke-width="1.5"/>
-  <text x="385" y="342" text-anchor="middle" fill="#9ece6a" font-size="10">Holder now runs at SCHED_FIFO 80 until release. RT waiter blocked on rt_mutex (not spinning).</text>
-  <text x="385" y="356" text-anchor="middle" fill="#c0caf5" font-size="9">On release: kernel transfers futex word ownership to highest-priority waiter, drops boost.</text>
+  <text x="385" y="342" text-anchor="middle" fill="#9ece6a" font-size="10">Holder runs at SCHED_FIFO 80 until release.</text>
+  <text x="385" y="356" text-anchor="middle" fill="#c0caf5" font-size="9">RT waiter sleeps on rt_mutex; release hands ownership to the highest-priority waiter.</text>
 
   <!-- syscall crossing -->
   <line x1="220" y1="195" x2="220" y2="230" stroke="#ff9e64" stroke-width="1.5"/>

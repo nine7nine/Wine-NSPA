@@ -1,0 +1,524 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Wine-NSPA -- Memory, Large Pages, and Working-Set Support</title>
+<style>
+  :root {
+    --bg: #1a1b26; --fg: #c0caf5; --accent: #7aa2f7;
+    --green: #9ece6a; --red: #f7768e; --yellow: #e0af68;
+    --surface: #24283b; --border: #3b4261; --muted: #8c92b3;
+    --purple: #bb9af7; --orange: #ff9e64; --cyan: #7dcfff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+    background: var(--bg); color: var(--fg);
+    max-width: 1100px; margin: 0 auto; padding: 2rem 1.5rem;
+    line-height: 1.7;
+  }
+  .page-nav {
+    display: flex;
+    justify-content: flex-end;
+    margin-bottom: 0.5rem;
+  }
+  .page-nav a {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.35rem 0.7rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: rgba(36, 40, 59, 0.9);
+    color: var(--accent);
+    font-size: 0.78rem;
+    line-height: 1;
+  }
+  .page-nav a:hover {
+    background: var(--surface);
+    color: var(--cyan);
+    text-decoration: none;
+  }
+  h1 { color: var(--accent); font-size: 1.5rem; margin: 1.5rem 0 0.5rem; }
+  h2 { color: var(--accent); font-size: 1.2rem; margin: 2rem 0 0.75rem;
+       border-bottom: 1px solid var(--border); padding-bottom: 0.3rem; }
+  h3 { color: var(--yellow); font-size: 1rem; margin: 1.25rem 0 0.5rem; }
+  h4 { color: var(--cyan); font-size: 0.95rem; margin: 1rem 0 0.4rem; }
+  p, li { font-size: 0.85rem; margin-bottom: 0.5rem; }
+  ul, ol { padding-left: 1.5rem; margin-bottom: 0.75rem; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  table {
+    width: 100%; border-collapse: collapse;
+    margin: 0.75rem 0 1rem; font-size: 0.8rem;
+  }
+  th, td {
+    padding: 0.4rem 0.75rem; text-align: left;
+    border: 1px solid var(--border);
+  }
+  th { background: var(--surface); color: var(--accent); font-weight: 600; }
+  td { background: var(--bg); }
+  code {
+    background: var(--surface); padding: 0.15rem 0.4rem;
+    border-radius: 3px; font-size: 0.82rem; color: var(--cyan);
+  }
+  pre {
+    background: var(--surface); padding: 1rem 1.1rem; border-radius: 8px;
+    overflow-x: auto; margin: 0.75rem 0 1rem;
+    border: 1px solid var(--border);
+  }
+  pre code {
+    display: block; background: transparent; padding: 0;
+    font-size: 0.8rem; color: inherit;
+  }
+  pre code.hljs,
+  code.hljs {
+    background: transparent;
+    padding: 0;
+  }
+  blockquote {
+    background: var(--surface); border-left: 3px solid var(--accent);
+    padding: 0.75rem 1rem; margin: 1rem 0; border-radius: 0 4px 4px 0;
+    font-size: 0.82rem;
+  }
+  blockquote strong { color: var(--yellow); }
+  hr { border: none; border-top: 1px solid var(--border); margin: 2rem 0; }
+  strong { color: var(--fg); }
+  em { color: var(--muted); font-style: italic; }
+  .diagram-container {
+    display: flex; justify-content: center;
+    margin: 1.25rem auto 1.5rem; padding: 0.75rem;
+    background: rgba(36, 40, 59, 0.55);
+    border: 1px solid var(--border); border-radius: 10px;
+    overflow-x: auto;
+  }
+  .diagram-container svg {
+    display: block;
+    width: 100% !important;
+    max-width: 100%;
+    height: auto !important;
+    margin: 0 auto;
+    flex: 0 0 auto;
+  }
+</style>
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/tokyo-night-dark.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
+</head><body>
+<div class="page-nav"><a href="index.html">Docs Home</a></div>
+<h1 id="wine-nspa--memory-large-pages-and-working-set-support">Wine-NSPA &ndash; Memory, Large Pages, and Working-Set Support</h1>
+
+<p>This page covers the shipped Wine-NSPA memory surface: large-page allocation,
+large-page file mappings, current-process working-set reporting, working-set
+quota bookkeeping, and the shared-memory backing choices used by the major
+bypass subsystems.</p>
+
+<h2 id="table-of-contents">Table of Contents</h2>
+
+<ol>
+<li><a href="#1-overview">Overview</a></li>
+<li><a href="#2-what-is-shipped">What is shipped</a></li>
+<li><a href="#3-large-page-allocation-and-mapping">Large-page allocation and mapping</a></li>
+<li><a href="#4-working-set-reporting-and-quota-semantics">Working-set reporting and quota semantics</a></li>
+<li><a href="#5-shared-memory-backing-choices">Shared-memory backing choices</a></li>
+<li><a href="#6-validation-surface">Validation surface</a></li>
+<li><a href="#7-implementation-map">Implementation map</a></li>
+<li><a href="#8-related-docs">Related docs</a></li>
+</ol>
+
+
+<hr />
+
+<h2 id="1-overview">1. Overview</h2>
+
+<p>Wine-NSPA has a real memory subsystem story now. It is not just &ldquo;some
+hugepage patches&rdquo; and it is not just &ldquo;memfd everywhere.&rdquo;</p>
+
+<p>Three distinct pieces are shipped:</p>
+
+<ul>
+<li>large-page support for anonymous and section-backed mappings</li>
+<li>working-set reporting plus working-set quota bookkeeping</li>
+<li>selective shared-memory backing choices for bypass state</li>
+</ul>
+
+
+<p>The important design point is that these pieces solve different problems.
+Large pages reduce TLB pressure on hot mappings. Working-set reporting makes
+the Windows-visible memory surface honest enough for tools and tests.
+Dedicated shared-memory backends keep bypass subsystems off the wineserver hot
+path without forcing every shared region through one mechanism.</p>
+
+<hr />
+
+<h2 id="2-what-is-shipped">2. What is shipped</h2>
+
+<table>
+<thead>
+<tr>
+<th> Surface </th>
+<th> Shipped behavior </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> <code>GetLargePageMinimum()</code> </td>
+<td> Returns the real smallest huge-page size published into <code>KUSER_SHARED_DATA</code>, or <code>0</code> when the host has no usable hugepage pool. </td>
+</tr>
+<tr>
+<td> <code>VirtualAlloc(MEM_LARGE_PAGES)</code> </td>
+<td> Accepted and mapped through the unix VM path, with large-page alignment and large-page view tagging preserved for reporting. </td>
+</tr>
+<tr>
+<td> <code>NtAllocateVirtualMemoryEx(... MEM_LARGE_PAGES ...)</code> </td>
+<td> Accepted on the same large-page path, including the 1 GiB huge-page request shape when the host supports it. </td>
+</tr>
+<tr>
+<td> <code>CreateFileMapping(SEC_LARGE_PAGES)</code> </td>
+<td> Privilege-gated, backed through large-page-capable <code>memfd_create()</code> on the wineserver side, and mapped with large-page alignment rules. </td>
+</tr>
+<tr>
+<td> <code>QueryWorkingSetEx()</code> </td>
+<td> Current-process reporting is live, including <code>LargePage</code> flag reporting. Preferred path is <code>PAGEMAP_SCAN</code>; fallback is <code>/proc/self/pagemap</code>. </td>
+</tr>
+<tr>
+<td> <code>Get/SetProcessWorkingSetSize(Ex)</code> </td>
+<td> Working-set quota values are accepted, stored, and returned through <code>ProcessQuotaLimits</code>. This is bookkeeping, not a working-set trimmer. </td>
+</tr>
+<tr>
+<td> msg-ring shared state </td>
+<td> Per-queue message / redraw / paint-cache regions live in dedicated <code>memfd</code> mappings. </td>
+</tr>
+<tr>
+<td> local-file shared state </td>
+<td> Cross-process inode sharing arbitration lives in a dedicated shared <code>memfd</code> table, separate from message rings and separate from large-page mappings. </td>
+</tr>
+</tbody>
+</table>
+
+
+<hr />
+
+<h2 id="3-large-page-allocation-and-mapping">3. Large-page allocation and mapping</h2>
+
+<p>Large-page support has two entry paths: anonymous allocation and section-backed
+mapping. Both start from Windows-visible APIs, but the backing shape differs.</p>
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 960 430" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
+  <style>
+    .ml-bg { fill: #1a1b26; }
+    .ml-box { fill: #24283b; stroke: #7aa2f7; stroke-width: 1.6; rx: 8; }
+    .ml-green { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.6; rx: 8; }
+    .ml-yellow { fill: #2a2418; stroke: #e0af68; stroke-width: 1.6; rx: 8; }
+    .ml-purple { fill: #2a2137; stroke: #bb9af7; stroke-width: 1.6; rx: 8; }
+    .ml-line-blue { stroke: #7aa2f7; stroke-width: 1.2; fill: none; }
+    .ml-line-green { stroke: #9ece6a; stroke-width: 1.2; fill: none; }
+    .ml-line-yellow { stroke: #e0af68; stroke-width: 1.2; fill: none; }
+    .ml-dash { stroke: #6b7398; stroke-width: 0.9; stroke-dasharray: 5,3; fill: none; }
+    .ml-title { fill: #7aa2f7; font-size: 14px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .ml-label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+    .ml-small { fill: #a9b1d6; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+    .ml-tag-green { fill: #9ece6a; font-size: 11px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .ml-tag-yellow { fill: #e0af68; font-size: 11px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .ml-tag-purple { fill: #bb9af7; font-size: 11px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+  </style>
+
+  <rect x="0" y="0" width="960" height="430" class="ml-bg" rx="6"/>
+  <text x="480" y="26" text-anchor="middle" class="ml-title">Large-page allocation and mapping paths</text>
+
+  <rect x="35" y="60" width="250" height="120" class="ml-green" rx="6"/>
+  <text x="60" y="84" class="ml-tag-green">Windows-visible entrypoints</text>
+  <text x="60" y="112" class="ml-label">`GetLargePageMinimum()`</text>
+  <text x="60" y="132" class="ml-label">`VirtualAlloc(MEM_LARGE_PAGES)`</text>
+  <text x="60" y="152" class="ml-label">`NtAllocateVirtualMemoryEx(...)`</text>
+  <text x="60" y="172" class="ml-label">`CreateFileMapping(SEC_LARGE_PAGES)`</text>
+
+  <rect x="355" y="60" width="250" height="150" class="ml-box" rx="6"/>
+  <text x="380" y="84" class="ml-title" style="font-size:12px;">Wine userspace</text>
+  <text x="380" y="112" class="ml-label">kernelbase reads `KUSER_SHARED_DATA`</text>
+  <text x="380" y="132" class="ml-label">`virtual.c` validates size + alignment</text>
+  <text x="380" y="152" class="ml-label">large-page views keep `SEC_LARGE_PAGES` tag</text>
+  <text x="380" y="172" class="ml-label">working-set reporting can later expose `LargePage`</text>
+  <text x="380" y="192" class="ml-small">anonymous path stays in-process; section path crosses wineserver once</text>
+
+  <rect x="675" y="60" width="250" height="150" class="ml-yellow" rx="6"/>
+  <text x="700" y="84" class="ml-tag-yellow">Kernel and wineserver backing</text>
+  <text x="700" y="112" class="ml-label">hugepage inventory scanned at startup</text>
+  <text x="700" y="132" class="ml-label">`LargePageMinimum` published to shared data</text>
+  <text x="700" y="152" class="ml-label">anonymous large pages use hugepage-aware `mmap`</text>
+  <text x="700" y="172" class="ml-label">section path uses `memfd_create(... MFD_HUGETLB ...)`</text>
+  <text x="700" y="192" class="ml-label">`SEC_LARGE_PAGES` requires `SeLockMemoryPrivilege`</text>
+
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="285" y1="120" x2="355" y2="120" class="ml-line-green"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="605" y1="120" x2="675" y2="120" class="ml-line-blue"/>
+
+  <rect x="70" y="260" width="360" height="110" class="ml-purple" rx="6"/>
+  <text x="95" y="284" class="ml-tag-purple">Anonymous path</text>
+  <text x="95" y="312" class="ml-label">`VirtualAlloc(MEM_LARGE_PAGES)`</text>
+  <text x="95" y="332" class="ml-label">or `NtAllocateVirtualMemoryEx(... MEM_LARGE_PAGES ...)`</text>
+  <text x="95" y="352" class="ml-small">2 MiB large pages today; 1 GiB huge-page request shape also accepted when configured</text>
+
+  <rect x="530" y="260" width="360" height="110" class="ml-yellow" rx="6"/>
+  <text x="555" y="284" class="ml-tag-yellow">Section-backed path</text>
+  <text x="555" y="312" class="ml-label">`CreateFileMapping(SEC_LARGE_PAGES)`</text>
+  <text x="555" y="332" class="ml-label">wineserver mapping object + hugetlb-capable memfd</text>
+  <text x="555" y="352" class="ml-small">map-view path enforces large-page size alignment before the view is installed</text>
+
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="480" y1="210" x2="480" y2="235" class="ml-dash"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="250" y1="235" x2="710" y2="235" class="ml-dash"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="250" y1="235" x2="250" y2="260" class="ml-line-purple"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="710" y1="235" x2="710" y2="260" class="ml-line-yellow"/>
+</svg>
+</div>
+
+
+<p>The large-page contract is:</p>
+
+<ul>
+<li>expose the real large-page minimum when the host has one</li>
+<li>reject invalid alignment and privilege shapes instead of silently inventing a fake success path</li>
+<li>preserve enough view metadata that <code>QueryWorkingSetEx()</code> can later report <code>LargePage=1</code></li>
+</ul>
+
+
+<p>That last point matters. The feature is not just about getting <code>mmap()</code>
+flags accepted. It is about keeping the Windows-visible memory story coherent
+from allocation to reporting.</p>
+
+<hr />
+
+<h2 id="4-working-set-reporting-and-quota-semantics">4. Working-set reporting and quota semantics</h2>
+
+<p>Working-set support is deliberately split into two levels:</p>
+
+<ul>
+<li><strong>reporting</strong>: current-process <code>QueryWorkingSetEx()</code> tells tools and tests
+what is resident and whether a page is large-page-backed</li>
+<li><strong>quota bookkeeping</strong>: <code>GetProcessWorkingSetSize(Ex)</code> and
+<code>SetProcessWorkingSetSize(Ex)</code> store and return Windows-visible quota values</li>
+</ul>
+
+
+<p>What is <strong>not</strong> shipped is a Linux-side working-set trimmer that enforces those
+quota values by reclaiming or emptying the process working set.</p>
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 960 370" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
+  <style>
+    .ws-bg { fill: #1a1b26; }
+    .ws-box { fill: #24283b; stroke: #7aa2f7; stroke-width: 1.6; rx: 8; }
+    .ws-green { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.6; rx: 8; }
+    .ws-yellow { fill: #2a2418; stroke: #e0af68; stroke-width: 1.6; rx: 8; }
+    .ws-line-blue { stroke: #7aa2f7; stroke-width: 1.2; fill: none; }
+    .ws-line-green { stroke: #9ece6a; stroke-width: 1.2; fill: none; }
+    .ws-line-yellow { stroke: #e0af68; stroke-width: 1.2; fill: none; }
+    .ws-dash { stroke: #6b7398; stroke-width: 0.9; stroke-dasharray: 5,3; fill: none; }
+    .ws-title { fill: #7aa2f7; font-size: 14px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .ws-label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+    .ws-small { fill: #a9b1d6; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+    .ws-tag-green { fill: #9ece6a; font-size: 11px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .ws-tag-yellow { fill: #e0af68; font-size: 11px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+  </style>
+
+  <rect x="0" y="0" width="960" height="370" class="ws-bg" rx="6"/>
+  <text x="480" y="26" text-anchor="middle" class="ws-title">Working-set reporting vs quota bookkeeping</text>
+
+  <rect x="40" y="70" width="390" height="215" class="ws-green" rx="6"/>
+  <text x="65" y="94" class="ws-tag-green">Reporting path</text>
+  <text x="65" y="122" class="ws-label">`QueryWorkingSetEx()`</text>
+  <text x="65" y="142" class="ws-label">`NtQueryVirtualMemory(... MemoryWorkingSetExInformation ...)`</text>
+  <text x="65" y="162" class="ws-label">current-process pages only</text>
+  <text x="65" y="182" class="ws-label">preferred probe: `PAGEMAP_SCAN`</text>
+  <text x="65" y="202" class="ws-label">fallback probe: `/proc/self/pagemap`</text>
+  <text x="65" y="222" class="ws-label">returns residency bits plus `LargePage`</text>
+  <text x="65" y="248" class="ws-small" style="font-size:8px; letter-spacing:-0.15px">this is the path the public `large-pages` harness uses to confirm large-page-backed views</text>
+
+  <rect x="530" y="70" width="390" height="215" class="ws-yellow" rx="6"/>
+  <text x="555" y="94" class="ws-tag-yellow">Quota path</text>
+  <text x="555" y="122" class="ws-label">`SetProcessWorkingSetSize(Ex)`</text>
+  <text x="555" y="142" class="ws-label">`NtSetInformationProcess(ProcessQuotaLimits)`</text>
+  <text x="555" y="162" class="ws-label">values stored in process bookkeeping</text>
+  <text x="555" y="182" class="ws-label">`GetProcessWorkingSetSize(Ex)` returns the stored values</text>
+  <text x="555" y="202" class="ws-label">no `mlockall`, no kernel-side trimmer, no forced sweep</text>
+  <text x="555" y="222" class="ws-label">Windows-visible quota surface is present without fake enforcement</text>
+  <text x="555" y="244" class="ws-small">keeps compatibility and diagnostics honest</text>
+  <text x="555" y="258" class="ws-small">without claiming a memory manager Wine does not have</text>
+
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="430" y1="178" x2="530" y2="178" class="ws-dash"/>
+  <text x="480" y="170" text-anchor="middle" class="ws-small">same overall memory surface, different semantics</text>
+</svg>
+</div>
+
+
+<p>That division is intentional. Reporting should be correct. Quota APIs should
+behave coherently. But the docs should not imply that Wine-NSPA has grown a
+full Windows-style working-set manager. It has not.</p>
+
+<hr />
+
+<h2 id="5-shared-memory-backing-choices">5. Shared-memory backing choices</h2>
+
+<p>The tree uses several shared-memory backends, and they are chosen per
+subsystem instead of by one global rule.</p>
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 960 420" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
+  <style>
+    .bk-bg { fill: #1a1b26; }
+    .bk-box { fill: #24283b; stroke: #7aa2f7; stroke-width: 1.6; rx: 8; }
+    .bk-green { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.6; rx: 8; }
+    .bk-yellow { fill: #2a2418; stroke: #e0af68; stroke-width: 1.6; rx: 8; }
+    .bk-purple { fill: #2a2137; stroke: #bb9af7; stroke-width: 1.6; rx: 8; }
+    .bk-line-blue { stroke: #7aa2f7; stroke-width: 1.2; fill: none; }
+    .bk-line-green { stroke: #9ece6a; stroke-width: 1.2; fill: none; }
+    .bk-line-yellow { stroke: #e0af68; stroke-width: 1.2; fill: none; }
+    .bk-line-purple { stroke: #bb9af7; stroke-width: 1.2; fill: none; }
+    .bk-title { fill: #7aa2f7; font-size: 14px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .bk-label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+    .bk-small { fill: #a9b1d6; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+    .bk-tag-green { fill: #9ece6a; font-size: 11px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .bk-tag-yellow { fill: #e0af68; font-size: 11px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .bk-tag-purple { fill: #bb9af7; font-size: 11px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+  </style>
+
+  <rect x="0" y="0" width="960" height="420" class="bk-bg" rx="6"/>
+  <text x="480" y="26" text-anchor="middle" class="bk-title">Shared-memory backing choices by subsystem</text>
+
+  <rect x="35" y="70" width="205" height="250" class="bk-box" rx="6"/>
+  <text x="60" y="94" class="bk-title" style="font-size:12px;">Request / reply payload</text>
+  <text x="60" y="122" class="bk-label">per-thread `request_shm`</text>
+  <text x="60" y="142" class="bk-label">server-call payload bytes</text>
+  <text x="60" y="162" class="bk-label">reply payload bytes</text>
+  <text x="60" y="188" class="bk-small">used by gamma and by the canonical wineserver path</text>
+
+  <rect x="265" y="70" width="205" height="250" class="bk-green" rx="6"/>
+  <text x="290" y="94" class="bk-tag-green">Per-queue `memfd`</text>
+  <text x="290" y="122" class="bk-label">msg-ring send / reply slots</text>
+  <text x="290" y="142" class="bk-label">redraw push ring</text>
+  <text x="290" y="162" class="bk-label">paint-cache metadata</text>
+  <text x="290" y="188" class="bk-small">queue-local, fd-passed, mapped by the client peers that need it</text>
+
+  <rect x="495" y="70" width="205" height="250" class="bk-purple" rx="6"/>
+  <text x="520" y="94" class="bk-tag-purple">Shared `memfd` tables</text>
+  <text x="520" y="122" class="bk-label">local-file inode arbitration</text>
+  <text x="520" y="142" class="bk-label">shared `(dev, inode)` state</text>
+  <text x="520" y="162" class="bk-label">bucket PI mutex words</text>
+  <text x="520" y="188" class="bk-small">one published region, reused by every process that participates in the local-file path</text>
+
+  <rect x="725" y="70" width="200" height="250" class="bk-yellow" rx="6"/>
+  <text x="750" y="94" class="bk-tag-yellow">Large-page mappings</text>
+  <text x="750" y="122" class="bk-label">hugepage-backed anonymous views</text>
+  <text x="750" y="142" class="bk-label">or hugetlb-capable section memfd</text>
+  <text x="750" y="162" class="bk-label">not part of msg-ring or inode-table plumbing</text>
+  <text x="750" y="188" class="bk-small">separate goal: page size and locking semantics, not peer-to-peer bypass state</text>
+
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="240" y1="195" x2="265" y2="195" class="bk-line-blue"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="470" y1="195" x2="495" y2="195" class="bk-line-green"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="700" y1="195" x2="725" y2="195" class="bk-line-purple"/>
+</svg>
+</div>
+
+
+<p>This is why a single &ldquo;memfd page&rdquo; would be misleading. <code>memfd</code> is important,
+but it is not the whole story:</p>
+
+<ul>
+<li>some NSPA state lives in shared payload windows</li>
+<li>some lives in queue-local <code>memfd</code> regions</li>
+<li>some lives in shared <code>memfd</code> tables</li>
+<li>large pages are a different memory feature again</li>
+</ul>
+
+
+<p>The docs should keep those roles separate, because the correctness rules and
+performance goals are different.</p>
+
+<hr />
+
+<h2 id="6-validation-surface">6. Validation surface</h2>
+
+<p>The public <code>large-pages</code> PE harness now covers more than one call shape:</p>
+
+<ul>
+<li><code>VirtualAlloc(MEM_LARGE_PAGES)</code></li>
+<li><code>QueryWorkingSetEx()</code> <code>LargePage</code> reporting on the resulting view</li>
+<li><code>CreateFileMapping(SEC_LARGE_PAGES)</code></li>
+<li>privilege-negative <code>SEC_LARGE_PAGES</code> behavior</li>
+<li>1 GiB huge-page request shape when the host is configured for it</li>
+</ul>
+
+
+<p>That means the public test surface now validates both the allocation path and
+the Windows-visible reporting path. The relevant public harness documentation
+lives on <code>nspa-rt-test.gen.html</code>.</p>
+
+<hr />
+
+<h2 id="7-implementation-map">7. Implementation map</h2>
+
+<table>
+<thead>
+<tr>
+<th> File </th>
+<th> Responsibility </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> <code>server/mapping.c</code> </td>
+<td> hugepage inventory scan, <code>LargePageMinimum</code> publication, <code>SEC_LARGE_PAGES</code> privilege gate, large-page section backing </td>
+</tr>
+<tr>
+<td> <code>dlls/kernelbase/memory.c</code> </td>
+<td> <code>GetLargePageMinimum()</code> </td>
+</tr>
+<tr>
+<td> <code>dlls/ntdll/unix/virtual.c</code> </td>
+<td> anonymous large-page allocation, large-page view tracking, <code>QueryWorkingSetEx()</code> reporting </td>
+</tr>
+<tr>
+<td> <code>dlls/ntdll/unix/process.c</code> </td>
+<td> <code>ProcessQuotaLimits</code> working-set bookkeeping </td>
+</tr>
+<tr>
+<td> <code>dlls/kernelbase/process.c</code> </td>
+<td> <code>Get/SetProcessWorkingSetSize(Ex)</code> user-facing entrypoints </td>
+</tr>
+<tr>
+<td> <code>dlls/kernelbase/debug.c</code> </td>
+<td> <code>QueryWorkingSetEx()</code> / <code>K32QueryWorkingSetEx()</code> front-end </td>
+</tr>
+<tr>
+<td> <code>server/queue.c</code> </td>
+<td> per-queue <code>memfd</code> regions for msg-ring / redraw / paint-cache </td>
+</tr>
+<tr>
+<td> <code>server/nspa/local_file.c</code> </td>
+<td> shared inode arbitration <code>memfd</code> table for the local-file path </td>
+</tr>
+</tbody>
+</table>
+
+
+<hr />
+
+<h2 id="8-related-docs">8. Related docs</h2>
+
+<ul>
+<li><a href="architecture.gen.html">Architecture Overview</a></li>
+<li><a href="nspa-rt-test.gen.html">RT Test Harness</a></li>
+<li><a href="msg-ring-architecture.gen.html">Message Ring Architecture</a></li>
+<li><a href="nt-local-stubs.gen.html">NT Local Stubs</a></li>
+<li><a href="nspa-local-file-architecture.gen.html">Local-File Bypass Architecture</a></li>
+</ul>
+
+
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+  document.querySelectorAll("pre code").forEach(function (block) {
+    hljs.highlightElement(block);
+  });
+});
+</script>
+</body></html>

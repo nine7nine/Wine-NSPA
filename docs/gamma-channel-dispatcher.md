@@ -179,7 +179,8 @@ shmem window.
   <text x="335" y="246" text-anchor="middle" class="gc-pur">5. wake sender</text>
 
   <text x="480" y="344" text-anchor="middle" class="gc-sm">Attach-time path: wineserver creates the channel fd and transfers it to the client</text>
-  <text x="480" y="358" text-anchor="middle" class="gc-sm">with `SCM_RIGHTS` in `init_first_thread`; request and reply bytes remain in `request_shm`.</text>
+  <text x="480" y="358" text-anchor="middle" class="gc-sm">with `SCM_RIGHTS` in `init_first_thread`.</text>
+  <text x="480" y="372" text-anchor="middle" class="gc-sm">Request and reply bytes remain in `request_shm`.</text>
 </svg>
 </div>
 
@@ -204,13 +205,9 @@ channel work with `TRY_RECV2` before it sleeps again.
     .ga-g { fill: #9ece6a; font: bold 10px 'JetBrains Mono', monospace; }
     .ga-v { fill: #bb9af7; font: bold 10px 'JetBrains Mono', monospace; }
     .ga-y { fill: #e0af68; font: bold 10px 'JetBrains Mono', monospace; }
-    .ga-line { stroke: #c0caf5; stroke-width: 1.4; fill: none; }
+    .ga-line-b { stroke: #7aa2f7; stroke-width: 1.4; fill: none; }
+    .ga-line-g { stroke: #9ece6a; stroke-width: 1.4; fill: none; }
   </style>
-  <defs>
-    <marker id="gaArrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
-      <path d="M0,0 L8,3 L0,6" fill="#c0caf5"/>
-    </marker>
-  </defs>
 
   <rect x="0" y="0" width="980" height="520" class="ga-bg"/>
   <text x="490" y="28" text-anchor="middle" class="ga-h">Gamma dispatcher on post-1011 kernels</text>
@@ -241,9 +238,9 @@ channel work with `TRY_RECV2` before it sleeps again.
   <text x="785" y="296" text-anchor="middle" class="ga-s">dispatcher closes ring state</text>
   <text x="785" y="314" text-anchor="middle" class="ga-s">dispatcher frees its own context and exits</text>
 
-  <path d="M490 154 L195 210" class="ga-line" marker-end="url(#gaArrow)"/>
-  <path d="M490 154 L490 210" class="ga-line" marker-end="url(#gaArrow)"/>
-  <path d="M490 154 L785 210" class="ga-line" marker-end="url(#gaArrow)"/>
+  <path d="M490 154 L490 184 L195 184 L195 210" class="ga-line-b"/>
+  <line x1="490" y1="154" x2="490" y2="210" class="ga-line-g"/>
+  <path d="M490 154 L490 184 L785 184 L785 210" class="ga-line-b"/>
 
   <rect x="180" y="390" width="620" height="90" class="ga-note"/>
   <text x="490" y="416" text-anchor="middle" class="ga-y">Load-bearing invariant</text>
@@ -266,7 +263,7 @@ only carries scheduling metadata and reply ownership:
     .gr-kernel { fill: #1f2535; stroke: #bb9af7; stroke-width: 1.8; rx: 8; }
     .gr-server { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
     .gr-note { fill: #2a2418; stroke: #e0af68; stroke-width: 1.6; rx: 8; }
-    .gr-lane { stroke: #3b4261; stroke-width: 1; stroke-dasharray: 6,4; }
+    .gr-lane { stroke: #6b7398; stroke-width: 1; stroke-dasharray: 6,4; }
     .gr-h { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
     .gr-t { fill: #c0caf5; font: 11px 'JetBrains Mono', monospace; }
     .gr-s { fill: #a9b1d6; font: 9px 'JetBrains Mono', monospace; }
@@ -274,13 +271,10 @@ only carries scheduling metadata and reply ownership:
     .gr-g { fill: #9ece6a; font: bold 10px 'JetBrains Mono', monospace; }
     .gr-v { fill: #bb9af7; font: bold 10px 'JetBrains Mono', monospace; }
     .gr-y { fill: #e0af68; font: bold 10px 'JetBrains Mono', monospace; }
-    .gr-line { stroke: #c0caf5; stroke-width: 1.5; fill: none; }
+    .gr-line-b { stroke: #7aa2f7; stroke-width: 1.5; fill: none; }
+    .gr-line-v { stroke: #bb9af7; stroke-width: 1.5; fill: none; }
+    .gr-line-g { stroke: #9ece6a; stroke-width: 1.5; fill: none; }
   </style>
-  <defs>
-    <marker id="grArrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
-      <path d="M0,0 L8,3 L0,6" fill="#c0caf5"/>
-    </marker>
-  </defs>
 
   <rect x="0" y="0" width="980" height="590" class="gr-bg"/>
   <text x="490" y="28" text-anchor="middle" class="gr-h">Single-request sequence</text>
@@ -293,52 +287,53 @@ only carries scheduling metadata and reply ownership:
   <text x="490" y="62" text-anchor="middle" class="gr-v">kernel channel object</text>
   <text x="820" y="62" text-anchor="middle" class="gr-g">dispatcher thread</text>
 
-  <rect x="220" y="88" width="540" height="46" class="gr-note"/>
+  <rect x="220" y="88" width="540" height="60" class="gr-note"/>
   <text x="490" y="110" text-anchor="middle" class="gr-y">data plane stays in `request_shm`</text>
-  <text x="490" y="126" text-anchor="middle" class="gr-s">request bytes and reply bytes are zero-copy; the channel only carries metadata and reply ownership</text>
+  <text x="490" y="126" text-anchor="middle" class="gr-s">request bytes and reply bytes are zero-copy.</text>
+  <text x="490" y="140" text-anchor="middle" class="gr-s">The channel only carries metadata and reply ownership.</text>
 
   <rect x="60" y="168" width="200" height="48" class="gr-client"/>
   <text x="160" y="190" text-anchor="middle" class="gr-t">1. build request</text>
   <text x="160" y="206" text-anchor="middle" class="gr-s">copy header and payload into `request_shm`</text>
 
-  <line x1="160" y1="216" x2="160" y2="244" class="gr-line" marker-end="url(#grArrow)"/>
+  <line x1="160" y1="216" x2="160" y2="244" class="gr-line-b"/>
 
   <rect x="60" y="244" width="200" height="54" class="gr-client"/>
   <text x="160" y="266" text-anchor="middle" class="gr-b">2. `SEND_PI`</text>
   <text x="160" y="284" text-anchor="middle" class="gr-s">submit metadata, boost dispatcher, block sender</text>
 
-  <line x1="260" y1="271" x2="390" y2="271" class="gr-line" marker-end="url(#grArrow)"/>
+  <line x1="260" y1="271" x2="390" y2="271" class="gr-line-v"/>
 
   <rect x="390" y="244" width="200" height="54" class="gr-kernel"/>
   <text x="490" y="266" text-anchor="middle" class="gr-v">channel entry queued</text>
   <text x="490" y="284" text-anchor="middle" class="gr-s">tid, prio, payload_off, thread_token</text>
 
-  <line x1="490" y1="298" x2="490" y2="336" class="gr-line" marker-end="url(#grArrow)"/>
+  <line x1="490" y1="298" x2="490" y2="336" class="gr-line-v"/>
 
   <rect x="390" y="336" width="200" height="54" class="gr-kernel"/>
   <text x="490" y="358" text-anchor="middle" class="gr-v">3. `RECV2` dequeues winner</text>
   <text x="490" y="376" text-anchor="middle" class="gr-s">burst mode may continue with `TRY_RECV2`</text>
 
-  <line x1="590" y1="363" x2="720" y2="363" class="gr-line" marker-end="url(#grArrow)"/>
+  <line x1="590" y1="363" x2="720" y2="363" class="gr-line-g"/>
 
   <rect x="720" y="336" width="200" height="54" class="gr-server"/>
   <text x="820" y="358" text-anchor="middle" class="gr-g">4. handler runs</text>
   <text x="820" y="376" text-anchor="middle" class="gr-s">reads `request_shm`, writes reply bytes back</text>
 
-  <line x1="820" y1="390" x2="820" y2="428" class="gr-line" marker-end="url(#grArrow)"/>
+  <line x1="820" y1="390" x2="820" y2="428" class="gr-line-g"/>
 
   <rect x="720" y="428" width="200" height="48" class="gr-server"/>
   <text x="820" y="450" text-anchor="middle" class="gr-g">5. `REPLY(entry_id)`</text>
   <text x="820" y="466" text-anchor="middle" class="gr-s">same thread completes wake + reply signal</text>
 
-  <line x1="720" y1="452" x2="590" y2="452" class="gr-line" marker-end="url(#grArrow)"/>
+  <line x1="720" y1="452" x2="590" y2="452" class="gr-line-g"/>
 
   <rect x="390" y="428" width="200" height="48" class="gr-kernel"/>
   <text x="490" y="450" text-anchor="middle" class="gr-v">reply ownership returns</text>
   <text x="490" y="466" text-anchor="middle" class="gr-s">kernel wakes sender and drains / re-applies PI</text>
 
-  <line x1="490" y1="476" x2="490" y2="514" class="gr-line" marker-end="url(#grArrow)"/>
-  <line x1="390" y1="514" x2="260" y2="514" class="gr-line" marker-end="url(#grArrow)"/>
+  <line x1="490" y1="476" x2="490" y2="514" class="gr-line-b"/>
+  <line x1="390" y1="514" x2="260" y2="514" class="gr-line-b"/>
 
   <rect x="60" y="490" width="200" height="48" class="gr-client"/>
   <text x="160" y="512" text-anchor="middle" class="gr-b">6. sender resumes</text>
@@ -368,7 +363,7 @@ returning to `AGG_WAIT`.
     .gd-kernel { fill: #1a1a2a; stroke: #bb9af7; stroke-width: 2;   rx: 6; }
     .gd-server { fill: #24283b; stroke: #9ece6a; stroke-width: 2;   rx: 6; }
     .gd-shmem  { fill: #2a2418; stroke: #e0af68; stroke-width: 1.5; rx: 6; }
-    .gd-lane   { fill: none;    stroke: #3b4261; stroke-width: 1; stroke-dasharray: 6,4; }
+    .gd-lane   { fill: none;    stroke: #6b7398; stroke-width: 1; stroke-dasharray: 6,4; }
     .gd-title  { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
     .gd-h      { fill: #c0caf5; font: bold 11px 'JetBrains Mono', monospace; }
     .gd-l      { fill: #c0caf5; font: 10px 'JetBrains Mono', monospace; }

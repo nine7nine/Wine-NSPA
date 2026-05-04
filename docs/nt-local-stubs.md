@@ -583,13 +583,9 @@ the reset fix, with zero `err:service`, `err:rpc`, or `err:ole` errors.
     .le-h { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
     .le-g { fill: #9ece6a; font: bold 10px 'JetBrains Mono', monospace; }
     .le-y { fill: #e0af68; font: bold 10px 'JetBrains Mono', monospace; }
-    .le-line { stroke: #c0caf5; stroke-width: 1.5; fill: none; }
+    .le-line-b { stroke: #7aa2f7; stroke-width: 1.5; fill: none; }
+    .le-line-g { stroke: #9ece6a; stroke-width: 1.5; fill: none; }
   </style>
-  <defs>
-    <marker id="leArrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
-      <path d="M0,0 L8,3 L0,6" fill="#c0caf5"/>
-    </marker>
-  </defs>
 
   <rect x="0" y="0" width="940" height="350" class="le-bg"/>
   <text x="470" y="26" text-anchor="middle" class="le-h">Anonymous local event with server-aware completion</text>
@@ -609,8 +605,8 @@ the reset fix, with zero `err:service`, `err:rpc`, or `err:ole` errors.
   <text x="775" y="132" text-anchor="middle" class="le-s">direct `NTSYNC_IOC_EVENT_SET` on registered fd</text>
   <text x="775" y="150" text-anchor="middle" class="le-s">no `STATUS_INVALID_HANDLE` fallback failure</text>
 
-  <path d="M280 124 L355 124" class="le-line" marker-end="url(#leArrow)"/>
-  <path d="M585 124 L660 124" class="le-line" marker-end="url(#leArrow)"/>
+  <path d="M280 124 L355 124" class="le-line-b"/>
+  <path d="M585 124 L660 124" class="le-line-g"/>
 
   <rect x="150" y="214" width="640" height="76" class="le-note"/>
   <text x="470" y="246" text-anchor="middle" class="le-y">Why this matters</text>

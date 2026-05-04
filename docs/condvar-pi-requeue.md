@@ -55,7 +55,7 @@ The standard Win32 `SleepConditionVariableCS` implementation has a structural pr
     .cv-arrow { stroke: #9aa5ce; stroke-width: 1.5; fill: none; }
     .cv-arrow-green { stroke: #9ece6a; stroke-width: 2; fill: none; }
     .cv-arrow-red { stroke: #f7768e; stroke-width: 2; fill: none; }
-    .cv-divider { stroke: #3b4261; stroke-width: 1; stroke-dasharray: 8,4; }
+    .cv-divider { stroke: #6b7398; stroke-width: 1; stroke-dasharray: 8,4; }
     .cv-danger-zone { fill: #f7768e; fill-opacity: 0.08; stroke: #f7768e; stroke-width: 1.5; stroke-dasharray: 4,3; rx: 6; }
     .cv-safe-zone { fill: #9ece6a; fill-opacity: 0.06; stroke: #9ece6a; stroke-width: 1.5; stroke-dasharray: 4,3; rx: 6; }
   </style>
@@ -210,8 +210,8 @@ The condvar PI implementation spans the PE-unix boundary. The PE side (`dlls/ntd
     .af-arrow-green { stroke: #9ece6a; stroke-width: 2; fill: none; }
     .af-arrow-red { stroke: #f7768e; stroke-width: 1.5; fill: none; }
     .af-arrow-cyan { stroke: #7dcfff; stroke-width: 1.5; fill: none; }
-    .af-divider { stroke: #3b4261; stroke-width: 1; stroke-dasharray: 8,4; }
-    .af-boundary { fill: none; stroke: #3b4261; stroke-width: 1; stroke-dasharray: 5,3; rx: 6; }
+    .af-divider { stroke: #6b7398; stroke-width: 1; stroke-dasharray: 8,4; }
+    .af-boundary { fill: none; stroke: #6b7398; stroke-width: 1; stroke-dasharray: 5,3; rx: 6; }
   </style>
 
   <!-- Title -->

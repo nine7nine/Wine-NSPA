@@ -480,9 +480,9 @@ of the Wine-NSPA stack. Each PE subcommand targets specific components.</p>
 </tr>
 <tr>
 <td> large-pages </td>
-<td> virtual.c </td>
-<td> hugetlbfs </td>
-<td> Silent fallback to 4KB pages </td>
+<td> virtual.c + mapping.c </td>
+<td> hugetlbfs + <code>PAGEMAP_SCAN</code> </td>
+<td> Large-page allocation, reporting, or privilege semantics regress </td>
 </tr>
 <tr>
 <td> fork-mutex </td>
@@ -562,9 +562,9 @@ of the Wine-NSPA stack. Each PE subcommand targets specific components.</p>
 <tr>
 <td> 7 </td>
 <td> <code>large-pages</code> </td>
-<td> VirtualAlloc(MEM_LARGE_PAGES) 2MB + PAGEMAP </td>
-<td> HugePages_Free delta, LargePage flag </td>
-<td> virtual.c large pages </td>
+<td> <code>VirtualAlloc(MEM_LARGE_PAGES)</code>, <code>QueryWorkingSetEx</code>, <code>CreateFileMapping(SEC_LARGE_PAGES)</code> </td>
+<td> HugePages_Free delta, <code>LargePage</code> flag, privilege semantics </td>
+<td> virtual.c + mapping.c large pages </td>
 </tr>
 <tr>
 <td> 8 </td>
@@ -677,13 +677,17 @@ verify accessible, free.</p>
 clear-on-first-access, alloc/free race with fault handler, wrong-thread
 signal delivery.</p>
 
-<h3 id="37-large-pages--virtualallocmem_large_pages">3.7 <code>large-pages</code> &ndash; VirtualAlloc(MEM_LARGE_PAGES)</h3>
+<h3 id="37-large-pages--large-page-allocation-and-working-set-reporting">3.7 <code>large-pages</code> &ndash; Large-Page Allocation and Working-Set Reporting</h3>
 
 <p><code>RtlAdjustPrivilege(SE_LOCK_MEMORY_PRIVILEGE)</code> ->
 <code>VirtualAlloc(MEM_LARGE_PAGES)</code> -> <code>/proc/meminfo</code> cross-check ->
-page touch round-trip -> <code>K32QueryWorkingSetEx</code> PAGEMAP_SCAN
-LargePage-flag check -> <code>VirtualFree</code> -> verify <code>HugePages_Free</code>
-restored.</p>
+page touch round-trip -> <code>K32QueryWorkingSetEx</code> <code>LargePage</code> check ->
+<code>VirtualFree</code> -> verify <code>HugePages_Free</code> restored.</p>
+
+<p>The same harness also validates the shipped section-backed path:
+<code>CreateFileMapping(SEC_LARGE_PAGES)</code> plus the privilege-negative case,
+and it exercises the 1 GiB huge-page request shape when the host is
+configured for it.</p>
 
 <p>Skip conditions (PASS): meminfo not readable, <code>HugePages_Total == 0</code>,
 <code>GetLargePageMinimum == 0</code>, RtlAdjustPrivilege fails.</p>

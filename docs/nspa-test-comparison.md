@@ -88,7 +88,7 @@ present).
 | fork-mutex | PASS | PASS | 100/100 children spawned + reaped |
 | cs-contention | PASS | PASS | CS-PI fires correctly |
 | signal-recursion | PASS | PASS | recursive `virtual_mutex` path clean |
-| large-pages | PASS | PASS | 2MB + 1GB pages, LargePage flag set |
+| large-pages | PASS | PASS | 2MB + 1GB pages, `SEC_LARGE_PAGES`, LargePage flag set |
 | ntsync-d4 | PASS | PASS | mutex PI + chain + prio + WFMO |
 | ntsync-d8 | PASS | PASS | same, depth 8 |
 | ntsync-d12 | PASS | PASS | same, depth 12, 8 rapid threads |
@@ -191,7 +191,7 @@ reverted (memory: `feedback_dont_shotgun_audit_into_unfound_bug`).
 | fork-mutex | PASS | PASS | 100/100 children spawned + reaped |
 | cs-contention | PASS | PASS | CS-PI fires correctly |
 | signal-recursion | PASS | PASS | Recursive virtual_mutex path clean |
-| large-pages | PASS | PASS | 2MB + 1GB pages, LargePage flag set |
+| large-pages | PASS | PASS | 2MB + 1GB pages, `SEC_LARGE_PAGES`, LargePage flag set |
 | ntsync-d4 | 8/8 | 8/8 | Mutex PI + chain + prio + WFMO |
 | ntsync-d8 | 8/8 | 8/8 | Same, depth 8 |
 | ntsync-d12 | 8/8 | 8/8 | Same, depth 12, 8 rapid threads |

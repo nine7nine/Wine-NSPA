@@ -93,13 +93,10 @@ The distinction matters: Section 11 discusses why.
     .nt-yellow { fill: #e0af68; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .nt-violet { fill: #bb9af7; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .nt-line { stroke: #c0caf5; stroke-width: 1.4; }
-    .nt-dash { stroke: #3b4261; stroke-width: 1.2; stroke-dasharray: 6,4; }
+    .nt-link-b { stroke: #7aa2f7; stroke-width: 1.4; }
+    .nt-link-v { stroke: #bb9af7; stroke-width: 1.4; }
+    .nt-dash { stroke: #6b7398; stroke-width: 1.2; stroke-dasharray: 6,4; }
   </style>
-  <defs>
-    <marker id="ntArrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
-      <path d="M0,0 L8,3 L0,6" fill="#c0caf5"/>
-    </marker>
-  </defs>
 
   <rect x="0" y="0" width="940" height="520" class="nt-bg"/>
   <text x="470" y="28" text-anchor="middle" class="nt-title">NTSync in Wine-NSPA: object families, PI paths, and patch layering</text>
@@ -125,8 +122,8 @@ The distinction matters: Section 11 discusses why.
   <text x="780" y="144" text-anchor="middle" class="nt-small">wake queues + task priority ordering</text>
   <text x="780" y="162" text-anchor="middle" class="nt-small">KASAN / debug kernels found 1007-1009 bugs</text>
 
-  <line x1="280" y1="115" x2="350" y2="115" class="nt-line" marker-end="url(#ntArrow)"/>
-  <line x1="590" y1="115" x2="660" y2="115" class="nt-line" marker-end="url(#ntArrow)"/>
+  <line x1="280" y1="115" x2="350" y2="115" class="nt-link-b"/>
+  <line x1="590" y1="115" x2="660" y2="115" class="nt-link-v"/>
 
   <rect x="40" y="220" width="180" height="98" class="nt-obj"/>
   <text x="130" y="246" text-anchor="middle" class="nt-green">Mutex</text>
@@ -366,7 +363,7 @@ The rb-tree key is `(prio DESC, seq ASC)`: higher priority sorts first; ties bre
 <svg width="100%" viewBox="0 0 940 560" xmlns="http://www.w3.org/2000/svg">
   <style>
     .ch-bg { fill: #1a1b26; }
-    .ch-lane { fill: none; stroke: #3b4261; stroke-width: 1; stroke-dasharray: 5,4; }
+    .ch-lane { fill: none; stroke: #6b7398; stroke-width: 1; stroke-dasharray: 5,4; }
     .ch-box { fill: #24283b; stroke: #7aa2f7; stroke-width: 2; rx: 7; }
     .ch-kernel { fill: #1a1a2a; stroke: #bb9af7; stroke-width: 2; rx: 7; }
     .ch-state { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 7; }
@@ -377,13 +374,11 @@ The rb-tree key is `(prio DESC, seq ASC)`: higher priority sorts first; ties bre
     .ch-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .ch-yellow { fill: #e0af68; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .ch-violet { fill: #bb9af7; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
-    .ch-line { stroke: #c0caf5; stroke-width: 1.4; }
+    .ch-line-b { stroke: #7aa2f7; stroke-width: 1.4; }
+    .ch-line-v { stroke: #bb9af7; stroke-width: 1.4; }
+    .ch-line-g { stroke: #9ece6a; stroke-width: 1.4; }
+    .ch-line-y { stroke: #e0af68; stroke-width: 1.4; }
   </style>
-  <defs>
-    <marker id="chArrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
-      <path d="M0,0 L8,3 L0,6" fill="#c0caf5"/>
-    </marker>
-  </defs>
 
   <rect x="0" y="0" width="940" height="560" class="ch-bg"/>
   <text x="470" y="28" text-anchor="middle" class="ch-title">Channel object lifecycle: request ordering, dispatch, reply, and cleanup</text>
@@ -405,13 +400,13 @@ The rb-tree key is `(prio DESC, seq ASC)`: higher priority sorts first; ties bre
   <text x="470" y="140" text-anchor="middle" class="ch-small">key = (prio DESC, seq ASC)</text>
   <text x="470" y="158" text-anchor="middle" class="ch-small">depth++, entry may become new minimum</text>
 
-  <line x1="240" y1="126" x2="330" y2="126" class="ch-line" marker-end="url(#chArrow)"/>
+  <line x1="240" y1="126" x2="330" y2="126" class="ch-line-b"/>
 
   <rect x="670" y="98" width="260" height="56" class="ch-box"/>
   <text x="800" y="122" text-anchor="middle" class="ch-label">RECV / RECV2 waiter</text>
   <text x="800" y="140" text-anchor="middle" class="ch-small">blocked on recv_wq; 1011 adds TRY_RECV2 follow-on</text>
 
-  <line x1="610" y1="148" x2="670" y2="148" class="ch-line" marker-end="url(#chArrow)"/>
+  <line x1="610" y1="148" x2="670" y2="148" class="ch-line-y"/>
   <text x="640" y="138" text-anchor="middle" class="ch-yellow">boost + wake</text>
   <text x="640" y="154" text-anchor="middle" class="ch-small">1007 makes wake exclusive</text>
 
@@ -421,8 +416,8 @@ The rb-tree key is `(prio DESC, seq ASC)`: higher priority sorts first; ties bre
   <text x="470" y="270" text-anchor="middle" class="ch-small">mark DISPATCHED, append list, depth--</text>
   <text x="470" y="288" text-anchor="middle" class="ch-small">1005 RECV2 adds thread_token lookup</text>
 
-  <line x1="800" y1="154" x2="800" y2="210" class="ch-line" marker-end="url(#chArrow)"/>
-  <line x1="800" y1="250" x2="610" y2="250" class="ch-line" marker-end="url(#chArrow)"/>
+  <line x1="800" y1="154" x2="800" y2="210" class="ch-line-v"/>
+  <line x1="800" y1="250" x2="610" y2="250" class="ch-line-v"/>
 
   <rect x="670" y="326" width="260" height="80" class="ch-box"/>
   <text x="800" y="350" text-anchor="middle" class="ch-label">handler runs in wineserver</text>
@@ -430,7 +425,7 @@ The rb-tree key is `(prio DESC, seq ASC)`: higher priority sorts first; ties bre
   <text x="800" y="386" text-anchor="middle" class="ch-small">reply data written to shared memory</text>
   <text x="800" y="404" text-anchor="middle" class="ch-small">then REPLY(entry_id)</text>
 
-  <line x1="800" y1="290" x2="800" y2="326" class="ch-line" marker-end="url(#chArrow)"/>
+  <line x1="800" y1="290" x2="800" y2="326" class="ch-line-g"/>
 
   <rect x="330" y="326" width="280" height="80" class="ch-state"/>
   <text x="470" y="350" text-anchor="middle" class="ch-green">DISPATCHED list</text>
@@ -438,7 +433,7 @@ The rb-tree key is `(prio DESC, seq ASC)`: higher priority sorts first; ties bre
   <text x="470" y="386" text-anchor="middle" class="ch-small">1009 refcount keeps entry alive across wake</text>
   <text x="470" y="404" text-anchor="middle" class="ch-small">receiver drain drops handler boost</text>
 
-  <line x1="670" y1="366" x2="610" y2="366" class="ch-line" marker-end="url(#chArrow)"/>
+  <line x1="670" y1="366" x2="610" y2="366" class="ch-line-g"/>
 
   <rect x="40" y="326" width="200" height="80" class="ch-box"/>
   <text x="140" y="350" text-anchor="middle" class="ch-label">sender sleep</text>
@@ -446,7 +441,7 @@ The rb-tree key is `(prio DESC, seq ASC)`: higher priority sorts first; ties bre
   <text x="140" y="386" text-anchor="middle" class="ch-small">cleanup may race with REPLY</text>
   <text x="140" y="404" text-anchor="middle" class="ch-small">1009 closes UAF window</text>
 
-  <line x1="330" y1="366" x2="240" y2="366" class="ch-line" marker-end="url(#chArrow)"/>
+  <line x1="330" y1="366" x2="240" y2="366" class="ch-line-b"/>
 
   <rect x="330" y="448" width="280" height="62" class="ch-fix"/>
   <text x="470" y="472" text-anchor="middle" class="ch-yellow">Cleanup / free boundary</text>
@@ -457,10 +452,11 @@ The rb-tree key is `(prio DESC, seq ASC)`: higher priority sorts first; ties bre
   <text x="800" y="490" text-anchor="middle" class="ch-small">after REPLY, userspace may `TRY_RECV2`</text>
   <text x="800" y="504" text-anchor="middle" class="ch-small">and drain more ready entries before sleeping again</text>
 
-  <line x1="140" y1="406" x2="140" y2="448" class="ch-line"/>
-  <line x1="140" y1="448" x2="330" y2="448" class="ch-line" marker-end="url(#chArrow)"/>
+  <line x1="140" y1="406" x2="140" y2="448" class="ch-line-b"/>
+  <line x1="140" y1="448" x2="330" y2="448" class="ch-line-b"/>
 
-  <text x="470" y="534" text-anchor="middle" class="ch-small">priority ordering is in-kernel; per-sender order stays serial because each SEND_PI blocks for REPLY</text>
+  <text x="470" y="534" text-anchor="middle" class="ch-small">priority ordering is in-kernel.</text>
+  <text x="470" y="548" text-anchor="middle" class="ch-small">Per-sender order stays serial because each SEND_PI blocks for REPLY.</text>
 </svg>
 </div>
 
@@ -969,13 +965,9 @@ in one syscall, while still keeping channel PI visible.
     .ag-s { fill: #a9b1d6; font: 9px 'JetBrains Mono', monospace; }
     .ag-h { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
     .ag-v { fill: #bb9af7; font: bold 10px 'JetBrains Mono', monospace; }
-    .ag-line { stroke: #c0caf5; stroke-width: 1.4; fill: none; }
+    .ag-line-g { stroke: #9ece6a; stroke-width: 1.4; fill: none; }
+    .ag-line-b { stroke: #7aa2f7; stroke-width: 1.4; fill: none; }
   </style>
-  <defs>
-    <marker id="agArrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
-      <path d="M0,0 L8,3 L0,6" fill="#c0caf5"/>
-    </marker>
-  </defs>
 
   <rect x="0" y="0" width="940" height="360" class="ag-bg"/>
   <text x="470" y="28" text-anchor="middle" class="ag-h">1010 aggregate-wait: the dispatcher-facing kernel surface</text>
@@ -998,8 +990,8 @@ in one syscall, while still keeping channel PI visible.
   <text x="790" y="142" text-anchor="middle" class="ag-s">uring eventfd</text>
   <text x="790" y="160" text-anchor="middle" class="ag-s">future fd-poll / timer wake sources</text>
 
-  <path d="M260 142 L360 142" class="ag-line" marker-end="url(#agArrow)"/>
-  <path d="M680 142 L580 142" class="ag-line" marker-end="url(#agArrow)"/>
+  <line x1="260" y1="142" x2="360" y2="142" class="ag-line-g"/>
+  <line x1="580" y1="142" x2="680" y2="142" class="ag-line-b"/>
 
   <rect x="140" y="254" width="660" height="62" class="ag-note"/>
   <text x="470" y="278" text-anchor="middle" class="ag-t">Load-bearing follow-up in production</text>
@@ -1105,7 +1097,7 @@ There are two distinct userspace shapes:
 <svg width="100%" viewBox="0 0 980 470" xmlns="http://www.w3.org/2000/svg">
   <style>
     .bg { fill: #1a1b26; }
-    .lane { fill: #24283b; stroke: #3b4261; stroke-width: 1.2; rx: 10; }
+    .lane { fill: #24283b; stroke: #6b7398; stroke-width: 1.2; rx: 10; }
     .srv { fill: #1f2535; stroke: #7aa2f7; stroke-width: 1.8; rx: 8; }
     .cli { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
     .mid { fill: #2a1f35; stroke: #bb9af7; stroke-width: 1.8; rx: 8; }
@@ -1117,7 +1109,7 @@ There are two distinct userspace shapes:
     .v { fill: #bb9af7; font: bold 10px 'JetBrains Mono', monospace; }
     .y { fill: #e0af68; font: bold 10px 'JetBrains Mono', monospace; }
     .line { stroke: #c0caf5; stroke-width: 1.2; fill: none; }
-    .guide { stroke: #3b4261; stroke-width: 1; stroke-dasharray: 6,4; }
+    .guide { stroke: #6b7398; stroke-width: 1; stroke-dasharray: 6,4; }
   </style>
 
   <rect x="0" y="0" width="980" height="470" class="bg"/>

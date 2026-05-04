@@ -68,7 +68,7 @@ The rejected shape was:
 <svg width="100%" viewBox="0 0 980 430" xmlns="http://www.w3.org/2000/svg">
   <style>
     .bg { fill: #1a1b26; }
-    .lane { stroke: #3b4261; stroke-width: 1.2; stroke-dasharray: 6,4; }
+    .lane { stroke: #6b7398; stroke-width: 1.2; stroke-dasharray: 6,4; }
     .box { fill: #24283b; stroke: #7aa2f7; stroke-width: 2; rx: 8; }
     .bad { fill: #2a1a1a; stroke: #f7768e; stroke-width: 2; rx: 8; }
     .note { fill: #2a2418; stroke: #e0af68; stroke-width: 1.8; rx: 8; }
@@ -77,13 +77,10 @@ The rejected shape was:
     .h { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
     .r { fill: #f7768e; font: bold 10px 'JetBrains Mono', monospace; }
     .y { fill: #e0af68; font: bold 10px 'JetBrains Mono', monospace; }
-    .line { stroke: #c0caf5; stroke-width: 1.4; fill: none; }
+    .line-l { stroke: #7aa2f7; stroke-width: 1.4; fill: none; }
+    .line-r { stroke: #f7768e; stroke-width: 1.4; fill: none; }
+    .line-y { stroke: #e0af68; stroke-width: 1.4; fill: none; }
   </style>
-  <defs>
-    <marker id="badArrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
-      <path d="M0,0 L8,3 L0,6" fill="#c0caf5"/>
-    </marker>
-  </defs>
 
   <rect x="0" y="0" width="980" height="430" class="bg"/>
   <text x="490" y="26" text-anchor="middle" class="h">Rejected cross-thread bridge</text>
@@ -97,7 +94,7 @@ The rejected shape was:
   <text x="250" y="120" text-anchor="middle" class="t">`CHANNEL_RECV2`</text>
   <text x="250" y="140" text-anchor="middle" class="s">dispatcher owns request entry</text>
 
-  <line x1="250" y1="154" x2="250" y2="182" class="line" marker-end="url(#badArrow)"/>
+  <line x1="250" y1="154" x2="250" y2="182" class="line-l"/>
 
   <rect x="120" y="182" width="260" height="78" class="box"/>
   <text x="250" y="206" text-anchor="middle" class="t">handler submits SQE</text>
@@ -108,7 +105,7 @@ The rejected shape was:
   <text x="730" y="120" text-anchor="middle" class="t">`main_loop_epoll`</text>
   <text x="730" y="140" text-anchor="middle" class="s">main thread owns uring wake</text>
 
-  <line x1="730" y1="154" x2="730" y2="182" class="line" marker-end="url(#badArrow)"/>
+  <line x1="730" y1="154" x2="730" y2="182" class="line-r"/>
 
   <rect x="600" y="182" width="260" height="92" class="bad"/>
   <text x="730" y="206" text-anchor="middle" class="t">CQE arrives later</text>
@@ -117,14 +114,14 @@ The rejected shape was:
   <text x="730" y="262" text-anchor="middle" class="s">`CHANNEL_REPLY` issued cross-thread</text>
 
   <text x="490" y="172" text-anchor="middle" class="y">ownership jump after SQE submit</text>
-  <line x1="380" y1="221" x2="600" y2="221" class="line" marker-end="url(#badArrow)"/>
+  <line x1="380" y1="221" x2="600" y2="221" class="line-y"/>
   <text x="490" y="238" text-anchor="middle" class="s">completion timing now depends on the main-thread wake path</text>
 
-  <line x1="730" y1="274" x2="730" y2="316" class="line" marker-end="url(#badArrow)"/>
-  <rect x="170" y="326" width="640" height="58" class="note"/>
-  <text x="490" y="348" text-anchor="middle" class="y">Why it was rejected</text>
+  <line x1="730" y1="274" x2="730" y2="322" class="line-r"/>
+  <rect x="170" y="322" width="640" height="72" class="note"/>
+  <text x="490" y="346" text-anchor="middle" class="y">Why it was rejected</text>
   <text x="490" y="364" text-anchor="middle" class="s">request receive, CQE drain, and reply signaling no longer live on one RT thread</text>
-  <text x="490" y="378" text-anchor="middle" class="s">reply ordering depends on main-thread wake timing and contention instead of dispatcher availability</text>
+  <text x="490" y="382" text-anchor="middle" class="s">reply timing depends on main-thread wake timing and main-thread contention</text>
 </svg>
 </div>
 
@@ -161,13 +158,9 @@ The dispatcher is the first consumer, but the primitive is intentionally general
     .h { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
     .g { fill: #9ece6a; font: bold 10px 'JetBrains Mono', monospace; }
     .v { fill: #bb9af7; font: bold 10px 'JetBrains Mono', monospace; }
-    .line { stroke: #c0caf5; stroke-width: 1.4; fill: none; }
+    .line-o { stroke: #9ece6a; stroke-width: 1.4; fill: none; }
+    .line-f { stroke: #7aa2f7; stroke-width: 1.4; fill: none; }
   </style>
-  <defs>
-    <marker id="aggArrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
-      <path d="M0,0 L8,3 L0,6" fill="#c0caf5"/>
-    </marker>
-  </defs>
 
   <rect x="0" y="0" width="980" height="420" class="bg"/>
   <text x="490" y="28" text-anchor="middle" class="h">Patch 1010: heterogeneous wait surface</text>
@@ -192,8 +185,8 @@ The dispatcher is the first consumer, but the primitive is intentionally general
   <text x="810" y="160" text-anchor="middle" class="t">future fd-poll / timer wake sources</text>
   <text x="810" y="178" text-anchor="middle" class="s">poll semantics, no intrinsic PI owner</text>
 
-  <path d="M290 147 C320 147, 340 147, 370 147" class="line" marker-end="url(#aggArrow)"/>
-  <path d="M690 147 C660 147, 640 147, 610 147" class="line" marker-end="url(#aggArrow)"/>
+  <line x1="290" y1="147" x2="370" y2="147" class="line-o"/>
+  <line x1="610" y1="147" x2="690" y2="147" class="line-f"/>
 
   <rect x="160" y="286" width="660" height="74" class="note"/>
   <text x="490" y="312" text-anchor="middle" class="t">Kernel follow-ups required for production stability</text>
@@ -294,13 +287,9 @@ The dispatcher now waits on three sources:
     .g { fill: #9ece6a; font: bold 10px 'JetBrains Mono', monospace; }
     .v { fill: #bb9af7; font: bold 10px 'JetBrains Mono', monospace; }
     .y { fill: #e0af68; font: bold 10px 'JetBrains Mono', monospace; }
-    .line { stroke: #c0caf5; stroke-width: 1.4; fill: none; }
+    .line-b { stroke: #7aa2f7; stroke-width: 1.4; fill: none; }
+    .line-g { stroke: #9ece6a; stroke-width: 1.4; fill: none; }
   </style>
-  <defs>
-    <marker id="dispArrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
-      <path d="M0,0 L8,3 L0,6" fill="#c0caf5"/>
-    </marker>
-  </defs>
 
   <rect x="0" y="0" width="980" height="560" class="bg"/>
   <text x="490" y="28" text-anchor="middle" class="h">Dispatcher aggregate-wait topology</text>
@@ -328,9 +317,9 @@ The dispatcher now waits on three sources:
   <text x="775" y="280" text-anchor="middle" class="s">aggregate-wait returns</text>
   <text x="775" y="298" text-anchor="middle" class="s">dispatcher drains and frees its own context</text>
 
-  <path d="M490 154 L205 212" class="line" marker-end="url(#dispArrow)"/>
-  <path d="M490 154 L490 212" class="line" marker-end="url(#dispArrow)"/>
-  <path d="M490 154 L775 212" class="line" marker-end="url(#dispArrow)"/>
+  <path d="M490 154 L490 180 L205 180 L205 212" class="line-b"/>
+  <line x1="490" y1="154" x2="490" y2="212" class="line-g"/>
+  <path d="M490 154 L490 180 L775 180 L775 212" class="line-b"/>
 
   <rect x="160" y="392" width="660" height="94" class="note"/>
   <text x="490" y="418" text-anchor="middle" class="y">Operational invariants</text>
@@ -380,13 +369,10 @@ That logic is runtime feature detection, not a release ladder:
     .g { fill: #9ece6a; font: bold 10px 'JetBrains Mono', monospace; }
     .v { fill: #bb9af7; font: bold 10px 'JetBrains Mono', monospace; }
     .y { fill: #e0af68; font: bold 10px 'JetBrains Mono', monospace; }
-    .line { stroke: #c0caf5; stroke-width: 1.4; fill: none; }
+    .line-v { stroke: #bb9af7; stroke-width: 1.4; fill: none; }
+    .line-g { stroke: #9ece6a; stroke-width: 1.4; fill: none; }
+    .line-y { stroke: #e0af68; stroke-width: 1.4; fill: none; }
   </style>
-  <defs>
-    <marker id="rollArrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
-      <path d="M0,0 L8,3 L0,6" fill="#c0caf5"/>
-    </marker>
-  </defs>
 
   <rect x="0" y="0" width="980" height="430" class="bg"/>
   <text x="490" y="26" text-anchor="middle" class="h">Dispatcher compatibility decisions</text>
@@ -420,12 +406,12 @@ That logic is runtime feature detection, not a release ladder:
   <text x="780" y="346" text-anchor="middle" class="s">oldest supported channel shape</text>
   <text x="780" y="364" text-anchor="middle" class="s">no thread-token carried in the receive result</text>
 
-  <path d="M490 132 L200 178" class="line" marker-end="url(#rollArrow)"/>
-  <path d="M490 132 L780 178" class="line" marker-end="url(#rollArrow)"/>
-  <path d="M330 224 L390 224" class="line" marker-end="url(#rollArrow)"/>
-  <path d="M590 224 L650 224" class="line" marker-end="url(#rollArrow)"/>
-  <path d="M780 270 L780 300" class="line" marker-end="url(#rollArrow)"/>
-  <path d="M590 346 L650 346" class="line" marker-end="url(#rollArrow)"/>
+  <path d="M490 132 L490 156 L200 156 L200 178" class="line-v"/>
+  <path d="M490 132 L490 156 L780 156 L780 178" class="line-v"/>
+  <line x1="330" y1="224" x2="390" y2="224" class="line-y"/>
+  <line x1="590" y1="224" x2="650" y2="224" class="line-g"/>
+  <line x1="780" y1="270" x2="780" y2="300" class="line-g"/>
+  <line x1="590" y1="346" x2="650" y2="346" class="line-y"/>
 
   <rect x="70" y="300" width="260" height="92" class="curr"/>
   <text x="200" y="326" text-anchor="middle" class="v">steady-state production loop</text>

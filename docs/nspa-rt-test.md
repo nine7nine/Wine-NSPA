@@ -133,7 +133,7 @@ of the Wine-NSPA stack. Each PE subcommand targets specific components.
     .rt-arrow    { stroke: #9aa5ce; stroke-width: 1.5; fill: none; }
     .rt-arrow-grn{ stroke: #9ece6a; stroke-width: 1.5; fill: none; }
     .rt-arrow-blu{ stroke: #7aa2f7; stroke-width: 1.5; fill: none; }
-    .rt-region   { fill: none; stroke: #3b4261; stroke-width: 1; stroke-dasharray: 5,3; rx: 8; }
+    .rt-region   { fill: none; stroke: #6b7398; stroke-width: 1; stroke-dasharray: 5,3; rx: 8; }
   </style>
 
   <text x="440" y="22" class="rt-label-ylw" text-anchor="middle">nspa_rt_test.exe -- Test Architecture (PE binary to kernel)</text>
@@ -300,7 +300,7 @@ Each PE subcommand targets a specific cross-section of the stack:
 | dispatcher-burst | gamma dispatcher + server-side io_uring | `/dev/ntsync` channel + aggregate-wait + TRY_RECV2 | dispatcher hot path regresses with no PE-side coverage |
 | socket-io | io_uring.c | io_uring `RECVMSG` / `SENDMSG` + ntsync `uring_fd` | Async socket deferred-path latency or completion regression |
 | signal-recursion | virtual.c | segv_handler | Deadlock in recursive mutex path |
-| large-pages | virtual.c | hugetlbfs | Silent fallback to 4KB pages |
+| large-pages | virtual.c + mapping.c | hugetlbfs + `PAGEMAP_SCAN` | Large-page allocation, reporting, or privilege semantics regress |
 | fork-mutex | process.c | posix_spawn | Child hangs from corrupted mutex |
 | srw-bench | sync.c (SRW) | futex | Acquire latency regression |
 
@@ -318,7 +318,7 @@ Each PE subcommand targets a specific cross-section of the stack:
 | 4 | `philosophers` | Dining philosophers with transitive PI | meals/phil, RT max_wait (us), spread | sync.c transitive PI |
 | 5 | `fork-mutex` | Rapid CreateProcess stress (N spawns) | spawn time, exit code, success rate | process.c opt-out |
 | 6 | `signal-recursion` | PAGE_GUARD fault stress (N threads) | iters completed, fault count, elapsed | virtual.c recursive mutex |
-| 7 | `large-pages` | VirtualAlloc(MEM_LARGE_PAGES) 2MB + PAGEMAP | HugePages_Free delta, LargePage flag | virtual.c large pages |
+| 7 | `large-pages` | `VirtualAlloc(MEM_LARGE_PAGES)`, `QueryWorkingSetEx`, `CreateFileMapping(SEC_LARGE_PAGES)` | HugePages_Free delta, `LargePage` flag, privilege semantics | virtual.c + mapping.c large pages |
 | 8 | `ntsync` | 5 sub-tests: rapid mutex, PI, prio, chain, WFMO | per-sub PASS/FAIL, wait times | /dev/ntsync driver |
 | 9 | `socket-io` | TCP loopback: immediate + deferred socket path | latency (us) p50/p95/p99/max, msgs/sec | io_uring socket SQE path |
 | 10 | `srw-bench` | SRW lock contention benchmark | acquire latency (ns) p50/p99/max, ops/sec | sync.c SRW |
@@ -388,13 +388,17 @@ Catches: `virtual_mutex` self-re-entry deadlock, broken PAGE_GUARD
 clear-on-first-access, alloc/free race with fault handler, wrong-thread
 signal delivery.
 
-### 3.7 `large-pages` -- VirtualAlloc(MEM_LARGE_PAGES)
+### 3.7 `large-pages` -- Large-Page Allocation and Working-Set Reporting
 
 `RtlAdjustPrivilege(SE_LOCK_MEMORY_PRIVILEGE)` ->
 `VirtualAlloc(MEM_LARGE_PAGES)` -> `/proc/meminfo` cross-check ->
-page touch round-trip -> `K32QueryWorkingSetEx` PAGEMAP_SCAN
-LargePage-flag check -> `VirtualFree` -> verify `HugePages_Free`
-restored.
+page touch round-trip -> `K32QueryWorkingSetEx` `LargePage` check ->
+`VirtualFree` -> verify `HugePages_Free` restored.
+
+The same harness also validates the shipped section-backed path:
+`CreateFileMapping(SEC_LARGE_PAGES)` plus the privilege-negative case,
+and it exercises the 1 GiB huge-page request shape when the host is
+configured for it.
 
 Skip conditions (PASS): meminfo not readable, `HugePages_Total == 0`,
 `GetLargePageMinimum == 0`, RtlAdjustPrivilege fails.

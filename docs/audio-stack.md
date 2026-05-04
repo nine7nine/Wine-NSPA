@@ -106,7 +106,7 @@ The three flavors above resolve into a single layered data path. Every Win32 aud
     .box-hw { fill: #2a2418; stroke: #e0af68; stroke-width: 1.5; }
     .conn { stroke: #565f89; stroke-width: 1.4; }
     .conn-fast { stroke: #bb9af7; stroke-width: 1.6; stroke-dasharray: 6 3; }
-    .divider { stroke: #3b4261; stroke-width: 1; stroke-dasharray: 4 4; }
+    .divider { stroke: #6b7398; stroke-width: 1; stroke-dasharray: 4 4; }
   </style>
 
   <text x="470" y="26" text-anchor="middle" class="lbl-hdr">Wine-NSPA audio data path -- three API surfaces, one JACK transport</text>
@@ -678,9 +678,10 @@ Other audio drivers (`winealsa.drv`, `winepulse.drv`, `wineoss.drv`) needed stub
   <text x="285" y="170" class="lbl-fx">futex_wake (1)</text>
   <text x="565" y="173" class="lbl-fx">futex_wake (2)</text>
 
-  <text x="80" y="320" class="lbl-dim">data flow: JACK capture -&gt; ASIO input -&gt; bufferSwitch -&gt; ASIO output -&gt; JACK port</text>
-  <text x="80" y="338" class="lbl-dim">handshake: IDLE -&gt; CAPTURE_READY -&gt; OUTPUT_READY -&gt; IDLE   (one JACK period)</text>
-  <text x="80" y="356" class="lbl-dim">audio out the JACK port at end of same period the host filled</text>
+  <text x="80" y="320" class="lbl-dim">data flow: JACK capture -&gt; ASIO input -&gt; bufferSwitch</text>
+  <text x="80" y="338" class="lbl-dim">-&gt; ASIO output -&gt; JACK port</text>
+  <text x="80" y="356" class="lbl-dim">handshake: IDLE -&gt; CAPTURE_READY -&gt; OUTPUT_READY -&gt; IDLE   (one JACK period)</text>
+  <text x="80" y="374" class="lbl-dim">audio out the JACK port at end of same period the host filled</text>
 </svg>
 </div>
 
