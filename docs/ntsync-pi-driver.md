@@ -19,9 +19,10 @@ lives on [NTSync Userspace Sync](ntsync-userspace.gen.html).
 11. [Receive snapshot fix](#11-receive-snapshot-fix)
 12. [Dedicated slab caches](#12-dedicated-slab-caches)
 13. [Lockless SEND_PI target scan](#13-lockless-send_pi-target-scan)
-14. [Validation](#14-validation)
-15. [Audit notes](#15-audit-notes)
-16. [References](#16-references)
+14. [Wait-queue dedicated cache](#14-wait-queue-dedicated-cache)
+15. [Validation](#15-validation)
+16. [Audit notes](#16-audit-notes)
+17. [References](#17-references)
 
 ---
 
@@ -38,10 +39,11 @@ Wine-NSPA now carries a shipped kernel overlay that extends upstream
 - the channel and aggregate-wait primitives that back the gamma dispatcher
 - the later hardening and hot-path cleanup work needed for production use
 
-The current production module is srcversion `F1A9EA24E257A35BB21341D`
-on kernel `6.19.11-rt1-1-nspa`. The feature-by-feature detail below keeps
-the patch numbers for traceability, but the public reading order is by
-capability rather than by patch label.
+The current production module is srcversion `25751C3E41E15401318758E`
+on kernel `6.19.11-rt1-1-nspa` (post-1015, with `SLAB_NO_MERGE` applied
+to all four ntsync caches; see Section 14). The feature-by-feature
+detail below keeps the patch numbers for traceability, but the public
+reading order is by capability rather than by patch label.
 
 This doc is the design and implementation reference for that kernel half:
 what each carried feature adds, what bug it closes, how it preserves NT
@@ -52,12 +54,12 @@ semantics, and how it interacts with `obj_lock` and PREEMPT_RT.
 Wine-NSPA does not fork ntsync. The patches are diffs against upstream
 `drivers/misc/ntsync.c` and apply cleanly in series
 1003 -> 1004 -> 1005 -> 1006 -> 1007 -> 1008 -> 1009 -> 1010 -> 1011 ->
-1012 -> 1013 -> 1014. They live in `wine-rt-claude/ntsync-patches/` as
-standalone unified diffs. The kernel build (`linux-nspa`) applies the
+1012 -> 1013 -> 1014 -> 1015. They live in `wine-rt-claude/ntsync-patches/`
+as standalone unified diffs. The kernel build (`linux-nspa`) applies the
 stack at PKGBUILD time; the resulting `.ko` ships as part of the
 kernel package.
 
-The patch numbering (`1003-` through `1014-`) is local to NSPA. It bears no relationship to upstream NTSync revisions or any LKML series.
+The patch numbering (`1003-` through `1015-`) is local to NSPA. It bears no relationship to upstream NTSync revisions or any LKML series.
 
 ### Feature map at a glance
 
@@ -76,10 +78,11 @@ The patch numbering (`1003-` through `1014-`) is local to NSPA. It bears no rela
 | 1013  | Dedicated kmem_caches                 | `ntsync_event_pi` / `ntsync_channel_entry` / `ntsync_pi_owner` -> own `kmem_cache`s with `SLAB_HWCACHE_ALIGN` | ~120 |
 | 1014  | SEND_PI lockless target scan          | `list_empty_careful` fast-path skips `wq->lock` round-trip on empty waiter queues             | ~10     |
 | 1014a | kmem_cache_free NULL guard            | Site-2089 `pending_pi.new_ep` free now NULL-guarded; closes `cache_from_obj` deref under `SLAB_FREELIST_HARDENED` | ~3 |
+| 1015  | Wait-queue dedicated cache            | `struct ntsync_q` -> own `kmem_cache` (≤16 entries + kmalloc fallback); `SLAB_NO_MERGE` retro-correction across all 4 ntsync caches | ~120 |
 
-Patches 1003-1006, 1010, 1011, and 1013 are feature/infrastructure work; 1007-1009, 1012, 1014, and 1014a
+Patches 1003-1006, 1010, 1011, 1013, and 1015 are feature/infrastructure work; 1007-1009, 1012, 1014, and 1014a
 are minimal surgical fixes for specific KASAN- or trace-confirmed bugs (1014 is also a measurable IRQ-off
-window reduction on the audio hot path). The distinction matters: Section 15 discusses why.
+window reduction on the audio hot path). The distinction matters: Section 16 discusses why.
 
 <div class="diagram-container">
 <svg width="100%" viewBox="0 0 940 520" xmlns="http://www.w3.org/2000/svg">
@@ -177,7 +180,7 @@ window reduction on the audio hot path). The distinction matters: Section 15 dis
   <text x="760" y="408" text-anchor="middle" class="nt-small">single kernel sync substrate for RT waits</text>
   <text x="760" y="424" text-anchor="middle" class="nt-small">channel-backed wineserver transport</text>
   <text x="760" y="440" text-anchor="middle" class="nt-small">aggregate-wait + TRY_RECV2 burst-drain</text>
-  <text x="760" y="456" text-anchor="middle" class="nt-small">1012-1014 carries: snapshot, slab caches, lockless scan</text>
+  <text x="760" y="456" text-anchor="middle" class="nt-small">1012-1015 carries: snapshot, slab caches, lockless scan, wait-q cache</text>
 </svg>
 </div>
 
@@ -1400,7 +1403,257 @@ A four-dimension audit covering the entire post-1014 file:
 
 ---
 
-## 14. Validation
+## 14. Wait-queue dedicated cache
+
+### Motivation
+
+A post-1014a audit (2026-05-05) of the live driver enumerated all
+remaining `kmalloc` / `kzalloc` sites in `ntsync.c`. Six sites total;
+only **two** on the audio dispatcher hot path, both for the per-ioctl
+wait queue (`struct ntsync_q`) allocated by `setup_wait` and
+`ntsync_aggregate_setup`. Every WAIT_ANY / WAIT_ALL / AGGREGATE_WAIT
+ioctl pays one `kmalloc(struct_size(...))` then one `kfree`.
+
+| Site (post-1014a line) | Path                                | Status                       |
+|------------------------|-------------------------------------|------------------------------|
+| 1974  `ntsync_thread_reg`     | per channel thread-register  | COLD -- skip                 |
+| 2160  `ntsync_obj`            | per CreateEvent/Mutex/Sem    | COOL -- marginal             |
+| **2383  wait queue `q`**      | per WAIT_ANY/WAIT_ALL ioctl  | **HOT -- target**            |
+| **2829  wait queue `q` (agg)**| per AGGREGATE_WAIT ioctl     | **HOT -- target**            |
+| 2840  `fds` array             | per wait-with-FDs (var-count)| not eligible                 |
+| 3092  `ntsync_device`         | per chardev open             | COLD -- skip                 |
+
+`struct ntsync_q` is the only HOT kmalloc class that survived 1013.
+
+### Variable-size design
+
+`struct ntsync_q` has a flexible-array member `entries[]` whose count
+is `total_count` -- 1 (typical audio worker) up to
+`NTSYNC_MAX_WAIT_COUNT+1` = 65 (`NtWaitForMultipleObjects` cap) or
+`NTSYNC_AGG_MAX` = 64 (aggregate). Three options were considered:
+
+- **(a)** Single fixed-size cache for "up to 16 entries" plus
+  `kmalloc` fallback when `total_count > 16`. Cleanest.
+- **(b)** Two-tier (small ≤16 + large ≤64) plus `kmalloc` above. Halves
+  typical-case per-slot waste but doubles the cache count.
+- **(c)** Per-cpu pre-allocated buffer pool with sized slots. More
+  code, marginal extra win.
+
+Shipped (a). 16 entries comfortably covers the typical 1-8 audio wait
+depth; larger waits keep the `kmalloc` path with no regression. Slot
+size with `SLAB_HWCACHE_ALIGN` is 704B on x86_64 (header `32` +
+`16×entry(40)` = `672B`, rounded to the next 64-byte cacheline).
+
+### Allocator routing
+
+A `bool from_cache` field is added to `struct ntsync_q`, placed in the
+existing 2-byte trailing pad after `bool ownerdead` so
+`sizeof(struct ntsync_q)` is unchanged. Set by `ntsync_alloc_q`, read
+by `ntsync_free_q`:
+
+```c
+static struct ntsync_q *ntsync_alloc_q(__u32 total_count)
+{
+    struct ntsync_q *q;
+
+    if (total_count <= NTSYNC_Q_CACHE_MAX_ENTRIES) {
+        q = kmem_cache_alloc(ntsync_wait_q_cache, GFP_KERNEL);
+        if (q)
+            q->from_cache = true;
+    } else {
+        q = kmalloc(struct_size(q, entries, total_count), GFP_KERNEL);
+        if (q)
+            q->from_cache = false;
+    }
+    return q;
+}
+
+static void ntsync_free_q(struct ntsync_q *q)
+{
+    if (!q)
+        return;
+    if (q->from_cache)
+        kmem_cache_free(ntsync_wait_q_cache, q);
+    else
+        kfree(q);
+}
+```
+
+`ntsync_free_q` is NULL-safe by design (early return). `kmem_cache_free`
+is *not* NULL-safe under `SLAB_FREELIST_HARDENED` (the 1014a lesson);
+centralising the guard in the wrapper makes per-site audit trivial.
+Two alloc-site conversions plus six free-site conversions complete the
+WAIT_* / AGGREGATE_WAIT path.
+
+### PREEMPT_RT discipline (1006 alloc-hoist invariant)
+
+Both `kmem_cache_alloc(..., GFP_KERNEL)` and `kmalloc(..., GFP_KERNEL)`
+are sleep-prone (they may direct-reclaim). R1 from
+`ntsync-rt-audit.md` forbids sleeping operations under
+`raw_spinlock_t`. Verified at every call site:
+
+| Site                              | Context when ntsync_*_q runs                                |
+|-----------------------------------|-------------------------------------------------------------|
+| `setup_wait` 2383                 | Top of function, no locks held                              |
+| `ntsync_aggregate_setup` 2829     | Top of function, no locks held                              |
+| `setup_wait` err 2421             | Error cleanup, no locks held                                |
+| `ntsync_wait_any` 2573            | After unqueue and `ntsync_pi_work_finish`                   |
+| `ntsync_wait_all` 2746            | After `wait_all_lock` unlock and `ntsync_pi_work_finish`    |
+| `ntsync_aggregate_setup` err 2842 | fds-alloc fail, no locks held                               |
+| `ntsync_aggregate_setup` err 2891 | Partial-init fail, no locks held                            |
+| `ntsync_aggregate_wait` 3083      | After unqueue and `ntsync_pi_work_finish`                   |
+
+The 1006 alloc-hoist invariant is preserved end-to-end.
+
+### UAF / lifecycle (1012 lesson -- N/A)
+
+`struct ntsync_q` has a task-private lifecycle: allocated by the
+syscalling task, populated by the same task, published into wait
+queues under `obj_lock`, `list_del`'d under `obj_lock` during unqueue
+(mutually exclusive with `try_wake_any_*`), then freed. No
+cross-thread free path exists. The 1012 snapshot-vs-refcount lesson
+does not apply -- there is no lock-drop window between mutator and
+freer.
+
+### `SLAB_NO_MERGE` retro-correction
+
+The original 1015 patch only added `SLAB_HWCACHE_ALIGN` (mirroring
+1013). First boot showed the new cache absent from `/proc/slabinfo`.
+`/sys/kernel/slab/` revealed why:
+
+```
+ntsync_channel_entry -> :0000192    # merged
+ntsync_event_pi      -> :0000128    # merged
+ntsync_pi_owner      -> :0000128    # merged
+ntsync_wait_q        -> :0000704    # merged (1015 alone)
+```
+
+**All four** ntsync caches had been merged by SLUB into generic
+kmalloc-N classes. The 1013 architectural promise of "isolation from
+`kmalloc-128`" had not been holding on the **prod** kernel since 1013
+shipped. It held on the **debug** kernel because
+`SLAB_FREELIST_HARDENED` makes caches incompatible for merging --
+different debug-vs-prod config. Section 12's drum-load slabinfo
+absorption table was therefore debug-kernel evidence; on prod, those
+allocations were going into `kmalloc-128` the whole time.
+
+Fix: add `SLAB_NO_MERGE` (available since kernel 6.4; prod runs 6.19)
+to all four `kmem_cache_create` calls, bundled into the 1015 patch as
+a retroactive correction:
+
+```c
+ntsync_event_pi_cache      = kmem_cache_create("ntsync_event_pi",      ..., SLAB_HWCACHE_ALIGN | SLAB_NO_MERGE, NULL);
+ntsync_channel_entry_cache = kmem_cache_create("ntsync_channel_entry", ..., SLAB_HWCACHE_ALIGN | SLAB_NO_MERGE, NULL);
+ntsync_pi_owner_cache      = kmem_cache_create("ntsync_pi_owner",      ..., SLAB_HWCACHE_ALIGN | SLAB_NO_MERGE, NULL);
+ntsync_wait_q_cache        = kmem_cache_create("ntsync_wait_q",        ..., SLAB_HWCACHE_ALIGN | SLAB_NO_MERGE, NULL);
+```
+
+After the fix, `/sys/kernel/slab/ntsync_*/` are all real directories;
+no symlinks, no merging. The 1013 isolation promise now actually holds
+on prod.
+
+### Workload absorption (Ableton, prod kernel, 30s windows at 1Hz)
+
+| cache                  | active_objs (steady-state) | kmalloc-N delta during same window |
+|------------------------|----------------------------|------------------------------------|
+| `ntsync_wait_q`        | 184                        | `kmalloc-1k` delta = 0             |
+| `ntsync_event_pi`      | 256                        | covered in dedicated cache         |
+| `ntsync_channel_entry` | 168                        | covered in dedicated cache         |
+| `ntsync_pi_owner`      | 256                        | covered in dedicated cache         |
+
+184 active `ntsync_wait_q` objects is the steady-state concurrency of
+Ableton's worker pool parked in `NtWaitForMultipleObjects`. Pre-1015
+those 184 would have lived in `kmalloc-1k`; post-1015 they sit in the
+dedicated cache, with `kmalloc-1k` flat across the load window --
+isolation proven on the prod kernel for the first time since 1013.
+
+The `active_objs` metric is *concurrency*, not throughput; a
+per-second alloc-rate proof would need
+`/sys/kernel/slab/ntsync_wait_q/alloc_calls` cumulative deltas or a
+`slabtop` snapshot pair. Not a gate, just a refinement for future
+evidence-gathering.
+
+### Independence
+
+1015 has no dependency on 1012 / 1013 / 1014; the patches remain
+separately revertable. The `SLAB_NO_MERGE` retro-correction is bundled
+because both edits live in the same `kmem_cache_create` chain --
+shipping it as a separate `1013a` would have meant two patch
+applications for one logical change.
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 940 360" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .wq-bg { fill: #1a1b26; }
+    .wq-box { fill: #24283b; stroke: #7aa2f7; stroke-width: 1.6; rx: 8; }
+    .wq-cache-pre { fill: #2a1f14; stroke: #e0af68; stroke-width: 1.6; rx: 8; stroke-dasharray: 6,4; }
+    .wq-cache { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
+    .wq-new { fill: #1a1a2a; stroke: #bb9af7; stroke-width: 2; rx: 8; }
+    .wq-t { fill: #c0caf5; font: 11px 'JetBrains Mono', monospace; }
+    .wq-s { fill: #a9b1d6; font: 9px 'JetBrains Mono', monospace; }
+    .wq-h { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
+    .wq-y { fill: #e0af68; font: bold 10px 'JetBrains Mono', monospace; }
+    .wq-g { fill: #9ece6a; font: bold 10px 'JetBrains Mono', monospace; }
+    .wq-v { fill: #bb9af7; font: bold 10px 'JetBrains Mono', monospace; }
+    .wq-line { stroke: #c0caf5; stroke-width: 1.2; fill: none; }
+    .wq-link { stroke: #7aa2f7; stroke-width: 1.4; fill: none; }
+  </style>
+
+  <rect x="0" y="0" width="940" height="360" class="wq-bg"/>
+  <text x="470" y="28" text-anchor="middle" class="wq-h">1015: ntsync_wait_q cache + SLAB_NO_MERGE on all four ntsync caches</text>
+
+  <rect x="40" y="60" width="270" height="86" class="wq-box"/>
+  <text x="175" y="84" text-anchor="middle" class="wq-t">WAIT_ANY / WAIT_ALL / AGGREGATE_WAIT</text>
+  <text x="175" y="104" text-anchor="middle" class="wq-s">setup_wait (q = ntsync_alloc_q(total_count))</text>
+  <text x="175" y="120" text-anchor="middle" class="wq-s">ntsync_aggregate_setup (q = ntsync_alloc_q(nb_obj))</text>
+  <text x="175" y="138" text-anchor="middle" class="wq-s">total_count: 1 typical, 16 cache cap, 65 max</text>
+
+  <rect x="365" y="60" width="240" height="86" class="wq-new"/>
+  <text x="485" y="84" text-anchor="middle" class="wq-v">ntsync_wait_q (704B slot)</text>
+  <text x="485" y="104" text-anchor="middle" class="wq-s">≤16 entries -> cache slot</text>
+  <text x="485" y="120" text-anchor="middle" class="wq-s">&gt;16 entries -> kmalloc fallback</text>
+  <text x="485" y="138" text-anchor="middle" class="wq-s">routed via q-&gt;from_cache (in pad)</text>
+
+  <rect x="660" y="60" width="240" height="86" class="wq-box"/>
+  <text x="780" y="84" text-anchor="middle" class="wq-t">Ableton steady-state</text>
+  <text x="780" y="104" text-anchor="middle" class="wq-s">184 active objs (worker-pool waits)</text>
+  <text x="780" y="120" text-anchor="middle" class="wq-s">pre-1015 home: kmalloc-1k</text>
+  <text x="780" y="138" text-anchor="middle" class="wq-s">kmalloc-1k delta = 0 across load</text>
+
+  <line x1="310" y1="103" x2="365" y2="103" class="wq-link"/>
+  <line x1="605" y1="103" x2="660" y2="103" class="wq-link"/>
+
+  <rect x="40" y="178" width="860" height="50" class="wq-cache-pre"/>
+  <text x="470" y="200" text-anchor="middle" class="wq-y">Pre-SLAB_NO_MERGE on prod kernel: all four caches silently merged into generic kmalloc-N</text>
+  <text x="470" y="218" text-anchor="middle" class="wq-s">/sys/kernel/slab/ntsync_* are symlinks to :0000128 / :0000192 / :0000704</text>
+
+  <rect x="40" y="240" width="200" height="76" class="wq-cache"/>
+  <text x="140" y="262" text-anchor="middle" class="wq-g">ntsync_event_pi</text>
+  <text x="140" y="282" text-anchor="middle" class="wq-s">128B slot · 1013</text>
+  <text x="140" y="300" text-anchor="middle" class="wq-s">SLAB_NO_MERGE</text>
+
+  <rect x="248" y="240" width="200" height="76" class="wq-cache"/>
+  <text x="348" y="262" text-anchor="middle" class="wq-g">ntsync_channel_entry</text>
+  <text x="348" y="282" text-anchor="middle" class="wq-s">192B slot · 1013</text>
+  <text x="348" y="300" text-anchor="middle" class="wq-s">SLAB_NO_MERGE</text>
+
+  <rect x="456" y="240" width="200" height="76" class="wq-cache"/>
+  <text x="556" y="262" text-anchor="middle" class="wq-g">ntsync_pi_owner</text>
+  <text x="556" y="282" text-anchor="middle" class="wq-s">128B slot · 1013</text>
+  <text x="556" y="300" text-anchor="middle" class="wq-s">SLAB_NO_MERGE</text>
+
+  <rect x="664" y="240" width="236" height="76" class="wq-new"/>
+  <text x="782" y="262" text-anchor="middle" class="wq-v">ntsync_wait_q  (NEW · 1015)</text>
+  <text x="782" y="282" text-anchor="middle" class="wq-s">704B slot · ≤16-entry q + fallback</text>
+  <text x="782" y="300" text-anchor="middle" class="wq-s">SLAB_HWCACHE_ALIGN | SLAB_NO_MERGE</text>
+
+  <text x="470" y="338" text-anchor="middle" class="wq-t">production module srcversion `25751C3E41E15401318758E` (post-1015 + SLAB_NO_MERGE)</text>
+</svg>
+</div>
+
+---
+
+## 15. Validation
 
 ### Module srcversion lineage
 
@@ -1412,10 +1665,12 @@ A four-dimension audit covering the entire post-1014 file:
 | `A250A77651C8D5DAB719FE2`   | + Bug 4 fix (1009)              | post-1009 production baseline; ~370M mixed ops validated          |
 | `CFF56DE1EF28D693BB597CD`   | + 1010 + post-1010 PI follow-ups| aggregate-wait production module; same-thread dispatcher default-on |
 | `10124FB81FDC76797EF1F91`   | + 1011                          | TRY_RECV2 available for burst drain                                |
-| `F1A9EA24E257A35BB21341D`   | + 1012 + 1013 + 1014 (1014a)    | current production module; channel snapshot UAF closed, dedicated kmem_caches, lockless SEND_PI target scan |
+| `F1A9EA24E257A35BB21341D`   | + 1012 + 1013 + 1014 (1014a)    | post-1014a; channel snapshot UAF closed, dedicated kmem_caches (debug-merged on prod, see 14), lockless SEND_PI target scan |
+| `F31543CEDB86AC07AE7C06E`   | + 1015 (initial)                | Wait-q kmem_cache landed; first boot revealed all 4 ntsync caches were silently SLUB-merged on prod kernel |
+| `25751C3E41E15401318758E`   | + 1015 (with `SLAB_NO_MERGE`)   | current production module; `SLAB_NO_MERGE` retro-applied to all four ntsync caches, isolation now actually holds on prod |
 | `BD93BECF70D336DC1A80337`   | (rolled-back Codex 1007-1011)   | Historical only; do not load                                       |
 
-The current production module at `/lib/modules/6.19.11-rt1-1-nspa/kernel/drivers/misc/ntsync.ko` is `F1A9EA24E257A35BB21341D`.
+The current production module at `/lib/modules/6.19.11-rt1-1-nspa/kernel/drivers/misc/ntsync.ko` is `25751C3E41E15401318758E`.
 
 ### Stress validation (debug kernel, KASAN-on)
 
@@ -1518,7 +1773,46 @@ on prod kernel `6.19.11-rt1-1-nspa`: 16/16 RT pass + 3/3 native ioctl
 pass; channel snapshot UAF and `kmem_cache_free` NULL-deref both
 closed; dedicated kmem_cache slabinfo evidence captured under real
 Ableton drum-load (158 new event-PI staging pairs absorbed in the
-dedicated caches with `kmalloc-128` flat).
+dedicated caches with `kmalloc-128` flat). Note: that drum-load
+slabinfo capture was on the **debug** kernel; on the prod kernel the
+1013 caches had been SLUB-merged into `kmalloc-128` the entire time,
+which is the issue 1015's `SLAB_NO_MERGE` retro-correction fixes
+(Section 14).
+
+### Post-1015 validation (prod kernel)
+
+The 1015 build was validated against the same prod kernel
+`6.19.11-rt1-1-nspa`. The native ioctl soak (`validate-1015.sh`,
+which exercises both `setup_wait` and `ntsync_aggregate_setup` alloc
+paths through `test-mixed-load-stress`, `test-channel-stress`,
+`test-channel-try-recv2-stress`, and `test-aggregate-wait`) was not
+invoked this round: the prod kernel has no
+`SLAB_FREELIST_HARDENED`/KASAN tooling, so the soak's signal value
+collapses to functional-only -- which Ableton already provides at
+much higher rate. The actual correctness gate was the
+four-dimension audit plus the NULL-safe `ntsync_free_q` wrapper.
+
+Empirical safety: Ableton booted clean both pre- and
+post-`SLAB_NO_MERGE` rebuild; audio-path WAIT_ANY ioctls drove the
+new alloc/free pair constantly with no GP-fault, so `from_cache`
+routing is correct in both directions.
+
+Slabinfo absorption (`validate-1015-slabinfo-watch.sh`, Ableton 30s
+windows at 1Hz, project loaded, mixed transport activity):
+
+- `ntsync_wait_q` steady-state 184 active objects (worker pool parked
+  in `NtWaitForMultipleObjects`).
+- `ntsync_event_pi` 256, `ntsync_channel_entry` 168, `ntsync_pi_owner`
+  256.
+- `kmalloc-1k` delta = 0 across the load window; `kmalloc-128/192/
+  256/512` deltas are unrelated system traffic, same shape pre-1015.
+
+The 184 active `ntsync_wait_q` objects -- that would have been in
+`kmalloc-1k` on every prior build -- combined with the flat
+`kmalloc-1k` row, are the isolation proof on prod. `active_objs` is
+concurrency, not throughput; per-second alloc rate would need
+`/sys/kernel/slab/ntsync_wait_q/alloc_calls` deltas (not a gate, just
+a refinement).
 
 Per the slub_debug benchmark caveat (`feedback_slub_debug_skews_benchmarks.md`), only PASS/FAIL is authoritative across debug vs production kernels; throughput numbers aren't directly comparable (debug-kernel `slub_debug=FZPU` + kfence + KASAN tax dominates).
 
@@ -1538,7 +1832,7 @@ Priority wakeup ordering is exact (5 waiters at distinct priorities wake in prio
 
 ---
 
-## 15. Audit notes
+## 16. Audit notes
 
 The patches in this stack divide cleanly into two categories. The boundary matters because it dictates which patches were safe to ship in a flurry and which weren't.
 
@@ -1589,7 +1883,7 @@ This is also why 1006 was safe to ship in-flurry while the rolled-back 1007-1011
 
 ---
 
-## 16. References
+## 17. References
 
 ### Patches (NSPA tree)
 
@@ -1607,6 +1901,7 @@ All in `wine-rt-claude/ntsync-patches/`:
 - `1012-ntsync-channel-recv-snapshot-pop-fields-uaf-fix.patch` -- snapshot popped fields under `obj_lock`
 - `1013-ntsync-dedicated-slab-caches.patch` -- dedicated `kmem_cache`s for the three hot allocation classes
 - `1014-ntsync-channel-send-pi-lockless-target-scan.patch` -- `list_empty_careful` fast-path on `SEND_PI`, with the 1014a `kmem_cache_free` NULL guard at site 2089 folded in
+- `1015-ntsync-wait-q-kmem-cache.patch` -- dedicated `kmem_cache` for `struct ntsync_q` (≤16 entries + `kmalloc` fallback) and `SLAB_NO_MERGE` retro-correction across all four ntsync caches
 
 ### Production source
 
@@ -1632,6 +1927,8 @@ In `wine/nspa/tests/`:
 - `test-aggregate-wait.c` -- 1010 aggregate-wait functional + PI sub-tests
 - `test-mixed-load-stress.c` -- 13-thread cross-path soak
 - `run-rt-suite.sh` -- sanity runner with `SKIPPED_BY_DESIGN` list
+- `wine-rt-claude/ntsync-patches/validate-1015.sh` -- 1015 native ioctl soak driver (covers both `setup_wait` and `ntsync_aggregate_setup` alloc paths)
+- `wine-rt-claude/ntsync-patches/validate-1015-slabinfo-watch.sh` -- 1015 Ableton-side `/proc/slabinfo` 1Hz capture for absorption / isolation evidence
 
 ### Audit / handoff documentation
 
@@ -1643,11 +1940,12 @@ In project memory (`/home/ninez/.claude/projects/-home-ninez-pkgbuilds-Wine-NSPA
 - `project_ntsync_channel_reply_uaf_20260427.md` -- 1009 KASAN trace + minimal-fix discussion
 - `project_ntsync_session_20260504_evening_kasan.md` -- 1012 channel field-snapshot UAF discovery + fix
 - `project_ntsync_session_20260504_late_kmem_cache_audit.md` -- 1014a NULL-deref crash + 4-dim audit
-- `feedback_dont_shotgun_audit_into_unfound_bug.md` -- the lesson behind Section 15
+- `feedback_dont_shotgun_audit_into_unfound_bug.md` -- the lesson behind Section 16
 - `feedback_kmem_cache_free_not_null_safe.md` -- the 1014a lesson captured
 - `feedback_slub_debug_skews_benchmarks.md` -- why debug-vs-prod throughput numbers don't compare
-- `wine/nspa/docs/ntsync-1012-1014-architectural-notes-20260504.md` -- canonical in-tree notes for 1012 / 1013 / 1014 / 1014a
+- `wine/nspa/docs/ntsync-1012-1014-architectural-notes-20260504.md` -- canonical in-tree notes for 1012 / 1013 / 1014 / 1014a / 1015
 - `wine/nspa/docs/ntsync-rt-audit.md` -- in-tree audit doc
+- `project_ntsync_1015_shipped_20260505.md` -- 1015 + `SLAB_NO_MERGE` retro-correction shipped + Ableton-validated
 
 ### Cross-references
 
