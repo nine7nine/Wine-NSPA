@@ -1,9 +1,7 @@
 # Wine-NSPA -- librtpi (PI mutex / condvar)
 
 This page documents Wine-NSPA's Wine-internal librtpi shim for
-PI-aware Unix-side mutexes and condition variables, including the
-recursive-mutex extension and the automated tree-wide sweep that moved
-Wine call sites onto it.
+PI-aware Unix-side mutexes and condition variables.
 
 ## Table of Contents
 

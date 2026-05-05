@@ -1,10 +1,7 @@
 # Wine-NSPA -- Aggregate-Wait and Async Completion
 
-This page documents the **landed** aggregate-wait slice in Wine-NSPA:
-the `NTSYNC_IOC_AGGREGATE_WAIT` kernel primitive plus the first
-userspace consumer shape that uses it: the gamma dispatcher's
-per-process `io_uring` ownership model and its same-thread
-aggregate-wait receive / CQE-drain / reply loop.
+This page documents Wine-NSPA's shipped aggregate-wait kernel primitive
+and the dispatcher-owned same-thread async-completion path built on it.
 
 ---
 

@@ -1,8 +1,7 @@
 # Wine-NSPA -- io_uring I/O Architecture
 
-This page explains where `io_uring` fits in Wine-NSPA, what has already landed
-for file and socket I/O, and which surfaces remain outside the `io_uring`
-boundary because they are still fundamentally server-managed.
+This page documents Wine-NSPA's shipped `io_uring` surface for file and
+socket I/O.
 
 ## Table of Contents
 

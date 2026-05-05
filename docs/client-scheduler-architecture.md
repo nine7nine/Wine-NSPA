@@ -1,9 +1,7 @@
 # Wine-NSPA -- Client Scheduler Architecture
 
-This page explains the client-side scheduler infrastructure that landed on
-2026-05-02: the spawn-main thread split, the per-process `ntdll_sched`
-dispatch loops, the lazy RT-class sched thread, and the first consumers now
-routed through them.
+This page documents the shipped client-side scheduler hosts and the
+current consumers routed through them.
 
 ## Table of Contents
 

@@ -1,6 +1,7 @@
 # Wine-NSPA -- Gamma Channel Dispatcher
 
-This page explains the current wineserver request path for a Wine process: how requests enter the gamma channel, how the dispatcher owns the reply path, and how the aggregate-wait dispatcher loop fits into that design.
+This page documents the shipped gamma request path and the
+aggregate-wait dispatcher loop that completes it.
 
 ## Table of Contents
 

@@ -1,6 +1,7 @@
 # Wine-NSPA -- Wineserver Decomposition
 
-This page explains the residual wineserver architecture problem after the existing bypasses, which decomposition slices have already landed, and which ones are still roadmap material.
+This page documents the residual wineserver problem after the shipped
+bypasses and the remaining decomposition roadmap.
 
 ## Table of Contents
 

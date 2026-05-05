@@ -1,10 +1,8 @@
 # Wine-NSPA -- NTSync PI Kernel
 
-This page documents the Wine-NSPA ntsync kernel overlay: the
-priority-inheritance baseline, channel transport, aggregate-wait,
-burst drain, and the later hardening work needed to keep the shipped
-PREEMPT_RT path production-safe. The companion Wine-side half lives on
-[NTSync Userspace Sync](ntsync-userspace.gen.html).
+This page documents the Wine-NSPA ntsync kernel overlay that backs PI
+waits, gamma channels, and aggregate-wait. The companion Wine-side half
+lives on [NTSync Userspace Sync](ntsync-userspace.gen.html).
 
 ## Table of Contents
 

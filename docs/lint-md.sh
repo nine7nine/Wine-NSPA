@@ -17,11 +17,21 @@ error() {
 
 check_top_structure() {
     local file="$1"
-    local head40 head80 head60
+    local head40 head80 head60 intro_block intro_paras intro_sentences
 
     head40=$(sed -n '1,40p' "$file")
     head60=$(sed -n '1,60p' "$file")
     head80=$(sed -n '1,80p' "$file")
+    if ! grep -q '^## Table of Contents' "$file"; then
+        return
+    fi
+
+    intro_block=$(awk '
+        NR==1 { next }
+        /^## Table of Contents/ { exit }
+        /^---$/ { next }
+        { print }
+    ' "$file")
 
     if grep -Eq '^(Status:|\*\*Status:\*\*|> \*\*Status:|\*\*Date:\*\*|Author:|Wine 11\.6|Linux-NSPA )' <<<"$head40"; then
         error "$file: page top still contains metadata/status banner content"
@@ -33,6 +43,31 @@ check_top_structure() {
 
     if grep -Eqi '^(#|[0-9]+\.) .*Phase [0-9A-Z]|kernel patch [0-9]{4}|patch [0-9]{4}' <<<"$head60"; then
         warn "$file: public-facing title/TOC still leads with internal phase or patch naming"
+    fi
+
+    intro_paras=$(perl -0ne '
+        s/^\s+|\s+$//g;
+        if (length($_)) {
+            @p = grep { /\S/ } split(/\n\s*\n/, $_);
+            print scalar(@p);
+        } else {
+            print 0;
+        }
+    ' <<<"$intro_block")
+
+    if [[ "${intro_paras:-0}" -gt 1 ]]; then
+        error "$file: page top should be a single short intro paragraph before the TOC"
+    fi
+
+    intro_sentences=$(perl -0ne '
+        s/\n/ /g;
+        s/\s+/ /g;
+        my $count = () = /[.!?](?:["'"'"'`)]+)?(?:\s|$)/g;
+        print $count;
+    ' <<<"$intro_block")
+
+    if [[ "${intro_sentences:-0}" -gt 2 ]]; then
+        warn "$file: page top intro should stay to one or two sentences before the TOC"
     fi
 }
 

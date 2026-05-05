@@ -1,6 +1,7 @@
 # Wine-NSPA -- NT-local stubs
 
-This page explains the NT-local stub pattern itself: what gets moved into the client process, how cross-process arbitration is still preserved, and how the shipped stubs fit into the broader decomposition story.
+This page documents the NT-local stub pattern and the shipped stub
+surfaces built on it.
 
 ## Table of Contents
 

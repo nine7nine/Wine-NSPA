@@ -1,9 +1,7 @@
 # Wine-NSPA -- Local Section Bypass
 
-This page covers the shipped client-side section path built on top of the
-local-file bypass: eligible file-backed sections are created, mapped, queried,
-unmapped, and closed inside the client process, with honest fallback when the
-call crosses into server-owned or cross-process semantics.
+This page documents the shipped client-side section path built on top of
+local-file handles.
 
 ## Table of Contents
 

@@ -1,10 +1,8 @@
 # Wine-NSPA -- Memory, Sections, Large Pages, and Working-Set Support
 
-This page covers the shipped Wine-NSPA memory surface: client-side local
-sections, large-page allocation, large-page file mappings, RT-keyed page
-locking and hugetlb promotion, current-process working-set reporting,
-working-set quota bookkeeping, and the shared-memory backing choices used by
-the major bypass subsystems.
+This page documents Wine-NSPA's shipped memory surface: local sections,
+RT-keyed page locking and hugetlb, working-set support, and shared-memory
+backing choices.
 
 ## Table of Contents
 
