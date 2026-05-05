@@ -109,9 +109,10 @@
 <h1 id="wine-nspa--memory-sections-large-pages-and-working-set-support">Wine-NSPA &ndash; Memory, Sections, Large Pages, and Working-Set Support</h1>
 
 <p>This page covers the shipped Wine-NSPA memory surface: client-side local
-sections, large-page allocation, large-page file mappings, current-process
-working-set reporting, working-set quota bookkeeping, and the shared-memory
-backing choices used by the major bypass subsystems.</p>
+sections, large-page allocation, large-page file mappings, RT-keyed page
+locking and hugetlb promotion, current-process working-set reporting,
+working-set quota bookkeeping, and the shared-memory backing choices used by
+the major bypass subsystems.</p>
 
 <h2 id="table-of-contents">Table of Contents</h2>
 
@@ -122,7 +123,7 @@ backing choices used by the major bypass subsystems.</p>
 <li><a href="#4-large-page-allocation-and-mapping">Large-page allocation and mapping</a></li>
 <li><a href="#5-working-set-reporting-and-quota-semantics">Working-set reporting and quota semantics</a></li>
 <li><a href="#6-shared-memory-backing-choices">Shared-memory backing choices</a></li>
-<li><a href="#7-validation-surface">Validation surface</a></li>
+<li><a href="#7-validation-and-observed-effect">Validation and observed effect</a></li>
 <li><a href="#8-implementation-map">Implementation map</a></li>
 <li><a href="#9-related-docs">Related docs</a></li>
 </ol>
@@ -132,14 +133,15 @@ backing choices used by the major bypass subsystems.</p>
 
 <h2 id="1-overview">1. Overview</h2>
 
-<p>Wine-NSPA has a real memory subsystem story now. It is not just &ldquo;some
-hugepage patches&rdquo; and it is not just &ldquo;memfd everywhere.&rdquo;</p>
+<p>Wine-NSPA has a real memory subsystem story now. It is not just large-page
+syscall support and it is not just <code>memfd</code> everywhere.</p>
 
-<p>Three distinct pieces are shipped:</p>
+<p>Four distinct pieces are shipped:</p>
 
 <ul>
 <li>client-side file-backed sections built on top of local-file handles</li>
 <li>large-page support for anonymous and section-backed mappings</li>
+<li>RT-keyed page locking and hugetlb promotion for the hot anonymous-memory path</li>
 <li>working-set reporting plus working-set quota bookkeeping</li>
 <li>selective shared-memory backing choices for bypass state</li>
 </ul>
@@ -180,6 +182,18 @@ mechanism.</p>
 <tr>
 <td> <code>CreateFileMapping(SEC_LARGE_PAGES)</code> </td>
 <td> Privilege-gated, backed through large-page-capable <code>memfd_create()</code> on the wineserver side, and mapped with large-page alignment rules. </td>
+</tr>
+<tr>
+<td> RT-keyed <code>mlockall()</code> </td>
+<td> When <code>NSPA_RT_PRIO</code> is set, process startup issues <code>mlockall(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT)</code> so touched pages stay locked without pretending Wine has a full working-set manager. </td>
+</tr>
+<tr>
+<td> RT-keyed transparent hugetlb </td>
+<td> When <code>NSPA_RT_PRIO</code> is set, eligible anonymous <code>RESERVE|COMMIT</code> RW allocations auto-promote onto the existing large-page mapping path. </td>
+</tr>
+<tr>
+<td> RT-keyed heap arena hugetlb backing </td>
+<td> When <code>NSPA_RT_PRIO</code> is set, eligible growable heap arenas round up and full-commit onto huge pages, eliminating most heap-driven <code>mmap</code> / <code>mprotect</code> / page-fault traffic from the hot path. </td>
 </tr>
 <tr>
 <td> local file-backed sections </td>
@@ -239,8 +253,10 @@ guessed at.</p>
 
 <h2 id="4-large-page-allocation-and-mapping">4. Large-page allocation and mapping</h2>
 
-<p>Large-page support has two entry paths: anonymous allocation and section-backed
-mapping. Both start from Windows-visible APIs, but the backing shape differs.</p>
+<p>Large-page support now has three shipped shapes: explicit Windows large-page
+APIs, RT-keyed anonymous-memory promotion, and heap-arena backing that rides on
+that same anonymous path. Section-backed mappings remain the one large-page
+shape that still crosses wineserver once for backing creation.</p>
 
 <div class="diagram-container">
 <svg width="100%" viewBox="0 0 960 430" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
@@ -378,7 +394,7 @@ quota values by reclaiming or emptying the process working set.</p>
   <text x="555" y="142" class="ws-label">`NtSetInformationProcess(ProcessQuotaLimits)`</text>
   <text x="555" y="162" class="ws-label">values stored in process bookkeeping</text>
   <text x="555" y="182" class="ws-label">`GetProcessWorkingSetSize(Ex)` returns the stored values</text>
-  <text x="555" y="202" class="ws-label">no `mlockall`, no kernel-side trimmer, no forced sweep</text>
+  <text x="555" y="202" class="ws-label">no kernel-side trimmer, no forced sweep, no fake reclaim story</text>
   <text x="555" y="222" class="ws-label">Windows-visible quota surface is present without fake enforcement</text>
   <text x="555" y="244" class="ws-small">keeps compatibility and diagnostics honest</text>
   <text x="555" y="258" class="ws-small">without claiming a memory manager Wine does not have</text>
@@ -390,8 +406,9 @@ quota values by reclaiming or emptying the process working set.</p>
 
 
 <p>That division is intentional. Reporting should be correct. Quota APIs should
-behave coherently. But the docs should not imply that Wine-NSPA has grown a
-full Windows-style working-set manager. It has not.</p>
+behave coherently. RT-keyed <code>mlockall()</code> improves residency behavior for the
+actual process, but the docs should not imply that Wine-NSPA has grown a full
+Windows-style working-set manager or a quota-enforcing trimmer. It has not.</p>
 
 <hr />
 
@@ -474,7 +491,7 @@ performance goals are different.</p>
 
 <hr />
 
-<h2 id="7-validation-surface">7. Validation surface</h2>
+<h2 id="7-validation-and-observed-effect">7. Validation and observed effect</h2>
 
 <p>The public <code>large-pages</code> PE harness now covers more than one call shape:</p>
 
@@ -494,6 +511,25 @@ through the shipped workload path rather than a dedicated PE harness:
 clean on the local path and materially reduces mapping RPC traffic.</p>
 
 <p>The relevant public harness documentation lives on <code>nspa-rt-test.gen.html</code>.</p>
+
+<p>The newer RT-keyed memory work was validated separately on real workloads and
+targeted shell harnesses:</p>
+
+<ul>
+<li><code>mlockall()</code> under <code>NSPA_RT_PRIO</code> cut perf page faults from <code>561/s</code> to
+<code>451/s</code>, cut bpf page faults from <code>869/s</code> to <code>629/s</code>, and tightened max
+futex wait from <code>94us</code> to <code>49us</code>, with <code>VmLck</code> around <code>300848kB</code>.</li>
+<li>transparent hugetlb auto-promotion stayed conservative and is now keyed only
+off <code>NSPA_RT_PRIO</code>; the cleanup pass ended with <code>test-huge-auto.sh</code> <code>3/3 PASS</code>.</li>
+<li>heap arena hugetlb backing increased hugepage regions from <code>3</code> or <code>6</code> to
+<code>104</code>, reduced dTLB miss / insn to <code>0.071%</code>, reduced <code>mmap</code> rate from
+<code>33-61/s</code> to <code>0.13/s</code>, reduced <code>mprotect</code> rate from <code>56-90/s</code> to <code>0.03/s</code>,
+and reduced page-faults from <code>753-869/s</code> to <code>2.8/s</code>.</li>
+<li>after the gate cleanup, the public shell checks finished at
+<code>test-mlock-ws.sh 4/4</code>, <code>test-huge-auto.sh 3/3</code>, and
+<code>test-heap-hugepage.sh 3/3</code>.</li>
+</ul>
+
 
 <hr />
 
@@ -525,11 +561,15 @@ clean on the local path and materially reduces mapping RPC traffic.</p>
 </tr>
 <tr>
 <td> <code>dlls/ntdll/unix/virtual.c</code> </td>
-<td> anonymous large-page allocation, large-page view tracking, <code>QueryWorkingSetEx()</code> reporting </td>
+<td> anonymous large-page allocation, transparent hugetlb promotion, large-page view tracking, <code>QueryWorkingSetEx()</code> reporting </td>
 </tr>
 <tr>
 <td> <code>dlls/ntdll/unix/process.c</code> </td>
-<td> <code>ProcessQuotaLimits</code> working-set bookkeeping </td>
+<td> <code>ProcessQuotaLimits</code> working-set bookkeeping plus RT-keyed <code>mlockall()</code> startup </td>
+</tr>
+<tr>
+<td> <code>dlls/ntdll/heap.c</code> </td>
+<td> RT-keyed hugepage arena backing for eligible growable heaps </td>
 </tr>
 <tr>
 <td> <code>dlls/kernelbase/process.c</code> </td>

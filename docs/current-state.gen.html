@@ -156,11 +156,11 @@ single-threaded wineserver path while keeping honest fallback paths for
 cross-process or server-authoritative semantics.</p>
 
 <p>What the project looks like today: one small kernel overlay
-(1003-1011 on top of upstream <code>ntsync</code>) plus a Wine fork that increasingly
+(<code>1003-1014</code> on top of upstream <code>ntsync</code>) plus a Wine fork that increasingly
 routes work through kernel-mediated channels, client-range sync objects,
-bounded shared-memory rings, local NT stubs, and per-process scheduler hosts,
-all still gated so upstream-Wine behaviour remains available when the NSPA
-paths are disabled.</p>
+bounded shared-memory rings, local NT stubs, per-process scheduler hosts, and
+RT-keyed memory tuning. When <code>NSPA_RT_PRIO</code> is unset, the RT-specific paths
+still stand down and upstream-Wine behaviour remains available.</p>
 
 <hr />
 
@@ -190,7 +190,7 @@ paths are disabled.</p>
 </tr>
 <tr>
 <td> ntsync srcversion </td>
-<td> <code>10124FB81FDC76797EF1F91</code> </td>
+<td> <code>F1A9EA24E257A35BB21341D</code> </td>
 </tr>
 <tr>
 <td> Module ref count </td>
@@ -198,7 +198,7 @@ paths are disabled.</p>
 </tr>
 <tr>
 <td> Sources </td>
-<td> upstream <code>drivers/misc/ntsync.{c,h}</code> + NSPA patch stack <code>1003-1011</code> </td>
+<td> upstream <code>drivers/misc/ntsync.{c,h}</code> + NSPA patch stack <code>1003-1014</code> </td>
 </tr>
 </tbody>
 </table>
@@ -228,15 +228,15 @@ paths are disabled.</p>
 </tr>
 <tr>
 <td> Async file path </td>
-<td> async <code>CreateFile</code>, default ON </td>
+<td> dispatcher-owned async <code>CreateFile</code> on the per-process ring </td>
 </tr>
 <tr>
 <td> Async socket path </td>
-<td> <code>io_uring</code> RECVMSG / SENDMSG, default ON </td>
+<td> <code>io_uring</code> <code>RECVMSG</code> / <code>SENDMSG</code> shipped on the deferred path </td>
 </tr>
 <tr>
 <td> Memory surface </td>
-<td> client-side local sections, large pages, current-process <code>QueryWorkingSetEx</code>, and working-set quota bookkeeping shipped </td>
+<td> local sections, large pages, current-process <code>QueryWorkingSetEx</code>, working-set quota bookkeeping, RT-keyed <code>mlockall()</code>, transparent hugetlb promotion, and heap arena hugetlb backing shipped </td>
 </tr>
 <tr>
 <td> Local sync path </td>
@@ -316,80 +316,59 @@ paths are disabled.</p>
 <td> <code>NTSYNC_IOC_CHANNEL_TRY_RECV2</code>: non-blocking <code>RECV2</code> for post-dispatch burst drain </td>
 <td> Shipped </td>
 </tr>
+<tr>
+<td> 1012 </td>
+<td> Receive snapshot fix </td>
+<td> snapshots popped channel-entry fields under <code>obj_lock</code>; closes post-1011 slab UAF on <code>RECV</code> / <code>RECV2</code> </td>
+<td> Shipped </td>
+</tr>
+<tr>
+<td> 1013 </td>
+<td> Dedicated slab caches </td>
+<td> moves hot ntsync allocation classes into dedicated <code>kmem_cache</code>s with <code>SLAB_HWCACHE_ALIGN</code> </td>
+<td> Shipped </td>
+</tr>
+<tr>
+<td> 1014 </td>
+<td> Lockless SEND_PI target scan </td>
+<td> <code>list_empty_careful</code> fast-path avoids a wasted <code>wq-&gt;lock</code> round-trip on the common empty-queue case </td>
+<td> Shipped </td>
+</tr>
 </tbody>
 </table>
 
 
-<h3 id="24-2026-04-30-shipped-defaults">2.4 2026-04-30 shipped defaults</h3>
+<h3 id="24-2026-04-30-dispatcher-and-flush-follow-ons">2.4 2026-04-30 dispatcher and flush follow-ons</h3>
 
 <table>
 <thead>
 <tr>
-<th> Feature </th>
-<th> Default </th>
-<th> Override </th>
-<th> User-visible result </th>
+<th> Change </th>
+<th> Shipped effect </th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td> <code>NSPA_FLUSH_THROTTLE_MS</code> </td>
-<td> <code>8</code> </td>
-<td> <code>NSPA_FLUSH_THROTTLE_MS=N</code>; <code>=0</code> disables </td>
-<td> <code>x11drv_surface_flush</code>: 8.23% -> 4.74% (−43%); <code>copy_rect_32</code> memmove: 4.38% -> 2.49% (−43%); MainThread CPU recovered: ~5.4 percentage points </td>
+<td> <code>NSPA_FLUSH_THROTTLE_MS=8</code> </td>
+<td> <code>x11drv_surface_flush</code>: <code>8.23%</code> -> <code>4.74%</code> (<code>-43%</code>); <code>copy_rect_32</code> memmove: <code>4.38%</code> -> <code>2.49%</code> (<code>-43%</code>); MainThread CPU recovered: <code>~5.4</code> percentage points </td>
 </tr>
 <tr>
-<td> <code>NSPA_ENABLE_ASYNC_CREATE_FILE</code> </td>
-<td> <code>1</code> </td>
-<td> <code>NSPA_ENABLE_ASYNC_CREATE_FILE=0</code> </td>
-<td> routes <code>CreateFile</code> through the per-process <code>io_uring</code> ring, removing the <code>open()</code> lock-drop CS from the audio xrun path </td>
+<td> aggregate-wait + <code>TRY_RECV2</code> burst drain </td>
+<td> dispatcher drains multiple queued entries per wake instead of paying N aggregate-wait round-trips </td>
 </tr>
 <tr>
-<td> <code>NSPA_TRY_RECV2</code> </td>
-<td> <code>1</code> </td>
-<td> <code>NSPA_TRY_RECV2=0</code> </td>
-<td> On ntsync 1011 kernels, drains multiple channel entries per <code>AGG_WAIT</code> instead of N round-trips </td>
+<td> dispatcher-owned async <code>CreateFile</code> </td>
+<td> removes the <code>open()</code> lock-drop critical section from the audio xrun path </td>
+</tr>
+<tr>
+<td> hot-path follow-ons (<code>1d85c558ceb</code>, <code>c0f5c515cd7</code>, <code>2870c9629ce</code>, <code>0802dadc750</code>) </td>
+<td> removes queue-helper call overhead, strips allocator-debug tax from production, and inlines <code>read_request_shm</code> on the dispatcher path </td>
 </tr>
 </tbody>
 </table>
 
 
-<h3 id="25-dispatcher-hot-path-follow-ons-shipped-no-user-knob">2.5 Dispatcher hot-path follow-ons (shipped, no user knob)</h3>
-
-<table>
-<thead>
-<tr>
-<th> Commit </th>
-<th> Landed change </th>
-<th> Observed effect </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> <code>1d85c558ceb</code> </td>
-<td> ACQ_REL fences + inline <code>nspa_queue_bypass_shm</code> </td>
-<td> removes the hot accessor call and the unnecessary <code>mfence</code> cost from the dispatcher path </td>
-</tr>
-<tr>
-<td> <code>c0f5c515cd7</code> + <code>2870c9629ce</code> </td>
-<td> gate <code>mark_block_*</code> poison and the paired valgrind annotations behind <code>NSPA_DEBUG_POISON_ALLOCS</code> </td>
-<td> reclaims the full <code>1.34pp</code> allocator-debug tax seen under <code>dispatcher-burst</code>; <code>mark_block_uninitialized</code> falls out of the top symbols </td>
-</tr>
-<tr>
-<td> <code>0802dadc750</code> </td>
-<td> inline <code>read_request_shm</code> at the dispatcher call site </td>
-<td> <code>read_request_shm</code> was sampled at <code>3.55%</code> wineserver-relative under <code>dispatcher-burst</code>; after inlining it disappears from the symbol table and saves <code>~1pp</code> more on the dispatcher path </td>
-</tr>
-</tbody>
-</table>
-
-
-<p>These are production-path cleanups, not new feature flags. They keep
-the shipped gamma dispatcher from paying avoidable function-call and
-debug-aid overhead once the architectural wins from aggregate-wait and
-<code>TRY_RECV2</code> are already in place.</p>
-
-<h3 id="26-2026-05-01-shipped-follow-ons-no-new-user-knob">2.6 2026-05-01 shipped follow-ons (no new user knob)</h3>
+<h3 id="25-2026-05-01-compatibility-and-gui-follow-ons">2.5 2026-05-01 compatibility and GUI follow-ons</h3>
 
 <table>
 <thead>
@@ -403,175 +382,116 @@ debug-aid overhead once the architectural wins from aggregate-wait and
 <tr>
 <td> <code>527647bac3e</code> </td>
 <td> AVX2-vectorize the alpha-bit OR loop in <code>dlls/winex11.drv/bitblt.c::x11drv_surface_flush</code> </td>
-<td> <code>x11drv_surface_flush</code>: <code>6.72%</code> -> <code>2.39%</code> (<code>-4.33pp</code>, <code>-64%</code>); total <code>winex11.so</code>: <code>6.76%</code> -> <code>2.43%</code> (<code>-4.33pp</code>); output bit-identical, no visual regression </td>
+<td> <code>x11drv_surface_flush</code>: <code>6.72%</code> -> <code>2.39%</code> (<code>-4.33pp</code>, <code>-64%</code>); total <code>winex11.so</code>: <code>6.76%</code> -> <code>2.43%</code> (<code>-4.33pp</code>) </td>
 </tr>
 <tr>
 <td> <code>97aff17da45</code> + <code>206f32b3de9</code> </td>
-<td> once-guard 9 dominant stub FIXMEs and real-impl <code>ShutdownBlockReasonCreate/Destroy</code> as silent success </td>
-<td> top stub noise drops from <code>~565</code> prints per Ableton run to <code>~5</code> first-time prints; shutdown-reason calls stop failing with <code>ERROR_CALL_NOT_IMPLEMENTED</code> </td>
+<td> once-guard dominant stub FIXMEs and real-impl <code>ShutdownBlockReasonCreate/Destroy</code> as silent success </td>
+<td> top stub noise drops from <code>~565</code> prints per Ableton run to <code>~5</code> first-time prints </td>
 </tr>
 </tbody>
 </table>
 
 
-<p>These are compatibility and presentation cleanups, not architectural
-changes. The AVX2 change reduces PE-side GUI flush cost under the same
-busy Ableton workload already used for the 2026-04-30 throttle and
-dispatcher measurements. The FIXMEs cleanup does not change RT
-behaviour, but it makes real regressions easier to spot because known
-stub chatter no longer buries the logs.</p>
-
-<h3 id="27-2026-05-02-shipped-client-side-follow-ons">2.7 2026-05-02 shipped client-side follow-ons</h3>
-
-<table>
-<thead>
-<tr>
-<th> Feature </th>
-<th> Default </th>
-<th> Override </th>
-<th> Shipped effect </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> <code>NSPA_USE_SCHED_THREAD</code> </td>
-<td> <code>1</code> </td>
-<td> <code>NSPA_USE_SCHED_THREAD=0</code> </td>
-<td> spawn-main + <code>ntdll_sched</code> substrate is now engaged by default; first real consumer is the async close queue </td>
-</tr>
-<tr>
-<td> <code>NSPA_SCHED_USE_FOR_WM_TIMER</code> </td>
-<td> ON when RT available </td>
-<td> <code>NSPA_SCHED_USE_FOR_WM_TIMER=0</code> </td>
-<td> <code>local_wm_timer</code> dispatch moves onto shared <code>wine-sched-rt</code> instead of a dedicated RT helper thread </td>
-</tr>
-<tr>
-<td> <code>NSPA_SCHED_USE_FOR_LOCAL_TIMER</code> </td>
-<td> ON when RT available </td>
-<td> <code>NSPA_SCHED_USE_FOR_LOCAL_TIMER=0</code> </td>
-<td> <code>local_timer</code> dispatch moves onto shared <code>wine-sched-rt</code> instead of a dedicated RT helper thread </td>
-</tr>
-<tr>
-<td> <code>NSPA_NT_LOCAL_EVENT</code> </td>
-<td> <code>1</code> </td>
-<td> <code>NSPA_NT_LOCAL_EVENT=0</code> </td>
-<td> anonymous <code>NtCreateEvent</code> now uses the client-range fast path with server-side fd registration for async-completion signaling </td>
-</tr>
-<tr>
-<td> <code>NSPA_URING_RECV</code> </td>
-<td> <code>1</code> </td>
-<td> <code>NSPA_URING_RECV=0</code> </td>
-<td> <code>recv_socket</code> uses <code>IORING_OP_RECVMSG</code> on the shipped async socket path </td>
-</tr>
-<tr>
-<td> <code>NSPA_URING_SEND</code> </td>
-<td> <code>1</code> </td>
-<td> <code>NSPA_URING_SEND=0</code> </td>
-<td> <code>send_socket</code> uses <code>IORING_OP_SENDMSG</code> on the shipped async socket path </td>
-</tr>
-</tbody>
-</table>
-
-
-<p>Supporting shipped changes in the same arc:</p>
+<h3 id="26-2026-05-02-client-side-follow-ons">2.6 2026-05-02 client-side follow-ons</h3>
 
 <table>
 <thead>
 <tr>
 <th> Change </th>
-<th> Effect </th>
+<th> Shipped effect </th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td> client-range event async parity fix </td>
-<td> server-side async queue path mirrors the <code>reset_event</code> discipline used for server events; smoke 0/1 with <code>NSPA_NT_LOCAL_EVENT=1</code> were clean with zero <code>err:service</code>, <code>err:rpc</code>, or <code>err:ole</code> errors </td>
+<td> spawn-main + <code>ntdll_sched</code> </td>
+<td> one default scheduler host per process, plus lazy RT-class host </td>
 </tr>
 <tr>
-<td> <code>NtCreateTimer</code> client-range backing event default ON </td>
-<td> local timers stop paying a server-created event helper round-trip for anonymous backing events </td>
+<td> sched-hosted <code>local_timer</code> + <code>local_wm_timer</code> </td>
+<td> eligible timer work moves onto shared <code>wine-sched-rt</code> instead of dedicated helper threads </td>
+</tr>
+<tr>
+<td> anonymous local events </td>
+<td> <code>NtCreateEvent</code> now uses the client-range fast path while async completion remains server-correct </td>
+</tr>
+<tr>
+<td> socket <code>RECVMSG</code> / <code>SENDMSG</code> </td>
+<td> deferred socket I/O now uses true socket SQEs on the PE side </td>
 </tr>
 <tr>
 <td> local-file async close queue </td>
 <td> eligible fully-shareable local-file closes leave the caller thread immediately and drain on <code>wine-sched</code> </td>
 </tr>
-<tr>
-<td> sched observability sampler </td>
-<td> shipped opt-in periodic sampler behind <code>NSPA_SCHED_OBS_INTERVAL_MS</code> </td>
-</tr>
-<tr>
-<td> heap LFH carries </td>
-<td> two LFH heuristic / retained-group carries shipped with smoke level 0 + 1 PASS; broader public validation still ahead </td>
-</tr>
 </tbody>
 </table>
 
 
-<h3 id="28-2026-05-03-local-file-and-section-follow-ons">2.8 2026-05-03 local-file and section follow-ons</h3>
-
-<table>
-<thead>
-<tr>
-<th> Feature </th>
-<th> Default </th>
-<th> Override </th>
-<th> Shipped effect </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> local-file bypass </td>
-<td> ON </td>
-<td> <code>NSPA_DISABLE_LOCAL_FILES=1</code> </td>
-<td> widened open envelope now covers more regular-file traffic without a wineserver <code>create_file</code> round-trip </td>
-</tr>
-<tr>
-<td> local dir-mint path </td>
-<td> ON </td>
-<td> <code>NSPA_ENABLE_LOCAL_DIR=0</code> </td>
-<td> explicit directory opens stay client-side instead of forcing the older directory fallback </td>
-</tr>
-<tr>
-<td> local sections </td>
-<td> ON </td>
-<td> <code>NSPA_LOCAL_SECTION=0</code> </td>
-<td> eligible unnamed file-backed sections can create / map / query / unmap / close locally, with same-process duplicate promoted only when it crosses a real server-handle boundary </td>
-</tr>
-</tbody>
-</table>
-
-
-<p>Supporting shipped changes in the same arc:</p>
+<h3 id="27-2026-05-03-local-file-and-section-follow-ons">2.7 2026-05-03 local-file and section follow-ons</h3>
 
 <table>
 <thead>
 <tr>
 <th> Change </th>
-<th> Effect </th>
+<th> Shipped effect </th>
 </tr>
 </thead>
 <tbody>
+<tr>
+<td> widened local-file envelope </td>
+<td> more regular-file, directory, metadata, flush, and EOF traffic stays client-side </td>
+</tr>
+<tr>
+<td> local sections </td>
+<td> eligible unnamed file-backed sections now stay client-side for create / map / query / unmap / close </td>
+</tr>
 <tr>
 <td> widened local open dispositions and access masks </td>
 <td> <code>create_file</code> handler count <code>7,845</code> -> <code>5,658</code> (<code>-28%</code>), handler time <code>137 ms</code> -> <code>50 ms</code> (<code>-64%</code>) on the compared run </td>
 </tr>
 <tr>
-<td> local-section default-on flip </td>
+<td> local-section path </td>
 <td> <code>nspa_create_mapping_from_unix_fd</code> count <code>2,664</code> -> <code>~800</code> (<code>-70%</code>); total wineserver handler time <code>1,991 ms</code> -> <code>1,077 ms</code> on the cleanest run </td>
-</tr>
-<tr>
-<td> duplicate-unix-fd at section creation </td>
-<td> <code>CreateFile -&gt; CreateFileMapping -&gt; CloseHandle(file) -&gt; MapViewOfFile</code> stays clean; no EBADF / mapping failures </td>
-</tr>
-<tr>
-<td> local <code>FileEndOfFileInformation</code> path </td>
-<td> grow stays local, unmapped shrink stays local, mapped shrink still returns <code>STATUS_USER_MAPPED_FILE</code>; direct handler-time saving <code>~8 ms / snapshot</code> </td>
 </tr>
 </tbody>
 </table>
 
 
-<h3 id="29-validation-baseline-against-10124fb81fdc76797ef1f91">2.9 Validation baseline against <code>10124FB81FDC76797EF1F91</code></h3>
+<h3 id="28-2026-05-05-memory-and-kernel-follow-ons">2.8 2026-05-05 memory and kernel follow-ons</h3>
+
+<table>
+<thead>
+<tr>
+<th> Change </th>
+<th> Shipped effect </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> ntsync <code>1012-1014</code> landed in production </td>
+<td> current module advanced to <code>F1A9EA24E257A35BB21341D</code> </td>
+</tr>
+<tr>
+<td> RT-keyed <code>mlockall()</code> </td>
+<td> perf page faults <code>561/s</code> -> <code>451/s</code>; bpf page faults <code>869/s</code> -> <code>629/s</code>; max futex wait <code>94us</code> -> <code>49us</code>; <code>VmLck</code> around <code>300848kB</code> </td>
+</tr>
+<tr>
+<td> RT-keyed transparent hugetlb </td>
+<td> conservative hugepage auto-promotion is now keyed only off <code>NSPA_RT_PRIO</code> </td>
+</tr>
+<tr>
+<td> RT-keyed heap arena hugetlb backing </td>
+<td> hugepage regions <code>3/6</code> -> <code>104</code>; dTLB miss / insn -> <code>0.071%</code>; <code>mmap</code> rate <code>33-61/s</code> -> <code>0.13/s</code>; <code>mprotect</code> rate <code>56-90/s</code> -> <code>0.03/s</code>; page-faults <code>753-869/s</code> -> <code>2.8/s</code> </td>
+</tr>
+<tr>
+<td> memory gate cleanup </td>
+<td> per-feature memory env gates removed; <code>NSPA_RT_PRIO</code> is now the single public RT memory gate </td>
+</tr>
+</tbody>
+</table>
+
+
+<h3 id="29-validation-baseline-against-f1a9ea24e257a35bb21341d">2.9 Validation baseline against <code>F1A9EA24E257A35BB21341D</code></h3>
 
 <table>
 <thead>
@@ -624,11 +544,14 @@ stub chatter no longer buries the logs.</p>
 
 
 <p><strong>Layer 1 totals: 3 PASS / 0 FAIL. Layer 2 totals: 24 PASS / 0 FAIL /
-0 TIMEOUT. Module <code>10124FB81FDC76797EF1F91</code> was loaded live and
-verified while these full-suite results were collected.</strong></p>
+0 TIMEOUT. The full-suite public boundary is still those totals; the
+newer <code>1012-1014</code> and memory carries are documented as targeted
+follow-on validation on top of that base.</strong></p>
 
-<p>NTSync kernel and Wine in-process sync detail lives on
-<code>ntsync-driver.gen.html</code>; dispatcher and async-completion detail lives on
+<p>NTSync detail now lives on two public pages:
+<code>ntsync-pi-driver.gen.html</code> for the kernel overlay and
+<code>ntsync-userspace.gen.html</code> for Wine&rsquo;s in-process sync path. Dispatcher
+and async-completion detail lives on
 <code>gamma-channel-dispatcher.gen.html</code> and
 <code>aggregate-wait-and-async-completion.gen.html</code>.</p>
 
@@ -787,13 +710,13 @@ own correctness proof and gate.</p>
 <td> <strong>msg-ring paint cache</strong> </td>
 <td> Shipped </td>
 <td> ON </td>
-<td> Cross-process redraw cache for <code>WM_PAINT</code>; <code>NSPA_ENABLE_PAINT_CACHE=0</code> is now the diagnostic opt-out, while the default shipped path stays on. </td>
+<td> Cross-process redraw cache for <code>WM_PAINT</code> on top of the msg-ring publication path. </td>
 </tr>
 <tr>
 <td> <strong>Memory and large pages</strong> </td>
 <td> Shipped </td>
 <td> ON where supported </td>
-<td> client-side local sections, <code>GetLargePageMinimum</code>, <code>VirtualAlloc(MEM_LARGE_PAGES)</code>, <code>CreateFileMapping(SEC_LARGE_PAGES)</code>, current-process <code>QueryWorkingSetEx</code>, and working-set quota bookkeeping are live with no global NSPA gate. </td>
+<td> local sections, <code>GetLargePageMinimum</code>, <code>VirtualAlloc(MEM_LARGE_PAGES)</code>, <code>CreateFileMapping(SEC_LARGE_PAGES)</code>, current-process <code>QueryWorkingSetEx</code>, working-set quota bookkeeping, and RT-keyed <code>mlockall()</code> / hugetlb follow-ons are live. </td>
 </tr>
 <tr>
 <td> <strong>Direct <code>get_message</code> bypass</strong> </td>
@@ -808,7 +731,7 @@ own correctness proof and gate.</p>
 <td> sync poll replacement plus async <code>NtReadFile</code> / <code>NtWriteFile</code> bypass on the PE side. </td>
 </tr>
 <tr>
-<td> <strong>Aggregate-wait dispatcher</strong> (<code>NSPA_AGG_WAIT</code>) </td>
+<td> <strong>Aggregate-wait dispatcher</strong> </td>
 <td> Shipped </td>
 <td> ON </td>
 <td> Per-process server-side <code>io_uring</code> infrastructure plus aggregate-wait dispatcher loop. Same RT thread receives requests, drains CQEs, and signals replies. </td>
@@ -817,7 +740,7 @@ own correctness proof and gate.</p>
 <td> <strong>Async <code>CreateFile</code></strong> </td>
 <td> Shipped </td>
 <td> ON </td>
-<td> <code>NSPA_ENABLE_ASYNC_CREATE_FILE=1</code> routes <code>CreateFile</code> through the dispatcher-owned ring and removes the <code>open()</code> lock-drop critical section from the audio xrun path. </td>
+<td> <code>CreateFile</code> routes through the dispatcher-owned ring and removes the <code>open()</code> lock-drop critical section from the audio xrun path. </td>
 </tr>
 <tr>
 <td> <strong><code>io_uring</code> socket recv/send</strong> </td>
@@ -895,12 +818,12 @@ own correctness proof and gate.</p>
   </style>
 
   <rect x="0" y="0" width="940" height="500" class="cs-bg" rx="6"/>
-  <text x="470" y="28" text-anchor="middle" class="cs-title">2026-05-03 deployment board: shipped state, diagnostics, and remaining work</text>
+  <text x="470" y="28" text-anchor="middle" class="cs-title">2026-05-05 deployment board: shipped state, diagnostics, and remaining work</text>
 
   <rect x="50" y="70" width="250" height="150" class="cs-green" rx="6"/>
   <text x="175" y="96" text-anchor="middle" class="cs-tag-green">Kernel / sync substrate</text>
-  <text x="175" y="122" text-anchor="middle" class="cs-label">NTSync 1003-1011</text>
-  <text x="175" y="140" text-anchor="middle" class="cs-small">PI waits, channel IPC, aggregate-wait, TRY_RECV2</text>
+  <text x="175" y="122" text-anchor="middle" class="cs-label">NTSync PI + dispatcher kernel surfaces</text>
+  <text x="175" y="140" text-anchor="middle" class="cs-small">PI waits, channel transport, aggregate-wait, burst drain</text>
   <text x="175" y="164" text-anchor="middle" class="cs-label">CS-PI + condvar PI</text>
   <text x="175" y="182" text-anchor="middle" class="cs-small">all RT paths gate on NSPA_RT_PRIO</text>
 
@@ -908,8 +831,8 @@ own correctness proof and gate.</p>
   <text x="470" y="96" text-anchor="middle" class="cs-tag-green">Client-side bypasses</text>
   <text x="470" y="122" text-anchor="middle" class="cs-label">gamma + spawn-main + local events</text>
   <text x="470" y="140" text-anchor="middle" class="cs-small">local-file, local sections, sched-hosted timers, hook cache, msg-ring v1</text>
-  <text x="470" y="164" text-anchor="middle" class="cs-label">socket uring + async create_file shipped</text>
-  <text x="470" y="182" text-anchor="middle" class="cs-small">more client-side work avoids wineserver entirely</text>
+  <text x="470" y="164" text-anchor="middle" class="cs-label">socket uring + async create_file + RT memory</text>
+  <text x="470" y="182" text-anchor="middle" class="cs-small">more client-side work and RT-keyed memory tuning avoid server and VM churn</text>
 
   <rect x="640" y="70" width="250" height="150" class="cs-green" rx="6"/>
   <text x="765" y="96" text-anchor="middle" class="cs-tag-green">Audio stack</text>
@@ -921,7 +844,8 @@ own correctness proof and gate.</p>
   <rect x="50" y="270" width="250" height="140" class="cs-gate" rx="6"/>
   <text x="175" y="296" text-anchor="middle" class="cs-tag-yellow">Diagnostics / A-B</text>
   <text x="175" y="322" text-anchor="middle" class="cs-label">force older paths for comparison</text>
-  <text x="175" y="340" text-anchor="middle" class="cs-small">env overrides keep local-file, paint-cache, gamma, and uring A/B-able</text>
+  <text x="175" y="338" text-anchor="middle" class="cs-small">remaining A/B toggles cover sched routing, socket uring,</text>
+  <text x="175" y="352" text-anchor="middle" class="cs-small">flush throttle, and poll vs epoll</text>
   <text x="175" y="364" text-anchor="middle" class="cs-label">runtime measurement toggles</text>
   <text x="175" y="382" text-anchor="middle" class="cs-small">kept for validation and regression isolation, not as the shipped default</text>
 
@@ -954,8 +878,10 @@ own correctness proof and gate.</p>
 <h3 id="41-full-suite-baseline-still-in-force">4.1 Full-suite baseline still in force</h3>
 
 <ul>
-<li>ntsync module <code>10124FB81FDC76797EF1F91</code> against prod kernel
-<code>6.19.11-rt1-1-nspa</code>: 1003-1011 live, loaded, and verified clean.</li>
+<li>current prod ntsync module <code>F1A9EA24E257A35BB21341D</code> against kernel
+<code>6.19.11-rt1-1-nspa</code>, with the public full-suite boundary still anchored
+to the earlier <code>3 PASS / 0 FAIL</code> native + <code>24 PASS / 0 FAIL / 0 TIMEOUT</code>
+PE matrix totals.</li>
 <li>Native suite: <strong>3 PASS / 0 FAIL</strong> (<code>test-event-set-pi</code>,
 <code>test-channel-recv-exclusive</code>, <code>test-aggregate-wait</code>).</li>
 <li><code>test-aggregate-wait</code>: <strong>9/9 PASS</strong>, including kitchen-sink
@@ -966,11 +892,12 @@ path directly.</li>
 </ul>
 
 
-<p>The 2026-05-02 and 2026-05-03 work did not publish a new full-suite version.
-What it added was targeted validation for the newly-landed scheduler, timer,
-event, socket, local-file, and local-section surfaces.</p>
+<p>The 2026-05-02 through 2026-05-05 work did not publish a new full-suite
+version. What it added was targeted validation for the newly-landed scheduler,
+timer, event, socket, local-file, local-section, ntsync-hardening, and RT
+memory surfaces.</p>
 
-<h3 id="42-targeted-2026-05-02-and-2026-05-03-validation">4.2 Targeted 2026-05-02 and 2026-05-03 validation</h3>
+<h3 id="42-targeted-2026-05-02-through-2026-05-05-validation">4.2 Targeted 2026-05-02 through 2026-05-05 validation</h3>
 
 <table>
 <thead>
@@ -1040,6 +967,21 @@ event, socket, local-file, and local-section surfaces.</p>
 <td> widened local-file path </td>
 <td> workload comparison </td>
 <td> <code>create_file</code> count <code>7,845</code> -> <code>5,658</code>, handler time <code>137 ms</code> -> <code>50 ms</code> </td>
+</tr>
+<tr>
+<td> RT-keyed <code>mlockall()</code> </td>
+<td> targeted shell harness </td>
+<td> <code>test-mlock-ws.sh 4/4 PASS</code>; <code>VmLck</code> <code>301,884 kB</code> on-gate vs <code>28 kB</code> off-gate </td>
+</tr>
+<tr>
+<td> RT-keyed transparent hugetlb </td>
+<td> targeted shell harness </td>
+<td> <code>test-huge-auto.sh 3/3 PASS</code> </td>
+</tr>
+<tr>
+<td> RT-keyed heap arena hugetlb backing </td>
+<td> targeted shell harness </td>
+<td> <code>test-heap-hugepage.sh 3/3 PASS</code>; hugepage regions <code>1</code> on-gate vs <code>0</code> off-gate </td>
 </tr>
 </tbody>
 </table>
@@ -1175,7 +1117,7 @@ event, socket, local-file, and local-section surfaces.</p>
 </table>
 
 
-<h4 id="2026-05-02-and-2026-05-03-feature-specific-wins">2026-05-02 and 2026-05-03 feature-specific wins</h4>
+<h4 id="2026-05-02-through-2026-05-05-feature-specific-wins">2026-05-02 through 2026-05-05 feature-specific wins</h4>
 
 <table>
 <thead>
@@ -1201,6 +1143,10 @@ event, socket, local-file, and local-section surfaces.</p>
 <td> local-file EOF path </td>
 <td> direct handler-time saving <code>~8 ms / snapshot</code>, plus eligible <code>ftruncate()</code> no longer blocks the wineserver loop inline </td>
 </tr>
+<tr>
+<td> RT-keyed heap arena hugetlb backing </td>
+<td> hugepage regions <code>3/6</code> -> <code>104</code>; <code>mmap</code> rate <code>33-61/s</code> -> <code>0.13/s</code>; <code>mprotect</code> rate <code>56-90/s</code> -> <code>0.03/s</code>; page-faults <code>753-869/s</code> -> <code>2.8/s</code> </td>
+</tr>
 </tbody>
 </table>
 
@@ -1209,7 +1155,7 @@ event, socket, local-file, and local-section surfaces.</p>
 
 <ul>
 <li>The last published full PE matrix is still the 2026-04-30 <code>24 PASS / 0 FAIL /
-0 TIMEOUT</code> run. The 2026-05-02 and 2026-05-03 features are covered by
+0 TIMEOUT</code> run. The 2026-05-02 through 2026-05-05 features are covered by
 targeted validation, not a new full-suite publish yet.</li>
 <li>Local events default-ON still exposes a known cosmetic log line in some
 Ableton runs: <code>wined3d_cs_destroy</code> &ldquo;Closing present event failed&rdquo;. It is not
@@ -1244,7 +1190,7 @@ timer/fd-poll/router splits remain longer-horizon work.</li>
 
 <hr />
 
-<h2 id="6-recent-landed-arc-2026-04-30-to-2026-05-03">6. Recent landed arc (2026-04-30 to 2026-05-03)</h2>
+<h2 id="6-recent-landed-arc-2026-04-30-to-2026-05-05">6. Recent landed arc (2026-04-30 to 2026-05-05)</h2>
 
 <table>
 <thead>
@@ -1305,6 +1251,16 @@ timer/fd-poll/router splits remain longer-horizon work.</li>
 <td> local sections default ON </td>
 <td> eligible unnamed file-backed sections stay client-side for create / map / query / unmap / close </td>
 </tr>
+<tr>
+<td> 2026-05-04 </td>
+<td> ntsync hardening follow-ons </td>
+<td> receive snapshot fix, dedicated slab caches, and lockless <code>SEND_PI</code> target scan land in the production kernel module </td>
+</tr>
+<tr>
+<td> 2026-05-05 </td>
+<td> RT memory follow-ons </td>
+<td> <code>mlockall()</code>, transparent hugetlb promotion, and heap-arena hugetlb backing ship under <code>NSPA_RT_PRIO</code> </td>
+</tr>
 </tbody>
 </table>
 
@@ -1325,31 +1281,11 @@ timer/fd-poll/router splits remain longer-horizon work.</li>
 <tbody>
 <tr>
 <td> <code>NSPA_RT_PRIO=80</code> </td>
-<td> Master gate. Sets RT priority ceiling and activates all four PI paths. When unset, Wine-NSPA is byte-identical to upstream Wine. </td>
+<td> Master gate. Sets RT priority ceiling, activates all four PI paths, enables the shipped RT dispatcher shape, and turns on the RT-keyed memory follow-ons (<code>mlockall()</code>, transparent hugetlb, heap arena hugetlb backing). When unset, the RT-specific paths stand down. </td>
 </tr>
 <tr>
 <td> <code>NSPA_RT_POLICY=FF</code> </td>
 <td> SCHED_FIFO (vs RR). Same-prio RR quantum-slices the audio thread; FIFO eliminates. </td>
-</tr>
-<tr>
-<td> <code>NSPA_OPENFD_LOCKDROP=1</code> </td>
-<td> Open-path <code>openat()</code> lock-drop. <strong>Default ON post-1006.</strong> </td>
-</tr>
-<tr>
-<td> <code>NSPA_DISPATCHER_USE_TOKEN=1</code> </td>
-<td> Gamma T3 thread-token consumption in dispatcher. <strong>Default ON.</strong> </td>
-</tr>
-<tr>
-<td> <code>NSPA_AGG_WAIT=1</code> </td>
-<td> Aggregate-wait dispatcher loop. <strong>Default ON post-1010 validation.</strong> Set <code>0</code> to force the legacy direct receive loop. </td>
-</tr>
-<tr>
-<td> <code>NSPA_TRY_RECV2=1</code> </td>
-<td> Post-dispatch burst-drain on ntsync 1011 kernels. <strong>Default ON.</strong> Set <code>0</code> to force one <code>AGG_WAIT</code> round-trip per dequeued entry. </td>
-</tr>
-<tr>
-<td> <code>NSPA_ENABLE_ASYNC_CREATE_FILE=1</code> </td>
-<td> Async <code>CreateFile</code> through the dispatcher-owned ring. <strong>Default ON.</strong> Set <code>0</code> to stay on the older sync handler path. </td>
 </tr>
 <tr>
 <td> <code>NSPA_USE_SCHED_THREAD=1</code> </td>
@@ -1368,10 +1304,6 @@ timer/fd-poll/router splits remain longer-horizon work.</li>
 <td> Opt-in sched observability sampler. Default OFF. Writes <code>/dev/shm/nspa-obs.&lt;pid&gt;</code> periodically. </td>
 </tr>
 <tr>
-<td> <code>NSPA_NT_LOCAL_EVENT=1</code> </td>
-<td> Anonymous <code>NtCreateEvent</code> client-range fast path. <strong>Default ON.</strong> Set <code>0</code> to force anonymous events back through wineserver. </td>
-</tr>
-<tr>
 <td> <code>NSPA_FLUSH_THROTTLE_MS=8</code> </td>
 <td> <code>flush_window_surfaces</code> throttle on <code>x11drv</code> MainThread. <strong>Default ON at 8.</strong> Set <code>N</code> to retune; <code>0</code> disables. </td>
 </tr>
@@ -1382,22 +1314,6 @@ timer/fd-poll/router splits remain longer-horizon work.</li>
 <tr>
 <td> <code>NSPA_URING_SEND=1</code> </td>
 <td> Socket SENDMSG <code>io_uring</code> path. <strong>Default ON.</strong> Set <code>0</code> to force the older send path. </td>
-</tr>
-<tr>
-<td> <code>NSPA_ENABLE_PAINT_CACHE=1</code> </td>
-<td> msg-ring paint cache. <strong>Default ON.</strong> Set <code>0</code> to force the older RPC path for A/B testing. </td>
-</tr>
-<tr>
-<td> <code>NSPA_DISABLE_LOCAL_FILES=1</code> </td>
-<td> Disables the local-file bypass entirely and forces <code>NtCreateFile</code> back through wineserver. </td>
-</tr>
-<tr>
-<td> <code>NSPA_ENABLE_LOCAL_DIR=0</code> </td>
-<td> Disables the explicit directory-mint path while leaving the rest of the local-file bypass on. </td>
-</tr>
-<tr>
-<td> <code>NSPA_LOCAL_SECTION=0</code> </td>
-<td> Disables client-side local sections and forces eligible file-backed sections back through wineserver. </td>
 </tr>
 <tr>
 <td> <code>NSPA_DISABLE_EPOLL=1</code> </td>
@@ -1497,7 +1413,7 @@ REALTIME-class priorities scale linearly below it.</p>
 <tbody>
 <tr>
 <td> <code>current-state.md</code> </td>
-<td> This document — state of the art on 2026-05-03 </td>
+<td> This document — state of the art on 2026-05-05 </td>
 </tr>
 <tr>
 <td> <code>client-scheduler-architecture.gen.html</code> </td>
@@ -1520,8 +1436,12 @@ REALTIME-class priorities scale linearly below it.</p>
 <td> Gamma request/reply transport plus post-1010 aggregate-wait dispatcher loop </td>
 </tr>
 <tr>
-<td> <code>ntsync-driver.gen.html</code> </td>
-<td> NTSync kernel overlay plus Wine in-process sync path, including aggregate-wait and <code>TRY_RECV2</code> </td>
+<td> <code>ntsync-pi-driver.gen.html</code> </td>
+<td> NTSync PI kernel overlay: PI baseline, channel transport, aggregate-wait, and later kernel hardening </td>
+</tr>
+<tr>
+<td> <code>ntsync-userspace.gen.html</code> </td>
+<td> Wine in-process sync path: handle-to-fd cache, client-created sync objects, direct wait/signal helpers, and dispatcher-facing wrappers </td>
 </tr>
 <tr>
 <td> <code>io_uring-architecture.gen.html</code> </td>
@@ -1545,7 +1465,7 @@ REALTIME-class priorities scale linearly below it.</p>
 </tr>
 <tr>
 <td> <code>nt-local-stubs.gen.html</code> </td>
-<td> NT-local stub pattern, now including local events and sched-hosted timer dispatch </td>
+<td> NT-local stub pattern, now including local sections, local events, and sched-hosted timer dispatch </td>
 </tr>
 <tr>
 <td> <code>shmem-ipc.gen.html</code> </td>
@@ -1571,14 +1491,14 @@ REALTIME-class priorities scale linearly below it.</p>
 </table>
 
 
-<p>The architecture-heavy pieces added through 2026-05-03 are now covered
+<p>The architecture-heavy pieces added through 2026-05-05 are now covered
 in the public docs set, including the client scheduler, local events,
 socket <code>io_uring</code>, gamma, aggregate-wait, hook cache, local-file,
-local sections, msg-ring, and the decomposition notes.</p>
+local sections, memory follow-ons, msg-ring, and the decomposition notes.</p>
 
 <hr />
 
-<p><em>Generated 2026-05-03. State board reflects the shipped 2026-05-03 set. ntsync <code>10124FB81FDC76797EF1F91</code>, kernel
+<p><em>Generated 2026-05-05. State board reflects the shipped 2026-05-05 set. ntsync <code>F1A9EA24E257A35BB21341D</code>, kernel
 <code>6.19.11-rt1-1-nspa</code>.</em></p>
 
 <script>

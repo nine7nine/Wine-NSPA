@@ -61,8 +61,7 @@ server path.
 | `NtDuplicateObject` | Same-process duplicate of a local section promotes once to a server section, caches that server handle, and then lets the duplicate proceed. |
 | File/section coherence | Mapping bits are published into the local-file aggregate so later share checks and `FileEndOfFileInformation` handling still see active mappings. |
 
-The gate is default-on. Set `NSPA_LOCAL_SECTION=0` to disable the client-side
-section path and force eligible calls back through wineserver.
+This path is now the shipped default for eligible unnamed file-backed sections.
 
 ---
 

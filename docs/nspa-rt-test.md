@@ -44,7 +44,7 @@ exercises `inproc_wait` -> ntsync ioctls directly and does **not** hit
 loop. `dispatcher-burst` is the first PE-side workload in the published
 matrix that covers that path.
 
-The 2026-05-02 and 2026-05-03 shipped follow-ons did **not** introduce a new
+The 2026-05-02 through 2026-05-05 shipped follow-ons did **not** introduce a new
 full matrix version. They were validated with targeted harnesses instead:
 
 - `run-rt-probe-validation.sh` covers the sched-hosted `local_timer` and
@@ -58,6 +58,9 @@ full matrix version. They were validated with targeted harnesses instead:
   stays clean, `nspa_create_mapping_from_unix_fd` drops `2,664` -> `~800`,
   and widened local-file coverage cuts `create_file` handler count
   `7,845` -> `5,658`
+- RT-keyed memory follow-ons are validated through targeted shell harnesses:
+  `test-mlock-ws.sh` `4/4 PASS`, `test-huge-auto.sh` `3/3 PASS`, and
+  `test-heap-hugepage.sh` `3/3 PASS`
 - Ableton boot / library scan / project load / playback smoke covers the
   local-event default flip and the client-scheduler / socket carries under
   the real mixed workload
@@ -80,7 +83,7 @@ The PE binary runs in two modes:
 - **Layer 2 PE matrix:** 24 PASS / 0 FAIL / 0 TIMEOUT (12 tests x
   baseline + RT), including `dispatcher-burst`.
 
-### Targeted Follow-On Validators (2026-05-02 and 2026-05-03)
+### Targeted Follow-On Validators (2026-05-02 through 2026-05-05)
 
 - **sched RT-probe script:** `run-rt-probe-validation.sh` -- `10/10 PASS`
   for the `wine-sched-rt` migration of `local_timer` and
@@ -90,6 +93,8 @@ The PE binary runs in two modes:
 - **local-file / local-section workload path:** same-process map-after-file-close
   is clean; local-file and section carries reduce file and mapping traffic
   without changing the published full-suite boundary
+- **RT-keyed memory follow-ons:** `test-mlock-ws.sh` `4/4 PASS`,
+  `test-huge-auto.sh` `3/3 PASS`, `test-heap-hugepage.sh` `3/3 PASS`
 - **real workload smoke:** Ableton boot / library scan / project load /
   playback remained clean after the client-scheduler, local-event, and
   socket, local-file, and local-section follow-ons
@@ -470,7 +475,7 @@ to cover the gamma dispatcher hot path:
 
 The verdict is failure-count only; latency is observational. That
 keeps the test deterministic enough to live in the default matrix while
-still giving a reproducible A/B for `NSPA_TRY_RECV2`. The subcommand
+still giving a reproducible A/B for the dispatcher burst-drain path. The subcommand
 landed in [`f087a265`](https://github.com/nine7nine/Wine-NSPA/commit/f087a265)
 and was wired into the default PE matrix by
 [`343d7ac2`](https://github.com/nine7nine/Wine-NSPA/commit/343d7ac2).
@@ -533,10 +538,10 @@ the source around documents what we tried and why it was reverted.
     ./run-rt-suite.sh wine       # Layer 2 only
     ./run-rt-suite.sh all        # both (default)
 
-### Validation Totals (2026-04-30)
+### Validation Totals (2026-04-30 public full-suite boundary)
 
-The current ntsync module (`srcversion 10124FB81FDC76797EF1F91`) keeps
-all four post-debug-kernel bugs fixed and adds the 1011
+The published full-suite boundary was collected on module
+`10124FB81FDC76797EF1F91`, which carried the 1011
 `CHANNEL_TRY_RECV2` follow-on:
 
 - Bug 1: test cleanup asymmetry stranding R1 in
@@ -845,7 +850,7 @@ on next invocation if the source is newer than the binary.
 | Requirement | Check | Purpose |
 |-------------|-------|---------|
 | `ntsync` module loaded | `sudo modprobe ntsync` | Required for ntsync sub-tests + Layer 1 |
-| ntsync 1011 loaded | module srcversion `10124FB81FDC76797EF1F91` | Required for `NSPA_TRY_RECV2=1` to do anything in `dispatcher-burst` |
+| current ntsync production module loaded | module srcversion `F1A9EA24E257A35BB21341D` | Current shipped kernel/userspace pair for the dispatcher path |
 | Hugepages reserved | `/proc/meminfo` HugePages_Total > 0 | Required for `large-pages` test |
 | RT-capable kernel | `uname -r` shows `-rt` | Required for SCHED_FIFO promotion |
 | CAP_SYS_NICE or root | `ulimit -r` | Required for RT scheduling |

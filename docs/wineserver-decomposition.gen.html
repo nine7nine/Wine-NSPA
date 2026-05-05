@@ -171,7 +171,7 @@
 </ul>
 
 
-<p>The audience this doc is written for: a developer who has read the bypass overview, has skimmed the gamma-channel-dispatcher and ntsync-driver docs, and wants to understand the architectural arc that the bypass work <em>enables</em>. If you&rsquo;re implementing a single bypass and want a checklist, read the bypass detail doc for that bypass; if you&rsquo;re implementing one roadmap slice from this page, read the in-tree handoff doc (<code>wine/nspa/docs/wineserver-decomposition-plan.md</code>) which has line-level kernel landmarks. This doc is the why, not the how.</p>
+<p>The audience this doc is written for: a developer who has read the bypass overview, has skimmed the gamma-channel-dispatcher and ntsync split docs, and wants to understand the architectural arc that the bypass work <em>enables</em>. If you&rsquo;re implementing a single bypass and want a checklist, read the bypass detail doc for that bypass; if you&rsquo;re implementing one roadmap slice from this page, read the in-tree handoff doc (<code>wine/nspa/docs/wineserver-decomposition-plan.md</code>) which has line-level kernel landmarks. This doc is the why, not the how.</p>
 
 <p>The main 2026-05-03 correction is scope: some of the work this page once
 treated as &ldquo;future wineserver-internal decomposition pressure&rdquo; is now
@@ -368,16 +368,16 @@ residual server-owned timer queue, not the whole timer surface.</p>
 
 <p>In current NSPA wineserver, PI propagates through two paths. First, the gamma channel: a client SEND_PI boosts the dispatcher pthread to the sender&rsquo;s priority (kernel-mediated), and the kernel re-boosts on each RECV pop to the popped entry&rsquo;s priority for the duration of the handler &ndash; so PI tracks the highest-priority pending request automatically. Second, <code>global_lock</code> itself is a <code>pi_mutex_t</code>; any thread blocked on it boosts the holder.</p>
 
-<p>Phase 3 introduces three new threads. PI behaviour for each:</p>
+<p>The residual thread split introduces three new threads. PI behaviour for each:</p>
 
 <ul>
 <li><em>Timer thread</em> runs at the same priority as the main loop, doesn&rsquo;t have a sender (it&rsquo;s time-driven), and takes <code>global_lock</code> like everyone else. PI on its <code>global_lock</code> blocking is normal <code>pi_mutex_t</code> behaviour. No new propagation is needed.</li>
 <li><em>FD polling thread</em> is non-RT (or low-RT). It enqueues to the handler thread; the handler thread&rsquo;s RT priority is what matters. The polling thread never holds <code>global_lock</code>, so it never inverts anything. The handoff queue itself is short-lived; the queue-drain wakeup signals an event that the handler thread waits on, and PI on that event needs to come from somewhere &ndash; probably from the FD readiness itself (which has no inherent priority) plus the highest-priority pending FD-driven request (which we&rsquo;d have to compute). This is a design detail still open.</li>
-<li><em>Router thread</em> (Phase 4) sits ahead of the handler thread. Senders boost the router via SEND_PI as they do today. Router → handler handoff inside wineserver needs to preserve the boost; an NTSync event signalled with the request&rsquo;s priority does this naturally if both router and handler use NTSync primitives for the handoff. Userspace queues without an NTSync hop don&rsquo;t propagate PI, so the handoff queue probably wants to be NTSync-mediated.</li>
+<li><em>Router thread</em> sits ahead of the handler thread. Senders boost the router via SEND_PI as they do today. Router → handler handoff inside wineserver needs to preserve the boost; an NTSync event signalled with the request&rsquo;s priority does this naturally if both router and handler use NTSync primitives for the handoff. Userspace queues without an NTSync hop don&rsquo;t propagate PI, so the handoff queue probably wants to be NTSync-mediated.</li>
 </ul>
 
 
-<p>The pattern that emerges: as long as every thread-to-thread handoff inside wineserver goes through an NTSync primitive that carries priority (channel, event with SET_PI), PI propagates end-to-end. As soon as a handoff goes through a bare userspace queue (a <code>pi_mutex_t</code>-protected list with no PI signal), priority propagation breaks and the highest-priority pending request can be starved by lower-priority work. That observation alone is a design constraint on Phase 3 / Phase 4: every handoff queue needs an NTSync event as its waiter primitive, not just a bare condition variable.</p>
+<p>The pattern that emerges: as long as every thread-to-thread handoff inside wineserver goes through an NTSync primitive that carries priority (channel, event with SET_PI), PI propagates end-to-end. As soon as a handoff goes through a bare userspace queue (a <code>pi_mutex_t</code>-protected list with no PI signal), priority propagation breaks and the highest-priority pending request can be starved by lower-priority work. That observation alone is a design constraint on the residual thread split and the later router/handler split: every handoff queue needs an NTSync event as its waiter primitive, not just a bare condition variable.</p>
 
 <p>This is also why the aggregate-wait extension matters strategically. With aggregate-wait, a handler thread can wait on (incoming channel events, FD-event queue NTSync event, timer-deadline NTSync event) and the kernel keeps PI consistent across all of them. Without aggregate-wait, we either fragment the wait primitives (one thread per wait shape, more handoff queues, more places to drop PI) or lose the cleanliness of the boost propagation.</p>
 
@@ -385,7 +385,7 @@ residual server-owned timer queue, not the whole timer surface.</p>
 
 <h2 id="4-ntsync-extension-proposals">4. NTSync extension proposals</h2>
 
-<p>NTSync is the kernel module NSPA owns and extends (<code>ntsync-patches/</code>, <code>ntsync-driver.gen.html</code>). Two extensions are relevant to wineserver decomposition. The first is shipped; the second now exists as a shipped kernel/userspace slice with broader decomposition consumers still ahead.</p>
+<p>NTSync is the kernel module NSPA owns and extends (<code>ntsync-patches/</code>, <code>ntsync-pi-driver.gen.html</code>). Two extensions are relevant to wineserver decomposition. The first is shipped; the second now exists as a shipped kernel/userspace slice with broader decomposition consumers still ahead.</p>
 
 <h3 id="41-thread-token-pass-through-shipped">4.1 Thread-token pass-through (shipped)</h3>
 
@@ -401,11 +401,11 @@ residual server-owned timer queue, not the whole timer surface.</p>
 
 <h3 id="42-aggregate-wait-primitive-shipped-slice">4.2 Aggregate-wait primitive (shipped slice)</h3>
 
-<p>The kernel primitive plus its first userspace consumer are <strong>shipped</strong> (2026-04-29). The broader decomposition consumers still remain queued, but <code>NTSYNC_IOC_AGGREGATE_WAIT</code> itself is no longer hypothetical and is already default-on in the gamma dispatcher via <code>NSPA_AGG_WAIT</code>.</p>
+<p>The kernel primitive plus its first userspace consumer are <strong>shipped</strong> (2026-04-29). The broader decomposition consumers still remain queued, but <code>NTSYNC_IOC_AGGREGATE_WAIT</code> itself is no longer hypothetical and is already part of the normal gamma dispatcher path.</p>
 
 <p>The problem: wineserver&rsquo;s main loop today waits via <code>poll()</code> / <code>epoll_wait()</code> over wineserver fds. It does <em>not</em> compose with NTSync object waits. The dispatcher pthread waits via <code>NTSYNC_IOC_CHANNEL_RECV</code> (futex-backed); it does <em>not</em> compose with fd readiness or NT timer deadlines. Each thread has exactly one wait primitive and one shape of wakeup, and the two shapes can&rsquo;t merge into a single waiter.</p>
 
-<p>That fragmentation is workable today because wineserver is not yet thread-decomposed. The main loop doesn&rsquo;t <em>need</em> to wait on NTSync objects; the dispatcher doesn&rsquo;t <em>need</em> to wait on fds. Once we move toward &ldquo;single RT thread does everything except FD polling&rdquo; (Phase 3) the unification matters: the RT thread needs to wait on the gamma channel, on a poll-set of wineserver fds, and on the next NT timer deadline, all in one syscall, with PI propagation from the channel sender.</p>
+<p>That fragmentation is workable today because wineserver is not yet thread-decomposed. The main loop doesn&rsquo;t <em>need</em> to wait on NTSync objects; the dispatcher doesn&rsquo;t <em>need</em> to wait on fds. Once we move toward &ldquo;single RT thread does everything except FD polling&rdquo; the unification matters: the RT thread needs to wait on the gamma channel, on a poll-set of wineserver fds, and on the next NT timer deadline, all in one syscall, with PI propagation from the channel sender.</p>
 
 <p>The landed ioctl is <code>NTSYNC_IOC_AGGREGATE_WAIT</code>, which takes a heterogeneous source set:</p>
 
@@ -491,7 +491,7 @@ to wineserver&rsquo;s authoritative domain.</p>
 
 <p>The split <em>pays</em> over time, as state migrates out. Once enough state lives client-side (NT-local stubs, redirect tables in shared memory, hook caches), more request types qualify for the fast path. Trivial queries &ndash; &ldquo;is this handle valid?&rdquo; &ldquo;what&rsquo;s the size of this object?&rdquo; &ldquo;is this thread alive?&rdquo; &ndash; become candidates. Cross-process queries that can be answered from shared metadata become candidates. Each migration is a small change to the classifier: add a request type to the fast-path set, validate, ship.</p>
 
-<p>The reason this is a Phase 4 item rather than a Phase 3 item: it has zero immediate impact. The fast-path set is empty today. Designing the classifier framework before there are clients for it risks over-engineering. Better to wait until a few obvious fast-path candidates exist (the bypasses ahead make this likely &ndash; e.g. the GetMessage bypass turns a class of message-pump traffic into a candidate; the redraw push ring already shifts state shapes that could be queried fast-path).</p>
+<p>The reason this sits later than the residual timer/fd split is that it has zero immediate impact. The fast-path set is empty today. Designing the classifier framework before there are clients for it risks over-engineering. Better to wait until a few obvious fast-path candidates exist (the bypasses ahead make this likely &ndash; e.g. the GetMessage bypass turns a class of message-pump traffic into a candidate; the redraw push ring already shifts state shapes that could be queried fast-path).</p>
 
 <p>The risk of the split itself is low (it&rsquo;s mechanical). The actual hard work is the per-request-type fast-path classification: deciding whether request type X is eligible, validating that the eligibility logic is correct under all envelope conditions, A/B'ing.</p>
 
@@ -501,7 +501,7 @@ to wineserver&rsquo;s authoritative domain.</p>
 
 <p>Today, the main loop is RT and spends most of its time blocked in <code>poll()</code> or <code>epoll_wait()</code>. The wait itself doesn&rsquo;t actually need RT priority &ndash; only the <em>response</em> to the wait does. RT priority matters for the work that happens after the wait returns, not for the act of sleeping in the kernel.</p>
 
-<p>The 2026-05-02 and 2026-05-03 shipped follow-ons narrow this split&rsquo;s
+<p>The 2026-05-02 through 2026-05-05 shipped follow-ons narrow this split&rsquo;s
 motivation. Deferred socket recv/send no longer depend on wineserver fd wakeups
 in the common PE path because they already submit <code>IORING_OP_RECVMSG</code> /
 <code>IORING_OP_SENDMSG</code> from the client side. Local sections and widened local-file
@@ -686,13 +686,13 @@ descriptors that remain after those client-side surfaces have peeled away.</p>
 <ul>
 <li><strong>Incremental migration ships value continuously.</strong> Each slice ships a discrete, testable, revertible win. <code>open_fd</code> lock-drop alone measurably improved drum-track-load-while-playing. Thread-token pass-through alone reclaims ~10% of dispatcher CPU. A rewrite has no intermediate value; it ships when it ships, and the integration risk is concentrated at the moment of swap-over.</li>
 <li><strong>The existing handler bodies are correct.</strong> Wine has decades of bugfixing inside the handler implementations &ndash; corner cases, app compatibility, NT-quirk-of-the-month fixes. A rewrite has to re-port all of that, and &ldquo;we missed a quirk&rdquo; is a regression that&rsquo;s expensive to find. Decomposition reuses the handler bodies; only the dispatch and locking discipline around them changes.</li>
-<li><strong>Each step is independently revertible.</strong> If the residual thread split turns out to introduce a regression, the env-var gates flip off and the earlier shipped slices plus the bypasses all keep working. Compare the cost of reverting one slice to the cost of rolling back from a unified rewrite that&rsquo;s already replaced the old wineserver.</li>
+<li><strong>Each step is independently revertible.</strong> If the residual thread split turns out to introduce a regression, the slice can be reverted cleanly and the earlier shipped slices plus the bypasses all keep working. Compare the cost of reverting one slice to the cost of rolling back from a unified rewrite that&rsquo;s already replaced the old wineserver.</li>
 <li><strong>The bypass arc shrinks the rewrite target.</strong> By the time decomposition gets to lock partitioning, the surface that needs partitioning is much smaller than today&rsquo;s wineserver. A rewrite&rsquo;s target is fixed at the time the rewrite starts; a decomposition&rsquo;s target shrinks while the work is in progress.</li>
 <li><strong>The direction is consistent at every step.</strong> &ldquo;Less wineserver, less global_lock, more event-driven RT primitives&rdquo; is the same direction at every slice. The target architecture is refined incrementally instead of requiring a single up-front replacement design.</li>
 </ul>
 
 
-<p>The cost of decomposition is a slight cost in design uniformity. Each phase has its own approach, its own gating env var, its own validation discipline. There&rsquo;s no single &ldquo;wineserver 2.0&rdquo; that you can point at; instead there&rsquo;s a wineserver that&rsquo;s been progressively reshaped. That is, on net, the right trade for a project that has to ship usable improvements continuously rather than commit to a multi-quarter rewrite.</p>
+<p>The cost of decomposition is a slight cost in design uniformity. Each slice has its own approach and its own validation discipline. There&rsquo;s no single &ldquo;wineserver 2.0&rdquo; that you can point at; instead there&rsquo;s a wineserver that&rsquo;s been progressively reshaped. That is, on net, the right trade for a project that has to ship usable improvements continuously rather than commit to a multi-quarter rewrite.</p>
 
 <p>A useful framing: bypasses and decomposition use the same incremental-migration discipline on different surfaces. Bypasses move NT-API state; decomposition restructures the remaining wineserver internals.</p>
 
@@ -702,7 +702,7 @@ descriptors that remain after those client-side surfaces have peeled away.</p>
 
 <p>This discipline has caught real bugs. The post-1006 ntsync work re-validated several &ldquo;shipped&rdquo; bypasses against a kernel module that finally didn&rsquo;t lock the host; the validation found that some of the lockup attribution had been wrong (<code>open_fd</code> lock-drop was blamed for a lockup that turned out to be an unrelated NTSync slab corruption). Without re-validation under stable conditions, the wrong bypass would have stayed gated.</p>
 
-<p>The implication for the residual thread split: every component split needs its own gate (<code>NSPA_TIMER_THREAD_SPLIT=1</code>, <code>NSPA_FD_POLL_THREAD=1</code>, and so on), its own validation plan, and independent combination testing. <code>NSPA_AGG_WAIT</code> already followed that path and flipped default-on after validation; the remaining pieces should be held to the same discipline.</p>
+<p>The implication for the residual thread split: every component split needs its own bounded validation plan and independent combination testing. Aggregate-wait already followed that path; the remaining pieces should be held to the same discipline.</p>
 
 <hr />
 
@@ -834,7 +834,8 @@ descriptors that remain after those client-side surfaces have peeled away.</p>
 <li><code>client-scheduler-architecture.md</code> &ndash; the shipped per-process scheduler host that already absorbed eligible local timer work and narrowed the remaining wineserver timer problem.</li>
 <li><code>gamma-channel-dispatcher.md</code> &ndash; the existing gamma dispatcher, which 5.2&rsquo;s router/handler split decomposes. Also the home of the shipped thread-token pass-through implementation.</li>
 <li><code>nt-local-stubs.md</code> &ndash; the architectural pattern for client-resident handlers. Section 6&rsquo;s &ldquo;what stays in wineserver&rdquo; defines the floor that nt-local stubs and bypasses converge toward.</li>
-<li><code>ntsync-driver.gen.html</code> &ndash; the kernel module that hosts the NTSync primitives. Section 4&rsquo;s extensions live in this module&rsquo;s patch series.</li>
+<li><code>ntsync-pi-driver.gen.html</code> &ndash; the NTSync PI kernel page. Section 4&rsquo;s extensions live in this module&rsquo;s patch series.</li>
+<li><code>ntsync-userspace.gen.html</code> &ndash; the Wine in-process sync page that pairs with the kernel overlay.</li>
 <li><code>nspa-local-file-architecture.gen.html</code>, <code>msg-ring-architecture.gen.html</code>, <code>io_uring-architecture.gen.html</code>, <code>cs-pi.gen.html</code>, <code>condvar-pi-requeue.gen.html</code> &ndash; the per-subsystem detail docs whose work composes with the decomposition arc.</li>
 <li><code>architecture.gen.html</code> &ndash; the integrated NSPA architecture overview; this doc is the wineserver-internals lens of that architecture.</li>
 <li>In-tree handoff: <code>wine/nspa/docs/wineserver-decomposition-plan.md</code> &ndash; the session-handoff version of this plan, with line-level kernel landmarks and active-session details. Use that doc when implementing the queued and long-horizon splits; use this doc when reasoning about the trajectory.</li>

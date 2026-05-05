@@ -38,7 +38,7 @@ replacing it.
 | Surface | Status | Default | Notes |
 |-------|--------|---------|-------|
 | Sync poll + async file I/O | **Shipped** | On | `NtReadFile` / `NtWriteFile` async bypass + sync poll replacement; pool allocator (TLS, 32 ops); CQE drain at `server_select` / `server_wait` |
-| Dispatcher-owned async `CreateFile` | **Shipped** | On | `NSPA_ENABLE_ASYNC_CREATE_FILE=1`; routes `CreateFile` through the per-process ring and removes the `open()` lock-drop CS from the audio xrun path |
+| Dispatcher-owned async `CreateFile` | **Shipped** | On | routes `CreateFile` through the per-process ring and removes the `open()` lock-drop CS from the audio xrun path |
 | Socket recv | **Shipped** | On | `NSPA_URING_RECV=1`; `recv_socket` submits `IORING_OP_RECVMSG` on the deferred path |
 | Socket send | **Shipped** | On | `NSPA_URING_SEND=1`; `send_socket` submits `IORING_OP_SENDMSG` on the deferred path |
 | `NtFlushBuffersFile` FSYNC | **Dropped** | -- | disk path is already synchronous `fsync()`; no meaningful `io_uring` win |
@@ -424,7 +424,7 @@ The 2026-05-02 default-on flip was backed by:
 - `socket-io` deferred path: `-6.8%` p99 latency
 - `socket-io`: `0/2000` failures
 - Ableton boot, library scan, and playback: clean with `63` threads and zero
-  new errors versus the Phase 4.6 baseline
+  new errors versus the earlier shipped socket baseline
 
 ### Why this stays server-correct
 
@@ -451,8 +451,8 @@ Not every async surface is an `io_uring` candidate.
 | anonymous-pipe follow-on | current Win32 `CreatePipe` route still sits on the named-pipe pseudo-fd infrastructure |
 | directory notify via inotify | current inotify state is one server-process-wide facility, not a per-PE resource |
 
-The 2026-05-02 correction is that these are not "Phase 4.8 pending" in the
-same sense that sockets used to be pending. Named-pipe and named-event
+The 2026-05-02 correction is that these are no longer "next `io_uring`
+candidates" in the same sense that sockets used to be. Named-pipe and named-event
 completion now compose with the **local-event** server-registration path, not
 with `io_uring`.
 
@@ -495,12 +495,12 @@ with `io_uring`.
 | io_uring ring management | Shipped | Per-thread, lazy init |
 | Pool allocator (TLS, 32 ops) | Shipped | RT-safe, zero malloc in submit path |
 | sync poll + async file I/O | Shipped, default-on | `NtReadFile` / `NtWriteFile` |
-| async `CreateFile` via dispatcher ring | Shipped, default-on | `NSPA_ENABLE_ASYNC_CREATE_FILE=1`; server-side consumer on the per-process ring |
+| async `CreateFile` via dispatcher ring | Shipped | server-side consumer on the per-process ring |
 | socket I/O (deferred path) | Shipped, default-on | `NSPA_URING_RECV=1`, `NSPA_URING_SEND=1`; validated on `socket-io` and Ableton |
 | dropped follow-ons | Dropped | not worthwhile or blocked by server-managed architecture |
 | E2 bitmap (server `sock.c`) | Shipped | engaged when the client-owned socket poll path is active |
 | ntsync `uring_fd` extension | Shipped (kernel patch) | Wakes ntsync waits on CQE |
-| ntsync PI v2 + audit fixes | Shipped (kernel patch) | Module srcversion `10124FB81FDC76797EF1F91` |
+| ntsync PI kernel + audit fixes | Shipped (kernel patch) | Module srcversion `F1A9EA24E257A35BB21341D` |
 | Audit §4.1 retry-loop hardening | Shipped (wine) | Superproject `a7e34c7` |
 
 ### Next Actions

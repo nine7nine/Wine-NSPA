@@ -411,56 +411,20 @@ return -1;   /* retry exhausted */
 
 <p>The walker is allocated on the dispatching thread&rsquo;s stack and the <code>nspa_hook_walker_current</code> pointer is <code>__thread</code> storage. Nested hook dispatches push/pop via the <code>prev</code> pointer field. Stack-local with a per-thread current-pointer is the right pattern: no allocation, no lock, no leak on early return &ndash; the walker disappears with the stack frame.</p>
 
-<p>Tier 2 is opt-out via <code>NSPA_DISABLE_HOOK_TIER2</code>; default is on. Tier 1 is opt-out via <code>NSPA_DISABLE_HOOK_TIER1</code>. Both default-on as of the 2026-04-25 ship.</p>
+<p>Tier 1 and Tier 2 are both part of the shipped path.</p>
 
 <h3 id="when-tier-2-falls-back">When Tier 2 falls back</h3>
 
 <p>The reader returns -1 (RPC fallback) when:</p>
 
-<table>
-<thead>
-<tr>
-<th> Condition </th>
-<th> Where set </th>
-<th> Why </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> <code>overflowed = 1</code> </td>
-<td> server rebuild </td>
-<td> Chain &gt; 8 entries, or a global hook fires here, or WINEVENT out-of-context </td>
-</tr>
-<tr>
-<td> <code>module_offset</code> out of range </td>
-<td> reader copy loop </td>
-<td> Pool-offset arithmetic would read past end of pool; treat as corruption </td>
-</tr>
-<tr>
-<td> <code>module_size &amp;gt;= MAX_PATH</code> </td>
-<td> reader copy loop </td>
-<td> Module name doesn&rsquo;t fit in walker&rsquo;s per-entry MAX_PATH WCHAR slot </td>
-</tr>
-<tr>
-<td> Retry exhausted (8 iterations) </td>
-<td> reader retry loop </td>
-<td> Server is churning the cache faster than client can read; rare </td>
-</tr>
-<tr>
-<td> <code>bypass shm</code> not mapped </td>
-<td> early return </td>
-<td> Memfd-backed bypass region didn&rsquo;t bootstrap (msg-bypass off, or pre-init) </td>
-</tr>
-<tr>
-<td> <code>NSPA_DISABLE_HOOK_TIER2=1</code> </td>
-<td> env check </td>
-<td> User opted out </td>
-</tr>
-</tbody>
-</table>
-
-
-<p>Each of these has a corresponding RPC-path code, so falling back is always safe.</p>
+<p>| Condition | Where set | Why |
+|&mdash;&mdash;&mdash;&ndash;|&mdash;&mdash;&mdash;&ndash;|&mdash;&ndash;|
+| <code>overflowed = 1</code> | server rebuild | Chain &gt; 8 entries, or a global hook fires here, or WINEVENT out-of-context |
+| <code>module_offset</code> out of range | reader copy loop | Pool-offset arithmetic would read past end of pool; treat as corruption |
+| <code>module_size &amp;gt;= MAX_PATH</code> | reader copy loop | Module name doesn&rsquo;t fit in walker&rsquo;s per-entry MAX_PATH WCHAR slot |
+| Retry exhausted (8 iterations) | reader retry loop | Server is churning the cache faster than client can read; rare |
+| <code>bypass shm</code> not mapped | early return | Memfd-backed bypass region didn&rsquo;t bootstrap (msg-bypass off, or pre-init) |
+Each of these has a corresponding RPC-path code, so falling back is always safe.</p>
 
 <h2 id="6-server-side-cache-rebuild">6. Server-side cache rebuild</h2>
 
@@ -674,7 +638,7 @@ if (hook-&gt;module_size &amp;&amp; hook-&gt;module &amp;&amp; e-&gt;module_offs
 <tr>
 <td> 2026-04-25 </td>
 <td> T2.2 / T2.3 </td>
-<td> Client-side <code>nspa_hook_try_read_cache</code> reader; default-on with <code>NSPA_DISABLE_HOOK_TIER2</code> opt-out </td>
+<td> Client-side <code>nspa_hook_try_read_cache</code> reader </td>
 </tr>
 <tr>
 <td> 2026-04-25 </td>
@@ -806,7 +770,7 @@ if (hook-&gt;module_size &amp;&amp; hook-&gt;module &amp;&amp; e-&gt;module_offs
 <td> 790-798 </td>
 </tr>
 <tr>
-<td> Tier 1 env gate (<code>nspa_queue_hook_tier1_active</code>) </td>
+<td> Tier 1 active-path helper (<code>nspa_queue_hook_tier1_active</code>) </td>
 <td> <code>wine/server/queue.c</code> </td>
 <td> 758-774 </td>
 </tr>
@@ -834,32 +798,8 @@ if (hook-&gt;module_size &amp;&amp; hook-&gt;module &amp;&amp; e-&gt;module_offs
 </table>
 
 
-<p>Environment variables:</p>
-
-<table>
-<thead>
-<tr>
-<th> Variable </th>
-<th> Default </th>
-<th> Effect </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> <code>NSPA_DISABLE_HOOK_TIER1</code> </td>
-<td> unset </td>
-<td> Disables Tier 1 client refcount + server&rsquo;s <code>tier1_active</code> reply path; reverts to legacy <code>start_hook_chain</code> / <code>finish_hook_chain</code> accounting </td>
-</tr>
-<tr>
-<td> <code>NSPA_DISABLE_HOOK_TIER2</code> </td>
-<td> unset </td>
-<td> Disables Tier 2 cache reader; every walk uses the RPC trio (Tier 1 still applies if not also disabled) </td>
-</tr>
-</tbody>
-</table>
-
-
-<p>Both variables are read once per process (cached) and matched server-side via <code>reply-&gt;tier1_active</code> so client and server agree on whether the bypass is active for any given queue.</p>
+<p>There are no public hook-cache feature gates in the shipped path. The cache is
+now part of the normal client/server contract for eligible hook walks.</p>
 
 <script>
 document.addEventListener("DOMContentLoaded", function () {

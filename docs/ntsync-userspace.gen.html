@@ -2,7 +2,7 @@
 <html lang="en"><head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Wine-NSPA -- NTSync Userspace Integration</title>
+<title>Wine-NSPA -- NTSync Userspace Sync</title>
 <style>
   :root {
     --bg: #1a1b26; --fg: #c0caf5; --accent: #7aa2f7;
@@ -106,16 +106,16 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
 </head><body>
 <div class="page-nav"><a href="index.html">Docs Home</a></div>
-<h1 id="wine-nspa--ntsync-userspace-integration">Wine-NSPA &ndash; NTSync Userspace Integration</h1>
+<h1 id="wine-nspa--ntsync-userspace-sync">Wine-NSPA &ndash; NTSync Userspace Sync</h1>
 
-<p>This page documents the Wine userspace half of the ntsync integration: the
-ntdll handle-to-fd cache, the server-owned vs. client-created anonymous
-sync handle paths, the wait / signal helpers, the dispatcher ioctl
-wrappers, and the PE-side wait coverage.</p>
+<p>This page documents the Wine userspace half of ntsync: the ntdll
+handle-to-fd cache, the server-owned vs. client-created sync-object paths,
+the direct wait / signal helpers, the dispatcher-facing ioctl wrappers, and
+the PE-side coverage that exercises them.</p>
 
-<p>The kernel-side ntsync overlay &ndash; PI primitives, channel transport,
-aggregate-wait, and the post-1011 carries &ndash; is documented in the
-companion page <a href="ntsync-pi-driver.gen.html">NTSync PI Driver</a>.</p>
+<p>The kernel half &ndash; the PI baseline, channel transport, aggregate-wait, and
+the later hardening work &ndash; is documented on the companion page
+<a href="ntsync-pi-driver.gen.html">NTSync PI Kernel</a>.</p>
 
 <h2 id="table-of-contents">Table of Contents</h2>
 
@@ -230,11 +230,10 @@ wineserver. The first wait or signal does a one-time
 <code>get_inproc_sync_fd</code> request; after that, ntdll caches the fd and
 goes direct.</li>
 <li><strong>client-created anonymous sync handles</strong>: anonymous mutexes,
-anonymous semaphores, and anonymous events when
-<code>NSPA_NT_LOCAL_EVENT</code> is left at its shipped default-on setting.
-These never need wineserver to mint the fd in the first place; ntdll
-allocates a client-range handle, issues the ntsync create ioctl
-itself, and populates the cache immediately.</li>
+anonymous semaphores, and anonymous events. These never need
+wineserver to mint the fd in the first place; ntdll allocates a
+client-range handle, issues the ntsync create ioctl itself, and
+populates the cache immediately.</li>
 </ul>
 
 
@@ -289,7 +288,7 @@ comes from on the first reference.</p>
 
   <rect x="560" y="104" width="340" height="60" class="cli" rx="6"/>
   <text x="730" y="128" text-anchor="middle" class="t">anonymous NtCreateMutex / NtCreateSemaphore / NtCreateEvent</text>
-  <text x="730" y="146" text-anchor="middle" class="s">event path is shipped default-on via NSPA_NT_LOCAL_EVENT=1 (=0 disables)</text>
+  <text x="730" y="146" text-anchor="middle" class="s">anonymous events now use this client-created path by default</text>
 
   <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="730" y1="164" x2="730" y2="192" class="line"/>
 
@@ -408,9 +407,8 @@ that the server-owned path uses.</p>
 <ul>
 <li>anonymous mutexes: client-created</li>
 <li>anonymous semaphores: client-created</li>
-<li>anonymous events: client-created when <code>NSPA_NT_LOCAL_EVENT</code> is left
-at its default-on setting; <code>NSPA_NT_LOCAL_EVENT=0</code> forces the older
-wineserver-created event path</li>
+<li>anonymous events: client-created by default, using the same cache
+and direct wait/signal helpers as anonymous mutexes and semaphores</li>
 <li>named or inheritable objects: stay on the server path</li>
 </ul>
 
@@ -631,12 +629,10 @@ do not cross the wineserver / client boundary as Win32 handles).</p>
 ioctl(channel_fd, NTSYNC_IOC_CHANNEL_REPLY, &amp;args.entry_id);
 </code></pre>
 
-<p>with <code>RECV</code> as fallback if <code>RECV2</code> returns <code>-ENOTTY</code> (old kernel
-without 1005). On post-1011 kernels the dispatcher follows the first
-successful <code>RECV2</code> with <code>TRY_RECV2</code> after each reply until the
-channel returns empty. On post-1010 kernels the dispatcher uses
-<code>NTSYNC_IOC_AGGREGATE_WAIT</code> to block on the channel + uring eventfd +
-shutdown eventfd in one syscall.</p>
+<p>On the current shipped kernel/userspace pair, the dispatcher uses
+<code>RECV2</code> for dequeue, follows each reply with <code>TRY_RECV2</code> until the
+channel returns empty, and uses <code>NTSYNC_IOC_AGGREGATE_WAIT</code> to block on
+the channel + uring eventfd + shutdown eventfd in one syscall.</p>
 
 <p>The client-side <code>SEND_PI</code> is invoked from the wineserver
 request-marshalling fast path; the client&rsquo;s RT thread blocks in the
@@ -658,9 +654,7 @@ processes.</p>
 cached fd via <code>inproc_wait()</code>, then call <code>linux_wait_objs()</code> which
 issues the kernel ioctl directly.</p>
 
-<p>Currently enabled for anonymous mutexes and semaphores, plus
-anonymous events when <code>NSPA_NT_LOCAL_EVENT</code> is left at its shipped
-default-on setting.</p>
+<p>Currently enabled for anonymous mutexes, semaphores, and events.</p>
 
 <hr />
 
@@ -706,8 +700,8 @@ dmesg splats at every step.</p>
 the <code>inproc_sync</code> cache (<code>get_cached_inproc_sync()</code>,
 <code>cache_inproc_sync()</code>, <code>release_inproc_sync()</code>,
 <code>get_server_inproc_sync()</code>), <code>alloc_client_handle()</code>, the
-<code>client_mutex_list</code> thread-exit walker, and the <code>NSPA_NT_LOCAL_EVENT</code>
-gating in <code>NtCreateEvent</code>.</li>
+<code>client_mutex_list</code> thread-exit walker, and the client-created
+anonymous-event path in <code>NtCreateEvent</code>.</li>
 <li><code>server/inproc_sync.c</code> &ndash; the server-side <code>struct inproc_sync</code> that
 attaches an ntsync fd to a wineserver object, plus the
 <code>get_inproc_sync_fd</code> request handler.</li>
@@ -721,7 +715,7 @@ attaches an ntsync fd to a wineserver object, plus the
 <code>ntsync_wait_args</code>, <code>NTSYNC_INDEX_URING_READY</code>, channel and
 thread-token ioctl arg structs.</li>
 <li><code>drivers/misc/ntsync.c</code> &ndash; the kernel implementation; see the
-<a href="ntsync-pi-driver.gen.html">NTSync PI Driver</a> page for the
+<a href="ntsync-pi-driver.gen.html">NTSync PI Kernel</a> page for the
 patch-by-patch walkthrough.</li>
 </ul>
 
@@ -729,7 +723,7 @@ patch-by-patch walkthrough.</li>
 <h3 id="cross-references">Cross-references</h3>
 
 <ul>
-<li><a href="ntsync-pi-driver.gen.html">NTSync PI Driver</a> &ndash; the kernel half:
+<li><a href="ntsync-pi-driver.gen.html">NTSync PI Kernel</a> &ndash; the kernel half:
 PI primitives, channel transport, aggregate-wait, post-1011 carries.</li>
 <li><a href="gamma-channel-dispatcher.gen.html">Gamma Channel Dispatcher</a> &ndash;
 how the wineserver dispatcher uses the channel ioctls and consumes

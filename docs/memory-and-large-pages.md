@@ -1,9 +1,10 @@
 # Wine-NSPA -- Memory, Sections, Large Pages, and Working-Set Support
 
 This page covers the shipped Wine-NSPA memory surface: client-side local
-sections, large-page allocation, large-page file mappings, current-process
-working-set reporting, working-set quota bookkeeping, and the shared-memory
-backing choices used by the major bypass subsystems.
+sections, large-page allocation, large-page file mappings, RT-keyed page
+locking and hugetlb promotion, current-process working-set reporting,
+working-set quota bookkeeping, and the shared-memory backing choices used by
+the major bypass subsystems.
 
 ## Table of Contents
 
@@ -13,7 +14,7 @@ backing choices used by the major bypass subsystems.
 4. [Large-page allocation and mapping](#4-large-page-allocation-and-mapping)
 5. [Working-set reporting and quota semantics](#5-working-set-reporting-and-quota-semantics)
 6. [Shared-memory backing choices](#6-shared-memory-backing-choices)
-7. [Validation surface](#7-validation-surface)
+7. [Validation and observed effect](#7-validation-and-observed-effect)
 8. [Implementation map](#8-implementation-map)
 9. [Related docs](#9-related-docs)
 
@@ -21,13 +22,14 @@ backing choices used by the major bypass subsystems.
 
 ## 1. Overview
 
-Wine-NSPA has a real memory subsystem story now. It is not just "some
-hugepage patches" and it is not just "memfd everywhere."
+Wine-NSPA has a real memory subsystem story now. It is not just large-page
+syscall support and it is not just `memfd` everywhere.
 
-Three distinct pieces are shipped:
+Four distinct pieces are shipped:
 
 - client-side file-backed sections built on top of local-file handles
 - large-page support for anonymous and section-backed mappings
+- RT-keyed page locking and hugetlb promotion for the hot anonymous-memory path
 - working-set reporting plus working-set quota bookkeeping
 - selective shared-memory backing choices for bypass state
 
@@ -49,6 +51,9 @@ mechanism.
 | `VirtualAlloc(MEM_LARGE_PAGES)` | Accepted and mapped through the unix VM path, with large-page alignment and large-page view tagging preserved for reporting. |
 | `NtAllocateVirtualMemoryEx(... MEM_LARGE_PAGES ...)` | Accepted on the same large-page path, including the 1 GiB huge-page request shape when the host supports it. |
 | `CreateFileMapping(SEC_LARGE_PAGES)` | Privilege-gated, backed through large-page-capable `memfd_create()` on the wineserver side, and mapped with large-page alignment rules. |
+| RT-keyed `mlockall()` | When `NSPA_RT_PRIO` is set, process startup issues `mlockall(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT)` so touched pages stay locked without pretending Wine has a full working-set manager. |
+| RT-keyed transparent hugetlb | When `NSPA_RT_PRIO` is set, eligible anonymous `RESERVE|COMMIT` RW allocations auto-promote onto the existing large-page mapping path. |
+| RT-keyed heap arena hugetlb backing | When `NSPA_RT_PRIO` is set, eligible growable heap arenas round up and full-commit onto huge pages, eliminating most heap-driven `mmap` / `mprotect` / page-fault traffic from the hot path. |
 | local file-backed sections | Eligible unnamed file-backed sections on local-file handles can stay client-side for create / map / unmap / query / close, with same-process duplicate promoted only when the call crosses a real server-handle boundary. |
 | `QueryWorkingSetEx()` | Current-process reporting is live, including `LargePage` flag reporting. Preferred path is `PAGEMAP_SCAN`; fallback is `/proc/self/pagemap`. |
 | `Get/SetProcessWorkingSetSize(Ex)` | Working-set quota values are accepted, stored, and returned through `ProcessQuotaLimits`. This is bookkeeping, not a working-set trimmer. |
@@ -86,8 +91,10 @@ For the full lifecycle and ownership rules, see
 
 ## 4. Large-page allocation and mapping
 
-Large-page support has two entry paths: anonymous allocation and section-backed
-mapping. Both start from Windows-visible APIs, but the backing shape differs.
+Large-page support now has three shipped shapes: explicit Windows large-page
+APIs, RT-keyed anonymous-memory promotion, and heap-arena backing that rides on
+that same anonymous path. Section-backed mappings remain the one large-page
+shape that still crosses wineserver once for backing creation.
 
 <div class="diagram-container">
 <svg width="100%" viewBox="0 0 960 430" xmlns="http://www.w3.org/2000/svg">
@@ -218,7 +225,7 @@ quota values by reclaiming or emptying the process working set.
   <text x="555" y="142" class="ws-label">`NtSetInformationProcess(ProcessQuotaLimits)`</text>
   <text x="555" y="162" class="ws-label">values stored in process bookkeeping</text>
   <text x="555" y="182" class="ws-label">`GetProcessWorkingSetSize(Ex)` returns the stored values</text>
-  <text x="555" y="202" class="ws-label">no `mlockall`, no kernel-side trimmer, no forced sweep</text>
+  <text x="555" y="202" class="ws-label">no kernel-side trimmer, no forced sweep, no fake reclaim story</text>
   <text x="555" y="222" class="ws-label">Windows-visible quota surface is present without fake enforcement</text>
   <text x="555" y="244" class="ws-small">keeps compatibility and diagnostics honest</text>
   <text x="555" y="258" class="ws-small">without claiming a memory manager Wine does not have</text>
@@ -229,8 +236,9 @@ quota values by reclaiming or emptying the process working set.
 </div>
 
 That division is intentional. Reporting should be correct. Quota APIs should
-behave coherently. But the docs should not imply that Wine-NSPA has grown a
-full Windows-style working-set manager. It has not.
+behave coherently. RT-keyed `mlockall()` improves residency behavior for the
+actual process, but the docs should not imply that Wine-NSPA has grown a full
+Windows-style working-set manager or a quota-enforcing trimmer. It has not.
 
 ---
 
@@ -309,7 +317,7 @@ performance goals are different.
 
 ---
 
-## 7. Validation surface
+## 7. Validation and observed effect
 
 The public `large-pages` PE harness now covers more than one call shape:
 
@@ -327,6 +335,22 @@ clean on the local path and materially reduces mapping RPC traffic.
 
 The relevant public harness documentation lives on `nspa-rt-test.gen.html`.
 
+The newer RT-keyed memory work was validated separately on real workloads and
+targeted shell harnesses:
+
+- `mlockall()` under `NSPA_RT_PRIO` cut perf page faults from `561/s` to
+  `451/s`, cut bpf page faults from `869/s` to `629/s`, and tightened max
+  futex wait from `94us` to `49us`, with `VmLck` around `300848kB`.
+- transparent hugetlb auto-promotion stayed conservative and is now keyed only
+  off `NSPA_RT_PRIO`; the cleanup pass ended with `test-huge-auto.sh` `3/3 PASS`.
+- heap arena hugetlb backing increased hugepage regions from `3` or `6` to
+  `104`, reduced dTLB miss / insn to `0.071%`, reduced `mmap` rate from
+  `33-61/s` to `0.13/s`, reduced `mprotect` rate from `56-90/s` to `0.03/s`,
+  and reduced page-faults from `753-869/s` to `2.8/s`.
+- after the gate cleanup, the public shell checks finished at
+  `test-mlock-ws.sh 4/4`, `test-huge-auto.sh 3/3`, and
+  `test-heap-hugepage.sh 3/3`.
+
 ---
 
 ## 8. Implementation map
@@ -337,8 +361,9 @@ The relevant public harness documentation lives on `nspa-rt-test.gen.html`.
 | `dlls/ntdll/unix/sync.c` / `dlls/ntdll/unix/virtual.c` | section creation, map / unmap / query hooks, and large-page / view semantics |
 | `server/mapping.c` | hugepage inventory scan, `LargePageMinimum` publication, `SEC_LARGE_PAGES` privilege gate, large-page section backing |
 | `dlls/kernelbase/memory.c` | `GetLargePageMinimum()` |
-| `dlls/ntdll/unix/virtual.c` | anonymous large-page allocation, large-page view tracking, `QueryWorkingSetEx()` reporting |
-| `dlls/ntdll/unix/process.c` | `ProcessQuotaLimits` working-set bookkeeping |
+| `dlls/ntdll/unix/virtual.c` | anonymous large-page allocation, transparent hugetlb promotion, large-page view tracking, `QueryWorkingSetEx()` reporting |
+| `dlls/ntdll/unix/process.c` | `ProcessQuotaLimits` working-set bookkeeping plus RT-keyed `mlockall()` startup |
+| `dlls/ntdll/heap.c` | RT-keyed hugepage arena backing for eligible growable heaps |
 | `dlls/kernelbase/process.c` | `Get/SetProcessWorkingSetSize(Ex)` user-facing entrypoints |
 | `dlls/kernelbase/debug.c` | `QueryWorkingSetEx()` / `K32QueryWorkingSetEx()` front-end |
 | `server/queue.c` | per-queue `memfd` regions for msg-ring / redraw / paint-cache |

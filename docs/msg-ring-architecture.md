@@ -1446,10 +1446,9 @@ RPC path. Default-on; flag is for bisection only.
 
 ### 12.1 Status
 
-**Shipped, default-on.** The fast path is shipped at
-`dlls/win32u/dce.c:1648-1685`, and `NSPA_ENABLE_PAINT_CACHE=0` is now
-the diagnostic opt-out. The older rollout history is kept below only
-for traceability.
+**Shipped.** The fast path is shipped at
+`dlls/win32u/dce.c:1648-1685`. The older rollout history is kept below
+only for traceability.
 
 ### 12.2 Rationale
 
@@ -1597,8 +1596,9 @@ the seqlock retry loop; on retry exhaustion, falls back to RPC.
 Hit/miss counters are gated behind `NSPA_PAINT_DIAG=1` because they ran
 unconditionally on every `get_update_flags` call across every Wine
 process — measurable cost on Ableton's polling UI thread (~3,227 calls
-per session even with paint-cache disabled, since the miss counter sat
-outside the disabled-check). Gated post-`f4a1671973b`.
+per session even before paint-cache became part of the normal shipped
+path, since the miss counter sat outside the fast-path check). Gated
+post-`f4a1671973b`.
 
 ### 12.6 Historical note
 
@@ -1606,8 +1606,7 @@ The fast path was temporarily reverted during its first rollout and
 later re-enabled after the MR1 / MR2 / MR4 hardening pass removed the
 message-path corruption that had been blamed on paint-cache. That
 history matters for traceability, but the current shipped behavior is
-simple: paint-cache is on by default and `NSPA_ENABLE_PAINT_CACHE=0`
-forces the older RPC path for A/B testing.
+simple: paint-cache is part of the normal path.
 
 ---
 
@@ -1876,7 +1875,7 @@ this footnote.
 | `4f2c29bb1b2` | temporary revert | Rolled back while the hardening work was still incomplete |
 | `f4a1671973b` | Gate hit/miss counters behind `NSPA_PAINT_DIAG=1` | Removed always-on counter cost |
 | (validation) | run-4 2026-04-28 with paint-cache on | PASS past historical 5-min lockup; F5 likely fixed by MR1/MR4 |
-| (current) | shipped default-on state | `NSPA_ENABLE_PAINT_CACHE=0` is the diagnostic opt-out |
+| (current) | shipped state | paint-cache is part of the normal path |
 
 ### 16.4 Direct `get_message` bypass
 

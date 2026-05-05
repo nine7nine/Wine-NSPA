@@ -108,7 +108,7 @@
 <div class="page-nav"><a href="index.html">Docs Home</a></div>
 <h1 id="wine-nspa--gamma-channel-dispatcher">Wine-NSPA &ndash; Gamma Channel Dispatcher</h1>
 
-<p>This page explains the current wineserver request path for a Wine process: how requests enter the gamma channel, how the dispatcher owns the reply path, and how the post-1010 aggregate-wait loop fits into that design.</p>
+<p>This page explains the current wineserver request path for a Wine process: how requests enter the gamma channel, how the dispatcher owns the reply path, and how the aggregate-wait dispatcher loop fits into that design.</p>
 
 <h2 id="table-of-contents">Table of Contents</h2>
 
@@ -121,7 +121,7 @@
 <li><a href="#6-dispatcher-state-machine">Dispatcher State Machine</a></li>
 <li><a href="#7-priority-inheritance-semantics">Priority-Inheritance Semantics</a></li>
 <li><a href="#8-open-path-lock-drop-integration">Open-path Lock-Drop Integration</a></li>
-<li><a href="#9-thread-token-pass-through-t1t2t3">Thread-Token Pass-Through (T1/T2/T3)</a></li>
+<li><a href="#9-thread-token-pass-through">Thread-token pass-through</a></li>
 <li><a href="#10-nt-semantics-preservation">NT Semantics Preservation</a></li>
 <li><a href="#11-validation-and-performance">Validation and Performance</a></li>
 <li><a href="#12-predecessors-and-their-failure-modes">Predecessors and Their Failure Modes</a></li>
@@ -157,27 +157,23 @@ not just one bare receive loop. That context owns:</p>
 </ul>
 
 
-<p>On post-1010 kernels the dispatcher blocks in
+<p>On current kernels the dispatcher blocks in
 <code>NTSYNC_IOC_AGGREGATE_WAIT</code> over <code>(channel object, uring eventfd if
 active, shutdown eventfd)</code>, follows a channel wake with
 <code>NTSYNC_IOC_CHANNEL_RECV2</code>, runs the existing <code>read_request_shm</code>
 handler under <code>global_lock</code>, and calls <code>NTSYNC_IOC_CHANNEL_REPLY</code> to
-wake the originator and drain its PI boost. On 1011 kernels, if
-<code>NSPA_TRY_RECV2</code> is left at its default-on setting, the dispatcher
-then issues <code>NTSYNC_IOC_CHANNEL_TRY_RECV2</code> in a tight loop to drain any
-additional ready entries from the same wake. On pre-1010 kernels it
-falls back permanently to the legacy direct <code>CHANNEL_RECV2</code> / <code>RECV</code>
-loop for that dispatcher, and on pre-1011 kernels the burst-drain
-feature gates itself off via <code>-ENOTTY</code>.</p>
+wake the originator and drain its PI boost. On current kernels the
+dispatcher then issues <code>NTSYNC_IOC_CHANNEL_TRY_RECV2</code> in a tight loop
+to drain any additional ready entries from the same wake.</p>
 
 <p>The key win over the legacy designs: priority inheritance is now
 <strong>kernel-atomic</strong>. There is no userspace TID-read-vs-<code>sched_setscheduler</code>
 race window, no <code>pthread_setschedparam</code> call against a thread that may
 have already exited, and no userspace bookkeeping of &ldquo;who is currently
 boosted to what&rdquo;. The kernel&rsquo;s <code>apply_event_pi_boost</code> /
-<code>consume_event_pi_boost</code> machinery (introduced in ntsync patch 1008
-deferred-boost) handles all of it inside the same lock that orders the
-queue.</p>
+<code>consume_event_pi_boost</code> machinery (introduced by the deferred event-boost
+carry in the ntsync overlay) handles all of it inside the same lock that
+orders the queue.</p>
 
 <p>The published <code>shmem-ipc.gen.html</code> describes v1.5 and v2.4. That
 document is <strong>superseded</strong> by this one. Gamma plus the aggregate-wait
@@ -207,7 +203,7 @@ dispatcher loop is the architecture in production today.</p>
 </tr>
 <tr>
 <td> Aggregate-wait primitive </td>
-<td> <code>drivers/misc/ntsync.c</code> + patch 1010 </td>
+<td> <code>drivers/misc/ntsync.c</code> (kernel overlay) </td>
 <td> Heterogeneous wait over channel object + fd sources </td>
 </tr>
 <tr>
@@ -331,9 +327,9 @@ shmem window.</p>
 
 <h3 id="22-aggregate-wait-topology">2.2 Aggregate-wait topology</h3>
 
-<p>Post-1010/1011 gamma is no longer just a blocking <code>RECV2</code> loop. The
+<p>Current gamma is no longer just a blocking <code>RECV2</code> loop. The
 dispatcher waits on three sources and selects the work type from the
-aggregate-wait result; on 1011 kernels it can then keep draining ready
+aggregate-wait result; it can then keep draining ready
 channel work with <code>TRY_RECV2</code> before it sleeps again.</p>
 
 <div class="diagram-container">
@@ -355,7 +351,7 @@ channel work with <code>TRY_RECV2</code> before it sleeps again.</p>
   </style>
 
   <rect x="0" y="0" width="980" height="520" class="ga-bg" rx="6"/>
-  <text x="490" y="28" text-anchor="middle" class="ga-h">Gamma dispatcher on post-1011 kernels</text>
+  <text x="490" y="28" text-anchor="middle" class="ga-h">Gamma dispatcher on current kernels</text>
 
   <rect x="250" y="70" width="480" height="84" class="ga-wait" rx="6"/>
   <text x="490" y="98" text-anchor="middle" class="ga-v">`NTSYNC_IOC_AGGREGATE_WAIT`</text>
@@ -366,7 +362,7 @@ channel work with <code>TRY_RECV2</code> before it sleeps again.</p>
   <text x="195" y="236" text-anchor="middle" class="ga-t">channel source fired</text>
   <text x="195" y="260" text-anchor="middle" class="ga-s">follow with `CHANNEL_RECV2`</text>
   <text x="195" y="278" text-anchor="middle" class="ga-s">run handler under `global_lock`</text>
-  <text x="195" y="296" text-anchor="middle" class="ga-s">reply, then TRY_RECV2-drain while ready (1011 + gate)</text>
+  <text x="195" y="296" text-anchor="middle" class="ga-s">reply, then TRY_RECV2-drain while ready</text>
   <text x="195" y="314" text-anchor="middle" class="ga-s">async-capable handler may submit SQE and return to wait</text>
 
   <rect x="365" y="210" width="250" height="132" class="ga-fast" rx="6"/>
@@ -390,8 +386,8 @@ channel work with <code>TRY_RECV2</code> before it sleeps again.</p>
   <rect x="180" y="390" width="620" height="90" class="ga-note" rx="6"/>
   <text x="490" y="416" text-anchor="middle" class="ga-y">Load-bearing invariant</text>
   <text x="490" y="438" text-anchor="middle" class="ga-s">the same RT thread receives, drains completion, and signals the reply</text>
-  <text x="490" y="456" text-anchor="middle" class="ga-s">aggregate-wait opt-out or `-ENOTTY` selects the legacy direct receive loop</text>
-  <text x="490" y="472" text-anchor="middle" class="ga-s">`NSPA_TRY_RECV2=0` or `-ENOTTY` keeps one dequeue per wake</text>
+  <text x="490" y="456" text-anchor="middle" class="ga-s">aggregate-wait owns the wait shape for channel, CQE, and shutdown readiness</text>
+  <text x="490" y="472" text-anchor="middle" class="ga-s">TRY_RECV2 keeps draining ready work from the same wake before returning to wait</text>
 </svg>
 </div>
 
@@ -676,25 +672,11 @@ never request data.</li>
 must be preserved; cross-thread ordering can become priority-ordered
 (strictly stronger, never weaker, than the legacy &ldquo;first-to-wake&rdquo;
 shape).</li>
-<li><strong>Graceful fallback.</strong> If the kernel lacks the channel ioctls, the
-client must transparently fall back to the upstream socket path.
-Same for senders that arrive before their dispatcher pthread has
-managed to spawn.</li>
+<li><strong>Bounded startup fallback.</strong> If a sender reaches the transport before
+its dispatcher context has spawned, the request still falls back to the
+canonical wineserver path instead of inventing a half-initialized fast path.</li>
 </ul>
 
-
-<p>The gating env vars on the current production path are:</p>
-
-<ul>
-<li><code>NSPA_DISPATCHER_USE_TOKEN=0</code> &ndash; A/B for T3 thread-token consumption</li>
-<li><code>NSPA_AGG_WAIT=0</code> &ndash; opt out of the post-1010 aggregate-wait loop and
-force the old direct <code>CHANNEL_RECV2</code> path for that dispatcher</li>
-<li><code>NSPA_TRY_RECV2=0</code> &ndash; keep one dequeue per wake even on 1011 kernels</li>
-</ul>
-
-
-<p>Gamma itself remains the default transport whenever the channel ioctls
-are present.</p>
 
 <hr />
 
@@ -881,19 +863,15 @@ gamma is cheaper than v1.5.</p>
 <h2 id="6-dispatcher-state-machine">6. Dispatcher State Machine</h2>
 
 <p>The dispatcher pthread is still born detached with explicit
-<code>SCHED_FIFO</code> attrs when <code>NSPA_SRV_RT_PRIO &gt; 0</code>, but the runtime loop is
-now selected in layers:</p>
+<code>SCHED_FIFO</code> attrs when <code>NSPA_SRV_RT_PRIO &gt; 0</code>, and the shipped runtime
+loop is now the aggregate-wait shape:</p>
 
 <ol>
-<li>prefer aggregate-wait if patch 1010 is present and <code>NSPA_AGG_WAIT</code>
-is not set to <code>0</code></li>
-<li>if aggregate-wait returns <code>-ENOTTY</code>, permanently fall back to the
-legacy direct receive loop for this dispatcher</li>
-<li>inside that loop, prefer <code>CHANNEL_RECV2</code>; if the kernel predates
-1005, permanently fall back to <code>CHANNEL_RECV</code></li>
-<li>after each successful dispatch, if patch 1011 is present and
-<code>NSPA_TRY_RECV2</code> is not set to <code>0</code>, issue non-blocking <code>TRY_RECV2</code>
-until the channel is empty</li>
+<li>block in <code>NTSYNC_IOC_AGGREGATE_WAIT</code> over channel, uring eventfd, and shutdown eventfd</li>
+<li>use <code>CHANNEL_RECV2</code> to dequeue the winning request</li>
+<li>run the handler under <code>global_lock</code></li>
+<li>issue <code>CHANNEL_REPLY</code></li>
+<li>use non-blocking <code>TRY_RECV2</code> to drain any additional ready entries</li>
 </ol>
 
 
@@ -1190,25 +1168,17 @@ preserved across the lock-drop window:</p>
 <p>The restore order is the inverse: re-lock, restore <code>current</code>,
 restore <code>current-&gt;error</code>, drop refs.</p>
 
-<h3 id="84-gating">8.4 Gating</h3>
+<h3 id="84-current-shipped-boundary">8.4 Current shipped boundary</h3>
 
-<p>The open-path lock-drop is <strong>default-on as of 2026-04-26</strong>, gated by
-<code>NSPA_OPENFD_LOCKDROP=0</code> for A/B testing or as a panic switch.
-Originally shipped default-off after a host lockup on the first
-validation run; the lockup was eventually traced to the ntsync
-driver&rsquo;s <code>kfree</code>-under-<code>raw_spinlock_t</code> bug (fixed in
-<code>ntsync-patches/1006-ntsync-rt-alloc-hoist.patch</code>), not the lock-drop
-itself. Re-validated post-1006 with Ableton drum-track-load-while-
-playing &ndash; the file-open burst this path targets &ndash; with
-clean results.</p>
-
-<p>The cached env-var read at lines 67-79 follows the same one-shot
-<code>getenv</code> pattern as the other gamma gates (<code>NSPA_DISPATCHER_USE_TOKEN</code>,
-<code>NSPA_DISABLE_EPOLL</code>).</p>
+<p>The open-path lock-drop is part of the shipped dispatcher environment.
+The first validation scare on this path turned out to be the old ntsync
+<code>kfree</code>-under-raw-spinlock bug, not the lock-drop itself. The path was
+revalidated after the kernel fix on the drum-track-load-while-playing
+workload it was designed to protect.</p>
 
 <hr />
 
-<h2 id="9-thread-token-pass-through-t1t2t3">9. Thread-Token Pass-Through (T1/T2/T3)</h2>
+<h2 id="9-thread-token-pass-through">9. Thread-token pass-through</h2>
 
 <p>The thread-token mechanism is a steady-state CPU optimisation
 introduced by ntsync patch 1005 and consumed by the dispatcher. It
@@ -1256,10 +1226,9 @@ it is worth the kernel-side complexity.</p>
 
 
 <p>T1 and T2 ship behaviour-neutral (the kernel stamps tokens and the
-wineserver registers them, but nobody reads the token). T3 flips
-the dispatcher to consume them and is gated <code>NSPA_DISPATCHER_USE_TOKEN</code>
-(default on, set to <code>0</code> to fall back to the legacy
-<code>get_thread_from_id</code> lookup for A/B testing).</p>
+wineserver registers them, but nobody reads the token). T3 is the
+current shipped consumer shape: the dispatcher consumes the token
+directly and skips the legacy <code>get_thread_from_id</code> lookup.</p>
 
 <h3 id="93-lifetime-safety">9.3 Lifetime safety</h3>
 
@@ -1367,11 +1336,8 @@ the kitchen-sink path with <strong>86,528 wakes / 0 timeouts / 0 errors</strong>
 <li><code>dispatcher-burst</code> matters because the rest of the PE matrix mostly
 goes through <code>inproc_wait</code> -> ntsync ioctls directly and does not hit
 the dispatcher hot path.</li>
-<li>On pre-1011 kernels the <code>TRY_RECV2</code> loop gates itself off via
-<code>-ENOTTY</code>; the dispatcher remains functionally correct and simply
-consumes one entry per wake.</li>
-<li>Ableton Live 12 Lite with <code>NSPA_AGG_WAIT=1</code>, default-on
-<code>NSPA_TRY_RECV2</code>, and default-on async <code>create_file</code>: clean
+<li>Ableton Live 12 Lite with aggregate-wait, <code>TRY_RECV2</code>, and async
+<code>CreateFile</code> all on the shipped path: clean
 cold-start, plugin scan, drum-track-load-while-playing, and clean
 shutdown.</li>
 </ul>
@@ -1501,18 +1467,15 @@ fences) was already in place.</p>
 concentrated in burst load where the dispatcher can drain N queued
 entries per <code>AGG_WAIT</code> wake instead of paying N round-trips.</p>
 
-<h3 id="113-configuration-validated-for-production">11.3 Configuration validated for production</h3>
+<h3 id="113-production-validation-shape">11.3 Production validation shape</h3>
 
-<p>For the 2026-04-30 production validation:</p>
+<p>For the 2026-05-05 shipped path:</p>
 
 <ul>
-<li>Module: <code>10124FB81FDC76797EF1F91</code></li>
+<li>Module: <code>F1A9EA24E257A35BB21341D</code></li>
 <li><code>NSPA_RT_POLICY=FF</code></li>
-<li><code>NSPA_OPENFD_LOCKDROP</code> unset -> default ON</li>
-<li><code>NSPA_DISPATCHER_USE_TOKEN</code> unset -> default ON</li>
-<li><code>NSPA_AGG_WAIT</code> unset -> default ON</li>
-<li><code>NSPA_TRY_RECV2</code> unset -> default ON</li>
-<li><code>NSPA_ENABLE_ASYNC_CREATE_FILE</code> unset -> default ON</li>
+<li>aggregate-wait, thread-token consumption, <code>TRY_RECV2</code>, and async
+<code>CreateFile</code> all on the normal shipped path</li>
 </ul>
 
 

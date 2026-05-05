@@ -256,7 +256,7 @@ After Tier 2 fills the walker, the dispatch loop in `call_message_hooks` (lines 
 
 The walker is allocated on the dispatching thread's stack and the `nspa_hook_walker_current` pointer is `__thread` storage. Nested hook dispatches push/pop via the `prev` pointer field. Stack-local with a per-thread current-pointer is the right pattern: no allocation, no lock, no leak on early return -- the walker disappears with the stack frame.
 
-Tier 2 is opt-out via `NSPA_DISABLE_HOOK_TIER2`; default is on. Tier 1 is opt-out via `NSPA_DISABLE_HOOK_TIER1`. Both default-on as of the 2026-04-25 ship.
+Tier 1 and Tier 2 are both part of the shipped path.
 
 ### When Tier 2 falls back
 
@@ -269,8 +269,6 @@ The reader returns -1 (RPC fallback) when:
 | `module_size &gt;= MAX_PATH` | reader copy loop | Module name doesn't fit in walker's per-entry MAX_PATH WCHAR slot |
 | Retry exhausted (8 iterations) | reader retry loop | Server is churning the cache faster than client can read; rare |
 | `bypass shm` not mapped | early return | Memfd-backed bypass region didn't bootstrap (msg-bypass off, or pre-init) |
-| `NSPA_DISABLE_HOOK_TIER2=1` | env check | User opted out |
-
 Each of these has a corresponding RPC-path code, so falling back is always safe.
 
 ## 6. Server-side cache rebuild
@@ -401,7 +399,7 @@ Tier 1 and Tier 2 were both shipped on 2026-04-25, with the diag-pile cleanup on
 | 2026-04-25 | T1.0 + T1.1 | Tier 1 protocol scaffolding (`hooks_count[]` reader); set_hook / remove_hook server-side increment / decrement |
 | 2026-04-25 | T2.0 | Tier 2 protocol scaffolding (`nspa_hook_chain_t`, `nspa_hook_entry_t`, module pool layout) |
 | 2026-04-25 | T2.1 | Server-side `nspa_hook_cache_rebuild` + invocation from `set_hook` / `remove_hook` handlers |
-| 2026-04-25 | T2.2 / T2.3 | Client-side `nspa_hook_try_read_cache` reader; default-on with `NSPA_DISABLE_HOOK_TIER2` opt-out |
+| 2026-04-25 | T2.2 / T2.3 | Client-side `nspa_hook_try_read_cache` reader |
 | 2026-04-25 | call_hook routing fix | `info->tid = 0` for cache-served entries (in-thread dispatch only); avoids accidentally taking the LL-hook cross-thread branch |
 | 2026-04-26 | diag pile removal | Removed 13 atomic counters (`top_calls`, `skipped_no_hooks`, `server_dispatch`, `cat_*`, `tier1_shmem_inc/dec`, `tier1_finish_forced/skipped`, `tier2_*`) and the 5-second background dump thread. They were pre-ship instrumentation to decide *whether* to build the cache; once shipped, kept paying ~13 atomic adds per `call_message_hooks` invocation forever. Kept only the load-bearing counters: `nspa_hook_walk_counts[]` (server reads for Tier 1 refcount) and `nspa_hook_try_read_cache` itself. |
 
@@ -443,17 +441,11 @@ Neither is on the near-term roadmap; current measured Tier 1 + Tier 2 hit rate m
 | Server remove_hook handler invocation | `wine/server/hook.c` | 549-557 |
 | Tier 1 server publish (`add_queue_hook_count`) | `wine/server/queue.c` | 738-749 |
 | Tier 1 client-walk refcount (`nspa_queue_hook_chain_busy_tier1`) | `wine/server/queue.c` | 790-798 |
-| Tier 1 env gate (`nspa_queue_hook_tier1_active`) | `wine/server/queue.c` | 758-774 |
+| Tier 1 active-path helper (`nspa_queue_hook_tier1_active`) | `wine/server/queue.c` | 758-774 |
 | Bypass shm pointer accessor (`nspa_queue_bypass_shm`) | `wine/server/queue.c` | 779-783 |
 | Protocol struct definitions | `wine/server/protocol.def` | 1134-1170 |
 | Bypass shm field layout (chains + pool) | `wine/server/protocol.def` | 1206-1214 |
 | Tier 1 / Tier 2 capacity macros | `wine/server/protocol.def` | 1142-1143 |
 
-Environment variables:
-
-| Variable | Default | Effect |
-|----------|---------|--------|
-| `NSPA_DISABLE_HOOK_TIER1` | unset | Disables Tier 1 client refcount + server's `tier1_active` reply path; reverts to legacy `start_hook_chain` / `finish_hook_chain` accounting |
-| `NSPA_DISABLE_HOOK_TIER2` | unset | Disables Tier 2 cache reader; every walk uses the RPC trio (Tier 1 still applies if not also disabled) |
-
-Both variables are read once per process (cached) and matched server-side via `reply->tier1_active` so client and server agree on whether the bypass is active for any given queue.
+There are no public hook-cache feature gates in the shipped path. The cache is
+now part of the normal client/server contract for eligible hook walks.

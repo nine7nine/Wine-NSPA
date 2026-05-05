@@ -428,11 +428,10 @@ That logic is runtime feature detection, not a release ladder:
 
 | Item | Value |
 |---|---|
-| Kernel module srcversion | `10124FB81FDC76797EF1F91` |
-| Wine userspace state | Dispatcher-owned ring and aggregate-wait loop are landed; async `CreateFile` now uses the same ring |
-| Default gate | `NSPA_AGG_WAIT=1` |
-| Opt-out | `NSPA_AGG_WAIT=0` |
-| Follow-on gates on top of this base | `NSPA_ENABLE_ASYNC_CREATE_FILE=1`; `NSPA_TRY_RECV2=1` on 1011 kernels |
+| Kernel module srcversion | `F1A9EA24E257A35BB21341D` |
+| Wine userspace state | Dispatcher-owned ring and aggregate-wait loop are shipped; async `CreateFile` and burst drain both build on the same base |
+| Current wait shape | `AGGREGATE_WAIT` over channel + uring eventfd + shutdown eventfd |
+| Current follow-ons on top of this base | dispatcher-owned async `CreateFile`; post-reply `TRY_RECV2` burst drain |
 
 ### Validation results
 
@@ -443,8 +442,8 @@ That logic is runtime feature detection, not a release ladder:
 | 1k mixed-concurrency stress | PASS |
 | 30k stress + full native ntsync suite | PASS, dmesg clean |
 | PE matrix | 24 PASS / 0 FAIL / 0 TIMEOUT, including `dispatcher-burst` |
-| Ableton level 2/3 with `NSPA_AGG_WAIT=1` | PASS |
-| Aggregate-wait default-on under Ableton | PASS |
+| Ableton level 2/3 on the shipped path | PASS |
+| Aggregate-wait in normal production use | PASS |
 
 The follow-up kernel fixes in `072bfee` matter here. The first 1010 cut exposed exactly
 the kind of PI edge that the dispatcher cannot tolerate: an aggregate-waiting dispatcher

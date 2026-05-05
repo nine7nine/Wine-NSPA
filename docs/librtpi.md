@@ -585,7 +585,7 @@ Notable later-than-bring-up commits:
   complementary, not stacked.
 - [Win32 Condvar PI (Requeue-PI)](condvar-pi-requeue.gen.html) --
   the analogous requeue-PI work for `RtlSleepConditionVariableCS`.
-- [NTSync PI Driver](ntsync-pi-driver.gen.html) -- the kernel
+- [NTSync PI Kernel](ntsync-pi-driver.gen.html) -- the kernel
   ntsync overlay that adds PI to NT-shape sync objects (mutex,
   semaphore, event, channel). librtpi covers Wine's *internal*
   Unix-side locks; ntsync covers the Win32 sync surface. Together

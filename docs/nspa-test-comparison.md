@@ -6,7 +6,7 @@ RT = `NSPA_RT_PRIO=80 NSPA_RT_POLICY=FF WINEPRELOADREMAPVDSO=force`
 This doc tracks Wine-NSPA test-suite evolution from v3 through v8. The
 current published full-suite snapshot remains v8 / 2026-04-30
 (1003-1011 kernel stack, 24 PASS / 0 FAIL / 0 TIMEOUT PE matrix,
-`dispatcher-burst` added). The shipped 2026-05-02 and 2026-05-03
+`dispatcher-burst` added). The shipped 2026-05-02 through 2026-05-05
 follow-ons below are validated by targeted harnesses and smoke runs
 rather than a new v9 full-suite publish. Earlier version sections are
 retained below as historical snapshots.
@@ -21,19 +21,20 @@ retained below as historical snapshots.
 
 ---
 
-## Post-v8 shipped follow-ons (2026-05-02 and 2026-05-03) -- targeted validators, not a new matrix version
+## Post-v8 shipped follow-ons (2026-05-02 through 2026-05-05) -- targeted validators, not a new matrix version
 
 ### Why this is not labeled v9
 
 The public project has shipped meaningful new client-side work since v8:
 spawn-main + `ntdll_sched`, sched-hosted timer migrations, anonymous
 local events default-on, socket `RECVMSG` / `SENDMSG` default-on, wider
-local-file coverage, and default-on local sections. Those changes were
+local-file coverage, default-on local sections, RT-keyed memory
+follow-ons, and the current ntsync production module. Those changes were
 validated with targeted harnesses and real-workload smoke, but they have
 **not** yet been rolled into a new published full-suite matrix version.
 So the current matrix version remains v8.
 
-### Targeted 2026-05-02 and 2026-05-03 results
+### Targeted 2026-05-02 through 2026-05-05 results
 
 | Area | Validation surface | Published result |
 |------|--------------------|------------------|
@@ -42,12 +43,14 @@ So the current matrix version remains v8.
 | socket `RECVMSG` / `SENDMSG` default-on | `socket-io` deferred path + Ableton smoke | throughput `+6.5%`; p99 latency `-6.8%`; `0/2000` failures; Ableton clean at `63` threads with zero new errors vs earlier shipped socket baseline |
 | local-file widening | workload comparison | `create_file` handler count `7,845` -> `5,658`; handler time `137 ms` -> `50 ms` |
 | local sections default-on | workload comparison | `nspa_create_mapping_from_unix_fd` count `2,664` -> `~800`; same-process map-after-file-close shape clean |
+| current ntsync production module | native channel / aggregate / stress reruns | receive snapshot fix, dedicated slab caches, and lockless `SEND_PI` scan validated on current srcversion `F1A9EA24E257A35BB21341D` |
+| RT-keyed memory follow-ons | targeted shell harnesses | `test-mlock-ws.sh 4/4 PASS`; `test-huge-auto.sh 3/3 PASS`; `test-heap-hugepage.sh 3/3 PASS` |
 
 ### Reading this with the rest of the docs
 
 Use this page for the current published matrix boundary. Use
 `current-state.gen.html` for the exact shipped defaults and targeted
-2026-05-02 and 2026-05-03 validation numbers that landed after v8.
+2026-05-02 through 2026-05-05 validation numbers that landed after v8.
 
 ---
 
@@ -138,8 +141,8 @@ harness was added in v8.
 | Area | Change | Impact |
 |------|--------|--------|
 | Kernel | 1011 `NTSYNC_IOC_CHANNEL_TRY_RECV2` shipped | non-blocking channel dequeue for post-dispatch burst drain |
-| Userspace | `NSPA_TRY_RECV2=1` default-on | drains multiple entries per `AGG_WAIT` under burst load |
-| Userspace | `NSPA_ENABLE_ASYNC_CREATE_FILE=1` default-on | removes the `open()` lock-drop CS from the audio xrun path |
+| Userspace | burst-drain shipped on the normal path | drains multiple entries per `AGG_WAIT` under burst load |
+| Userspace | dispatcher-owned async `CreateFile` shipped on the normal path | removes the `open()` lock-drop CS from the audio xrun path |
 | Userspace | `NSPA_FLUSH_THROTTLE_MS=8` default-on | recovers ~5.4 percentage points of MainThread CPU under busy Ableton |
 | Test surface | `dispatcher-burst` added to Layer 2 | first PE-side gamma / dispatcher coverage |
 
@@ -393,6 +396,6 @@ Priority wakeup order: correct in all configs across all versions.
 
 ---
 
-Generated: 2026-05-01 | Wine-NSPA RT test harness v8 current snapshot
+Generated: 2026-05-01 | Wine-NSPA RT test harness v8 historical snapshot
 (Layer 1 + Layer 2) -- `10124FB81FDC76797EF1F91`, 3 PASS / 0 FAIL
 native, 24 PASS / 0 FAIL / 0 TIMEOUT PE matrix.

@@ -147,7 +147,7 @@
 
 <p>NSPA is not an acronym. The current 11.x line is a reimplementation of earlier Wine 8.x and 10.x RT branches, updated to use NTSync (introduced upstream in Wine 9.x and Linux 6.10) instead of the older shmem-dispatcher-based design.</p>
 
-<p>The whole project is a small Linux kernel module (~3 kLOC of <code>ntsync.{c,h}</code> deltas on top of upstream) plus a Wine fork that increasingly bypasses wineserver through bounded shmem rings, all gated behind a single env var (<code>NSPA_RT_PRIO</code>). When <code>NSPA_RT_PRIO</code> is unset, every NSPA code path short-circuits to upstream Wine and behaviour is byte-identical. There is no zero-config tax for users who don&rsquo;t opt in.</p>
+<p>The whole project is a small Linux kernel module (~3 kLOC of <code>ntsync.{c,h}</code> deltas on top of upstream) plus a Wine fork that increasingly bypasses wineserver through bounded shmem rings, client-local tables, and scheduler hosts. <code>NSPA_RT_PRIO</code> is the master RT gate: when unset, the PI and RT-owned paths stand down and Wine behaves byte-identically to upstream. A few non-RT follow-ons keep their own narrower A/B toggles, but there is no zero-config tax for users who do not opt in.</p>
 
 <hr />
 
@@ -345,18 +345,17 @@ exceeded.</p>
 
 <h3 id="31-synchronization-and-priority-inheritance">3.1 Synchronization and priority inheritance</h3>
 
-<p>NSPA implements priority inheritance along four independent paths so that no Win32 sync surface is left as a priority-inversion source. CS-PI (Path A) repurposes <code>RTL_CRITICAL_SECTION::LockSemaphore</code> as a <code>FUTEX_LOCK_PI</code> futex word, giving every critical section the kernel&rsquo;s transitive PI chain semantics. NTSync direct (Path B) routes <code>NtWaitForSingleObject</code> and friends through <code>/dev/ntsync</code> ioctls, where the kernel module&rsquo;s 1003 patch implements priority-ordered waiter queues and per-task PI boost across mutex chains. Vendored librtpi (Path C) provides <code>pi_cond_wait</code> for unix-side condition variables built on <code>FUTEX_WAIT_REQUEUE_PI</code>. Win32 condvar PI (Path D) extends Path C up into the Win32 surface so <code>SleepConditionVariableCS</code> is also PI-clean.</p>
+<p>NSPA implements priority inheritance along four independent paths so that no Win32 sync surface is left as a priority-inversion source. CS-PI repurposes <code>RTL_CRITICAL_SECTION::LockSemaphore</code> as a <code>FUTEX_LOCK_PI</code> futex word, giving every critical section the kernel&rsquo;s transitive PI chain semantics. NTSync direct routes <code>NtWaitForSingleObject</code> and friends through <code>/dev/ntsync</code> ioctls, where the kernel overlay implements priority-ordered waiter queues and per-task PI boost across mutex chains. Vendored librtpi provides <code>pi_cond_wait</code> for unix-side condition variables built on <code>FUTEX_WAIT_REQUEUE_PI</code>. Win32 condvar PI extends that up into the Win32 surface so <code>SleepConditionVariableCS</code> is also PI-clean.</p>
 
 <p>The kernel side is where the heavy lifting happens. The <code>ntsync.ko</code>
 module sits at <code>/dev/ntsync</code> and implements NT sync object semantics
 natively in the kernel, with PI-aware mutexes, priority-ordered waiter
-queues, a channel object (1004/1005) that serves as the gamma
-dispatcher transport, 1010 aggregate-wait for heterogeneous waits, and
-1011 <code>TRY_RECV2</code> for post-dispatch burst drain. The current production
-module is <code>10124FB81FDC76797EF1F91</code>, which carries 1003-1011 plus the
-post-1010 PI follow-ups.</p>
+queues, a channel transport that serves the gamma dispatcher, an
+aggregate-wait primitive for heterogeneous waits, and <code>TRY_RECV2</code> for
+post-dispatch burst drain. The current production module is
+<code>F1A9EA24E257A35BB21341D</code>.</p>
 
-<p>All four paths are gated on <code>NSPA_RT_PRIO</code>. When unset, every PI code path short-circuits and Wine behaves byte-for-byte like upstream. <strong>Detail: see <a href="ntsync-driver.gen.html">ntsync-driver</a>, <a href="cs-pi.gen.html">cs-pi</a>, <a href="condvar-pi-requeue.gen.html">condvar-pi-requeue</a>.</strong></p>
+<p>All four paths are gated on <code>NSPA_RT_PRIO</code>. When unset, every PI code path short-circuits and Wine behaves byte-for-byte like upstream. <strong>Detail: see <a href="ntsync-pi-driver.gen.html">NTSync PI Kernel</a>, <a href="ntsync-userspace.gen.html">NTSync Userspace Sync</a>, <a href="cs-pi.gen.html">cs-pi</a>, <a href="condvar-pi-requeue.gen.html">condvar-pi-requeue</a>.</strong></p>
 
 <h3 id="32-wineserver-ipc">3.2 Wineserver IPC</h3>
 
@@ -487,11 +486,11 @@ the common mistake of treating every shared region as &ldquo;just more session s
 
 <h2 id="4-bypass-topology">4. Bypass topology</h2>
 
-<p>Each bypass moves a specific class of NT-API state or I/O work out of wineserver and into client-local state, bounded shared memory, or kernel-mediated primitives. Every path is independently gated, validated, and revertible.</p>
+<p>Each bypass moves a specific class of NT-API state or I/O work out of wineserver and into client-local state, bounded shared memory, or kernel-mediated primitives. Every path is independently bounded, validated, and revertible.</p>
 
 <p>The current topology covers the shipped bypass surfaces plus the
 residual wineserver floor (process/thread lifecycle, cross-process
-naming, path resolution, handle inheritance). As of 2026-05-03, the
+naming, path resolution, handle inheritance). As of 2026-05-05, the
 shipped/default-on set includes sync primitives, hook caching,
 NT-local file and section handling, local events, sched-hosted timer dispatch,
 the client scheduler substrate, <code>io_uring</code> regular-file I/O, gamma&rsquo;s
@@ -501,7 +500,7 @@ the <code>redraw_window</code> push ring, the paint cache fast path, and the X11
 flush throttle. Direct <code>GetMessage</code> bypass and sechost device-IRP poll
 remain pending.</p>
 
-<p>This staging keeps regression scope local and rebase cost bounded. The shipped paths already remove measurable server traffic while preserving an immediate fallback to the canonical wineserver path when a gate is disabled.</p>
+<p>This staging keeps regression scope local and rebase cost bounded. The shipped paths already remove measurable server traffic while still falling back cleanly whenever a call leaves the local envelope or an explicit A/B toggle is used.</p>
 
 <hr />
 
@@ -644,13 +643,13 @@ clamped to [1..98]
 
 <p><code>THREAD_PRIORITY_TIME_CRITICAL</code> is special-cased at the client side: even if a process didn&rsquo;t first call <code>SetPriorityClass(REALTIME)</code>, a <code>SetThreadPriority(thread, TIME_CRITICAL)</code> call is treated as a ceiling promotion. This covers the common audio pattern where apps set TIME_CRITICAL without first lifting the process class &ndash; a Win32-API quirk that NSPA accommodates leniently for the ceiling band only.</p>
 
-<p><strong>Detail: see <a href="current-state.gen.html">current-state</a> for the live mapping; per-path PI mechanism in <a href="cs-pi.gen.html">cs-pi</a> and <a href="ntsync-driver.gen.html">ntsync-driver</a>.</strong></p>
+<p><strong>Detail: see <a href="current-state.gen.html">current-state</a> for the live mapping; per-path PI mechanism in <a href="cs-pi.gen.html">cs-pi</a>, <a href="ntsync-pi-driver.gen.html">NTSync PI Kernel</a>, and <a href="ntsync-userspace.gen.html">NTSync Userspace Sync</a>.</strong></p>
 
 <hr />
 
 <h2 id="7-status-reference">7. Status reference</h2>
 
-<p>The canonical status board lives at <strong><a href="current-state.gen.html">current-state</a></strong>. It tracks shipped vs gated vs pending features, the ntsync patch stack through 1011, the current production module / validation posture, the default-on feature set, and the current dispatcher hot-path tuning notes.</p>
+<p>The canonical status board lives at <strong><a href="current-state.gen.html">current-state</a></strong>. It tracks shipped surfaces, remaining A/B toggles, pending work, the current production module / validation posture, and the current dispatcher and memory tuning notes.</p>
 
 <p>This document describes system structure. <code>current-state.md</code> records current validation and default polarity.</p>
 
@@ -717,8 +716,12 @@ clamped to [1..98]
 <td> Tier 1+2 Win32 hook-chain cache </td>
 </tr>
 <tr>
-<td> <code>ntsync-driver.gen.html</code> </td>
-<td> NTSync kernel overlay plus Wine in-process sync path, including aggregate-wait and <code>TRY_RECV2</code> </td>
+<td> <code>ntsync-pi-driver.gen.html</code> </td>
+<td> NTSync PI kernel overlay: PI baseline, channel transport, aggregate-wait, and later kernel hardening </td>
+</tr>
+<tr>
+<td> <code>ntsync-userspace.gen.html</code> </td>
+<td> Wine in-process sync path: handle-to-fd cache, client-created sync objects, direct wait/signal helpers, and dispatcher-facing wrappers </td>
 </tr>
 <tr>
 <td> <code>cs-pi.gen.html</code> </td>
@@ -762,7 +765,7 @@ here.</p>
 
 <hr />
 
-<p><em>Master overview updated 2026-05-03. Current production ntsync module <code>10124FB81FDC76797EF1F91</code>, kernel <code>6.19.11-rt1-1-nspa</code>. Per-subsystem detail is in the dedicated pages linked above; live state is in <code>current-state.gen.html</code>.</em></p>
+<p><em>Master overview updated 2026-05-05. Current production ntsync module <code>F1A9EA24E257A35BB21341D</code>, kernel <code>6.19.11-rt1-1-nspa</code>. Per-subsystem detail is in the dedicated pages linked above; live state is in <code>current-state.gen.html</code>.</em></p>
 
 <script>
 document.addEventListener("DOMContentLoaded", function () {

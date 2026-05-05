@@ -1,24 +1,31 @@
-# Wine-NSPA -- NTSync PI Driver
+# Wine-NSPA -- NTSync PI Kernel
 
-This page is the feature-by-feature architecture and implementation guide for the kernel-side Wine-NSPA ntsync overlay: PI primitives, the channel transport, the RT-safety carries, the aggregate-wait primitive, the burst-drain follow-on, and the post-1011 slab UAF fix, dedicated kmem_cache conversion, and SEND_PI lockless target scan.
+This page covers the Wine-NSPA kernel half of ntsync: the
+priority-inheritance baseline, the channel transport used by the gamma
+dispatcher, aggregate-wait, and the later hardening work needed to keep that
+stack production-safe on PREEMPT_RT.
 
-The Wine userspace half of the integration -- handle-to-fd caching, server-owned vs. client-created anonymous sync handles, the dispatcher ioctl wrappers, and PE-side wait coverage -- lives in the companion document [NTSync Userspace](ntsync-userspace.gen.html).
+Upstream ntsync is the base. This page documents the shipped Wine-NSPA kernel
+overlay on top of it. The Wine userspace half -- handle-to-fd caching,
+client-created anonymous sync objects, direct wait/signal helpers, and the
+dispatcher-facing ioctl wrappers -- lives on the companion page
+[NTSync Userspace Sync](ntsync-userspace.gen.html).
 
 ## Table of Contents
 
 1. [Overview](#1-overview)
 2. [Object Types](#2-object-types)
-3. [Priority-inheritance baseline (1003)](#3-priority-inheritance-baseline-1003)
-4. [Channel object (1004)](#4-channel-object-1004)
-5. [Thread-token pass-through (1005)](#5-thread-token-pass-through-1005)
-6. [RT alloc-hoist (1006)](#6-rt-alloc-hoist-1006)
-7. [Channel exclusive recv (1007)](#7-channel-exclusive-recv-1007)
-8. [Deferred `EVENT_SET_PI` boost (1008)](#8-deferred-event_set_pi-boost-1008)
-9. [channel_entry refcount UAF fix (1009)](#9-channel_entry-refcount-uaf-fix-1009)
-10. [Aggregate-wait (1010 + 1011)](#10-aggregate-wait-1010)
-11. [Channel recv snapshot UAF fix (1012)](#11-channel-recv-snapshot-uaf-fix-1012)
-12. [Dedicated kmem_caches (1013)](#12-dedicated-kmem_caches-1013)
-13. [SEND_PI lockless target scan (1014 + 1014a)](#13-send_pi-lockless-target-scan-1014--1014a)
+3. [Priority-inheritance baseline](#3-priority-inheritance-baseline)
+4. [Channel object](#4-channel-object)
+5. [Thread-token pass-through](#5-thread-token-pass-through)
+6. [RT alloc-hoist](#6-rt-alloc-hoist)
+7. [Exclusive receive wakeup fix](#7-exclusive-receive-wakeup-fix)
+8. [Deferred event boost](#8-deferred-event-boost)
+9. [Channel-entry lifetime fix](#9-channel-entry-lifetime-fix)
+10. [Aggregate-wait and burst drain](#10-aggregate-wait-and-burst-drain)
+11. [Receive snapshot fix](#11-receive-snapshot-fix)
+12. [Dedicated slab caches](#12-dedicated-slab-caches)
+13. [Lockless SEND_PI target scan](#13-lockless-send_pi-target-scan)
 14. [Validation](#14-validation)
 15. [Audit notes](#15-audit-notes)
 16. [References](#16-references)
@@ -31,37 +38,21 @@ NTSync is a Linux kernel driver (`drivers/misc/ntsync.c`, `/dev/ntsync`) that im
 
 For Wine-NSPA, upstream ntsync is necessary but insufficient. The upstream driver uses FIFO waiter queues, has no priority inheritance, and uses `spinlock_t` for the per-object lock -- which becomes a sleeping `rt_mutex` on PREEMPT_RT. None of those characteristics is acceptable for an RT audio workload where the audio callback must wait deterministically on Wine's primitives without inheriting unbounded inversion latency.
 
-Wine-NSPA now carries a stack of **twelve** kernel patches on top of
-upstream `ntsync.c`. The first (1003) was the original PI series
-shipped 2026-04-13: raw spinlocks, priority-ordered queues,
-mutex-owner PI boost. Patches 1004-1009 added the channel transport,
-thread-token path, and the hardening fixes needed to make that path
-production-safe on PREEMPT_RT. Patch **1010** added
-`NTSYNC_IOC_AGGREGATE_WAIT`, the missing heterogeneous wait primitive
-the gamma dispatcher needed for same-thread async completion, and
-patch **1011** then added `NTSYNC_IOC_CHANNEL_TRY_RECV2`, the
-non-blocking channel dequeue used for post-dispatch burst drain on top
-of the 1010 wait surface. Patch **1012** closed a post-1011 channel
-slab UAF caught by KASAN under `test-channel-stress` and real Ableton
-workloads. Patch **1013** moved the three hot ntsync allocation
-classes (`ntsync_event_pi`, `ntsync_channel_entry`, `ntsync_pi_owner`)
-out of the system kmalloc pool and into dedicated `kmem_cache`s with
-`SLAB_HWCACHE_ALIGN`. Patch **1014** added a `list_empty_careful`
-fast-path on `SEND_PI`'s boost-target scan, removing an unconditional
-`spin_lock_irqsave` round-trip on the audio-thread hot path. Patch
-**1014a** is the NULL-guard follow-up for `kmem_cache_free` at the
-event-PI staging free site missed in the 1013 conversion audit.
+Wine-NSPA now carries a shipped kernel overlay that extends upstream
+`ntsync.c` in three broad layers:
 
-Module srcversion `F1A9EA24E257A35BB21341D` is the current production
-module on prod kernel `6.19.11-rt1-1-nspa`. It carries 1003-1014 (with
-1014a folded in). Earlier production modules:
-`10124FB81FDC76797EF1F91` carried 1003-1011;
-`CFF56DE1EF28D693BB597CD` was the post-1010 baseline that first
-validated aggregate-wait;
-`A250A77651C8D5DAB719FE2` was the post-1009 baseline that was
-validated to ~370M mixed operations.
+- the PI baseline for mutex, semaphore, and event waits
+- the channel and aggregate-wait primitives that back the gamma dispatcher
+- the later hardening and hot-path cleanup work needed for production use
 
-This doc covers the patch-by-patch design rationale: what each change adds, what bug it closes (or feature it exposes), how it preserves NT semantics, and how it interacts with the `obj_lock` raw_spinlock and PREEMPT_RT.
+The current production module is srcversion `F1A9EA24E257A35BB21341D`
+on kernel `6.19.11-rt1-1-nspa`. The feature-by-feature detail below keeps
+the patch numbers for traceability, but the public reading order is by
+capability rather than by patch label.
+
+This doc is the design and implementation reference for that kernel half:
+what each carried feature adds, what bug it closes, how it preserves NT
+semantics, and how it interacts with `obj_lock` and PREEMPT_RT.
 
 ### NSPA overlay relationship
 
@@ -75,7 +66,7 @@ kernel package.
 
 The patch numbering (`1003-` through `1014-`) is local to NSPA. It bears no relationship to upstream NTSync revisions or any LKML series.
 
-### Patch series at a glance
+### Feature map at a glance
 
 | #     | Patch                                 | Purpose                                                                                       | LOC     |
 |-------|---------------------------------------|-----------------------------------------------------------------------------------------------|---------|
@@ -243,7 +234,7 @@ entry.
 
 ---
 
-## 3. The 1003 PI Baseline
+## 3. Priority-inheritance baseline
 
 The 1003 patch (originally three logical patches `1001`/`1002`/`1003`, collapsed in this section for clarity) established the RT baseline that all subsequent patches build on.
 
@@ -308,7 +299,7 @@ The original design walked `event->any_waiters` under `obj_lock` at `EVENT_SET_P
 
 ---
 
-## 4. Patch 1004: Channel Object
+## 4. Channel object
 
 `1004-ntsync-channel.patch` adds a new object type, `NTSYNC_TYPE_CHANNEL`. A channel is a bounded, kernel-side priority-ordered request/reply mailbox. It exists to replace Wine-NSPA's user-space futex + manual `sched_setscheduler` shm-IPC fast path between client processes and the wineserver.
 
@@ -535,7 +526,7 @@ A channel can only be freed when both `pending` and `dispatched` are empty; othe
 
 ---
 
-## 5. Patch 1005: Thread-Token Pass-Through
+## 5. Thread-token pass-through
 
 Once the channel was in production, perf 2026-04-26 showed ~10% of dispatcher CPU sitting in a userspace `get_thread_from_id()` lookup inside the gamma dispatcher's hot loop. Every received request needed to map `sender_tid` -> `struct thread *` to dispatch. This patch eliminates that lookup by stamping a wineserver-supplied opaque token onto each entry at RECV time.
 
@@ -589,7 +580,7 @@ Old `RECV` entries always carry `thread_token = 0` (initialized in `kzalloc`). U
 
 ---
 
-## 6. Patch 1006: RT Alloc-Hoist
+## 6. RT alloc-hoist
 
 This is a **safety patch**, not a feature: it fixes six sites in the driver where slab `kzalloc`/`kfree` was being called under `raw_spinlock_t` on PREEMPT_RT -- which is illegal. The bug was latent until 2026-04-26, when an Ableton workload hard-froze the host with a clean kernel oops.
 
@@ -677,7 +668,7 @@ Only observable difference: `ntsync_pi_owner` cleanup deferred by tens of nanose
 
 ---
 
-## 7. Patch 1007: Channel Exclusive Recv
+## 7. Exclusive receive wakeup fix
 
 **Bug:** `ntsync_channel_send_pi` speculatively boosts `recv_wq.head` to the sender's priority before `wake_up()`, but `wake_up()` was waking *all* non-exclusive waiters because `wait_event_interruptible` adds non-exclusive waiters by default. Non-head receivers could win the entry-pop race -> the boosted head was stranded with high priority and no work; the winner had low priority and the actual work. A real production priority inversion.
 
@@ -715,7 +706,7 @@ The rolled-back "Codex 1007-1011" patch series (Section 10) had attempted a much
 
 ---
 
-## 8. Patch 1008: EVENT_SET_PI Deferred Boost
+## 8. Deferred event boost
 
 **Bug:** the original `EVENT_SET_PI` design (Section 3) walked `event->any_waiters` under `obj_lock` at signal time and applied the boost to the head waiter. This missed any consumer that took `obj_lock` first, saw `signaled=true` and returned without queueing -- the standard wait fast-path. Result: ~4% of `EVENT_SET_PI` calls under PREEMPT_RT debug-kernel scheduling silently failed to apply the boost. A real RT-correctness hole.
 
@@ -873,7 +864,7 @@ One extra atomic exchange under `obj_lock` per `EVENT_SET_PI` (the pending_pi st
 
 ---
 
-## 9. Patch 1009: channel_entry Refcount UAF
+## 9. Channel-entry lifetime fix
 
 **Bug:** KASAN-caught slab-use-after-free on `ntsync_channel_entry` under `test-channel-stress` 4x4 with thread-registration churn. REPLY's `wake_up_all` on `e->wq` runs outside `obj_lock` (it must -- wq's internal lock is `spinlock_t`, becomes `rt_mutex` on PREEMPT_RT, can't nest under our `raw_spinlock_t`). That creates a window where SEND_PI's cleanup could `kfree(e)` between REPLY's `obj_unlock` and REPLY's `wake_up_all` reaching the freed wait queue.
 
@@ -958,7 +949,7 @@ A common alternative for this class of bug is to take a sleepable lock around th
 
 ---
 
-## 10. Patch 1010: Aggregate-Wait
+## 10. Aggregate-wait and burst drain
 
 Patch 1010 adds the heterogeneous wait primitive that the rest of the
 NSPA stack had been designing around: `NTSYNC_IOC_AGGREGATE_WAIT`.
@@ -1067,7 +1058,7 @@ The first production result was module srcversion
 its PI-ordering follow-ups. The current production module
 `10124FB81FDC76797EF1F91` then carries 1011 on top.
 
-### 10.1 Patch 1011: Channel TRY_RECV2
+### 10.1 Burst drain with `CHANNEL_TRY_RECV2`
 
 1011 adds `NTSYNC_IOC_CHANNEL_TRY_RECV2`, a non-blocking companion to
 `CHANNEL_RECV2`. It does not replace aggregate-wait; it is the follow-on
@@ -1088,7 +1079,7 @@ functionally correct on the one-entry-per-wake path.
 
 ---
 
-## 11. Patch 1012: Channel recv field-snapshot UAF fix
+## 11. Receive snapshot fix
 
 **Bug:** in `ntsync_obj_ioctl` paths for `NTSYNC_IOC_CHANNEL_RECV` and
 `NTSYNC_IOC_CHANNEL_RECV2`, the receiver popped a `channel_entry *e`
@@ -1147,7 +1138,7 @@ test before this session.
 
 ---
 
-## 12. Patch 1013: Dedicated `kmem_cache`s
+## 12. Dedicated slab caches
 
 **Pre-1013** three ntsync allocation classes lived in the system
 kmalloc pool:
@@ -1240,7 +1231,7 @@ separately revertable.
 
 ---
 
-## 13. Patch 1014 + 1014a: SEND_PI lockless target scan
+## 13. Lockless `SEND_PI` target scan
 
 ### Motivation
 
@@ -1540,7 +1531,7 @@ Per the slub_debug benchmark caveat (`feedback_slub_debug_skews_benchmarks.md`),
 
 ### Original 1003-era PI metrics (still valid)
 
-The PI contention / priority wakeup ordering / rapid mutex throughput / philosophers tests from the original `ntsync-driver.gen.html` remain valid. None of the later channel or aggregate-wait carries changed the mutex PI path; the metrics are unchanged:
+The PI contention / priority wakeup ordering / rapid mutex throughput / philosophers tests from the original single-page ntsync doc remain valid. None of the later channel or aggregate-wait carries changed the mutex PI path; the metrics are unchanged:
 
 | Metric / Test                  | v4 RT     | v5 RT     | Delta       |
 |--------------------------------|-----------|-----------|-------------|
