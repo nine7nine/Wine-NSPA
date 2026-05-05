@@ -1,22 +1,9 @@
 # Wine-NSPA -- librtpi (PI mutex / condvar)
 
-This page documents the librtpi shim Wine-NSPA carries for PI-aware
-mutexes and condition variables, the Wine-internal header-only
-implementation choice, the recursive-mutex extension Wine-NSPA adds on
-top of the upstream API, and the tree-wide automated sweep that
-rewrites Wine's `pthread_mutex_t` / `pthread_cond_t` use sites to the
-PI-aware equivalents.
-
-librtpi is an *underpinning* design choice in Wine-NSPA. Wine's Unix
-side talks to the host Linux through the glibc POSIX pthread
-implementation by default; that implementation gives NPTL semantics
-without priority inheritance. For an RT audio workload the absence of
-PI on Wine's internal locks is a load-bearing problem -- a low-prio
-thread holding `virtual_mutex` will block a high-prio thread waiting
-for it, with no inheritance to lift the holder. librtpi closes that
-gap by binding the user-space mutex word directly to
-`FUTEX_LOCK_PI` / `FUTEX_UNLOCK_PI`, so the Linux kernel applies PI
-to the holder for as long as a higher-priority waiter is queued.
+This page documents Wine-NSPA's Wine-internal librtpi shim for
+PI-aware Unix-side mutexes and condition variables, including the
+recursive-mutex extension and the automated tree-wide sweep that moved
+Wine call sites onto it.
 
 ## Table of Contents
 

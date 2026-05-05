@@ -76,7 +76,7 @@ exceeded.
   <!-- Client layer -->
   <rect x="20" y="60" width="940" height="140" class="layer-c"/>
   <text x="40" y="80" class="lbl-grn">CLIENT (PE process)</text>
-  <text x="40" y="94" class="lbl-mut">application code, ntdll, win32u, drivers</text>
+  <text x="40" y="94" class="lbl-mut">application code, ntdll, win32u, sched hosts, drivers</text>
 
   <rect x="40"  y="105" width="120" height="40" class="box"/>
   <text x="100" y="123" text-anchor="middle" class="lbl-sm">application code</text>
@@ -84,15 +84,15 @@ exceeded.
 
   <rect x="170" y="105" width="120" height="40" class="box"/>
   <text x="230" y="123" text-anchor="middle" class="lbl-sm">ntdll</text>
-  <text x="230" y="137" text-anchor="middle" class="lbl-mut">PE + unix</text>
+  <text x="230" y="137" text-anchor="middle" class="lbl-mut">PE + unix + sync</text>
 
   <rect x="300" y="105" width="120" height="40" class="box"/>
   <text x="360" y="123" text-anchor="middle" class="lbl-sm">win32u + nspa</text>
-  <text x="360" y="137" text-anchor="middle" class="lbl-mut">message ring v1+v2</text>
+  <text x="360" y="137" text-anchor="middle" class="lbl-mut">msg-ring + timer glue</text>
 
   <rect x="430" y="105" width="180" height="40" class="box-hot"/>
   <text x="520" y="123" text-anchor="middle" class="lbl-yel">NT-local stubs</text>
-  <text x="520" y="137" text-anchor="middle" class="lbl-mut">file / section / event / timers</text>
+  <text x="520" y="137" text-anchor="middle" class="lbl-mut">file / section / event / timer</text>
 
   <rect x="620" y="105" width="120" height="40" class="box"/>
   <text x="680" y="123" text-anchor="middle" class="lbl-sm">winejack.drv</text>
@@ -115,8 +115,8 @@ exceeded.
   <text x="640" y="184" text-anchor="middle" class="lbl-mut">shmem, server publishes invalidations</text>
 
   <rect x="750" y="155" width="120" height="35" class="box"/>
-  <text x="810" y="172" text-anchor="middle" class="lbl-sm">vDSO preloader</text>
-  <text x="810" y="184" text-anchor="middle" class="lbl-mut">Jinoh Kang port</text>
+  <text x="810" y="172" text-anchor="middle" class="lbl-sm">wine-sched hosts</text>
+  <text x="810" y="184" text-anchor="middle" class="lbl-mut">close queue + RT timers</text>
 
   <!-- Wineserver layer -->
   <rect x="20" y="220" width="940" height="130" class="layer-s"/>
@@ -126,7 +126,7 @@ exceeded.
   <rect x="40"  y="265" width="180" height="70" class="box-hot"/>
   <text x="130" y="283" text-anchor="middle" class="lbl-yel">gamma aggregate-wait dispatcher</text>
   <text x="130" y="297" text-anchor="middle" class="lbl-mut">per-process channel + uring</text>
-  <text x="130" y="311" text-anchor="middle" class="lbl-mut">AGG_WAIT -&gt; RECV2 -&gt; TRY_RECV2</text>
+  <text x="130" y="311" text-anchor="middle" class="lbl-mut">aggregate-wait -&gt; RECV2 -&gt; TRY_RECV2</text>
   <text x="130" y="325" text-anchor="middle" class="lbl-cy">same-thread CQE drain + REPLY</text>
 
   <rect x="240" y="265" width="180" height="70" class="box"/>
@@ -160,11 +160,11 @@ exceeded.
   <rect x="40"  y="415" width="200" height="120" class="box-hot"/>
   <text x="140" y="434" text-anchor="middle" class="lbl-yel">ntsync.ko</text>
   <text x="140" y="450" text-anchor="middle" class="lbl-mut">NT sync object driver</text>
-  <text x="140" y="464" text-anchor="middle" class="lbl-cy">1003 PI baseline</text>
-  <text x="140" y="478" text-anchor="middle" class="lbl-cy">1004-1009 gamma transport</text>
-  <text x="140" y="492" text-anchor="middle" class="lbl-cy">1010 aggregate-wait + 1011 TRY_RECV2</text>
-  <text x="140" y="506" text-anchor="middle" class="lbl-cy">channel notify-only source</text>
-  <text x="140" y="520" text-anchor="middle" class="lbl-cy">post-1010 PI follow-ups</text>
+  <text x="140" y="464" text-anchor="middle" class="lbl-cy">PI waits + channel transport</text>
+  <text x="140" y="478" text-anchor="middle" class="lbl-cy">thread-token pass-through</text>
+  <text x="140" y="492" text-anchor="middle" class="lbl-cy">aggregate-wait + TRY_RECV2</text>
+  <text x="140" y="506" text-anchor="middle" class="lbl-cy">receive snapshot + slab caches</text>
+  <text x="140" y="520" text-anchor="middle" class="lbl-cy">lockless SEND_PI target scan</text>
 
   <rect x="260" y="415" width="200" height="120" class="box"/>
   <text x="360" y="434" text-anchor="middle" class="lbl-sm">PI futex layer</text>
@@ -183,12 +183,12 @@ exceeded.
   <text x="580" y="518" text-anchor="middle" class="lbl-cy">same-thread CQE drain + socket SQEs shipped</text>
 
   <rect x="700" y="415" width="240" height="120" class="box"/>
-  <text x="820" y="434" text-anchor="middle" class="lbl-sm">RT scheduler (PREEMPT_RT_FULL)</text>
+  <text x="820" y="434" text-anchor="middle" class="lbl-sm">RT scheduler + VM</text>
   <text x="820" y="452" text-anchor="middle" class="lbl-mut">SCHED_FIFO 1..98</text>
   <text x="820" y="468" text-anchor="middle" class="lbl-mut">priority-ordered wakeup</text>
   <text x="820" y="484" text-anchor="middle" class="lbl-mut">rt_mutex PI propagation</text>
-  <text x="820" y="500" text-anchor="middle" class="lbl-mut">raw_spinlock_t hardening</text>
-  <text x="820" y="518" text-anchor="middle" class="lbl-mut">no kfree under raw spinlock</text>
+  <text x="820" y="500" text-anchor="middle" class="lbl-mut">mlockall + transparent hugetlb</text>
+  <text x="820" y="518" text-anchor="middle" class="lbl-mut">heap-arena hugetlb backing</text>
 
   <text x="490" y="555" text-anchor="middle" class="lbl-mut">--- bypass routes (dashed orange) skip the wineserver layer entirely ---</text>
 
@@ -234,10 +234,13 @@ NSPA implements priority inheritance along four independent paths so that no Win
 The kernel side is where the heavy lifting happens. The `ntsync.ko`
 module sits at `/dev/ntsync` and implements NT sync object semantics
 natively in the kernel, with PI-aware mutexes, priority-ordered waiter
-queues, a channel transport that serves the gamma dispatcher, an
-aggregate-wait primitive for heterogeneous waits, and `TRY_RECV2` for
-post-dispatch burst drain. The current production module is
-`F1A9EA24E257A35BB21341D`.
+queues, a channel transport that serves the gamma dispatcher, a
+thread-token return path, an aggregate-wait primitive for
+heterogeneous waits, and `TRY_RECV2` for post-dispatch burst drain. The
+userspace half now also includes the client-created anonymous sync path
+for mutexes, semaphores, and events, so the public story is a kernel
+overlay plus a Wine-side in-process sync layer rather than “just a
+driver.” The current production module is `F1A9EA24E257A35BB21341D`.
 
 All four paths are gated on `NSPA_RT_PRIO`. When unset, every PI code path short-circuits and Wine behaves byte-for-byte like upstream. **Detail: see [NTSync PI Kernel](ntsync-pi-driver.gen.html), [NTSync Userspace Sync](ntsync-userspace.gen.html), [cs-pi](cs-pi.gen.html), [condvar-pi-requeue](condvar-pi-requeue.gen.html).**
 
@@ -248,15 +251,16 @@ The classical Wine IPC architecture has every client thread `read()`/`write()` o
 The gamma dispatcher uses the ntsync channel object to deliver a
 per-process kernel-mediated request/reply queue. The client thread
 issues `NTSYNC_IOC_CHANNEL_SEND_PI`; the dispatcher receives via
-`CHANNEL_RECV2` and replies via `CHANNEL_REPLY`. On post-1010 kernels it
+`CHANNEL_RECV2` and replies via `CHANNEL_REPLY`. On current kernels it
 blocks in `NTSYNC_IOC_AGGREGATE_WAIT` over the channel plus its
-per-process uring eventfd and shutdown eventfd, and on 1011 kernels it
-follows each reply with non-blocking `TRY_RECV2` burst drain until the
-queue is empty. The current shipped path also carries a small hot-path
-tuning pack: inline request / queue helpers, lighter fences, and no
-production allocator poison overhead. The channel object carries a 1005
+per-process uring eventfd and shutdown eventfd, then follows each
+reply with non-blocking `TRY_RECV2` burst drain until the queue is
+empty. The current shipped path also carries a small hot-path tuning
+pack: inline request / queue helpers, lighter fences, and no production
+allocator poison overhead. The channel object also returns a
 thread-token so the kernel knows which client thread sent the request,
-and T1+T2+T3 thread-token consumption is shipped default-on. The legacy
+letting the server-side request path resolve the sender without a
+second userspace lookup. The legacy
 shmem-IPC path (`shmem-ipc.gen.html`) is **historical and superseded**
 and retained as reference material only.
 
@@ -275,9 +279,12 @@ stays the authority for the long tail.
 
 Shipped surfaces now include `nspa_local_file` plus local sections,
 anonymous local events, `nspa_local_timer`, and `nspa_local_wm_timer`.
-The timer work was extended on 2026-05-02 so anonymous timers now piggyback on
-the local-event base and the timer dispatchers can run on the shared RT sched
-host instead of dedicated helper threads.
+The timer work was extended so anonymous timers now piggyback on the
+local-event base and the timer dispatchers can run on the shared RT
+scheduler host instead of dedicated helper threads. The same general
+client-side move is also what made the async local-file close queue
+worth centralizing on the scheduler host instead of minting yet another
+long-lived helper thread.
 
 **Detail: see [nt-local-stubs](nt-local-stubs.gen.html), [nspa-local-file-architecture](nspa-local-file-architecture.gen.html), [local-section-architecture](local-section-architecture.gen.html).**
 
@@ -292,8 +299,9 @@ queue, and the first RT-class consumers are the migrated `local_timer` and
 `local_wm_timer` dispatchers.
 
 This is not a replacement for gamma or wineserver dispatch. It is the client
-helper-thread consolidation layer: a place to host small loops and RT timer
-work without a fresh per-subsystem dedicated thread.
+helper-thread consolidation layer: a place to host small loops, close queues,
+observability sampling, and RT timer work without a fresh per-subsystem
+dedicated thread.
 
 **Detail: see [client-scheduler-architecture](client-scheduler-architecture.gen.html).**
 
@@ -326,11 +334,12 @@ need a server-visible file handle trigger lazy promotion, and eligible unnamed
 file-backed sections can now stay local too.
 
 The **data-plane path** is owned by `io_uring`: regular-file reads and writes
-submit directly to a per-thread ring, async `CreateFile` can route through the
+submit directly to a per-thread ring, async `CreateFile` routes through the
 per-process dispatcher-owned ring, and the deferred async socket path now uses
 true `RECVMSG` / `SENDMSG` SQEs. `io_uring` composes with `nspa_local_file`
 because the unix fd held by the local-file table is the same fd the ring path
-operates on.
+operates on, and local sections now reduce the matching mapping-side RPC churn
+that used to sit adjacent to those opens.
 
 What remains outside `io_uring` is the genuinely server-managed surface:
 named pipes, named events, cross-process section / handle boundaries, and the
@@ -343,16 +352,18 @@ naming.
 
 Wine-NSPA's memory surface is broader than "large pages exist." The shipped
 tree now has four memory stories that matter architecturally: client-side local
-sections, large-page anonymous allocation and large-page server-backed
-mappings, current-process `QueryWorkingSetEx()` reporting plus working-set
-quota bookkeeping, and the selective use of dedicated `memfd` backends for
-bypass state such as msg-ring and local-file inode arbitration.
+sections, RT-keyed page locking and hugetlb promotion, current-process
+`QueryWorkingSetEx()` reporting plus working-set quota bookkeeping, and the
+selective use of dedicated `memfd` backends for bypass state such as msg-ring
+and local-file inode arbitration.
 
 Those pieces are related because they all change how Wine exposes or backs
 memory, but they are not the same mechanism. Local sections are about keeping
-common file-backed views client-side. Large pages are about page size and
-locking semantics. Working-set support is about what the Win32 memory surface
-reports and stores. `memfd` is about where bypass-owned shared state lives.
+common file-backed views client-side. RT-keyed `mlockall()`, transparent
+hugetlb promotion, and heap-arena hugetlb backing are about page locking and
+page size on the hot RT path. Working-set support is about what the Win32
+memory surface reports and stores. `memfd` is about where bypass-owned shared
+state lives.
 Keeping those roles separate makes the design easier to reason about and avoids
 the common mistake of treating every shared region as "just more session shmem."
 

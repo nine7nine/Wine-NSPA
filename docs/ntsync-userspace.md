@@ -1,13 +1,10 @@
 # Wine-NSPA -- NTSync Userspace Sync
 
-This page documents the Wine userspace half of ntsync: the ntdll
-handle-to-fd cache, the server-owned vs. client-created sync-object paths,
-the direct wait / signal helpers, the dispatcher-facing ioctl wrappers, and
-the PE-side coverage that exercises them.
-
-The kernel half -- the PI baseline, channel transport, aggregate-wait, and
-the later hardening work -- is documented on the companion page
-[NTSync PI Kernel](ntsync-pi-driver.gen.html).
+This page documents the Wine-side ntsync integration: the ntdll
+handle-to-fd cache, the server-owned vs. client-created sync-object
+paths, the direct wait / signal helpers, the dispatcher-facing ioctl
+wrappers, and the PE-side coverage that exercises them. The kernel
+half lives on [NTSync PI Kernel](ntsync-pi-driver.gen.html).
 
 ## Table of Contents
 
