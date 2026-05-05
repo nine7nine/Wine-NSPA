@@ -1,0 +1,754 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Wine-NSPA -- NTSync Userspace Integration</title>
+<style>
+  :root {
+    --bg: #1a1b26; --fg: #c0caf5; --accent: #7aa2f7;
+    --green: #9ece6a; --red: #f7768e; --yellow: #e0af68;
+    --surface: #24283b; --border: #3b4261; --muted: #8c92b3;
+    --purple: #bb9af7; --orange: #ff9e64; --cyan: #7dcfff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+    background: var(--bg); color: var(--fg);
+    max-width: 1100px; margin: 0 auto; padding: 2rem 1.5rem;
+    line-height: 1.7;
+  }
+  .page-nav {
+    display: flex;
+    justify-content: flex-end;
+    margin-bottom: 0.5rem;
+  }
+  .page-nav a {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.35rem 0.7rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: rgba(36, 40, 59, 0.9);
+    color: var(--accent);
+    font-size: 0.78rem;
+    line-height: 1;
+  }
+  .page-nav a:hover {
+    background: var(--surface);
+    color: var(--cyan);
+    text-decoration: none;
+  }
+  h1 { color: var(--accent); font-size: 1.5rem; margin: 1.5rem 0 0.5rem; }
+  h2 { color: var(--accent); font-size: 1.2rem; margin: 2rem 0 0.75rem;
+       border-bottom: 1px solid var(--border); padding-bottom: 0.3rem; }
+  h3 { color: var(--yellow); font-size: 1rem; margin: 1.25rem 0 0.5rem; }
+  h4 { color: var(--cyan); font-size: 0.95rem; margin: 1rem 0 0.4rem; }
+  p, li { font-size: 0.85rem; margin-bottom: 0.5rem; }
+  ul, ol { padding-left: 1.5rem; margin-bottom: 0.75rem; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  table {
+    width: 100%; border-collapse: collapse;
+    margin: 0.75rem 0 1rem; font-size: 0.8rem;
+  }
+  th, td {
+    padding: 0.4rem 0.75rem; text-align: left;
+    border: 1px solid var(--border);
+  }
+  th { background: var(--surface); color: var(--accent); font-weight: 600; }
+  td { background: var(--bg); }
+  code {
+    background: var(--surface); padding: 0.15rem 0.4rem;
+    border-radius: 3px; font-size: 0.82rem; color: var(--cyan);
+  }
+  pre {
+    background: var(--surface); padding: 1rem 1.1rem; border-radius: 8px;
+    overflow-x: auto; margin: 0.75rem 0 1rem;
+    border: 1px solid var(--border);
+  }
+  pre code {
+    display: block; background: transparent; padding: 0;
+    font-size: 0.8rem; color: inherit;
+  }
+  pre code.hljs,
+  code.hljs {
+    background: transparent;
+    padding: 0;
+  }
+  blockquote {
+    background: var(--surface); border-left: 3px solid var(--accent);
+    padding: 0.75rem 1rem; margin: 1rem 0; border-radius: 0 4px 4px 0;
+    font-size: 0.82rem;
+  }
+  blockquote strong { color: var(--yellow); }
+  hr { border: none; border-top: 1px solid var(--border); margin: 2rem 0; }
+  strong { color: var(--fg); }
+  em { color: var(--muted); font-style: italic; }
+  .diagram-container {
+    display: flex; justify-content: center;
+    margin: 1.25rem auto 1.5rem; padding: 0.75rem;
+    background: rgba(36, 40, 59, 0.55);
+    border: 1px solid var(--border); border-radius: 10px;
+    overflow-x: auto;
+  }
+  .diagram-container svg {
+    display: block;
+    width: 100% !important;
+    max-width: 100%;
+    height: auto !important;
+    margin: 0 auto;
+    flex: 0 0 auto;
+  }
+</style>
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/tokyo-night-dark.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
+</head><body>
+<div class="page-nav"><a href="index.html">Docs Home</a></div>
+<h1 id="wine-nspa--ntsync-userspace-integration">Wine-NSPA &ndash; NTSync Userspace Integration</h1>
+
+<p>This page documents the Wine userspace half of the ntsync integration: the
+ntdll handle-to-fd cache, the server-owned vs. client-created anonymous
+sync handle paths, the wait / signal helpers, the dispatcher ioctl
+wrappers, and the PE-side wait coverage.</p>
+
+<p>The kernel-side ntsync overlay &ndash; PI primitives, channel transport,
+aggregate-wait, and the post-1011 carries &ndash; is documented in the
+companion page <a href="ntsync-pi-driver.gen.html">NTSync PI Driver</a>.</p>
+
+<h2 id="table-of-contents">Table of Contents</h2>
+
+<ol>
+<li><a href="#1-overview">Overview</a></li>
+<li><a href="#2-two-userspace-consumer-shapes">Two userspace consumer shapes</a></li>
+<li><a href="#3-server-owned-sync-handles">Server-owned sync handles</a></li>
+<li><a href="#4-client-created-anonymous-sync-handles">Client-created anonymous sync handles</a></li>
+<li><a href="#5-wait-and-signal-execution">Wait and signal execution</a></li>
+<li><a href="#6-linux_wait_objs"><code>linux_wait_objs</code></a></li>
+<li><a href="#7-linux_set_event_obj_pi"><code>linux_set_event_obj_pi</code></a></li>
+<li><a href="#8-channel-ioctl-wrappers">Channel ioctl wrappers</a></li>
+<li><a href="#9-alloc_client_handle"><code>alloc_client_handle</code></a></li>
+<li><a href="#10-pe-side-wait-coverage">PE-side wait coverage</a></li>
+<li><a href="#11-references">References</a></li>
+</ol>
+
+
+<hr />
+
+<h2 id="1-overview">1. Overview</h2>
+
+<p>Wine-NSPA&rsquo;s ntsync userspace integration lives primarily in
+<code>dlls/ntdll/unix/sync.c</code>, with the server-owned bridge in
+<code>server/inproc_sync.c</code>. This is the half of the story the kernel-side
+patches do not show by themselves: the kernel provides
+<code>/dev/ntsync</code> and the ioctl set; Wine has to decide which Win32
+handles can resolve to an ntsync fd, where that fd comes from, and how
+to keep the resulting <code>(handle -&gt; fd)</code> mapping coherent with handle
+reuse and process exit.</p>
+
+<p>Steady state for a supported sync object on Wine-NSPA is:
+<code>NtWaitForSingleObject</code> / <code>NtSetEvent</code> / <code>NtReleaseSemaphore</code> /
+<code>NtReleaseMutant</code> go straight to <code>/dev/ntsync</code> with no wineserver
+round-trip. The first wait or signal on a handle resolves the handle to
+an fd; subsequent operations hit the local cache.</p>
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 940 360" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
+  <style>
+    .ov-bg { fill: #1a1b26; }
+    .ov-box { fill: #24283b; stroke: #7aa2f7; stroke-width: 1.8; rx: 8; }
+    .ov-fast { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
+    .ov-mid { fill: #1f2535; stroke: #bb9af7; stroke-width: 1.8; rx: 8; }
+    .ov-kernel { fill: #1a1a2a; stroke: #bb9af7; stroke-width: 2; rx: 8; }
+    .ov-t { fill: #c0caf5; font: 11px 'JetBrains Mono', monospace; }
+    .ov-s { fill: #a9b1d6; font: 9px 'JetBrains Mono', monospace; }
+    .ov-h { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
+    .ov-g { fill: #9ece6a; font: bold 10px 'JetBrains Mono', monospace; }
+    .ov-v { fill: #bb9af7; font: bold 10px 'JetBrains Mono', monospace; }
+    .ov-line { stroke: #c0caf5; stroke-width: 1.2; fill: none; }
+  </style>
+
+  <rect x="0" y="0" width="940" height="360" class="ov-bg" rx="6"/>
+  <text x="470" y="28" text-anchor="middle" class="ov-h">Userspace ntsync integration: layers and steady-state flow</text>
+
+  <rect x="40" y="64" width="220" height="88" class="ov-box" rx="6"/>
+  <text x="150" y="90" text-anchor="middle" class="ov-t">Win32 caller</text>
+  <text x="150" y="110" text-anchor="middle" class="ov-s">NtWait* / NtSetEvent / NtReleaseSemaphore</text>
+  <text x="150" y="126" text-anchor="middle" class="ov-s">SignalObjectAndWait, queue wake,</text>
+  <text x="150" y="142" text-anchor="middle" class="ov-s">async completion wake</text>
+
+  <rect x="290" y="64" width="220" height="88" class="ov-mid" rx="6"/>
+  <text x="400" y="90" text-anchor="middle" class="ov-v">ntdll inproc_sync layer</text>
+  <text x="400" y="110" text-anchor="middle" class="ov-s">cache lookup, type+access check,</text>
+  <text x="400" y="126" text-anchor="middle" class="ov-s">handle-to-fd resolution,</text>
+  <text x="400" y="142" text-anchor="middle" class="ov-s">close-bit + refcount discipline</text>
+
+  <rect x="540" y="64" width="220" height="88" class="ov-fast" rx="6"/>
+  <text x="650" y="90" text-anchor="middle" class="ov-g">linux_wait_objs / direct signal</text>
+  <text x="650" y="110" text-anchor="middle" class="ov-s">issues NTSYNC_IOC_WAIT_ANY / WAIT_ALL,</text>
+  <text x="650" y="126" text-anchor="middle" class="ov-s">EVENT_SET / EVENT_SET_PI,</text>
+  <text x="650" y="142" text-anchor="middle" class="ov-s">SEM_RELEASE, MUTEX_UNLOCK</text>
+
+  <rect x="790" y="64" width="120" height="88" class="ov-kernel" rx="6"/>
+  <text x="850" y="90" text-anchor="middle" class="ov-v">/dev/ntsync</text>
+  <text x="850" y="110" text-anchor="middle" class="ov-s">drivers/misc/ntsync.c</text>
+  <text x="850" y="126" text-anchor="middle" class="ov-s">PI baseline +</text>
+  <text x="850" y="142" text-anchor="middle" class="ov-s">channel + agg-wait</text>
+
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="260" y1="108" x2="290" y2="108" class="ov-line"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="510" y1="108" x2="540" y2="108" class="ov-line"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="760" y1="108" x2="790" y2="108" class="ov-line"/>
+
+  <rect x="40" y="190" width="380" height="74" class="ov-mid" rx="6"/>
+  <text x="230" y="214" text-anchor="middle" class="ov-v">server-owned path (named / inherited / cross-process)</text>
+  <text x="230" y="236" text-anchor="middle" class="ov-s">first use: SERVER_REQ get_inproc_sync_fd -> fd cached</text>
+  <text x="230" y="252" text-anchor="middle" class="ov-s">subsequent waits / signals bypass wineserver entirely</text>
+
+  <rect x="450" y="190" width="460" height="74" class="ov-fast" rx="6"/>
+  <text x="680" y="214" text-anchor="middle" class="ov-g">client-created path (anonymous mutex / semaphore / event)</text>
+  <text x="680" y="236" text-anchor="middle" class="ov-s">alloc_client_handle() + NTSYNC_IOC_CREATE_* in ntdll itself</text>
+  <text x="680" y="252" text-anchor="middle" class="ov-s">no wineserver round-trip to mint the object; cache populated immediately</text>
+
+  <rect x="180" y="296" width="580" height="50" class="ov-box" rx="6"/>
+  <text x="470" y="320" text-anchor="middle" class="ov-t">both paths converge on the same wait / signal helpers in dlls/ntdll/unix/sync.c</text>
+  <text x="470" y="336" text-anchor="middle" class="ov-s">linux_wait_objs(), linux_set_event_obj_pi(), and the matching unlock / release ioctls</text>
+</svg>
+</div>
+
+
+<hr />
+
+<h2 id="2-two-userspace-consumer-shapes">2. Two userspace consumer shapes</h2>
+
+<p>There are two distinct userspace shapes:</p>
+
+<ul>
+<li><strong>server-owned sync handles</strong>: named objects, inherited objects,
+cross-process objects, and any handle that still originates in
+wineserver. The first wait or signal does a one-time
+<code>get_inproc_sync_fd</code> request; after that, ntdll caches the fd and
+goes direct.</li>
+<li><strong>client-created anonymous sync handles</strong>: anonymous mutexes,
+anonymous semaphores, and anonymous events when
+<code>NSPA_NT_LOCAL_EVENT</code> is left at its shipped default-on setting.
+These never need wineserver to mint the fd in the first place; ntdll
+allocates a client-range handle, issues the ntsync create ioctl
+itself, and populates the cache immediately.</li>
+</ul>
+
+
+<p>The two shapes share the same <code>inproc_sync</code> cache layout and the same
+wait / signal helpers downstream. They differ only in where the fd
+comes from on the first reference.</p>
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 980 470" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
+  <style>
+    .bg { fill: #1a1b26; }
+    .lane { fill: #24283b; stroke: #6b7398; stroke-width: 0.9; rx: 10; }
+    .srv { fill: #1f2535; stroke: #7aa2f7; stroke-width: 1.8; rx: 8; }
+    .cli { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
+    .mid { fill: #2a1f35; stroke: #bb9af7; stroke-width: 1.8; rx: 8; }
+    .note { fill: #2a2418; stroke: #e0af68; stroke-width: 1.6; rx: 8; }
+    .t { fill: #c0caf5; font: 11px 'JetBrains Mono', monospace; }
+    .s { fill: #a9b1d6; font: 9px 'JetBrains Mono', monospace; }
+    .h { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
+    .g { fill: #9ece6a; font: bold 10px 'JetBrains Mono', monospace; }
+    .v { fill: #bb9af7; font: bold 10px 'JetBrains Mono', monospace; }
+    .y { fill: #e0af68; font: bold 10px 'JetBrains Mono', monospace; }
+    .line { stroke: #c0caf5; stroke-width: 1.2; fill: none; }
+    .guide { stroke: #6b7398; stroke-width: 1; stroke-dasharray: 6,4; }
+  </style>
+
+  <rect x="0" y="0" width="980" height="470" class="bg" rx="6"/>
+  <text x="490" y="26" text-anchor="middle" class="h">Server-owned vs. client-created handle paths</text>
+
+  <rect x="40" y="56" width="420" height="324" class="lane" rx="6"/>
+  <text x="250" y="82" text-anchor="middle" class="v">server-owned handle path</text>
+
+  <rect x="80" y="104" width="340" height="60" class="srv" rx="6"/>
+  <text x="250" y="128" text-anchor="middle" class="t">named / inherited / cross-process Win32 sync handle</text>
+  <text x="250" y="146" text-anchor="middle" class="s">wineserver remains the authority that created the object</text>
+
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="250" y1="164" x2="250" y2="192" class="line"/>
+
+  <rect x="80" y="192" width="340" height="70" class="mid" rx="6"/>
+  <text x="250" y="216" text-anchor="middle" class="t">server inproc_sync object + ntsync fd</text>
+  <text x="250" y="234" text-anchor="middle" class="s">server/inproc_sync.c owns the fd, exposes it via get_inproc_sync_fd</text>
+  <text x="250" y="252" text-anchor="middle" class="s">one-time wineserver lookup on first consumer-side use</text>
+
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="250" y1="262" x2="250" y2="292" class="line"/>
+
+  <rect x="80" y="292" width="340" height="60" class="srv" rx="6"/>
+  <text x="250" y="316" text-anchor="middle" class="t">ntdll inproc_sync cache entry</text>
+  <text x="250" y="334" text-anchor="middle" class="s">later waits and signals bypass wineserver and reuse the cached fd</text>
+
+  <rect x="520" y="56" width="420" height="324" class="lane" rx="6"/>
+  <text x="730" y="82" text-anchor="middle" class="g">client-created anonymous path</text>
+
+  <rect x="560" y="104" width="340" height="60" class="cli" rx="6"/>
+  <text x="730" y="128" text-anchor="middle" class="t">anonymous NtCreateMutex / NtCreateSemaphore / NtCreateEvent</text>
+  <text x="730" y="146" text-anchor="middle" class="s">event path is shipped default-on via NSPA_NT_LOCAL_EVENT=1 (=0 disables)</text>
+
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="730" y1="164" x2="730" y2="192" class="line"/>
+
+  <rect x="560" y="192" width="340" height="70" class="cli" rx="6"/>
+  <text x="730" y="216" text-anchor="middle" class="t">ntdll allocates client-range handle and issues NTSYNC_IOC_CREATE_*</text>
+  <text x="730" y="234" text-anchor="middle" class="s">fd is cached immediately; no wineserver round-trip to mint the object</text>
+  <text x="730" y="252" text-anchor="middle" class="s">anonymous events also register their fd with wineserver for async completion</text>
+
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="730" y1="262" x2="730" y2="292" class="line"/>
+
+  <rect x="560" y="292" width="340" height="60" class="cli" rx="6"/>
+  <text x="730" y="316" text-anchor="middle" class="t">same ntdll inproc_sync cache shape</text>
+  <text x="730" y="334" text-anchor="middle" class="s">waits and signals go straight to /dev/ntsync from the first operation</text>
+
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="250" y1="380" x2="250" y2="410" class="guide"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="730" y1="380" x2="730" y2="410" class="guide"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="250" y1="410" x2="730" y2="410" class="guide"/>
+
+  <rect x="220" y="402" width="540" height="52" class="note" rx="6"/>
+  <text x="490" y="426" text-anchor="middle" class="y">both paths converge on the same wait / signal helpers</text>
+  <text x="490" y="442" text-anchor="middle" class="s">dlls/ntdll/unix/sync.c drives the same /dev/ntsync ioctls in both cases</text>
+</svg>
+</div>
+
+
+<hr />
+
+<h2 id="3-server-owned-sync-handles">3. Server-owned sync handles</h2>
+
+<p>Server-owned sync objects still exist because some Win32 handles are
+not purely local: named objects, inherited handles, and cross-process
+objects all need wineserver as the authoritative creator and
+bookkeeper. That does <strong>not</strong> mean every wait on those objects keeps
+round-tripping through wineserver.</p>
+
+<p><code>server/inproc_sync.c</code> attaches an ntsync-backed
+<code>struct inproc_sync</code> object to the server object and keeps the fd
+alive there. On the client side, <code>get_inproc_sync()</code> first tries a
+lock-free cache lookup. On a miss, ntdll enters the protected
+<code>fd_cache_mutex</code> section, asks wineserver for <code>get_inproc_sync_fd</code>,
+receives the fd once, and then caches <code>(handle -&gt; fd, type, access)</code>
+locally.</p>
+
+<p>The important steady-state property is: <strong>server-owned does not mean
+server-waited</strong>. Once the fd is cached, <code>NtWaitForSingleObject</code>,
+<code>NtWaitForMultipleObjects</code>, <code>NtSetEvent</code>, <code>NtReleaseSemaphore</code>, and
+the other supported paths all go straight to <code>/dev/ntsync</code>.</p>
+
+<h3 id="cache-structure">Cache structure</h3>
+
+<p><code>dlls/ntdll/unix/sync.c</code> keeps a flat array indexed by handle of
+<code>struct inproc_sync</code>:</p>
+
+<pre><code class="code-block">struct inproc_sync {
+    int           fd;
+    unsigned int  refcount;
+    unsigned char closed;
+    unsigned char type;       /* enum inproc_sync_type as short */
+    ACCESS_MASK   access;
+    ...
+};
+
+#define INPROC_SYNC_CACHE_BLOCK_SIZE  (65536 / sizeof(struct inproc_sync))
+static struct inproc_sync *inproc_sync_cache[INPROC_SYNC_CACHE_ENTRIES];
+static struct inproc_sync inproc_sync_cache_initial_block[INPROC_SYNC_CACHE_BLOCK_SIZE];
+</code></pre>
+
+<p>The cache is laid out as an array of blocks; block 0 is statically
+allocated, later blocks are <code>mmap</code>ed as handles climb. Each entry
+carries a refcount and a <code>closed</code> bit.</p>
+
+<h3 id="lookup-discipline">Lookup discipline</h3>
+
+<p><code>get_inproc_sync()</code>:</p>
+
+<ol>
+<li>Lock-free cache lookup via <code>get_cached_inproc_sync()</code> &ndash; single
+relaxed atomic load on the entry plus an acquire fence to pair
+with the cache writer.</li>
+<li>On miss: <code>server_enter_uninterrupted_section(&amp;fd_cache_mutex, ...)</code>,
+re-check the cache (another thread may have populated it), then
+<code>SERVER_REQ get_inproc_sync_fd</code> to receive the fd. Cache it via
+<code>cache_inproc_sync()</code>.</li>
+<li>Refcount drop on release; the entry stays in the array but its
+<code>closed</code> bit prevents handing the same fd back after close.</li>
+</ol>
+
+
+<p>The miss path is protected by <code>fd_cache_mutex</code> plus the uninterrupted
+section so fd receipt cannot race with handle close or concurrent fd
+caching by another thread.</p>
+
+<hr />
+
+<h2 id="4-client-created-anonymous-sync-handles">4. Client-created anonymous sync handles</h2>
+
+<p>For anonymous objects, Wine-NSPA can skip wineserver even at creation
+time.</p>
+
+<p><code>alloc_client_handle()</code> hands out values from a client-private handle
+range that is disjoint from server handles. ntdll then issues the
+kernel create ioctl itself:</p>
+
+<ul>
+<li><code>NTSYNC_IOC_CREATE_MUTEX</code></li>
+<li><code>NTSYNC_IOC_CREATE_SEM</code></li>
+<li><code>NTSYNC_IOC_CREATE_EVENT</code></li>
+</ul>
+
+
+<p>and stores the returned fd directly in the same <code>inproc_sync</code> cache
+that the server-owned path uses.</p>
+
+<p>The shipped rules are:</p>
+
+<ul>
+<li>anonymous mutexes: client-created</li>
+<li>anonymous semaphores: client-created</li>
+<li>anonymous events: client-created when <code>NSPA_NT_LOCAL_EVENT</code> is left
+at its default-on setting; <code>NSPA_NT_LOCAL_EVENT=0</code> forces the older
+wineserver-created event path</li>
+<li>named or inheritable objects: stay on the server path</li>
+</ul>
+
+
+<h3 id="two-extra-pieces-of-bookkeeping">Two extra pieces of bookkeeping</h3>
+
+<h4 id="client-mutex-list--abandoned-mutex-semantics-on-thread-exit">Client-mutex list &ndash; abandoned-mutex semantics on thread exit</h4>
+
+<p>Win32 mutexes have abandoned semantics: a thread that holds a mutex
+and exits without releasing it leaves the mutex in an abandoned state
+that the next acquirer observes as <code>WAIT_ABANDONED</code>. The kernel
+ntsync driver implements this via <code>NTSYNC_IOC_MUTEX_KILL</code>, which marks
+the mutex as abandoned by a TID.</p>
+
+<p>Wineserver normally tracks ownership by walking a thread&rsquo;s owned
+objects on death. Client-created mutexes are not visible to
+wineserver, so ntdll has to track them itself:</p>
+
+<pre><code class="code-block">static struct list client_mutex_list = LIST_INIT( client_mutex_list );
+</code></pre>
+
+<p>Each <code>NTSYNC_IOC_CREATE_MUTEX</code> from <code>alloc_client_handle</code> registers a
+<code>client_mutex_entry</code> in this list. On thread exit, ntdll walks the
+list and issues <code>NTSYNC_IOC_MUTEX_KILL</code> for any mutex still owned by
+the dying TID. That preserves Win32 abandoned-mutex semantics for
+client-created mutexes.</p>
+
+<h4 id="anonymous-event-fd-registration-with-wineserver">Anonymous-event fd registration with wineserver</h4>
+
+<p>A server-side async completion (file I/O, RPC, etc.) needs to signal
+the consumer&rsquo;s event. Server code holds a Win32 handle, not an fd.
+When the consumer&rsquo;s event is client-created the server cannot resolve
+the handle &ndash; the handle is in the client-private range.</p>
+
+<p>Client-created events register their fd with wineserver after creation
+so server-side async completion can signal them directly. The
+registration carries <code>(handle, fd)</code>; the server stashes the fd against
+the handle&rsquo;s existing async completion machinery.</p>
+
+<hr />
+
+<h2 id="5-wait-and-signal-execution">5. Wait and signal execution</h2>
+
+<p>The steady-state wait helper is <code>inproc_wait()</code>. It resolves each
+handle to an fd with <code>get_inproc_sync()</code>, collects an optional alert
+fd, adds the optional <code>io_uring</code> eventfd, and then calls
+<code>linux_wait_objs()</code>.</p>
+
+<p>The full wait path is therefore a <em>userspace + kernel</em> design:</p>
+
+<ul>
+<li>ntdll does handle-to-fd resolution and cache management</li>
+<li><code>linux_wait_objs()</code> issues <code>NTSYNC_IOC_WAIT_ANY</code> / <code>WAIT_ALL</code></li>
+<li>if ntsync wakes because the <code>io_uring</code> eventfd fired, ntdll drains
+CQEs and re-enters the wait</li>
+</ul>
+
+
+<p>Signal-side helpers follow the same shape. <code>inproc_signal_and_wait()</code>
+releases or signals the source object directly with the matching
+ioctl, then waits on the destination object with the same in-process
+wait path.</p>
+
+<p>For cross-thread wakeups inside Wine,
+<code>wine_server_signal_internal_sync()</code> is the high-level entry point.
+If the current thread is running with an RT policy and priority, it
+calls <code>linux_set_event_obj_pi()</code> (which issues
+<code>NTSYNC_IOC_EVENT_SET_PI</code>); otherwise it falls back to plain
+<code>linux_set_event()</code> (which issues <code>NTSYNC_IOC_EVENT_SET</code>). That is
+the userspace half of the kernel&rsquo;s deferred-boost behaviour from
+patch 1008.</p>
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 980 430" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
+  <style>
+    .bg { fill: #1a1b26; }
+    .box { fill: #24283b; stroke: #7aa2f7; stroke-width: 1.8; rx: 8; }
+    .fast { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
+    .mid { fill: #1f2535; stroke: #bb9af7; stroke-width: 1.8; rx: 8; }
+    .note { fill: #2a2418; stroke: #e0af68; stroke-width: 1.6; rx: 8; }
+    .t { fill: #c0caf5; font: 11px 'JetBrains Mono', monospace; }
+    .s { fill: #a9b1d6; font: 9px 'JetBrains Mono', monospace; }
+    .h { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
+    .g { fill: #9ece6a; font: bold 10px 'JetBrains Mono', monospace; }
+    .v { fill: #bb9af7; font: bold 10px 'JetBrains Mono', monospace; }
+    .y { fill: #e0af68; font: bold 10px 'JetBrains Mono', monospace; }
+    .line { stroke: #c0caf5; stroke-width: 1.2; fill: none; }
+  </style>
+
+  <rect x="0" y="0" width="980" height="430" class="bg" rx="6"/>
+  <text x="490" y="26" text-anchor="middle" class="h">Userspace wait / signal path on top of ntsync</text>
+
+  <rect x="80" y="76" width="240" height="78" class="box" rx="6"/>
+  <text x="200" y="102" text-anchor="middle" class="t">Win32 call site</text>
+  <text x="200" y="124" text-anchor="middle" class="s">NtWait*, SignalObjectAndWait, queue wake, async completion wake</text>
+
+  <rect x="370" y="76" width="240" height="78" class="mid" rx="6"/>
+  <text x="490" y="102" text-anchor="middle" class="v">ntdll inproc_sync layer</text>
+  <text x="490" y="124" text-anchor="middle" class="s">cache lookup, access/type check, optional server fd fetch on miss</text>
+
+  <rect x="660" y="76" width="240" height="78" class="fast" rx="6"/>
+  <text x="780" y="102" text-anchor="middle" class="g">linux_wait_objs() / direct signal helper</text>
+  <text x="780" y="124" text-anchor="middle" class="s">issues WAIT_ANY / WAIT_ALL / EVENT_SET(_PI) / unlock / release ioctls</text>
+
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="320" y1="115" x2="370" y2="115" class="line"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="610" y1="115" x2="660" y2="115" class="line"/>
+
+  <rect x="180" y="224" width="220" height="86" class="box" rx="6"/>
+  <text x="290" y="248" text-anchor="middle" class="t">wait side</text>
+  <text x="290" y="268" text-anchor="middle" class="s">optional alert fd</text>
+  <text x="290" y="286" text-anchor="middle" class="s">optional io_uring eventfd</text>
+
+  <rect x="430" y="224" width="220" height="86" class="mid" rx="6"/>
+  <text x="540" y="248" text-anchor="middle" class="t">kernel wake result</text>
+  <text x="540" y="268" text-anchor="middle" class="s">object signaled, alert fired, or STATUS_URING_COMPLETION</text>
+  <text x="540" y="286" text-anchor="middle" class="s">CQE wake loops back through ntdll drain and re-wait</text>
+
+  <rect x="680" y="224" width="220" height="86" class="fast" rx="6"/>
+  <text x="790" y="248" text-anchor="middle" class="g">signal side</text>
+  <text x="790" y="268" text-anchor="middle" class="s">direct event set / mutex unlock / semaphore release</text>
+  <text x="790" y="286" text-anchor="middle" class="s">EVENT_SET_PI used when caller is RT and priority-known</text>
+
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="490" y1="154" x2="490" y2="188" class="line"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="490" y1="188" x2="290" y2="188" class="line"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="290" y1="188" x2="290" y2="224" class="line"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="780" y1="154" x2="780" y2="188" class="line"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="780" y1="188" x2="790" y2="188" class="line"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="790" y1="188" x2="790" y2="224" class="line"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="400" y1="266" x2="430" y2="266" class="line"/>
+
+  <rect x="200" y="340" width="580" height="56" class="note" rx="6"/>
+  <text x="490" y="364" text-anchor="middle" class="y">steady state is direct once a handle resolves to an ntsync fd</text>
+  <text x="490" y="380" text-anchor="middle" class="s">waits and signals bypass wineserver until close</text>
+</svg>
+</div>
+
+
+<hr />
+
+<h2 id="6-linux_wait_objs">6. <code>linux_wait_objs</code></h2>
+
+<p>The wait wrapper is largely unchanged from upstream. NSPA&rsquo;s only
+addition is the <code>uring_fd</code> parameter (passed via the repurposed <code>pad</code>
+field of <code>struct ntsync_wait_args</code>) that lets a single <code>WAIT_ANY</code> call
+wake on either an ntsync object signal or an <code>io_uring</code> CQE.</p>
+
+<pre><code class="code-block">static NTSTATUS linux_wait_objs(int device, DWORD count, const int *objs,
+                                WAIT_TYPE type, int alert_fd, int uring_fd,
+                                const LARGE_INTEGER *timeout)
+{
+    struct ntsync_wait_args args = {0};
+    ...
+    args.objs  = (uintptr_t)objs;
+    args.count = count;
+    args.owner = GetCurrentThreadId();
+    args.alert = alert_fd;
+    args.pad   = uring_fd &gt; 0 ? uring_fd : 0;
+
+    request = (type != WaitAll || count == 1) ? NTSYNC_IOC_WAIT_ANY
+                                              : NTSYNC_IOC_WAIT_ALL;
+    do { ret = ioctl(device, request, &amp;args); }
+    while (ret &lt; 0 &amp;&amp; errno == EINTR);
+    ...
+}
+</code></pre>
+
+<p>The user-space code is deliberately oblivious to the kernel-side
+<code>EVENT_SET_PI</code> staging machinery (patch 1008) and the field-snapshot
+fix (patch 1012). Wine just calls <code>WAIT_ANY</code> / <code>WAIT_ALL</code>; the kernel
+handles boost consumption and entry lifetime transparently. No
+Wine-side change was needed for those carries.</p>
+
+<hr />
+
+<h2 id="7-linux_set_event_obj_pi">7. <code>linux_set_event_obj_pi</code></h2>
+
+<p>The cross-thread priority-intent setter is a thin ioctl wrapper:</p>
+
+<pre><code class="code-block">static NTSTATUS linux_set_event_obj_pi(int obj, unsigned int policy,
+                                       unsigned int prio)
+{
+    struct ntsync_event_set_pi_args args = {
+        .flags  = 0,
+        .policy = policy,
+        .prio   = prio,
+        .__pad  = 0
+    };
+    if (ioctl(obj, NTSYNC_IOC_EVENT_SET_PI, &amp;args) &lt; 0)
+        return errno_to_status(errno);
+    return STATUS_SUCCESS;
+}
+</code></pre>
+
+<p>This is called from the gamma dispatcher path when an RT audio thread
+signals a queue event to the dispatcher pthread. The audio thread
+passes its own <code>(SCHED_FIFO, prio)</code>; the kernel stages the boost on
+the event; the dispatcher consumes the signal in its <code>WAIT_ANY</code> and
+gets boosted at wait-return.</p>
+
+<p>After patch 1008, the path is bulletproof against the fast-path race:
+even if the dispatcher pthread takes <code>obj_lock</code> first and sees
+<code>signaled=true</code>, it consumes the staged boost in the unqueue loop on
+its way out.</p>
+
+<hr />
+
+<h2 id="8-channel-ioctl-wrappers">8. Channel ioctl wrappers</h2>
+
+<p>The wineserver dispatcher uses the channel ioctls directly via
+<code>ioctl()</code> calls; there is no portable <code>linux_channel_*</code> helper at the
+Wine ntdll layer because channels are wineserver-process-private (they
+do not cross the wineserver / client boundary as Win32 handles).</p>
+
+<p>The dispatcher loop calls:</p>
+
+<pre><code class="code-block">ioctl(channel_fd, NTSYNC_IOC_CHANNEL_RECV2, &amp;args);
+/* dispatch using args.thread_token */
+ioctl(channel_fd, NTSYNC_IOC_CHANNEL_REPLY, &amp;args.entry_id);
+</code></pre>
+
+<p>with <code>RECV</code> as fallback if <code>RECV2</code> returns <code>-ENOTTY</code> (old kernel
+without 1005). On post-1011 kernels the dispatcher follows the first
+successful <code>RECV2</code> with <code>TRY_RECV2</code> after each reply until the
+channel returns empty. On post-1010 kernels the dispatcher uses
+<code>NTSYNC_IOC_AGGREGATE_WAIT</code> to block on the channel + uring eventfd +
+shutdown eventfd in one syscall.</p>
+
+<p>The client-side <code>SEND_PI</code> is invoked from the wineserver
+request-marshalling fast path; the client&rsquo;s RT thread blocks in the
+kernel until reply.</p>
+
+<hr />
+
+<h2 id="9-alloc_client_handle">9. <code>alloc_client_handle</code></h2>
+
+<p>Client-side ntsync object creation uses
+<code>InterlockedDecrement(&amp;client_handle_next)</code> to allocate client-range
+handles that do not collide with server-allocated handles. The
+client-private range starts at a large constant
+(<code>INPROC_SYNC_CACHE_TOTAL</code>) and counts down, while server handles
+count up from low values; the two ranges never meet for typical Wine
+processes.</p>
+
+<p>Wait operations (<code>NtWaitForSingleObject</code>) resolve the handle to a
+cached fd via <code>inproc_wait()</code>, then call <code>linux_wait_objs()</code> which
+issues the kernel ioctl directly.</p>
+
+<p>Currently enabled for anonymous mutexes and semaphores, plus
+anonymous events when <code>NSPA_NT_LOCAL_EVENT</code> is left at its shipped
+default-on setting.</p>
+
+<hr />
+
+<h2 id="10-pe-side-wait-coverage">10. PE-side wait coverage</h2>
+
+<p>The userspace ntsync surface is exercised by both Layer 1 native
+ntsync tests and the Layer 2 PE matrix. The split is:</p>
+
+<ul>
+<li><strong>PE-side wait coverage</strong> exercises the userspace path described
+above. The <code>nspa_rt_test.exe ntsync</code> harness creates Win32 mutexes,
+semaphores, and events, resolves them through <code>inproc_wait()</code>, and
+then hits <code>linux_wait_objs()</code> / the direct signal helpers.</li>
+<li><strong>Queue-wake and local-event coverage</strong> exercises the direct event
+signal path (<code>wine_server_signal_internal_sync()</code> and the registered
+event-fd path used by async completion).</li>
+<li><strong>Native ntsync tests</strong> exercise raw kernel behaviour that the Win32
+surface cannot reach directly: staged <code>EVENT_SET_PI</code>, channel
+races, aggregate-wait source ordering, and the hardening bugs from
+1007-1009 / 1012 / 1014a.</li>
+</ul>
+
+
+<p>Layer 2 published full-suite boundary remains
+<code>24 PASS / 0 FAIL / 0 TIMEOUT</code> on the PE matrix; Layer 1 native
+sanity is <code>3 PASS / 0 FAIL</code>. The cross-build production-kernel runs
+on the post-1011 module advanced through <code>~370 M</code> ops on the
+post-1009 baseline, then through aggregate-wait, then through 1011 /
+TRY_RECV2, and now the post-1014a module
+(<code>F1A9EA24E257A35BB21341D</code>) &ndash; with zero syscall errors and zero
+dmesg splats at every step.</p>
+
+<hr />
+
+<h2 id="11-references">11. References</h2>
+
+<h3 id="wine-source">Wine source</h3>
+
+<ul>
+<li><code>dlls/ntdll/unix/sync.c</code> &ndash; <code>linux_wait_objs()</code>,
+<code>linux_set_event_obj_pi()</code>, <code>linux_set_event()</code>,
+<code>linux_release_semaphore()</code>, <code>linux_unlock_mutex()</code>,
+the <code>inproc_sync</code> cache (<code>get_cached_inproc_sync()</code>,
+<code>cache_inproc_sync()</code>, <code>release_inproc_sync()</code>,
+<code>get_server_inproc_sync()</code>), <code>alloc_client_handle()</code>, the
+<code>client_mutex_list</code> thread-exit walker, and the <code>NSPA_NT_LOCAL_EVENT</code>
+gating in <code>NtCreateEvent</code>.</li>
+<li><code>server/inproc_sync.c</code> &ndash; the server-side <code>struct inproc_sync</code> that
+attaches an ntsync fd to a wineserver object, plus the
+<code>get_inproc_sync_fd</code> request handler.</li>
+</ul>
+
+
+<h3 id="kernel-surface">Kernel surface</h3>
+
+<ul>
+<li><code>include/uapi/linux/ntsync.h</code> &ndash; ioctl numbers,
+<code>ntsync_wait_args</code>, <code>NTSYNC_INDEX_URING_READY</code>, channel and
+thread-token ioctl arg structs.</li>
+<li><code>drivers/misc/ntsync.c</code> &ndash; the kernel implementation; see the
+<a href="ntsync-pi-driver.gen.html">NTSync PI Driver</a> page for the
+patch-by-patch walkthrough.</li>
+</ul>
+
+
+<h3 id="cross-references">Cross-references</h3>
+
+<ul>
+<li><a href="ntsync-pi-driver.gen.html">NTSync PI Driver</a> &ndash; the kernel half:
+PI primitives, channel transport, aggregate-wait, post-1011 carries.</li>
+<li><a href="gamma-channel-dispatcher.gen.html">Gamma Channel Dispatcher</a> &ndash;
+how the wineserver dispatcher uses the channel ioctls and consumes
+the thread-token, with TRY_RECV2 burst drain on top of
+aggregate-wait.</li>
+<li><a href="aggregate-wait-and-async-completion.gen.html">Aggregate-Wait and Async Completion</a>
+&ndash; the heterogeneous wait surface and its same-thread async
+completion consumer.</li>
+<li><a href="librtpi.gen.html">librtpi (PI mutex / condvar)</a> &ndash; the
+Wine-internal librtpi shim that closes Wine&rsquo;s userspace PI-mutex
+gap, complementary to the ntsync object-PI path documented here.</li>
+</ul>
+
+
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+  document.querySelectorAll("pre code").forEach(function (block) {
+    hljs.highlightElement(block);
+  });
+});
+</script>
+</body></html>

@@ -1,6 +1,8 @@
-# Wine-NSPA -- NTSync and In-Process Synchronization
+# Wine-NSPA -- NTSync PI Driver
 
-This page is the feature-by-feature architecture and implementation guide for the Wine-NSPA ntsync overlay, including the Wine-side in-process sync path, the gamma transport work, the landed aggregate-wait primitive, and the burst-drain follow-on.
+This page is the feature-by-feature architecture and implementation guide for the kernel-side Wine-NSPA ntsync overlay: PI primitives, the channel transport, the RT-safety carries, the aggregate-wait primitive, the burst-drain follow-on, and the post-1011 slab UAF fix, dedicated kmem_cache conversion, and SEND_PI lockless target scan.
+
+The Wine userspace half of the integration -- handle-to-fd caching, server-owned vs. client-created anonymous sync handles, the dispatcher ioctl wrappers, and PE-side wait coverage -- lives in the companion document [NTSync Userspace](ntsync-userspace.gen.html).
 
 ## Table of Contents
 
@@ -13,11 +15,13 @@ This page is the feature-by-feature architecture and implementation guide for th
 7. [Channel exclusive recv (1007)](#7-channel-exclusive-recv-1007)
 8. [Deferred `EVENT_SET_PI` boost (1008)](#8-deferred-event_set_pi-boost-1008)
 9. [channel_entry refcount UAF fix (1009)](#9-channel_entry-refcount-uaf-fix-1009)
-10. [Aggregate-wait (1010)](#10-aggregate-wait-1010)
-11. [Wine userspace integration](#11-wine-userspace-integration)
-12. [Validation](#12-validation)
-13. [Audit notes](#13-audit-notes)
-14. [References](#14-references)
+10. [Aggregate-wait (1010 + 1011)](#10-aggregate-wait-1010)
+11. [Channel recv snapshot UAF fix (1012)](#11-channel-recv-snapshot-uaf-fix-1012)
+12. [Dedicated kmem_caches (1013)](#12-dedicated-kmem_caches-1013)
+13. [SEND_PI lockless target scan (1014 + 1014a)](#13-send_pi-lockless-target-scan-1014--1014a)
+14. [Validation](#14-validation)
+15. [Audit notes](#15-audit-notes)
+16. [References](#16-references)
 
 ---
 
@@ -27,25 +31,35 @@ NTSync is a Linux kernel driver (`drivers/misc/ntsync.c`, `/dev/ntsync`) that im
 
 For Wine-NSPA, upstream ntsync is necessary but insufficient. The upstream driver uses FIFO waiter queues, has no priority inheritance, and uses `spinlock_t` for the per-object lock -- which becomes a sleeping `rt_mutex` on PREEMPT_RT. None of those characteristics is acceptable for an RT audio workload where the audio callback must wait deterministically on Wine's primitives without inheriting unbounded inversion latency.
 
-Wine-NSPA now carries a stack of **nine** kernel patches on top of
+Wine-NSPA now carries a stack of **twelve** kernel patches on top of
 upstream `ntsync.c`. The first (1003) was the original PI series
 shipped 2026-04-13: raw spinlocks, priority-ordered queues,
 mutex-owner PI boost. Patches 1004-1009 added the channel transport,
 thread-token path, and the hardening fixes needed to make that path
-production-safe on PREEMPT_RT. Patch **1010** then added
-`NTSYNC_IOC_AGGREGATE_WAIT`, which is the missing heterogeneous wait
-primitive the gamma dispatcher needed for same-thread async completion.
-Patch **1011** then added `NTSYNC_IOC_CHANNEL_TRY_RECV2`, the
+production-safe on PREEMPT_RT. Patch **1010** added
+`NTSYNC_IOC_AGGREGATE_WAIT`, the missing heterogeneous wait primitive
+the gamma dispatcher needed for same-thread async completion, and
+patch **1011** then added `NTSYNC_IOC_CHANNEL_TRY_RECV2`, the
 non-blocking channel dequeue used for post-dispatch burst drain on top
-of the 1010 wait surface.
+of the 1010 wait surface. Patch **1012** closed a post-1011 channel
+slab UAF caught by KASAN under `test-channel-stress` and real Ableton
+workloads. Patch **1013** moved the three hot ntsync allocation
+classes (`ntsync_event_pi`, `ntsync_channel_entry`, `ntsync_pi_owner`)
+out of the system kmalloc pool and into dedicated `kmem_cache`s with
+`SLAB_HWCACHE_ALIGN`. Patch **1014** added a `list_empty_careful`
+fast-path on `SEND_PI`'s boost-target scan, removing an unconditional
+`spin_lock_irqsave` round-trip on the audio-thread hot path. Patch
+**1014a** is the NULL-guard follow-up for `kmem_cache_free` at the
+event-PI staging free site missed in the 1013 conversion audit.
 
-Module srcversion `10124FB81FDC76797EF1F91` is the current production
-module on prod kernel `6.19.11-rt1-1-nspa`. It carries 1003-1011 plus
-the post-1010 PI follow-up ordering fixes. The earlier
-`CFF56DE1EF28D693BB597CD` module remains the post-1010 production
-baseline that first validated aggregate-wait; the earlier
-`A250A77651C8D5DAB719FE2` module remains the post-1009 baseline that
-was validated to ~370M mixed operations.
+Module srcversion `F1A9EA24E257A35BB21341D` is the current production
+module on prod kernel `6.19.11-rt1-1-nspa`. It carries 1003-1014 (with
+1014a folded in). Earlier production modules:
+`10124FB81FDC76797EF1F91` carried 1003-1011;
+`CFF56DE1EF28D693BB597CD` was the post-1010 baseline that first
+validated aggregate-wait;
+`A250A77651C8D5DAB719FE2` was the post-1009 baseline that was
+validated to ~370M mixed operations.
 
 This doc covers the patch-by-patch design rationale: what each change adds, what bug it closes (or feature it exposes), how it preserves NT semantics, and how it interacts with the `obj_lock` raw_spinlock and PREEMPT_RT.
 
@@ -53,30 +67,35 @@ This doc covers the patch-by-patch design rationale: what each change adds, what
 
 Wine-NSPA does not fork ntsync. The patches are diffs against upstream
 `drivers/misc/ntsync.c` and apply cleanly in series
-1003 -> 1004 -> 1005 -> 1006 -> 1007 -> 1008 -> 1009 -> 1010 -> 1011. They
-live in `wine-rt-claude/ntsync-patches/` as standalone unified diffs.
-The kernel build (`linux-nspa`) applies the stack at PKGBUILD time; the
-resulting `.ko` ships as part of the kernel package.
+1003 -> 1004 -> 1005 -> 1006 -> 1007 -> 1008 -> 1009 -> 1010 -> 1011 ->
+1012 -> 1013 -> 1014. They live in `wine-rt-claude/ntsync-patches/` as
+standalone unified diffs. The kernel build (`linux-nspa`) applies the
+stack at PKGBUILD time; the resulting `.ko` ships as part of the
+kernel package.
 
-The patch numbering (`1003-` through `1011-`) is local to NSPA. It bears no relationship to upstream NTSync revisions or any LKML series.
+The patch numbering (`1003-` through `1014-`) is local to NSPA. It bears no relationship to upstream NTSync revisions or any LKML series.
 
 ### Patch series at a glance
 
-| #    | Patch                                 | Purpose                                                                                       | LOC     |
-|------|---------------------------------------|-----------------------------------------------------------------------------------------------|---------|
-| 1003 | PI primitives                         | raw_spinlock obj_lock, priority-ordered waiter queues, mutex owner PI boost, per-task tracking| ~600    |
-| 1004 | Channel object                        | New `NTSYNC_TYPE_CHANNEL` with `CREATE`, `SEND_PI`, `RECV`, `REPLY` ioctls                    | ~530    |
-| 1005 | Thread-token                          | Per-channel `(tid -> token)` registry + `RECV2` ioctl, eliminates dispatcher userspace lookup | ~340    |
-| 1006 | RT alloc-hoist                        | Hoists 6 sites of `kmalloc`/`kfree` out of `raw_spinlock_t` (RT-illegal); `pi_work` pool      | ~750    |
-| 1007 | Channel exclusive recv                | `wake_up_all` priority-inversion fix: 3-LOC `wait_event_interruptible_exclusive` swap         | ~3      |
-| 1008 | EVENT_SET_PI deferred boost           | Closes fast-path race where consumer takes obj_lock first, sees signaled, returns unboosted   | ~80     |
-| 1009 | channel_entry refcount UAF            | KASAN-caught REPLY-vs-SEND_PI cleanup race; refcount_t on `ntsync_channel_entry`              | ~15     |
-| 1010 | Aggregate-wait                        | `NTSYNC_IOC_AGGREGATE_WAIT`: heterogeneous object+fd wait, channel notify-only support         | ~400    |
-| 1011 | Channel TRY_RECV2                     | `NTSYNC_IOC_CHANNEL_TRY_RECV2`: non-blocking `RECV2` for post-dispatch burst drain            | ~30     |
+| #     | Patch                                 | Purpose                                                                                       | LOC     |
+|-------|---------------------------------------|-----------------------------------------------------------------------------------------------|---------|
+| 1003  | PI primitives                         | raw_spinlock obj_lock, priority-ordered waiter queues, mutex owner PI boost, per-task tracking| ~600    |
+| 1004  | Channel object                        | New `NTSYNC_TYPE_CHANNEL` with `CREATE`, `SEND_PI`, `RECV`, `REPLY` ioctls                    | ~530    |
+| 1005  | Thread-token                          | Per-channel `(tid -> token)` registry + `RECV2` ioctl, eliminates dispatcher userspace lookup | ~340    |
+| 1006  | RT alloc-hoist                        | Hoists 6 sites of `kmalloc`/`kfree` out of `raw_spinlock_t` (RT-illegal); `pi_work` pool      | ~750    |
+| 1007  | Channel exclusive recv                | `wake_up_all` priority-inversion fix: 3-LOC `wait_event_interruptible_exclusive` swap         | ~3      |
+| 1008  | EVENT_SET_PI deferred boost           | Closes fast-path race where consumer takes obj_lock first, sees signaled, returns unboosted   | ~80     |
+| 1009  | channel_entry refcount UAF            | KASAN-caught REPLY-vs-SEND_PI cleanup race; refcount_t on `ntsync_channel_entry`              | ~15     |
+| 1010  | Aggregate-wait                        | `NTSYNC_IOC_AGGREGATE_WAIT`: heterogeneous object+fd wait, channel notify-only support        | ~400    |
+| 1011  | Channel TRY_RECV2                     | `NTSYNC_IOC_CHANNEL_TRY_RECV2`: non-blocking `RECV2` for post-dispatch burst drain            | ~30     |
+| 1012  | Channel recv field-snapshot UAF fix   | Snapshot popped-entry fields under `obj_lock` before unlock, closes RECV/RECV2 vs sender-cleanup slab UAF | ~15 |
+| 1013  | Dedicated kmem_caches                 | `ntsync_event_pi` / `ntsync_channel_entry` / `ntsync_pi_owner` -> own `kmem_cache`s with `SLAB_HWCACHE_ALIGN` | ~120 |
+| 1014  | SEND_PI lockless target scan          | `list_empty_careful` fast-path skips `wq->lock` round-trip on empty waiter queues             | ~10     |
+| 1014a | kmem_cache_free NULL guard            | Site-2089 `pending_pi.new_ep` free now NULL-guarded; closes `cache_from_obj` deref under `SLAB_FREELIST_HARDENED` | ~3 |
 
-Patches 1003-1006, 1010, and 1011 are feature/infrastructure work; 1007-1009
-are minimal surgical fixes for specific KASAN- or trace-confirmed bugs.
-The distinction matters: Section 11 discusses why.
+Patches 1003-1006, 1010, 1011, and 1013 are feature/infrastructure work; 1007-1009, 1012, 1014, and 1014a
+are minimal surgical fixes for specific KASAN- or trace-confirmed bugs (1014 is also a measurable IRQ-off
+window reduction on the audio hot path). The distinction matters: Section 15 discusses why.
 
 <div class="diagram-container">
 <svg width="100%" viewBox="0 0 940 520" xmlns="http://www.w3.org/2000/svg">
@@ -171,9 +190,10 @@ The distinction matters: Section 11 discusses why.
 
   <rect x="650" y="364" width="220" height="100" class="nt-box"/>
   <text x="760" y="388" text-anchor="middle" class="nt-label">Operational result</text>
-  <text x="760" y="412" text-anchor="middle" class="nt-small">single kernel sync substrate for RT waits</text>
-  <text x="760" y="430" text-anchor="middle" class="nt-small">channel-backed wineserver transport + aggregate-wait</text>
-  <text x="760" y="448" text-anchor="middle" class="nt-small">1011 then adds burst-drain on top of that shipped base</text>
+  <text x="760" y="408" text-anchor="middle" class="nt-small">single kernel sync substrate for RT waits</text>
+  <text x="760" y="424" text-anchor="middle" class="nt-small">channel-backed wineserver transport</text>
+  <text x="760" y="440" text-anchor="middle" class="nt-small">aggregate-wait + TRY_RECV2 burst-drain</text>
+  <text x="760" y="456" text-anchor="middle" class="nt-small">1012-1014 carries: snapshot, slab caches, lockless scan</text>
 </svg>
 </div>
 
@@ -1068,355 +1088,335 @@ functionally correct on the one-entry-per-wake path.
 
 ---
 
-## 11. Wine userspace integration
-
-The Wine-side ntsync integration lives primarily in
-`dlls/ntdll/unix/sync.c`, with the server-owned bridge in
-`server/inproc_sync.c`. This is the other half of the story that the
-kernel sections above do not show by themselves: Wine-NSPA does not
-only have a kernel ntsync overlay, it also has a userspace
-handle-to-fd layer that decides when a Win32 wait or signal can go
-straight to `/dev/ntsync`.
-
-### 11.1 Two userspace consumer shapes
-
-There are two distinct userspace shapes:
-
-- **server-owned sync handles**: named objects, inherited objects,
-  cross-process objects, and any handle that still originates in
-  wineserver. The first wait or signal does a one-time
-  `get_inproc_sync_fd` request; after that, ntdll caches the fd and
-  goes direct.
-- **client-created anonymous sync handles**: anonymous mutexes,
-  semaphores, and anonymous events when `NSPA_NT_LOCAL_EVENT` is left
-  at its default-on setting. These never need wineserver to mint the
-  fd in the first place; ntdll allocates a client-range handle, issues
-  the ntsync create ioctl itself, and populates the cache immediately.
-
-<div class="diagram-container">
-<svg width="100%" viewBox="0 0 980 470" xmlns="http://www.w3.org/2000/svg">
-  <style>
-    .bg { fill: #1a1b26; }
-    .lane { fill: #24283b; stroke: #6b7398; stroke-width: 1.2; rx: 10; }
-    .srv { fill: #1f2535; stroke: #7aa2f7; stroke-width: 1.8; rx: 8; }
-    .cli { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
-    .mid { fill: #2a1f35; stroke: #bb9af7; stroke-width: 1.8; rx: 8; }
-    .note { fill: #2a2418; stroke: #e0af68; stroke-width: 1.6; rx: 8; }
-    .t { fill: #c0caf5; font: 11px 'JetBrains Mono', monospace; }
-    .s { fill: #a9b1d6; font: 9px 'JetBrains Mono', monospace; }
-    .h { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
-    .g { fill: #9ece6a; font: bold 10px 'JetBrains Mono', monospace; }
-    .v { fill: #bb9af7; font: bold 10px 'JetBrains Mono', monospace; }
-    .y { fill: #e0af68; font: bold 10px 'JetBrains Mono', monospace; }
-    .line { stroke: #c0caf5; stroke-width: 1.2; fill: none; }
-    .guide { stroke: #6b7398; stroke-width: 1; stroke-dasharray: 6,4; }
-  </style>
-
-  <rect x="0" y="0" width="980" height="470" class="bg"/>
-  <text x="490" y="26" text-anchor="middle" class="h">Wine-side ntsync consumers: server-owned handles and client-created anonymous handles</text>
-
-  <rect x="40" y="56" width="420" height="324" class="lane"/>
-  <text x="250" y="82" text-anchor="middle" class="v">server-owned handle path</text>
-
-  <rect x="80" y="104" width="340" height="60" class="srv"/>
-  <text x="250" y="128" text-anchor="middle" class="t">named / inherited / cross-process Win32 sync handle</text>
-  <text x="250" y="146" text-anchor="middle" class="s">wineserver remains the authority that created the object</text>
-
-  <line x1="250" y1="164" x2="250" y2="192" class="line"/>
-
-  <rect x="80" y="192" width="340" height="70" class="mid"/>
-  <text x="250" y="216" text-anchor="middle" class="t">server `inproc_sync` object + ntsync fd</text>
-  <text x="250" y="234" text-anchor="middle" class="s">`server/inproc_sync.c` owns the fd and exposes it via `get_inproc_sync_fd`</text>
-  <text x="250" y="252" text-anchor="middle" class="s">one-time wineserver lookup on first consumer-side use</text>
-
-  <line x1="250" y1="262" x2="250" y2="292" class="line"/>
-
-  <rect x="80" y="292" width="340" height="60" class="srv"/>
-  <text x="250" y="316" text-anchor="middle" class="t">ntdll `inproc_sync` cache entry</text>
-  <text x="250" y="334" text-anchor="middle" class="s">later waits and signals bypass wineserver and reuse the cached fd</text>
-
-  <rect x="520" y="56" width="420" height="324" class="lane"/>
-  <text x="730" y="82" text-anchor="middle" class="g">client-created anonymous path</text>
-
-  <rect x="560" y="104" width="340" height="60" class="cli"/>
-  <text x="730" y="128" text-anchor="middle" class="t">anonymous `NtCreateMutex` / `NtCreateSemaphore` / `NtCreateEvent`</text>
-  <text x="730" y="146" text-anchor="middle" class="s">event path is shipped default-on via `NSPA_NT_LOCAL_EVENT=1` (`=0` disables)</text>
-
-  <line x1="730" y1="164" x2="730" y2="192" class="line"/>
-
-  <rect x="560" y="192" width="340" height="70" class="cli"/>
-  <text x="730" y="216" text-anchor="middle" class="t">ntdll allocates client-range handle and issues `NTSYNC_IOC_CREATE_*`</text>
-  <text x="730" y="234" text-anchor="middle" class="s">fd is cached immediately; no wineserver round-trip to mint the object</text>
-  <text x="730" y="252" text-anchor="middle" class="s">anonymous events also register their fd with wineserver for async completion</text>
-
-  <line x1="730" y1="262" x2="730" y2="292" class="line"/>
-
-  <rect x="560" y="292" width="340" height="60" class="cli"/>
-  <text x="730" y="316" text-anchor="middle" class="t">same ntdll `inproc_sync` cache shape</text>
-  <text x="730" y="334" text-anchor="middle" class="s">waits and signals go straight to `/dev/ntsync` from the first operation</text>
-
-  <line x1="250" y1="380" x2="250" y2="410" class="guide"/>
-  <line x1="730" y1="380" x2="730" y2="410" class="guide"/>
-  <line x1="250" y1="410" x2="730" y2="410" class="guide"/>
-
-  <rect x="220" y="402" width="540" height="52" class="note"/>
-  <text x="490" y="426" text-anchor="middle" class="y">both paths converge on the same wait / signal helpers</text>
-  <text x="490" y="442" text-anchor="middle" class="s">`dlls/ntdll/unix/sync.c` drives the same `/dev/ntsync` ioctls in both cases</text>
-</svg>
-</div>
-
-### 11.2 Server-owned sync handles
-
-Server-owned sync objects still exist because some Win32 handles are not
-purely local: named objects, inherited handles, and cross-process
-objects all need wineserver as the authoritative creator and
-bookkeeper. That does **not** mean every wait on those objects keeps
-round-tripping through wineserver.
-
-`server/inproc_sync.c` attaches an ntsync-backed `struct inproc_sync`
-object to the server object and keeps the fd alive there. On the client
-side, `get_inproc_sync()` first tries a lock-free cache lookup. On a
-miss, ntdll enters the protected `fd_cache_mutex` section, asks
-wineserver for `get_inproc_sync_fd`, receives the fd once, and then
-caches `(handle -> fd, type, access)` locally.
-
-The important steady-state property is: **server-owned does not mean
-server-waited**. Once the fd is cached, `NtWaitForSingleObject`,
-`NtWaitForMultipleObjects`, `NtSetEvent`, `NtReleaseSemaphore`, and the
-other supported paths all go straight to `/dev/ntsync`.
-
-Two details keep the cache safe:
-
-- the cache entry carries a refcount and `closed` bit so handle reuse
-  does not return a stale fd after `NtClose`
-- the miss path is protected by `fd_cache_mutex` plus an uninterrupted
-  section so fd receipt cannot race with handle close or concurrent fd
-  caching
-
-### 11.3 Client-created anonymous sync handles
-
-For anonymous objects, Wine-NSPA can skip wineserver even at creation
-time.
-
-`alloc_client_handle()` hands out values from a client-private handle
-range that is disjoint from server handles. ntdll then issues the
-kernel create ioctl itself:
-
-- `NTSYNC_IOC_CREATE_MUTEX`
-- `NTSYNC_IOC_CREATE_SEM`
-- `NTSYNC_IOC_CREATE_EVENT`
-
-and stores the returned fd directly in the same `inproc_sync` cache that
-the server-owned path uses.
-
-The current shipped rules are:
-
-- anonymous mutexes: client-created
-- anonymous semaphores: client-created
-- anonymous events: client-created when `NSPA_NT_LOCAL_EVENT` is left at
-  its default-on setting; `NSPA_NT_LOCAL_EVENT=0` forces the older
-  wineserver-created event path
-- named or inheritable objects: stay on the server path
-
-There are two extra pieces of bookkeeping in this path:
-
-- client-created mutexes are tracked in `client_mutex_list` so thread
-  exit can issue `NTSYNC_IOC_MUTEX_KILL` and preserve abandoned-mutex
-  semantics
-- client-created events register their fd with wineserver so server-side
-  async completion can signal them directly instead of failing on a
-  client-range handle
-
-### 11.4 Wait and signal execution
-
-The steady-state wait helper is `inproc_wait()`. It resolves each handle
-to an fd with `get_inproc_sync()`, collects an optional alert fd, adds
-the optional `io_uring` eventfd, and then calls `linux_wait_objs()`.
-
-That means the full wait path is already a *userspace + kernel* design,
-not just a kernel one:
-
-- ntdll does handle-to-fd resolution and cache management
-- `linux_wait_objs()` issues `NTSYNC_IOC_WAIT_ANY` / `WAIT_ALL`
-- if ntsync wakes because the `io_uring` eventfd fired, ntdll drains
-  CQEs and re-enters the wait
-
-Signal-side helpers follow the same shape. `inproc_signal_and_wait()`
-releases or signals the source object directly with the matching ioctl,
-then waits on the destination object with the same in-process wait path.
-
-For cross-thread wakeups inside Wine, `wine_server_signal_internal_sync()`
-is the high-level entry point. If the current thread is running with an
-RT policy and priority, it tries `NTSYNC_IOC_EVENT_SET_PI`; otherwise it
-falls back to plain `EVENT_SET`. That is the userspace half of the
-deferred-boost behavior described in section 8.
-
-<div class="diagram-container">
-<svg width="100%" viewBox="0 0 980 430" xmlns="http://www.w3.org/2000/svg">
-  <style>
-    .bg { fill: #1a1b26; }
-    .box { fill: #24283b; stroke: #7aa2f7; stroke-width: 1.8; rx: 8; }
-    .fast { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
-    .mid { fill: #1f2535; stroke: #bb9af7; stroke-width: 1.8; rx: 8; }
-    .note { fill: #2a2418; stroke: #e0af68; stroke-width: 1.6; rx: 8; }
-    .t { fill: #c0caf5; font: 11px 'JetBrains Mono', monospace; }
-    .s { fill: #a9b1d6; font: 9px 'JetBrains Mono', monospace; }
-    .h { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
-    .g { fill: #9ece6a; font: bold 10px 'JetBrains Mono', monospace; }
-    .v { fill: #bb9af7; font: bold 10px 'JetBrains Mono', monospace; }
-    .y { fill: #e0af68; font: bold 10px 'JetBrains Mono', monospace; }
-    .line { stroke: #c0caf5; stroke-width: 1.2; fill: none; }
-  </style>
-
-  <rect x="0" y="0" width="980" height="430" class="bg"/>
-  <text x="490" y="26" text-anchor="middle" class="h">Userspace wait / signal path on top of ntsync</text>
-
-  <rect x="80" y="76" width="240" height="78" class="box"/>
-  <text x="200" y="102" text-anchor="middle" class="t">Win32 call site</text>
-  <text x="200" y="124" text-anchor="middle" class="s">`NtWait*`, `SignalObjectAndWait`, queue wake, async completion wake</text>
-
-  <rect x="370" y="76" width="240" height="78" class="mid"/>
-  <text x="490" y="102" text-anchor="middle" class="v">ntdll `inproc_sync` layer</text>
-  <text x="490" y="124" text-anchor="middle" class="s">cache lookup, access/type check, optional server fd fetch on miss</text>
-
-  <rect x="660" y="76" width="240" height="78" class="fast"/>
-  <text x="780" y="102" text-anchor="middle" class="g">`linux_wait_objs()` / direct signal helper</text>
-  <text x="780" y="124" text-anchor="middle" class="s">issues `WAIT_ANY` / `WAIT_ALL` / `EVENT_SET(_PI)` / unlock / release ioctls</text>
-
-  <line x1="320" y1="115" x2="370" y2="115" class="line"/>
-  <line x1="610" y1="115" x2="660" y2="115" class="line"/>
-
-  <rect x="180" y="224" width="220" height="86" class="box"/>
-  <text x="290" y="248" text-anchor="middle" class="t">wait side</text>
-  <text x="290" y="268" text-anchor="middle" class="s">optional alert fd</text>
-  <text x="290" y="286" text-anchor="middle" class="s">optional `io_uring` eventfd</text>
-
-  <rect x="430" y="224" width="220" height="86" class="mid"/>
-  <text x="540" y="248" text-anchor="middle" class="t">kernel wake result</text>
-  <text x="540" y="268" text-anchor="middle" class="s">object signaled, alert fired, or `STATUS_URING_COMPLETION`</text>
-  <text x="540" y="286" text-anchor="middle" class="s">CQE wake loops back through ntdll drain and re-wait</text>
-
-  <rect x="680" y="224" width="220" height="86" class="fast"/>
-  <text x="790" y="248" text-anchor="middle" class="g">signal side</text>
-  <text x="790" y="268" text-anchor="middle" class="s">direct event set / mutex unlock / semaphore release</text>
-  <text x="790" y="286" text-anchor="middle" class="s">`EVENT_SET_PI` used when caller is RT and priority-known</text>
-
-  <line x1="490" y1="154" x2="490" y2="188" class="line"/>
-  <line x1="490" y1="188" x2="290" y2="188" class="line"/>
-  <line x1="290" y1="188" x2="290" y2="224" class="line"/>
-  <line x1="780" y1="154" x2="780" y2="188" class="line"/>
-  <line x1="780" y1="188" x2="790" y2="188" class="line"/>
-  <line x1="790" y1="188" x2="790" y2="224" class="line"/>
-  <line x1="400" y1="266" x2="430" y2="266" class="line"/>
-
-  <rect x="200" y="340" width="580" height="56" class="note"/>
-  <text x="490" y="364" text-anchor="middle" class="y">steady state is direct once a handle resolves to an ntsync fd</text>
-  <text x="490" y="380" text-anchor="middle" class="s">waits and signals bypass wineserver until close</text>
-</svg>
-</div>
-
-### 11.5 Coverage boundary
-
-The important testing split is:
-
-- **PE-side wait coverage** exercises the userspace path above. The
-  `nspa_rt_test.exe ntsync` harness creates Win32 mutexes, semaphores,
-  and events, resolves them through `inproc_wait()`, and then hits
-  `linux_wait_objs()` / the direct signal helpers.
-- **queue-wake and local-event coverage** exercises the direct event
-  signal path (`wine_server_signal_internal_sync()` and the registered
-  event-fd path used by async completion).
-- **native ntsync tests** exercise raw kernel behavior that the Win32
-  surface cannot reach directly: staged `EVENT_SET_PI`, channel races,
-  aggregate-wait source ordering, and the hardening bugs from 1007-1009.
-
-### linux_wait_objs
-
-The wait wrapper is largely unchanged from upstream. NSPA's only addition is the `uring_fd` parameter (passed via the repurposed `pad` field) that lets a single `WAIT_ANY` call wake on either an ntsync object signal or an io_uring CQE.
-
-    static NTSTATUS linux_wait_objs(int device, DWORD count, const int *objs,
-                                    WAIT_TYPE type, int alert_fd, int uring_fd,
-                                    const LARGE_INTEGER *timeout)
-    {
-        struct ntsync_wait_args args = {0};
-        ...
-        args.objs  = (uintptr_t)objs;
-        args.count = count;
-        args.owner = GetCurrentThreadId();
-        args.alert = alert_fd;
-        args.pad   = uring_fd > 0 ? uring_fd : 0;
-
-        request = (type != WaitAll || count == 1) ? NTSYNC_IOC_WAIT_ANY
-                                                  : NTSYNC_IOC_WAIT_ALL;
-        do { ret = ioctl(device, request, &args); }
-        while (ret < 0 && errno == EINTR);
-        ...
-    }
-
-The user-space code is deliberately oblivious to the kernel-side
-`EVENT_SET_PI` staging machinery added by 1008. Wine just calls
-`WAIT_ANY` / `WAIT_ALL`; the kernel handles boost consumption
-transparently in the unqueue loop. No Wine-side change was needed for
-1008.
-
-### linux_set_event_obj_pi
-
-The cross-thread priority-intent setter is a thin ioctl wrapper:
-
-    static NTSTATUS linux_set_event_obj_pi(int obj, unsigned int policy,
-                                           unsigned int prio)
-    {
-        struct ntsync_event_set_pi_args args = {
-            .flags  = 0,
-            .policy = policy,
-            .prio   = prio,
-            .__pad  = 0
-        };
-        if (ioctl(obj, NTSYNC_IOC_EVENT_SET_PI, &args) < 0)
-            return errno_to_status(errno);
-        return STATUS_SUCCESS;
-    }
-
-This is called from the gamma dispatcher path when an RT audio thread
-signals a queue event to the dispatcher pthread. The audio thread
-passes its own `(SCHED_FIFO, prio)`; the kernel stages the boost on the
-event; the dispatcher consumes the signal in its `WAIT_ANY` and gets
-boosted at wait-return.
-
-After 1008, this path is bulletproof against the fast-path race: even
-if the dispatcher pthread takes `obj_lock` first and sees
-`signaled=true`, it consumes the staged boost in the unqueue loop on
-its way out. The 4% boost-miss rate disappears.
-
-### Channel ioctl wrappers
-
-The wineserver dispatcher uses the channel ioctls directly via
-`ioctl()` calls; there is no portable `linux_channel_*` helper at the
-Wine ntdll layer because channels are wineserver-process-private (they
-don't cross the wineserver-client boundary as Win32 handles).
-
-The dispatcher loop calls:
-
-    ioctl(channel_fd, NTSYNC_IOC_CHANNEL_RECV2, &args);
-    /* dispatch using args.thread_token */
-    ioctl(channel_fd, NTSYNC_IOC_CHANNEL_REPLY, &args.entry_id);
-
-with `RECV` as fallback if `RECV2` returns `-ENOTTY` (old kernel
-without 1005). The client-side `SEND_PI` is invoked from the wineserver
-request-marshalling fast path; the client's RT thread blocks in the
-kernel until reply.
-
-### alloc_client_handle
-
-Client-side ntsync object creation uses `InterlockedDecrement(&client_handle_next)` to allocate client-range handles that don't collide with server-allocated handles. Wait operations (`NtWaitForSingleObject`) resolve the handle to a cached fd via `inproc_wait()`, then call `linux_wait_objs()` which issues the kernel ioctl directly.
-
-Currently enabled for anonymous mutexes and semaphores, plus anonymous
-events when `NSPA_NT_LOCAL_EVENT` is left at its shipped default-on
-setting.
+## 11. Patch 1012: Channel recv field-snapshot UAF fix
+
+**Bug:** in `ntsync_obj_ioctl` paths for `NTSYNC_IOC_CHANNEL_RECV` and
+`NTSYNC_IOC_CHANNEL_RECV2`, the receiver popped a `channel_entry *e`
+under `obj_lock`, then unlocked, then read `e->fields` (payload,
+`sender_pid`, etc). Between the unlock and the field reads the sender
+thread -- parked in `wait_event_interruptible` -- could be
+signal-interrupted, run its cleanup path, and `kfree(e)` in that
+window. The receiver then read freed memory. KASAN reproducibly caught
+this on `test-channel-stress` and on real Ableton workloads.
+
+The lock-drop is mandatory for the rest of the RECV/RECV2 path:
+`copy_to_user`, the `apply_event_pi_boost` call, and the receiver
+auto-boost cannot run under the `raw_spinlock_t obj_lock`. The fix
+therefore narrows what the post-unlock path needs to read off `e`.
+
+### Fix: snapshot relevant fields under `obj_lock` before unlocking
+
+    /* Pre-1012 (broken): */
+    spin_lock(&obj->obj_lock);
+    e = list_first_entry_or_null(&channel->pending, ...);
+    if (!e) { spin_unlock(...); return -EAGAIN; }
+    list_del(&e->link);
+    spin_unlock(&obj->obj_lock);
+    /* RACE: sender can free e here */
+    copy_to_user(buf, e->payload, e->len);
+
+    /* Post-1012 (fixed): */
+    spin_lock(&obj->obj_lock);
+    e = list_first_entry_or_null(&channel->pending, ...);
+    if (!e) { spin_unlock(...); return -EAGAIN; }
+    list_del(&e->link);
+    /* SNAPSHOT under the lock */
+    local_payload = e->payload;
+    local_len = e->len;
+    local_pid = e->sender_pid;
+    spin_unlock(&obj->obj_lock);
+    copy_to_user(buf, &local_payload, local_len);
+
+### Why snapshot, not refcount
+
+The 1009 fix used a `refcount_t` on the entry to keep it alive across
+REPLY's `wake_up_all`. 1012 does not. Refcount would have worked here
+too, but it would have added two atomic ops (`atomic_inc` on entry,
+`atomic_dec_and_test` on exit) to every channel `RECV` / `RECV2`
+on the audio dispatcher's critical chain. Snapshotting collapses the
+lock-drop window to zero rather than extending the entry's lifetime,
+costs zero atomics, and keeps the recv hot path one cacheline
+narrower. The snapshotted fields are small and well-bounded (a few
+words).
+
+### Coverage
+
+A new `test-channel-try-recv2-stress.c` was added in the same change
+as a gap-filler for patch 1011: `TRY_RECV2` had no dedicated stress
+test before this session.
 
 ---
 
-## 12. Validation
+## 12. Patch 1013: Dedicated `kmem_cache`s
+
+**Pre-1013** three ntsync allocation classes lived in the system
+kmalloc pool:
+
+- `struct ntsync_event_pi` (120 bytes) -> `kmalloc-128`
+- `struct ntsync_channel_entry` (192 bytes) -> `kmalloc-192`
+- `struct ntsync_pi_owner` (120 bytes) -> `kmalloc-128`
+
+That is functionally correct but architecturally weak for an RT-class
+hot path: two 120B objects in `kmalloc-128` sit back-to-back so the
+tail of one and the head of the next can share a cacheline; an
+ntsync object can neighbour a network struct or fs metadata in the
+same kmalloc bucket; `/proc/slabinfo` lumps everything into
+`kmalloc-128`; `kmem_cache_shrink`, `SLAB_FREELIST_HARDENED`, and
+`SLAB_HWCACHE_ALIGN` cannot be applied to a subset of `kmalloc-128`.
+
+### Implementation
+
+Three dedicated caches, each sized exactly to the struct, each with
+`SLAB_HWCACHE_ALIGN`:
+
+```c
+ntsync_event_pi_cache = kmem_cache_create("ntsync_event_pi",
+        sizeof(struct ntsync_event_pi),
+        0, SLAB_HWCACHE_ALIGN, NULL);
+
+ntsync_channel_entry_cache = kmem_cache_create("ntsync_channel_entry",
+        sizeof(struct ntsync_channel_entry),
+        0, SLAB_HWCACHE_ALIGN, NULL);
+
+ntsync_pi_owner_cache = kmem_cache_create("ntsync_pi_owner",
+        sizeof(struct ntsync_pi_owner),
+        0, SLAB_HWCACHE_ALIGN, NULL);
+```
+
+All `kzalloc` / `kfree` callsites for the three structs are converted
+to `kmem_cache_alloc` / `kmem_cache_free`. The conversion is
+mechanical except for one subtle gotcha (see Section 13's 1014a
+follow-up).
+
+### Init / exit lifecycle
+
+Caches are constructed in `ntsync_init` in dependency order with
+mirrored unwind labels, and destroyed in `ntsync_exit` in reverse
+order:
+
+- `misc_register` runs **after** all three caches are constructed --
+  an ioctl can never run against a half-initialised module.
+- `misc_deregister` runs **before** `kmem_cache_destroy` -- all
+  `.release` callbacks complete before any cache is torn down.
+- Both file_ops carry `.owner = THIS_MODULE`, so the module refcount
+  blocks unload while any fd is open.
+
+### Structural value (always-on)
+
+- **Cacheline alignment, every allocation.** Each object starts at a
+  64B cacheline boundary; hot fields (e.g. `pending_pi.new_ep`) land
+  predictably in cacheline 0 of the object. No false sharing between
+  ntsync objects.
+- **Isolation from `kmalloc-128`.** All ntsync state lives in
+  dedicated pools; coherence traffic stays inside the ntsync hot path.
+- **Visibility.** `/proc/slabinfo` and `/sys/kernel/slab/ntsync_*`
+  expose per-cache `objects`, `partial`, and `cpu_slabs` directly.
+- **`SLAB_FREELIST_HARDENED` covers the dedicated caches as a unit**
+  on kernels built with that flag. Catches double-free and
+  bad-pointer-free at the slab layer.
+- **No padding waste** vs the prior `kmalloc-128` route on the 120B
+  structs.
+
+### Workload absorption (slabinfo, drum-load capture 2026-05-04)
+
+| cache                 | idle | drum-load | delta | size | pre-1013 home |
+|-----------------------|------|-----------|-------|------|---------------|
+| ntsync_event_pi       | 637  | 795       | +158  | 120B | kmalloc-128   |
+| ntsync_pi_owner       | 637  | 795       | +158  | 120B | kmalloc-128   |
+| ntsync_channel_entry  | 168  | 168       | 0     | 192B | kmalloc-192   |
+| kmalloc-128 (system)  | 2240 | 2240      | 0     | 128B | n/a           |
+
+158 new event-PI staging pairs (one `event_pi` + one paired
+`pi_owner`) absorbed cleanly in the dedicated caches; `kmalloc-128`
+stayed flat -- isolation under real load. SLUB internal state moved
+in the expected direction: partial slabs filled (8 -> 2), per-CPU
+slabs went up (18 -> 24), matching "hot path picks up CPU-local
+allocations".
+
+### Independence from 1014
+
+1013 has no dependency on 1014 and vice versa; the patches are
+separately revertable.
+
+---
+
+## 13. Patch 1014 + 1014a: SEND_PI lockless target scan
+
+### Motivation
+
+In `ntsync_channel_send_pi`, before staging the boost on a target
+waiter, the code scans the channel's `wait_queue_head_t` to pick a
+target. Pre-1014 that scan acquired `wq->lock`
+(`spin_lock_irqsave` -- still raw on PREEMPT_RT here because it is the
+wait-queue's own lock, not `obj_lock`) even when the queue was empty.
+The empty case is the common one for an audio dispatcher under
+steady load: most `SEND_PI` fires hit a channel with no parked
+waiters. That is a wasted IRQ-disable plus spinlock round-trip on the
+audio thread's hot path.
+
+### Implementation
+
+Replace the unconditional lock+scan with a `list_empty_careful` peek
+first:
+
+    /* Pre-1014: */
+    spin_lock_irqsave(&wq->lock, flags);
+    list_for_each_entry(...) { ... }
+    spin_unlock_irqrestore(&wq->lock, flags);
+
+    /* Post-1014: */
+    if (list_empty_careful(&wq->head)) {
+        /* fall through to any_waiters fallback path; no lock taken */
+        goto no_target;
+    }
+    spin_lock_irqsave(&wq->lock, flags);
+    /* same as before */
+    spin_unlock_irqrestore(&wq->lock, flags);
+
+### Correctness
+
+- `list_empty_careful` uses `smp_load_acquire` and is documented as
+  appropriate for "lockless check, then maybe lock" patterns.
+- All `wq->head` mutators (`wait_event_*`, `prepare_to_wait`,
+  `finish_wait`) take `wq->lock`, so the lockless reader sees a
+  consistent list state.
+- Target selection is best-effort by design. If a false-positive
+  "empty" reading occurs in a race window, the *next* `SEND_PI` picks
+  up the missed waiter and the unconditional `wake_up` fires either
+  way -- no waiter is lost, no boost is misdirected. The fall-through
+  to the `any_waiters` fallback path is the documented escape valve
+  on the existing path.
+
+### RT-safety
+
+Removes a `spin_lock_irqsave` from the audio thread's `SEND_PI` hot
+path in the common (empty-queue) case -- a measurable IRQ-off window
+reduction in the path that matters most for audio jitter.
+
+### 1014a: `kmem_cache_free` is not NULL-safe
+
+The 1013 conversion left one `kfree`-style site for
+`obj->u.event.pending_pi.new_ep` un-NULL-guarded in `ntsync_free_obj`.
+The diff comment claimed `kmem_cache_free` is NULL-safe like `kfree`.
+The kernel source disagrees:
+
+`mm/slub.c:6900` (Linux 6.19.11):
+
+```c
+void kmem_cache_free(struct kmem_cache *s, void *x)
+{
+    s = cache_from_obj(s, x);
+    ...
+}
+
+static inline struct kmem_cache *cache_from_obj(struct kmem_cache *s, void *x)
+{
+    if (!IS_ENABLED(CONFIG_SLAB_FREELIST_HARDENED) &&
+        !kmem_cache_debug_flags(s, SLAB_CONSISTENCY_CHECKS))
+        return s;
+    cachep = virt_to_cache(x);  /* DEREFS x */
+    ...
+}
+```
+
+Under `SLAB_FREELIST_HARDENED` (debug kernel: enabled) the
+short-circuit fails and `virt_to_cache(NULL)` runs, dereferencing
+offset 0x8 of NULL. `kfree()` early-outs on `ZERO_OR_NULL_PTR(x)`;
+`kmem_cache_free` does not -- the asymmetry the diff comment got
+wrong.
+
+The crash signature on the debug kernel was a page fault at
+`kmem_cache_free+0x5c` with `RAX = vmemmap[0]` (the struct page for
+NULL) and `CR2 = 0x...0008` (the `slab->slab_cache` deref at offset
+8) -- exact match.
+
+### Fix
+
+    if (obj->type == NTSYNC_TYPE_EVENT && obj->u.event.pending_pi.new_ep)
+        kmem_cache_free(ntsync_event_pi_cache,
+                        obj->u.event.pending_pi.new_ep);
+
+The pattern matches the existing explicit-guard sites the same
+conversion already used at lines 1306, 1336, 1604, 1740, 1829, 1916.
+Site 2089 was simply missed in the original 1013 audit.
+
+### Audit summary that found 1014a
+
+A four-dimension audit covering the entire post-1014 file:
+
+- **NULL reachability** of every unguarded `kmem_cache_free` site:
+  17 sites total, 16 provably safe (loop-vars, refcnt-protected, or
+  explicit upstream `if (...) {`), 1 bug at site 2089.
+- **Allocator/deallocator pairing:** zero misroutes; no `kfree` on a
+  cache-allocated struct, no `kmem_cache_free` on a generic
+  `kmalloc`-allocated struct.
+- **Init / exit lifecycle:** caches created before `misc_register`,
+  mirrored unwind labels, `misc_deregister` before
+  `kmem_cache_destroy`, module-owner refcount blocks unload while
+  any fd is open.
+- **1014 lockless semantics:** `list_empty_careful` RCU-safe,
+  mutators all take `wq->lock`, false-positive "empty" benign by
+  design.
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 940 360" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .pc-bg { fill: #1a1b26; }
+    .pc-box { fill: #24283b; stroke: #7aa2f7; stroke-width: 1.8; rx: 8; }
+    .pc-fix { fill: #2a1f14; stroke: #e0af68; stroke-width: 1.6; rx: 8; }
+    .pc-cache { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
+    .pc-violet { fill: #1a1a2a; stroke: #bb9af7; stroke-width: 2; rx: 8; }
+    .pc-t { fill: #c0caf5; font: 11px 'JetBrains Mono', monospace; }
+    .pc-s { fill: #a9b1d6; font: 9px 'JetBrains Mono', monospace; }
+    .pc-h { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
+    .pc-y { fill: #e0af68; font: bold 10px 'JetBrains Mono', monospace; }
+    .pc-g { fill: #9ece6a; font: bold 10px 'JetBrains Mono', monospace; }
+    .pc-v { fill: #bb9af7; font: bold 10px 'JetBrains Mono', monospace; }
+    .pc-line { stroke: #c0caf5; stroke-width: 1.2; fill: none; }
+  </style>
+
+  <rect x="0" y="0" width="940" height="360" class="pc-bg"/>
+  <text x="470" y="28" text-anchor="middle" class="pc-h">Post-1011 carries: 1012 + 1013 + 1014 + 1014a surface</text>
+
+  <rect x="40" y="68" width="270" height="100" class="pc-fix"/>
+  <text x="175" y="92" text-anchor="middle" class="pc-y">1012 channel recv snapshot</text>
+  <text x="175" y="114" text-anchor="middle" class="pc-s">RECV / RECV2 path: snapshot</text>
+  <text x="175" y="130" text-anchor="middle" class="pc-s">payload, len, sender_pid under</text>
+  <text x="175" y="146" text-anchor="middle" class="pc-s">obj_lock before unlock; closes</text>
+  <text x="175" y="160" text-anchor="middle" class="pc-s">cross-thread slab UAF</text>
+
+  <rect x="335" y="68" width="270" height="100" class="pc-cache"/>
+  <text x="470" y="92" text-anchor="middle" class="pc-g">1013 dedicated kmem_caches</text>
+  <text x="470" y="114" text-anchor="middle" class="pc-s">ntsync_event_pi (120B)</text>
+  <text x="470" y="130" text-anchor="middle" class="pc-s">ntsync_channel_entry (192B)</text>
+  <text x="470" y="146" text-anchor="middle" class="pc-s">ntsync_pi_owner (120B)</text>
+  <text x="470" y="160" text-anchor="middle" class="pc-s">SLAB_HWCACHE_ALIGN, isolation</text>
+
+  <rect x="630" y="68" width="270" height="100" class="pc-violet"/>
+  <text x="765" y="92" text-anchor="middle" class="pc-v">1014 lockless target scan</text>
+  <text x="765" y="114" text-anchor="middle" class="pc-s">SEND_PI: list_empty_careful</text>
+  <text x="765" y="130" text-anchor="middle" class="pc-s">peek before wq-&gt;lock; skips</text>
+  <text x="765" y="146" text-anchor="middle" class="pc-s">spin_lock_irqsave round-trip</text>
+  <text x="765" y="160" text-anchor="middle" class="pc-s">on empty queue (common case)</text>
+
+  <rect x="180" y="208" width="580" height="68" class="pc-fix"/>
+  <text x="470" y="232" text-anchor="middle" class="pc-y">1014a: kmem_cache_free is not NULL-safe under SLAB_FREELIST_HARDENED</text>
+  <text x="470" y="252" text-anchor="middle" class="pc-s">cache_from_obj derefs operand; explicit NULL guard added at site 2089</text>
+  <text x="470" y="268" text-anchor="middle" class="pc-s">(obj-&gt;u.event.pending_pi.new_ep free in ntsync_free_obj)</text>
+
+  <line x1="175" y1="168" x2="320" y2="208" class="pc-line"/>
+  <line x1="470" y1="168" x2="470" y2="208" class="pc-line"/>
+  <line x1="765" y1="168" x2="620" y2="208" class="pc-line"/>
+
+  <rect x="40" y="296" width="860" height="48" class="pc-box"/>
+  <text x="470" y="320" text-anchor="middle" class="pc-t">production module srcversion `F1A9EA24E257A35BB21341D` (post-1014a)</text>
+  <text x="470" y="334" text-anchor="middle" class="pc-s">KASAN-clean over ~14M ops; running on prod kernel `6.19.11-rt1-1-nspa` since 2026-05-04</text>
+</svg>
+</div>
+
+---
+
+## 14. Validation
 
 ### Module srcversion lineage
 
@@ -1427,10 +1427,11 @@ setting.
 | `00C857BD7E51AB4F006B0BB`   | + Bug 3 fix (1008)              | EVENT_SET_PI deferred boost; 100% pass on event-set-pi (was 4% flake) |
 | `A250A77651C8D5DAB719FE2`   | + Bug 4 fix (1009)              | post-1009 production baseline; ~370M mixed ops validated          |
 | `CFF56DE1EF28D693BB597CD`   | + 1010 + post-1010 PI follow-ups| aggregate-wait production module; same-thread dispatcher default-on |
-| `10124FB81FDC76797EF1F91`   | + 1011                          | current production module; TRY_RECV2 available for burst drain    |
+| `10124FB81FDC76797EF1F91`   | + 1011                          | TRY_RECV2 available for burst drain                                |
+| `F1A9EA24E257A35BB21341D`   | + 1012 + 1013 + 1014 (1014a)    | current production module; channel snapshot UAF closed, dedicated kmem_caches, lockless SEND_PI target scan |
 | `BD93BECF70D336DC1A80337`   | (rolled-back Codex 1007-1011)   | Historical only; do not load                                       |
 
-The current production module at `/lib/modules/6.19.11-rt1-1-nspa/kernel/drivers/misc/ntsync.ko` is `10124FB81FDC76797EF1F91`.
+The current production module at `/lib/modules/6.19.11-rt1-1-nspa/kernel/drivers/misc/ntsync.ko` is `F1A9EA24E257A35BB21341D`.
 
 ### Stress validation (debug kernel, KASAN-on)
 
@@ -1448,8 +1449,16 @@ The current production module at `/lib/modules/6.19.11-rt1-1-nspa/kernel/drivers
 | test-aggregate-wait 9/9           | `CFF56DE...`  | functional + PI sub-tests | n/a | PASS         |
 | aggregate-wait 1k mixed stress    | `CFF56DE...`  | 1k iterations      | 0     | PASS            |
 | aggregate-wait 30k + native suite | `CFF56DE...`  | long stress + full suite | 0 | PASS       |
+| test-channel-stress (post-1012)   | `F1A9EA24...` | 1.34M ops (post-1012 KASAN re-soak) | 0 | PASS       |
+| test-channel-try-recv2-stress     | `F1A9EA24...` | 2.6M TRY_RECV2 ops          | 0     | PASS            |
+| test-mixed-load-stress 300s/13W   | `F1A9EA24...` | 5.28M chan SEND/REPLY, 1.99M audio waits, 12.6M REG/DEREG | 0 | PASS |
+| test-channel-stress 60s/4x4 (1014a) | `F1A9EA24...` | 1.40M SEND/REPLY, 1.40M RECV+RECV2 | 0 | PASS    |
+| test-channel-try-recv2-stress 30s | `F1A9EA24...` | 62k SEND, 2.68M attempts, 97.68% EAGAIN | 0 | PASS  |
 
-Cumulative debug-kernel: ~30 million operations, zero KASAN splats post-Bug 4 fix.
+Cumulative debug-kernel: ~30 million operations through post-1009;
+post-1014a adds another ~14 million ntsync ops (channel SEND_PI hit
+~21x more than the post-1012 validation window), zero KASAN splats,
+zero dmesg matches for BUG/KASAN/Oops/use-after-free/lockdep/warn.
 
 ### Production validation after aggregate-wait and burst-drain
 
@@ -1516,8 +1525,16 @@ After cross-build to the production kernel `6.19.11-rt1-1-nspa` (no debug instru
 **Cumulative on production kernel: post-1009 baseline ~370 M ops on
 `A250A77651C8D5DAB719FE2`, then aggregate-wait on
 `CFF56DE1EF28D693BB597CD`, then 1011 / TRY_RECV2 on
-`10124FB81FDC76797EF1F91`; 0 syscall errors, 0 dmesg splats, refcnt=0
-post-soak.**
+`10124FB81FDC76797EF1F91`, then 1012 / 1013 / 1014 (1014a) on the
+current `F1A9EA24E257A35BB21341D`; 0 syscall errors, 0 dmesg splats,
+refcnt=0 post-soak.**
+
+The post-1014a build was also re-validated with the full RT-suite v7
+on prod kernel `6.19.11-rt1-1-nspa`: 16/16 RT pass + 3/3 native ioctl
+pass; channel snapshot UAF and `kmem_cache_free` NULL-deref both
+closed; dedicated kmem_cache slabinfo evidence captured under real
+Ableton drum-load (158 new event-PI staging pairs absorbed in the
+dedicated caches with `kmalloc-128` flat).
 
 Per the slub_debug benchmark caveat (`feedback_slub_debug_skews_benchmarks.md`), only PASS/FAIL is authoritative across debug vs production kernels; throughput numbers aren't directly comparable (debug-kernel `slub_debug=FZPU` + kfence + KASAN tax dominates).
 
@@ -1537,7 +1554,7 @@ Priority wakeup ordering is exact (5 waiters at distinct priorities wake in prio
 
 ---
 
-## 13. Audit notes
+## 15. Audit notes
 
 The patches in this stack divide cleanly into two categories. The boundary matters because it dictates which patches were safe to ship in a flurry and which weren't.
 
@@ -1549,6 +1566,14 @@ Patches in the **mechanically verifiable** category enforce a rule that has an o
 - **1009** (channel_entry refcount) closes a UAF that KASAN catches by construction. The fix is a textbook refcount discipline. Mechanical.
 - **1008** (EVENT_SET_PI deferred boost) closes a measurable flake (4% miss rate on a deterministic test). The fix removes a code path with a known race; the test now passes 100%. Mechanical (the test is the oracle).
 - **1007** (channel exclusive recv) closes a deterministic-hang test that was stale-coded around the buggy behaviour. The fix is a 3-LOC swap to a kernel primitive (`wait_event_interruptible_exclusive`) whose semantics are documented and obvious. Mechanical.
+- **1012** (channel recv field-snapshot) closes a KASAN-caught cross-thread slab UAF. Snapshotting under the existing lock is a textbook fix; KASAN is the oracle. Mechanical.
+- **1014a** (`kmem_cache_free` NULL guard) closes a `cache_from_obj` deref at site 2089 surfaced by `SLAB_FREELIST_HARDENED`. The kernel source disagrees with the diff comment; `mm/slub.c` is the oracle. Mechanical.
+- **1014** (`list_empty_careful` fast-path) is a `smp_load_acquire`-based pre-check before an existing `wq->lock` section. Best-effort target selection means a false-positive "empty" reading is benign by design (next `SEND_PI` picks up the missed waiter, the unconditional wake fires either way). The semantics are documented. Mechanical.
+
+1013 (dedicated `kmem_cache`s) is **structural infrastructure**, not a
+correctness fix. It is always-on (cacheline alignment, isolation,
+visibility) and does not change observable semantics; the cost was a
+single missed NULL guard caught and fixed in 1014a.
 
 Patches in the **code-review hypothesis** category encode a reviewer's argument that some code is buggy. There is no oracle. If the reviewer's argument is wrong (or the bug is somewhere else), the patch ships new bugs without fixing the original one.
 
@@ -1580,7 +1605,7 @@ This is also why 1006 was safe to ship in-flurry while the rolled-back 1007-1011
 
 ---
 
-## 14. References
+## 16. References
 
 ### Patches (NSPA tree)
 
@@ -1593,6 +1618,11 @@ All in `wine-rt-claude/ntsync-patches/`:
 - `1007-ntsync-channel-exclusive-recv.patch` -- exclusive wait_event
 - `1008-ntsync-event-set-pi-deferred-boost.patch` -- deferred-boost machinery
 - `1009-ntsync-channel-entry-refcount.patch` -- refcount_t on channel_entry
+- `1010-ntsync-aggregate-wait.patch` -- `NTSYNC_IOC_AGGREGATE_WAIT`
+- `1011-ntsync-channel-try-recv2.patch` -- `NTSYNC_IOC_CHANNEL_TRY_RECV2`
+- `1012-ntsync-channel-recv-snapshot-pop-fields-uaf-fix.patch` -- snapshot popped fields under `obj_lock`
+- `1013-ntsync-dedicated-slab-caches.patch` -- dedicated `kmem_cache`s for the three hot allocation classes
+- `1014-ntsync-channel-send-pi-lockless-target-scan.patch` -- `list_empty_careful` fast-path on `SEND_PI`, with the 1014a `kmem_cache_free` NULL guard at site 2089 folded in
 
 ### Production source
 
@@ -1613,7 +1643,9 @@ In `wine/nspa/tests/`:
 - `test-event-set-pi-stress.c` -- 8x8 EVENT_SET_PI hammer
 - `test-channel-recv-exclusive.c` -- 1007 exclusive-recv validation (with symmetric cleanup)
 - `test-mutex-pi-stress.c` -- mutex contention + Tier B FIFO
-- `test-channel-stress.c` -- channel SEND_PI/RECV/REPLY + register churn (caught the 1009 UAF)
+- `test-channel-stress.c` -- channel SEND_PI/RECV/REPLY + register churn (caught the 1009 + 1012 UAFs)
+- `test-channel-try-recv2-stress.c` -- TRY_RECV2 stress (1011/1012 gap-filler)
+- `test-aggregate-wait.c` -- 1010 aggregate-wait functional + PI sub-tests
 - `test-mixed-load-stress.c` -- 13-thread cross-path soak
 - `run-rt-suite.sh` -- sanity runner with `SKIPPED_BY_DESIGN` list
 
@@ -1625,11 +1657,16 @@ In project memory (`/home/ninez/.claude/projects/-home-ninez-pkgbuilds-Wine-NSPA
 - `project_ntsync_prod_kernel_validation_20260427.md` -- prod-kernel revalidation totals
 - `project_ntsync_kfree_under_raw_spinlock.md` -- 1006 root-cause writeup
 - `project_ntsync_channel_reply_uaf_20260427.md` -- 1009 KASAN trace + minimal-fix discussion
-- `feedback_dont_shotgun_audit_into_unfound_bug.md` -- the lesson behind Section 10
+- `project_ntsync_session_20260504_evening_kasan.md` -- 1012 channel field-snapshot UAF discovery + fix
+- `project_ntsync_session_20260504_late_kmem_cache_audit.md` -- 1014a NULL-deref crash + 4-dim audit
+- `feedback_dont_shotgun_audit_into_unfound_bug.md` -- the lesson behind Section 15
+- `feedback_kmem_cache_free_not_null_safe.md` -- the 1014a lesson captured
 - `feedback_slub_debug_skews_benchmarks.md` -- why debug-vs-prod throughput numbers don't compare
+- `wine/nspa/docs/ntsync-1012-1014-architectural-notes-20260504.md` -- canonical in-tree notes for 1012 / 1013 / 1014 / 1014a
 - `wine/nspa/docs/ntsync-rt-audit.md` -- in-tree audit doc
 
 ### Cross-references
 
+- `ntsync-userspace.gen.html` -- the Wine ntdll handle-to-fd cache, server-owned vs client-created anonymous sync handles, dispatcher ioctl wrappers, and PE-side wait coverage that consume the kernel surface documented here.
 - `cs-pi.gen.html` -- the userspace CS-PI counterpart; together with this driver they close all priority inversion vectors in Wine's synchronization stack.
 - `gamma-channel-dispatcher.gen.html` -- how the gamma dispatcher userspace code uses the channel object and consumes the thread-token.

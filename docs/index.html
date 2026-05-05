@@ -65,7 +65,7 @@
 </head><body>
 
 <h1>Wine-NSPA 11.x Documentation</h1>
-<p class="subtitle">WIP -- Active research &amp; development. Everything subject to change. Last updated 2026-05-03.</p>
+<p class="subtitle">WIP -- Active research &amp; development. Everything subject to change. Last updated 2026-05-05.</p>
 
 <hr>
 
@@ -112,6 +112,11 @@
     <div class="desc">Shipped `io_uring` surface: file I/O, dispatcher-owned async `CreateFile`, and socket `RECVMSG` / `SENDMSG`, plus ntsync `uring_fd` integration. 3 SVG diagrams.</div>
   </li>
   <li>
+    <a href="librtpi.gen.html">librtpi (PI mutex / condvar)</a>
+    <span class="badge badge-arch">CORE</span>
+    <div class="desc">Wine-internal header-only librtpi shim: `pi_mutex_t` / `pi_cond_t` on `FUTEX_LOCK_PI` / `FUTEX_WAIT_REQUEUE_PI`, the NSPA recursive-mutex extension (`NSPA_RTPI_MUTEX_RECURSIVE`), the libclang-based pthread -> pi_* sweep tool, and the `include/rtpi.h` forwarder. Underpins Wine's Unix-side PI coverage.</div>
+  </li>
+  <li>
     <a href="nspa-local-file-architecture.gen.html">Local-File Bypass Architecture</a>
     <span class="badge badge-arch">CORE</span>
     <div class="desc">Bounded local `NtCreateFile` path for regular files and explicit directories, with shared inode arbitration, selected downstream file fast paths, and lazy server-handle promotion only when the call leaves the local envelope. ~28,500 file opens offloaded per Ableton startup. 2 SVG diagrams.</div>
@@ -137,9 +142,14 @@
     <div class="desc">Client-side NT bypass catalog: local-file, anonymous local events, and sched-hosted `local_timer` / `local_wm_timer`, plus the shared rules for fallback, promotion, and cross-process arbitration.</div>
   </li>
   <li>
-    <a href="ntsync-driver.gen.html">NTSync and In-Process Synchronization</a>
+    <a href="ntsync-pi-driver.gen.html">NTSync PI Driver</a>
     <span class="badge badge-arch">CORE</span>
-    <div class="desc">Kernel plus Wine userspace sync architecture: PI primitives, handle-to-fd caching, client-created anonymous sync handles, gamma channel transport, aggregate-wait, and `CHANNEL_TRY_RECV2`.</div>
+    <div class="desc">Kernel-side ntsync overlay: PI primitives (1003), channel transport (1004/1005/1007/1009/1012), RT alloc-hoist (1006), deferred `EVENT_SET_PI` (1008), aggregate-wait (1010), `CHANNEL_TRY_RECV2` (1011), dedicated kmem_caches (1013), and SEND_PI lockless target scan (1014/1014a). Production module srcversion `F1A9EA24E257A35BB21341D`.</div>
+  </li>
+  <li>
+    <a href="ntsync-userspace.gen.html">NTSync Userspace Integration</a>
+    <span class="badge badge-arch">CORE</span>
+    <div class="desc">Wine ntdll handle-to-fd cache, server-owned vs. client-created anonymous sync handle paths, `linux_wait_objs` / `linux_set_event_obj_pi`, dispatcher channel ioctl wrappers, and PE-side wait coverage. Companion to the NTSync PI Driver page.</div>
   </li>
   <li>
     <a href="condvar-pi-requeue.gen.html">Win32 Condvar PI (Requeue-PI)</a>
@@ -174,7 +184,14 @@
 
 <hr>
 
-<h2>Latest Highlights (2026-05-03)</h2>
+<h2>Latest Highlights (2026-05-05)</h2>
+<ul>
+  <li><strong>ntsync production module advanced through 1012 / 1013 / 1014 / 1014a</strong> &mdash; current prod srcversion is <code>F1A9EA24E257A35BB21341D</code>. 1012 closes a KASAN-caught <code>CHANNEL_RECV/RECV2</code> field-snapshot UAF; 1013 moves <code>ntsync_event_pi</code> / <code>ntsync_channel_entry</code> / <code>ntsync_pi_owner</code> into dedicated <code>kmem_cache</code>s with <code>SLAB_HWCACHE_ALIGN</code>; 1014 adds a <code>list_empty_careful</code> fast-path on SEND_PI; 1014a NULL-guards <code>kmem_cache_free</code> at the event-PI staging free site. <a href="ntsync-pi-driver.gen.html">NTSync PI Driver &rarr;</a></li>
+  <li><strong>ntsync documentation split</strong> &mdash; the kernel and userspace halves of the integration now live in separate pages: <a href="ntsync-pi-driver.gen.html">NTSync PI Driver</a> for the in-kernel patch stack, <a href="ntsync-userspace.gen.html">NTSync Userspace Integration</a> for the ntdll handle-to-fd cache, server-owned vs. client-created paths, and PE-side coverage.</li>
+  <li><strong>librtpi documented as a first-class architectural piece</strong> &mdash; new page covers the Wine-internal header-only librtpi shim, the NSPA recursive-mutex extension, the libclang-based <code>pthread</code> -&gt; <code>pi_*</code> sweep tool, and the four manual recursive-mutex carries. <a href="librtpi.gen.html">librtpi &rarr;</a></li>
+</ul>
+
+<h2>2026-05-03 Highlights</h2>
 <ul>
   <li><strong>local sections shipped default-on</strong> &mdash; eligible unnamed file-backed sections now stay client-side for create / map / query / unmap / close, and same-process duplicate promotes only when the call crosses a real server-handle boundary. <a href="local-section-architecture.gen.html">Local Section Bypass &rarr;</a></li>
   <li><strong>local-file widened again</strong> &mdash; more regular-file, directory, metadata, flush, and EOF traffic now stays client-side, with compared <code>create_file</code> handler count <code>7,845</code> &rarr; <code>5,658</code> and handler time <code>137 ms</code> &rarr; <code>50 ms</code>. <a href="nspa-local-file-architecture.gen.html">Local-File Bypass Architecture &rarr;</a></li>
@@ -251,7 +268,7 @@
 <hr>
 <p style="color: var(--muted); font-size: 0.75rem; margin-top: 2rem;">
   Wine-NSPA by Jordan Johnston &mdash; <a href="https://github.com/nine7nine/Wine-NSPA">github.com/nine7nine/Wine-NSPA</a>
-  <br>Kernel: Linux-NSPA 6.19.11-rt1-1 (PREEMPT_RT) | Wine 11.6 | 2026-05-03
+  <br>Kernel: Linux-NSPA 6.19.11-rt1-1 (PREEMPT_RT) | Wine 11.6 | 2026-05-05
 </p>
 
 <script>hljs.highlightAll();</script>

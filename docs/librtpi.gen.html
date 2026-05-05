@@ -1,0 +1,935 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Wine-NSPA -- librtpi (PI mutex / condvar)</title>
+<style>
+  :root {
+    --bg: #1a1b26; --fg: #c0caf5; --accent: #7aa2f7;
+    --green: #9ece6a; --red: #f7768e; --yellow: #e0af68;
+    --surface: #24283b; --border: #3b4261; --muted: #8c92b3;
+    --purple: #bb9af7; --orange: #ff9e64; --cyan: #7dcfff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+    background: var(--bg); color: var(--fg);
+    max-width: 1100px; margin: 0 auto; padding: 2rem 1.5rem;
+    line-height: 1.7;
+  }
+  .page-nav {
+    display: flex;
+    justify-content: flex-end;
+    margin-bottom: 0.5rem;
+  }
+  .page-nav a {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.35rem 0.7rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: rgba(36, 40, 59, 0.9);
+    color: var(--accent);
+    font-size: 0.78rem;
+    line-height: 1;
+  }
+  .page-nav a:hover {
+    background: var(--surface);
+    color: var(--cyan);
+    text-decoration: none;
+  }
+  h1 { color: var(--accent); font-size: 1.5rem; margin: 1.5rem 0 0.5rem; }
+  h2 { color: var(--accent); font-size: 1.2rem; margin: 2rem 0 0.75rem;
+       border-bottom: 1px solid var(--border); padding-bottom: 0.3rem; }
+  h3 { color: var(--yellow); font-size: 1rem; margin: 1.25rem 0 0.5rem; }
+  h4 { color: var(--cyan); font-size: 0.95rem; margin: 1rem 0 0.4rem; }
+  p, li { font-size: 0.85rem; margin-bottom: 0.5rem; }
+  ul, ol { padding-left: 1.5rem; margin-bottom: 0.75rem; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  table {
+    width: 100%; border-collapse: collapse;
+    margin: 0.75rem 0 1rem; font-size: 0.8rem;
+  }
+  th, td {
+    padding: 0.4rem 0.75rem; text-align: left;
+    border: 1px solid var(--border);
+  }
+  th { background: var(--surface); color: var(--accent); font-weight: 600; }
+  td { background: var(--bg); }
+  code {
+    background: var(--surface); padding: 0.15rem 0.4rem;
+    border-radius: 3px; font-size: 0.82rem; color: var(--cyan);
+  }
+  pre {
+    background: var(--surface); padding: 1rem 1.1rem; border-radius: 8px;
+    overflow-x: auto; margin: 0.75rem 0 1rem;
+    border: 1px solid var(--border);
+  }
+  pre code {
+    display: block; background: transparent; padding: 0;
+    font-size: 0.8rem; color: inherit;
+  }
+  pre code.hljs,
+  code.hljs {
+    background: transparent;
+    padding: 0;
+  }
+  blockquote {
+    background: var(--surface); border-left: 3px solid var(--accent);
+    padding: 0.75rem 1rem; margin: 1rem 0; border-radius: 0 4px 4px 0;
+    font-size: 0.82rem;
+  }
+  blockquote strong { color: var(--yellow); }
+  hr { border: none; border-top: 1px solid var(--border); margin: 2rem 0; }
+  strong { color: var(--fg); }
+  em { color: var(--muted); font-style: italic; }
+  .diagram-container {
+    display: flex; justify-content: center;
+    margin: 1.25rem auto 1.5rem; padding: 0.75rem;
+    background: rgba(36, 40, 59, 0.55);
+    border: 1px solid var(--border); border-radius: 10px;
+    overflow-x: auto;
+  }
+  .diagram-container svg {
+    display: block;
+    width: 100% !important;
+    max-width: 100%;
+    height: auto !important;
+    margin: 0 auto;
+    flex: 0 0 auto;
+  }
+</style>
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/tokyo-night-dark.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
+</head><body>
+<div class="page-nav"><a href="index.html">Docs Home</a></div>
+<h1 id="wine-nspa--librtpi-pi-mutex--condvar">Wine-NSPA &ndash; librtpi (PI mutex / condvar)</h1>
+
+<p>This page documents the librtpi shim Wine-NSPA carries for PI-aware
+mutexes and condition variables, the Wine-internal header-only
+implementation choice, the recursive-mutex extension Wine-NSPA adds on
+top of the upstream API, and the tree-wide automated sweep that
+rewrites Wine&rsquo;s <code>pthread_mutex_t</code> / <code>pthread_cond_t</code> use sites to the
+PI-aware equivalents.</p>
+
+<p>librtpi is an <em>underpinning</em> design choice in Wine-NSPA. Wine&rsquo;s Unix
+side talks to the host Linux through the glibc POSIX pthread
+implementation by default; that implementation gives NPTL semantics
+without priority inheritance. For an RT audio workload the absence of
+PI on Wine&rsquo;s internal locks is a load-bearing problem &ndash; a low-prio
+thread holding <code>virtual_mutex</code> will block a high-prio thread waiting
+for it, with no inheritance to lift the holder. librtpi closes that
+gap by binding the user-space mutex word directly to
+<code>FUTEX_LOCK_PI</code> / <code>FUTEX_UNLOCK_PI</code>, so the Linux kernel applies PI
+to the holder for as long as a higher-priority waiter is queued.</p>
+
+<h2 id="table-of-contents">Table of Contents</h2>
+
+<ol>
+<li><a href="#1-overview">Overview</a></li>
+<li><a href="#2-why-librtpi-not-glibc-pthread">Why librtpi, not glibc pthread</a></li>
+<li><a href="#3-header-only-shim-not-vendored-static-lib">Header-only shim, not vendored static lib</a></li>
+<li><a href="#4-pi_mutex_t--futex-pi-on-a-raw-word"><code>pi_mutex_t</code> &ndash; futex PI on a raw word</a></li>
+<li><a href="#5-nspa_rtpi_mutex_recursive-extension"><code>NSPA_RTPI_MUTEX_RECURSIVE</code> extension</a></li>
+<li><a href="#6-pi_cond_t--requeue-pi-condvar"><code>pi_cond_t</code> &ndash; requeue-PI condvar</a></li>
+<li><a href="#7-the-librtpi-sweep-tool">The librtpi sweep tool</a></li>
+<li><a href="#8-compile-line-discipline-includertpi-h-forwarder">Compile-line discipline (<code>include/rtpi.h</code> forwarder)</a></li>
+<li><a href="#9-consumers-in-the-wine-tree">Consumers in the Wine tree</a></li>
+<li><a href="#10-commit-history">Commit history</a></li>
+<li><a href="#11-references">References</a></li>
+</ol>
+
+
+<hr />
+
+<h2 id="1-overview">1. Overview</h2>
+
+<p>librtpi is a small library that gives PE/Unix code two PI-aware
+synchronization primitives:</p>
+
+<ul>
+<li><code>pi_mutex_t</code> &ndash; a mutex whose lock word is the operand of
+<code>FUTEX_LOCK_PI</code> / <code>FUTEX_UNLOCK_PI</code>, so the kernel maintains a PI
+chain on the holder for the duration of contention.</li>
+<li><code>pi_cond_t</code> &ndash; a condition variable that uses
+<code>FUTEX_WAIT_REQUEUE_PI</code> / <code>FUTEX_CMP_REQUEUE_PI</code> to atomically
+requeue waiters from the condvar word onto the paired mutex on
+signal, closing the wake-and-relock gap that exists with plain
+<code>FUTEX_WAIT</code>.</li>
+</ul>
+
+
+<p>Upstream librtpi (<code>gitlab.com/linux-rt/librtpi</code>) is a Unix-native
+static library. Wine-NSPA does not vendor that source tree; it carries
+a header-only re-implementation of the same public API at
+<code>libs/librtpi/rtpi.h</code>, plus a Wine-internal extension &ndash;
+<code>NSPA_RTPI_MUTEX_RECURSIVE</code> &ndash; that the upstream library deliberately
+does not provide.</p>
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 940 380" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
+  <style>
+    .lr-bg { fill: #1a1b26; }
+    .lr-box { fill: #24283b; stroke: #7aa2f7; stroke-width: 1.8; rx: 8; }
+    .lr-mid { fill: #1f2535; stroke: #bb9af7; stroke-width: 1.8; rx: 8; }
+    .lr-fast { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
+    .lr-fix { fill: #2a1f14; stroke: #e0af68; stroke-width: 1.6; rx: 8; }
+    .lr-t { fill: #c0caf5; font: 11px 'JetBrains Mono', monospace; }
+    .lr-s { fill: #a9b1d6; font: 9px 'JetBrains Mono', monospace; }
+    .lr-h { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
+    .lr-g { fill: #9ece6a; font: bold 10px 'JetBrains Mono', monospace; }
+    .lr-v { fill: #bb9af7; font: bold 10px 'JetBrains Mono', monospace; }
+    .lr-y { fill: #e0af68; font: bold 10px 'JetBrains Mono', monospace; }
+    .lr-line { stroke: #c0caf5; stroke-width: 1.2; fill: none; }
+  </style>
+
+  <rect x="0" y="0" width="940" height="380" class="lr-bg" rx="6"/>
+  <text x="470" y="28" text-anchor="middle" class="lr-h">librtpi shim: callers, primitives, kernel surface</text>
+
+  <rect x="40" y="64" width="240" height="86" class="lr-box" rx="6"/>
+  <text x="160" y="90" text-anchor="middle" class="lr-t">Wine Unix-side callers</text>
+  <text x="160" y="110" text-anchor="middle" class="lr-s">ntdll/unix, win32u, winex11.drv,</text>
+  <text x="160" y="126" text-anchor="middle" class="lr-s">winejack.drv, winealsa.drv,</text>
+  <text x="160" y="142" text-anchor="middle" class="lr-s">winegstreamer, file/cdrom/system</text>
+
+  <rect x="320" y="64" width="240" height="86" class="lr-mid" rx="6"/>
+  <text x="440" y="90" text-anchor="middle" class="lr-v">libs/librtpi/rtpi.h</text>
+  <text x="440" y="110" text-anchor="middle" class="lr-s">header-only, ~450 LoC</text>
+  <text x="440" y="126" text-anchor="middle" class="lr-s">pi_mutex_t / pi_cond_t API</text>
+  <text x="440" y="142" text-anchor="middle" class="lr-s">cached gettid in __thread var</text>
+
+  <rect x="600" y="64" width="300" height="86" class="lr-fast" rx="6"/>
+  <text x="750" y="90" text-anchor="middle" class="lr-g">Linux futex syscalls</text>
+  <text x="750" y="110" text-anchor="middle" class="lr-s">FUTEX_LOCK_PI / FUTEX_UNLOCK_PI / FUTEX_TRYLOCK_PI</text>
+  <text x="750" y="126" text-anchor="middle" class="lr-s">FUTEX_WAIT_REQUEUE_PI / FUTEX_CMP_REQUEUE_PI</text>
+  <text x="750" y="142" text-anchor="middle" class="lr-s">kernel rt_mutex PI chain</text>
+
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="280" y1="108" x2="320" y2="108" class="lr-line"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="560" y1="108" x2="600" y2="108" class="lr-line"/>
+
+  <rect x="40" y="186" width="400" height="86" class="lr-mid" rx="6"/>
+  <text x="240" y="210" text-anchor="middle" class="lr-v">pi_mutex_t (64-byte aligned union)</text>
+  <text x="240" y="230" text-anchor="middle" class="lr-s">{ futex, flags, nspa_recursion } | pad[64]</text>
+  <text x="240" y="248" text-anchor="middle" class="lr-s">futex word: TID | FUTEX_WAITERS | FUTEX_OWNER_DIED</text>
+  <text x="240" y="264" text-anchor="middle" class="lr-s">user-space CAS fast path, FUTEX_*_PI on contention</text>
+
+  <rect x="500" y="186" width="400" height="86" class="lr-mid" rx="6"/>
+  <text x="700" y="210" text-anchor="middle" class="lr-v">pi_cond_t (128-byte aligned union)</text>
+  <text x="700" y="230" text-anchor="middle" class="lr-s">{ cond, flags, wake_id, state } | pad[128]</text>
+  <text x="700" y="248" text-anchor="middle" class="lr-s">FUTEX_WAIT_REQUEUE_PI atomically requeues</text>
+  <text x="700" y="264" text-anchor="middle" class="lr-s">waiter onto paired pi_mutex on wake</text>
+
+  <rect x="40" y="296" width="860" height="68" class="lr-fix" rx="6"/>
+  <text x="470" y="320" text-anchor="middle" class="lr-y">NSPA extension: NSPA_RTPI_MUTEX_RECURSIVE</text>
+  <text x="470" y="338" text-anchor="middle" class="lr-s" style="font-size:8px; letter-spacing:-0.15px">re-entrance counter, only touched by the current owner; no atomics on the recursion path</text>
+  <text x="470" y="354" text-anchor="middle" class="lr-s">required for virtual_mutex (signal-handler re-entrance via guard-page stack-growth)</text>
+</svg>
+</div>
+
+
+<hr />
+
+<h2 id="2-why-librtpi-not-glibc-pthread">2. Why librtpi, not glibc pthread</h2>
+
+<p><code>pthread_mutex_t</code> from glibc is NPTL-backed and does not carry PI by
+default. glibc supports <code>PTHREAD_PRIO_INHERIT</code> as a mutex protocol
+attribute, but:</p>
+
+<ul>
+<li>the cost is not a free lift &ndash; it gates <code>pthread_mutex_lock</code> on
+internal NPTL bookkeeping and adds attribute walks the Wine code
+base does not carry,</li>
+<li><code>pthread_mutex_t</code> is opaque to callers, so the kernel&rsquo;s PI
+primitive is two abstraction layers below user code, and</li>
+<li><code>pthread_cond_t</code> has no requeue-PI variant exposed at the POSIX
+layer; the wake path is &ldquo;wake the waiter, waiter re-locks the
+mutex&rdquo;, which leaves a window where no PI is in effect.</li>
+</ul>
+
+
+<p>librtpi takes the inverse approach. The lock word <em>is</em> the futex
+operand. There is no opaque pthread bookkeeping. The wake path on
+the condvar side is an explicit
+<code>FUTEX_CMP_REQUEUE_PI</code> so the kernel hands the waiter to the mutex&rsquo;s
+PI chain atomically. That is semantically different from glibc&rsquo;s
+POSIX pthread implementation, and the difference is visible at the
+syscall trace level: librtpi calls are <code>SYS_futex</code> with the <code>_PI</code>
+operations, glibc calls are not.</p>
+
+<p>For Wine-NSPA&rsquo;s RT audio workload, that semantic difference is the
+whole point. The audio thread (<code>SCHED_FIFO</code>, prio 80) acquiring an
+internal Wine mutex held by a <code>SCHED_OTHER</code> worker has to inherit its
+priority onto the holder until release. With glibc pthread that does
+not happen for any of Wine&rsquo;s internal mutexes. With librtpi it
+happens unconditionally for every converted call site, with no
+runtime gating.</p>
+
+<hr />
+
+<h2 id="3-header-only-shim-not-vendored-static-lib">3. Header-only shim, not vendored static lib</h2>
+
+<p>Upstream librtpi is a small autotools project (Makefile.am,
+<code>pi_mutex.c</code>, <code>pi_cond.c</code>, <code>pi_futex.h</code>, ~600 LoC, last release
+2024). The earliest Wine-NSPA approach (NSPA RT v2.0) tried to vendor
+the source tree under <code>libs/librtpi/</code> and build it as a Wine-internal
+static library. That hit autotools obstacles repeatedly:</p>
+
+<ul>
+<li>Wine&rsquo;s <code>libs/</code> vendoring pattern is PE-cross-compiled (<code>musl</code>,
+<code>vkd3d</code>, <code>faudio</code>, <code>lcms2</code>, &hellip;). librtpi is Unix-native C; it
+cannot be PE-cross-compiled at all.</li>
+<li>Building a Unix-native static lib under <code>libs/</code> has no Wine
+precedent. Every attempt produced configure-script regressions or
+missing-symbol link errors against the existing Wine build glue.</li>
+<li>Upstream is small, stable, and the API surface Wine-NSPA needs is
+even smaller (<code>pi_mutex_*</code> plus <code>pi_cond_*</code>).</li>
+</ul>
+
+
+<p>NSPA RT v2.0.1 pivoted to a header-only re-implementation. The
+<code>libs/librtpi/Makefile.in</code> declares no build target; it exists only
+to host <code>rtpi.h</code>. The header re-implements the public API as inline
+functions on top of the Linux futex syscalls Wine-NSPA already used
+for CS-PI.</p>
+
+<p>The resulting layout matches upstream&rsquo;s <code>pi_mutex_t</code> and
+<code>pi_cond_t</code> field union exactly (down to the 64-byte / 128-byte
+padding), so any code written against upstream librtpi compiles
+unchanged against the NSPA shim. The NSPA additions
+(<code>nspa_recursion</code>, <code>wake_id</code>, <code>state</code>) live inside the existing
+padding; upstream callers that do not know about those fields are
+unaffected.</p>
+
+<hr />
+
+<h2 id="4-pi_mutex_t--futex-pi-on-a-raw-word">4. <code>pi_mutex_t</code> &ndash; futex PI on a raw word</h2>
+
+<p>The struct:</p>
+
+<pre><code class="language-c code-block">
+typedef union pi_mutex {
+    struct {
+        uint32_t futex;          /* low 30 bits = owner TID,
+                                  * bit 30 = FUTEX_OWNER_DIED,
+                                  * bit 31 = FUTEX_WAITERS,
+                                  * 0 when unowned */
+        uint32_t flags;
+        uint32_t nspa_recursion; /* NSPA extension; only touched
+                                  * by the current owner */
+    };
+    uint8_t pad[64];
+} pi_mutex_t __attribute__((aligned(64)));
+</code></pre>
+
+
+<p>The <code>flags</code> field carries <code>RTPI_MUTEX_PSHARED</code> to switch between
+<code>FUTEX_*_PI</code> (process-shared) and <code>FUTEX_*_PI_PRIVATE</code> (process-local).</p>
+
+<h3 id="lock-fast-path">Lock fast path</h3>
+
+<p>User-space CAS for the contention-free case:</p>
+
+<pre><code class="language-c code-block">
+if (__atomic_compare_exchange_n(&amp;mutex-&gt;futex, &amp;expected, tid, 0,
+                                __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
+    return 0;
+</code></pre>
+
+
+<p>If the CAS fails because the mutex is already owned by the current
+TID, the call returns <code>EDEADLK</code> (or bumps the recursion counter &ndash;
+see Section 5).</p>
+
+<p>If the CAS fails because the mutex is owned by another TID, the slow
+path issues <code>FUTEX_LOCK_PI</code> (or its private variant), which blocks
+the caller and applies PI to the holder until the mutex is released.</p>
+
+<h3 id="unlock-fast-path">Unlock fast path</h3>
+
+<pre><code class="language-c code-block">
+if ((mutex-&gt;futex &amp; 0x3fffffffu) != tid) return EPERM;
+if (__atomic_compare_exchange_n(&amp;mutex-&gt;futex, &amp;expected, 0, 0,
+                                __ATOMIC_RELEASE, __ATOMIC_RELAXED))
+    return 0;
+/* slow path: kernel unlock, wakes the highest-priority waiter */
+return syscall(SYS_futex, &amp;mutex-&gt;futex, op, 0, NULL, NULL, 0);
+</code></pre>
+
+
+<p>If there are no waiters (<code>FUTEX_WAITERS</code> bit clear), the user-space
+CAS releases the mutex; otherwise the kernel resolves the waiter
+queue and wakes the highest-priority waiter.</p>
+
+<h3 id="tid-cache">TID cache</h3>
+
+<p>Every <code>pi_mutex_lock</code> / <code>pi_mutex_unlock</code> needs <code>gettid()</code>. The
+header caches the TID in a <code>__thread</code> variable:</p>
+
+<pre><code class="language-c code-block">
+static __thread uint32_t nspa_rtpi_cached_tid;
+
+static inline uint32_t nspa_rtpi_tid(void)
+{
+    uint32_t tid = nspa_rtpi_cached_tid;
+    if (!tid) {
+        tid = (uint32_t)syscall(SYS_gettid);
+        nspa_rtpi_cached_tid = tid;
+    }
+    return tid;
+}
+</code></pre>
+
+
+<p>First call per thread pays the syscall cost; every subsequent call is
+a single load. There is no atomic on the cache because each thread
+writes its own slot.</p>
+
+<hr />
+
+<h2 id="5-nspa_rtpi_mutex_recursive-extension">5. <code>NSPA_RTPI_MUTEX_RECURSIVE</code> extension</h2>
+
+<p>Upstream librtpi does not support recursive mutexes. That is a
+deliberate library-design choice, not a kernel limitation &ndash; the
+kernel&rsquo;s <code>FUTEX_LOCK_PI</code> itself does not allow re-entrance, so a
+recursive layer has to be entirely user-space.</p>
+
+<p>Wine-NSPA needs recursion for at least one mutex: <code>virtual_mutex</code> in
+<code>dlls/ntdll/unix/virtual.c</code>, which is genuinely re-entered from
+within signal handlers. The guard-page stack-growth path
+(<code>virtual_setup_exception</code>) re-enters the address-space lock from a
+faulting thread that already holds it. Wine&rsquo;s pre-NSPA code achieved
+that with <code>pthread_mutexattr_settype(..., PTHREAD_MUTEX_RECURSIVE)</code>;
+the librtpi sweep cannot drop that mutex because plain <code>pi_mutex_t</code>
+returns <code>EDEADLK</code> on self-re-lock.</p>
+
+<p>The NSPA extension is minimal:</p>
+
+<pre><code class="language-c code-block">
+#define NSPA_RTPI_MUTEX_RECURSIVE 0x10
+</code></pre>
+
+
+<p>When the flag is set on <code>pi_mutex_init</code>, <code>pi_mutex_lock</code> /
+<code>pi_mutex_trylock</code> on a mutex already owned by the current thread
+bump <code>nspa_recursion</code> instead of returning <code>EDEADLK</code>;
+<code>pi_mutex_unlock</code> decrements it and only releases the futex word
+when it hits zero:</p>
+
+<pre><code class="language-c code-block">
+if ((mutex-&gt;futex &amp; 0x3fffffffu) == tid) {
+    if (mutex-&gt;flags &amp; NSPA_RTPI_MUTEX_RECURSIVE) {
+        mutex-&gt;nspa_recursion++;
+        return 0;
+    }
+    return EDEADLK;
+}
+</code></pre>
+
+
+
+
+<pre><code class="language-c code-block">
+if (mutex-&gt;flags &amp; NSPA_RTPI_MUTEX_RECURSIVE) {
+    if (mutex-&gt;nspa_recursion &gt; 0) {
+        mutex-&gt;nspa_recursion--;
+        return 0;
+    }
+}
+</code></pre>
+
+
+<p>The recursion counter is only touched by the current owner (as
+determined by the futex word), so no atomics are needed on it. The
+extension is a strict superset: a mutex initialized without the flag
+behaves exactly like upstream librtpi.</p>
+
+<p>The <code>nspa_recursion</code> field lives in the existing 64-byte padding of
+the union; binary layout is unchanged from upstream, and upstream
+code that does not know about the field is unaffected.</p>
+
+<h3 id="recursive-mutex-use-sites-in-the-wine-tree">Recursive-mutex use sites in the Wine tree</h3>
+
+<table>
+<thead>
+<tr>
+<th> File                                   </th>
+<th> Mutex                </th>
+<th> Why recursive </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> <code>dlls/ntdll/unix/virtual.c:3941</code>       </td>
+<td> <code>virtual_mutex</code>      </td>
+<td> signal-handler re-entrance via guard-page stack-growth path </td>
+</tr>
+<tr>
+<td> <code>dlls/win32u/sysparams.c:5888</code>         </td>
+<td> <code>user_mutex</code>         </td>
+<td> nested win32u call paths </td>
+</tr>
+<tr>
+<td> <code>dlls/win32u/gdiobj.c:1040</code>            </td>
+<td> <code>gdi_lock</code>           </td>
+<td> nested GDI object lookups </td>
+</tr>
+<tr>
+<td> <code>dlls/winex11.drv/init.c:58</code>           </td>
+<td> (winex11 lock)       </td>
+<td> nested X11 driver locking </td>
+</tr>
+</tbody>
+</table>
+
+
+<hr />
+
+<h2 id="6-pi_cond_t--requeue-pi-condvar">6. <code>pi_cond_t</code> &ndash; requeue-PI condvar</h2>
+
+<pre><code class="language-c code-block">
+typedef union pi_cond {
+    struct {
+        uint32_t cond;       /* sequence counter, incremented per signal */
+        uint32_t flags;
+        uint32_t wake_id;    /* signal generation, EAGAIN retry logic */
+        uint32_t state;      /* RTPI_COND_STATE_READY */
+    };
+    uint8_t pad[128];
+} pi_cond_t __attribute__((aligned(64)));
+</code></pre>
+
+
+<p>The condvar uses <code>FUTEX_WAIT_REQUEUE_PI</code> / <code>FUTEX_CMP_REQUEUE_PI</code> so
+that waiters are atomically requeued from the condvar futex onto the
+PI mutex&rsquo;s futex on signal. This closes the priority-inversion
+window that exists with plain <code>FUTEX_WAIT</code>, where a woken thread has
+to manually relock the mutex and there is a gap with no PI boost in
+effect.</p>
+
+<h3 id="wait-path">Wait path</h3>
+
+<pre><code class="language-text code-block">
+pi_cond_timedwait(cond, mutex, abstime):
+  cond-&gt;cond++
+  wake_id = cond-&gt;wake_id
+again:
+  futex_id = cond-&gt;cond
+  pi_mutex_unlock(mutex)
+  ret = syscall(SYS_futex, &amp;cond-&gt;cond, FUTEX_WAIT_REQUEUE_PI,
+                futex_id, abstime, &amp;mutex-&gt;futex, 0)
+  if ret == 0: return 0          /* kernel requeued us; we own the mutex */
+  pi_mutex_lock(mutex)            /* error path: relock manually */
+  if errno == EAGAIN and state == READY:
+    if cond-&gt;wake_id != wake_id:  return 0  /* signal raced us; stay awake */
+    cond-&gt;cond++
+    goto again
+  return errno
+</code></pre>
+
+
+<h3 id="signal-path">Signal path</h3>
+
+<pre><code class="language-text code-block">
+pi_cond_signal(cond, mutex):
+again:
+  cond-&gt;cond++
+  cond-&gt;wake_id = cond-&gt;cond
+  ret = syscall(SYS_futex, &amp;cond-&gt;cond, FUTEX_CMP_REQUEUE_PI, 1,
+                /* requeue 0 */, &amp;mutex-&gt;futex, cond-&gt;cond)
+  if ret &gt;= 0: return 0
+  if errno == EAGAIN: goto again
+  return errno
+</code></pre>
+
+
+<p><code>FUTEX_CMP_REQUEUE_PI</code> wakes one waiter and requeues zero (signal
+wakes exactly one). <code>pi_cond_broadcast</code> is the same shape with
+<code>requeue = INT_MAX</code>: wake one, requeue the rest directly onto the
+mutex&rsquo;s PI chain so the thundering-herd path becomes &ldquo;all woken
+threads compete for the mutex&rsquo;s PI chain, kernel hands it to the
+highest-priority requeued waiter on unlock&rdquo;.</p>
+
+<h3 id="pre-requeue-history">Pre-requeue history</h3>
+
+<p>The first version of the librtpi shim (NSPA RT v2.0) used plain
+<code>FUTEX_WAIT</code> / <code>FUTEX_WAKE</code> with a sequence counter &ndash; functionally
+correct but not requeue-PI. Commit <code>43862d8b591</code> (2026-04-15)
+upgraded it to the requeue-PI variant. After that the wait/wake gap
+closed: every Wine-side condvar in the converted set retains PI
+across the wake.</p>
+
+<hr />
+
+<h2 id="7-the-librtpi-sweep-tool">7. The librtpi sweep tool</h2>
+
+<p><code>nspa/librtpi_sweep.py</code> is the automated rewriter that converts Wine
+Unix-side <code>pthread_mutex_*</code> and <code>pthread_cond_*</code> use sites to the
+librtpi equivalents. It runs against the Wine tree any time it needs
+to re-apply the conversion (after a Wine version sync, after pulling
+upstream patches that touched converted files, etc).</p>
+
+<h3 id="two-phase-design">Two-phase design</h3>
+
+<ol>
+<li><strong>Pairing discovery</strong>: scan every target <code>.c</code> file, extract every
+<code>pthread_cond_wait(C, M)</code> / <code>pthread_cond_timedwait(C, M, T)</code> call,
+and build a multimap <code>cond_expr -&gt; { mutex_expr, ... }</code> keyed on the
+textual expression of the cond argument.</li>
+<li><strong>Rewrite</strong>: walk each file&rsquo;s libclang AST and emit in-place
+rewrites for <code>pthread_*</code> -> <code>pi_*</code>. For
+<code>pthread_cond_signal</code> / <code>pthread_cond_broadcast</code>, look up the
+paired mutex in the map built in phase 1. (<code>pi_cond_signal</code> and
+<code>pi_cond_broadcast</code> need the paired mutex argument; upstream
+pthread does not.)</li>
+</ol>
+
+
+<h3 id="hard-fail-rules">Hard-fail rules</h3>
+
+<p>The sweep refuses to silently emit <code>FIXME</code>s or fall back to
+heuristics:</p>
+
+<ul>
+<li><code>pthread_cond_signal</code> / <code>broadcast</code> on a cond with no paired mutex
+anywhere in the target scope -> the cond is never used with
+<code>cond_wait</code>, which means dead code or analysis gap; refuse to
+sweep the file.</li>
+<li><code>pthread_cond_signal</code> / <code>broadcast</code> on a cond with multiple paired
+mutexes that libclang AST scope analysis cannot disambiguate ->
+refuse to sweep.</li>
+<li>Any libclang parse error in a file -> refuse to sweep that file.</li>
+</ul>
+
+
+<h3 id="recursive-mutexes">Recursive mutexes</h3>
+
+<p>Mutexes initialized via
+<code>pthread_mutexattr_settype(..., PTHREAD_MUTEX_RECURSIVE)</code> cannot be
+converted by the sweep itself; the sweep detects and skips them so
+they remain <code>pthread_mutex_t</code>. The
+<code>NSPA_RTPI_MUTEX_RECURSIVE</code> extension is then applied by hand at
+those specific sites (Section 5 lists the four current sites). This
+keeps the sweep a &ldquo;no decisions, full automation&rdquo; tool: anything
+that needs human judgment is left alone.</p>
+
+<hr />
+
+<h2 id="8-compile-line-discipline-includertpih-forwarder">8. Compile-line discipline (<code>include/rtpi.h</code> forwarder)</h2>
+
+<p>Every Wine compile line carries <code>-Iinclude -I../include</code>. If a system
+copy of upstream librtpi is installed at <code>/usr/include/rtpi.h</code>, that
+path could shadow the NSPA header on some build configurations. That
+matters because <strong>upstream <code>pi_mutex_t</code> does not carry the
+<code>nspa_recursion</code> field</strong>: if any DLL accidentally compiled against
+the system header, the resulting object code would mis-lay out
+<code>pi_mutex_t</code> and silently misbehave at runtime &ndash; different parts of
+Wine would see different <code>pi_mutex_t</code> layouts and the recursive path
+through <code>virtual_mutex</code> would break.</p>
+
+<p><code>include/rtpi.h</code> exists exactly to prevent that. It is a forwarder:</p>
+
+<pre><code class="language-c code-block">
+#ifndef __WINE_INCLUDE_RTPI_H
+#define __WINE_INCLUDE_RTPI_H
+
+#include "../libs/librtpi/rtpi.h"
+
+#endif
+</code></pre>
+
+
+<p><code>include/</code> is searched first by every Wine compile line, so the
+forwarder always wins before the system search path is consulted.
+Every Wine DLL in the tree then automatically picks up the NSPA
+version with no per-<code>Makefile.in</code> <code>-I$(top_srcdir)/libs/librtpi</code> hack.</p>
+
+<hr />
+
+<h2 id="9-consumers-in-the-wine-tree">9. Consumers in the Wine tree</h2>
+
+<p>The librtpi sweep + the manual recursive-mutex carries cover <strong>57
+files</strong> under <code>dlls/</code>, <code>libs/</code>, <code>server/</code>, and <code>programs/</code>. Selected
+sites:</p>
+
+<table>
+<thead>
+<tr>
+<th> Subsystem        </th>
+<th> File                                  </th>
+<th> Notes                                    </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> ntdll/unix core  </td>
+<td> <code>dlls/ntdll/unix/virtual.c</code>           </td>
+<td> recursive <code>virtual_mutex</code> (signal handlers) </td>
+</tr>
+<tr>
+<td> ntdll/unix core  </td>
+<td> <code>dlls/ntdll/unix/server.c</code>            </td>
+<td> server-side wait/signal helpers          </td>
+</tr>
+<tr>
+<td> ntdll/unix core  </td>
+<td> <code>dlls/ntdll/unix/sched.c</code>             </td>
+<td> per-instance sched lock                  </td>
+</tr>
+<tr>
+<td> ntdll/unix core  </td>
+<td> <code>dlls/ntdll/unix/file.c</code>              </td>
+<td> file-table mutex                         </td>
+</tr>
+<tr>
+<td> ntdll/unix core  </td>
+<td> <code>dlls/ntdll/unix/cdrom.c</code>             </td>
+<td> cdrom device mutex                       </td>
+</tr>
+<tr>
+<td> ntdll/unix core  </td>
+<td> <code>dlls/ntdll/unix/system.c</code>            </td>
+<td> system-info mutex                        </td>
+</tr>
+<tr>
+<td> ntdll/unix nspa  </td>
+<td> <code>dlls/ntdll/unix/nspa/rt.c</code>           </td>
+<td> RT helpers                               </td>
+</tr>
+<tr>
+<td> ntdll/unix nspa  </td>
+<td> <code>dlls/ntdll/unix/nspa/local_file.c</code>   </td>
+<td> local-file fast-path                     </td>
+</tr>
+<tr>
+<td> ntdll/unix nspa  </td>
+<td> <code>dlls/ntdll/unix/nspa/local_timer.c</code>  </td>
+<td> sched-hosted local timers                </td>
+</tr>
+<tr>
+<td> win32u           </td>
+<td> <code>dlls/win32u/sysparams.c</code>             </td>
+<td> recursive <code>user_mutex</code>                   </td>
+</tr>
+<tr>
+<td> win32u           </td>
+<td> <code>dlls/win32u/gdiobj.c</code>                </td>
+<td> recursive <code>gdi_lock</code>                     </td>
+</tr>
+<tr>
+<td> winex11.drv      </td>
+<td> <code>dlls/winex11.drv/init.c</code>             </td>
+<td> recursive driver lock                    </td>
+</tr>
+<tr>
+<td> audio (JACK)     </td>
+<td> <code>dlls/winejack.drv/jack.c</code>            </td>
+<td> JACK callback PI                         </td>
+</tr>
+<tr>
+<td> audio (JACK)     </td>
+<td> <code>dlls/winejack.drv/jackmidi.c</code>        </td>
+<td> MIDI ring                                </td>
+</tr>
+<tr>
+<td> audio (ALSA)     </td>
+<td> <code>dlls/winealsa.drv/alsa.c</code>            </td>
+<td> ALSA stream lock                         </td>
+</tr>
+<tr>
+<td> audio (ALSA)     </td>
+<td> <code>dlls/winealsa.drv/alsamidi.c</code>        </td>
+<td> ALSA MIDI                                </td>
+</tr>
+<tr>
+<td> audio (Core)     </td>
+<td> <code>dlls/winecoreaudio.drv/coremidi.c</code>   </td>
+<td> CoreAudio MIDI                           </td>
+</tr>
+<tr>
+<td> gstreamer        </td>
+<td> <code>dlls/winegstreamer/wg_parser.c</code>      </td>
+<td> parser state                             </td>
+</tr>
+<tr>
+<td> gstreamer        </td>
+<td> <code>dlls/winegstreamer/wg_allocator.c</code>   </td>
+<td> allocator                                </td>
+</tr>
+<tr>
+<td> nsiproxy         </td>
+<td> <code>dlls/nsiproxy.sys/icmp_echo.c</code>       </td>
+<td> ICMP table mutex                         </td>
+</tr>
+<tr>
+<td> nsiproxy         </td>
+<td> <code>dlls/nsiproxy.sys/ndis.c</code>            </td>
+<td> NDIS table mutex                         </td>
+</tr>
+<tr>
+<td> signal core      </td>
+<td> <code>dlls/ntdll/unix/signal_x86_64.c</code>     </td>
+<td> signal-frame mutex                       </td>
+</tr>
+</tbody>
+</table>
+
+
+<p>The sweep tool is re-runnable on each Wine version sync; the
+recursive sites are stable manual carries.</p>
+
+<hr />
+
+<h2 id="10-commit-history">10. Commit history</h2>
+
+<p>The commits below trace librtpi&rsquo;s introduction and evolution in the
+Wine-NSPA tree. Times are author timestamps from <code>git log</code> on the
+<code>wine-rt-claude/wine</code> submodule.</p>
+
+<table>
+<thead>
+<tr>
+<th> Date       </th>
+<th> Hash         </th>
+<th> Subject                                                                </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> 2026-04-11 </td>
+<td> <code>251a7fb62d7</code></td>
+<td> <code>libs/librtpi,nspa: NSPA RT v2.0 -- vendor librtpi + ast-grep sweep rule</code> </td>
+</tr>
+<tr>
+<td> 2026-04-11 </td>
+<td> <code>eaa66310021</code></td>
+<td> <code>libs/librtpi: NSPA RT v2.0.1 -- pivot to Wine-internal header-only rtpi.h</code> </td>
+</tr>
+<tr>
+<td> 2026-04-11 </td>
+<td> <code>fec786944e5</code></td>
+<td> <code>libs/librtpi: vendor PI-futex mutex library (header-only)</code>            </td>
+</tr>
+<tr>
+<td> 2026-04-11 </td>
+<td> <code>bc835f4ab2c</code></td>
+<td> <code>nspa: add librtpi_sweep.py -- automated pthread -&gt; pi_* rewriter</code>     </td>
+</tr>
+<tr>
+<td> 2026-04-11 </td>
+<td> <code>e430344237a</code></td>
+<td> <code>nspa,dlls/ntdll/unix: relax sweep taint propagation + apply to ntdll/unix</code> </td>
+</tr>
+<tr>
+<td> 2026-04-11 </td>
+<td> <code>900f8b55a49</code></td>
+<td> <code>dlls/ntdll: apply librtpi sweep to thread.c (NSPA RT v2.1 first pass)</code></td>
+</tr>
+<tr>
+<td> 2026-04-11 </td>
+<td> <code>dfe8e556c5d</code></td>
+<td> <code>include,dlls/win32u: sweep win32u + rtpi.h forwarder + gdi_driver.h conversion</code> </td>
+</tr>
+<tr>
+<td> 2026-04-11 </td>
+<td> <code>0dd738115ca</code></td>
+<td> <code>nspa,dlls: big librtpi sweep across remaining DLLs + fix cond pairing + header fixups</code> </td>
+</tr>
+<tr>
+<td> 2026-04-15 </td>
+<td> <code>43862d8b591</code></td>
+<td> <code>librtpi: upgrade pi_cond to FUTEX_WAIT_REQUEUE_PI / FUTEX_CMP_REQUEUE_PI</code> </td>
+</tr>
+<tr>
+<td> 2026-04-15 </td>
+<td> <code>d8bec787a1e</code></td>
+<td> <code>nspa: add pi_cond requeue-PI benchmark</code>                                </td>
+</tr>
+<tr>
+<td> 2026-04-30 </td>
+<td> <code>94a419cf6d4</code></td>
+<td> <code>nspa ntdll/unix/sched: per-instance refactor + pi_mutex (multi-class prep)</code> </td>
+</tr>
+</tbody>
+</table>
+
+
+<p>Notable later-than-bring-up commits:</p>
+
+<ul>
+<li><code>1099e57371e</code> (<code>nspa rpc plan: 2.A clarified as no-op (CS-PI != librtpi)</code>) &ndash;
+explicit clarification that CS-PI (in <code>dlls/ntdll/sync.c</code>) and the
+librtpi sweep operate on <em>different</em> lock universes. CS-PI hooks
+Win32 <code>RtlEnterCriticalSection</code> process-wide when
+<code>NSPA_RT_PRIO</code> is set; librtpi converts Wine&rsquo;s <em>internal</em>
+Unix-side mutexes from <code>pthread_mutex_t</code> to <code>pi_mutex_t</code>. Win32
+CS DLLs (rpcrt4, ole32, etc.) get PI through CS-PI; they do not
+use librtpi.</li>
+</ul>
+
+
+<hr />
+
+<h2 id="11-references">11. References</h2>
+
+<h3 id="wine-nspa-source">Wine-NSPA source</h3>
+
+<ul>
+<li><code>libs/librtpi/rtpi.h</code> &ndash; the header-only implementation (~450
+LoC). Contains all <code>pi_mutex_*</code> and <code>pi_cond_*</code> inlines plus the
+<code>NSPA_RTPI_MUTEX_RECURSIVE</code> extension.</li>
+<li><code>libs/librtpi/Makefile.in</code> &ndash; present only to host <code>rtpi.h</code>; no
+build target.</li>
+<li><code>include/rtpi.h</code> &ndash; forwarder that ensures every Wine DLL
+picks up the NSPA header before any system librtpi header.</li>
+<li><code>nspa/librtpi_sweep.py</code> &ndash; two-phase libclang-based rewriter from
+<code>pthread_*</code> to <code>pi_*</code>.</li>
+<li><code>dlls/ntdll/unix/virtual.c</code> (line 3941),
+<code>dlls/win32u/sysparams.c</code> (line 5888),
+<code>dlls/win32u/gdiobj.c</code> (line 1040),
+<code>dlls/winex11.drv/init.c</code> (line 58) &ndash; the recursive-mutex carries.</li>
+<li><code>wine/nspa/tests/pi_cond_bench.c</code> &ndash; requeue-PI condvar benchmark.</li>
+</ul>
+
+
+<h3 id="upstream">Upstream</h3>
+
+<ul>
+<li>Upstream librtpi (<code>gitlab.com/linux-rt/librtpi</code>) &ndash; the public API
+Wine-NSPA mirrors. The NSPA struct layouts are deliberately
+union-compatible, so any code written against upstream librtpi
+compiles against the NSPA shim.</li>
+</ul>
+
+
+<h3 id="cross-references">Cross-references</h3>
+
+<ul>
+<li><a href="cs-pi.gen.html">Critical Section PI</a> &ndash; the <em>separate</em> PI hook
+that operates on Win32 <code>CRITICAL_SECTION</code> process-wide. CS-PI and
+librtpi work on disjoint lock universes; the relationship is
+complementary, not stacked.</li>
+<li><a href="condvar-pi-requeue.gen.html">Win32 Condvar PI (Requeue-PI)</a> &ndash;
+the analogous requeue-PI work for <code>RtlSleepConditionVariableCS</code>.</li>
+<li><a href="ntsync-pi-driver.gen.html">NTSync PI Driver</a> &ndash; the kernel
+ntsync overlay that adds PI to NT-shape sync objects (mutex,
+semaphore, event, channel). librtpi covers Wine&rsquo;s <em>internal</em>
+Unix-side locks; ntsync covers the Win32 sync surface. Together
+with CS-PI and condvar-PI they form the full set of PI coverage
+paths in Wine-NSPA.</li>
+<li><a href="sync-primitives-research.gen.html">Sync Primitives Research</a> &ndash;
+background research on the Linux/Windows/glibc primitives that
+motivated the librtpi choice.</li>
+</ul>
+
+
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+  document.querySelectorAll("pre code").forEach(function (block) {
+    hljs.highlightElement(block);
+  });
+});
+</script>
+</body></html>
