@@ -69,7 +69,7 @@ NT-local stub surfaces in tree:
     .ns-pur { fill: #bb9af7; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .ns-grn { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .ns-yel { fill: #e0af68; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
-    .ns-arrow { stroke: #9aa5ce; stroke-width: 1.7; fill: none; }
+    .ns-arrow { stroke: #7aa2f7; stroke-width: 1.7; fill: none; }
     .ns-arrow-b { stroke: #7aa2f7; stroke-width: 1.8; fill: none; }
     .ns-arrow-p { stroke: #bb9af7; stroke-width: 1.8; fill: none; }
     .ns-arrow-g { stroke: #9ece6a; stroke-width: 1.8; fill: none; }
