@@ -54,7 +54,8 @@ does not provide.
     .lr-g { fill: #9ece6a; font: bold 10px 'JetBrains Mono', monospace; }
     .lr-v { fill: #bb9af7; font: bold 10px 'JetBrains Mono', monospace; }
     .lr-y { fill: #e0af68; font: bold 10px 'JetBrains Mono', monospace; }
-    .lr-line { stroke: #c0caf5; stroke-width: 1.2; fill: none; }
+    .lr-line-b { stroke: #7aa2f7; stroke-width: 1.2; fill: none; }
+    .lr-line-v { stroke: #bb9af7; stroke-width: 1.2; fill: none; }
   </style>
 
   <rect x="0" y="0" width="940" height="380" class="lr-bg"/>
@@ -78,8 +79,8 @@ does not provide.
   <text x="750" y="126" text-anchor="middle" class="lr-s">FUTEX_WAIT_REQUEUE_PI / FUTEX_CMP_REQUEUE_PI</text>
   <text x="750" y="142" text-anchor="middle" class="lr-s">kernel rt_mutex PI chain</text>
 
-  <line x1="280" y1="108" x2="320" y2="108" class="lr-line"/>
-  <line x1="560" y1="108" x2="600" y2="108" class="lr-line"/>
+  <line x1="280" y1="108" x2="320" y2="108" class="lr-line-b"/>
+  <line x1="560" y1="108" x2="600" y2="108" class="lr-line-v"/>
 
   <rect x="40" y="186" width="400" height="86" class="lr-mid"/>
   <text x="240" y="210" text-anchor="middle" class="lr-v">pi_mutex_t (64-byte aligned union)</text>
