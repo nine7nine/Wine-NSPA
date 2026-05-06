@@ -850,7 +850,7 @@ on next invocation if the source is newer than the binary.
 | Requirement | Check | Purpose |
 |-------------|-------|---------|
 | `ntsync` module loaded | `sudo modprobe ntsync` | Required for ntsync sub-tests + Layer 1 |
-| current ntsync production module loaded | module srcversion `F1A9EA24E257A35BB21341D` | Current shipped kernel/userspace pair for the dispatcher path |
+| current ntsync production module loaded | module srcversion `25751C3E41E15401318758E` | Current shipped kernel/userspace pair for the dispatcher path |
 | Hugepages reserved | `/proc/meminfo` HugePages_Total > 0 | Required for `large-pages` test |
 | RT-capable kernel | `uname -r` shows `-rt` | Required for SCHED_FIFO promotion |
 | CAP_SYS_NICE or root | `ulimit -r` | Required for RT scheduling |

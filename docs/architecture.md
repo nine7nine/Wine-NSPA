@@ -163,8 +163,8 @@ exceeded.
   <text x="140" y="464" text-anchor="middle" class="lbl-cy">PI waits + channel transport</text>
   <text x="140" y="478" text-anchor="middle" class="lbl-cy">thread-token pass-through</text>
   <text x="140" y="492" text-anchor="middle" class="lbl-cy">aggregate-wait + TRY_RECV2</text>
-  <text x="140" y="506" text-anchor="middle" class="lbl-cy">receive snapshot + slab caches</text>
-  <text x="140" y="520" text-anchor="middle" class="lbl-cy">lockless SEND_PI target scan</text>
+  <text x="140" y="506" text-anchor="middle" class="lbl-cy">snapshot + dedicated slab caches</text>
+  <text x="140" y="520" text-anchor="middle" class="lbl-cy">wait-q cache + lockless SEND_PI</text>
 
   <rect x="260" y="415" width="200" height="120" class="box"/>
   <text x="360" y="434" text-anchor="middle" class="lbl-sm">PI futex layer</text>
@@ -240,7 +240,7 @@ heterogeneous waits, and `TRY_RECV2` for post-dispatch burst drain. The
 userspace half now also includes the client-created anonymous sync path
 for mutexes, semaphores, and events, so the public story is a kernel
 overlay plus a Wine-side in-process sync layer rather than “just a
-driver.” The current production module is `F1A9EA24E257A35BB21341D`.
+driver.” The current production module is `25751C3E41E15401318758E`.
 
 All four paths are gated on `NSPA_RT_PRIO`. When unset, every PI code path short-circuits and Wine behaves byte-for-byte like upstream. **Detail: see [NTSync PI Kernel](ntsync-pi-driver.gen.html), [NTSync Userspace Sync](ntsync-userspace.gen.html), [cs-pi](cs-pi.gen.html), [condvar-pi-requeue](condvar-pi-requeue.gen.html).**
 
@@ -492,4 +492,4 @@ here.
 
 ---
 
-*Master overview updated 2026-05-05. Current production ntsync module `F1A9EA24E257A35BB21341D`, kernel `6.19.11-rt1-1-nspa`. Per-subsystem detail is in the dedicated pages linked above; live state is in `current-state.gen.html`.*
+*Master overview updated 2026-05-05. Current production ntsync module `25751C3E41E15401318758E`, kernel `6.19.11-rt1-1-nspa`. Per-subsystem detail is in the dedicated pages linked above; live state is in `current-state.gen.html`.*

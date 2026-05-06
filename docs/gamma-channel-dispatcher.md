@@ -1100,7 +1100,7 @@ entries per `AGG_WAIT` wake instead of paying N round-trips.
 
 For the 2026-05-05 shipped path:
 
-- Module: `F1A9EA24E257A35BB21341D`
+- Module: `25751C3E41E15401318758E`
 - `NSPA_RT_POLICY=FF`
 - aggregate-wait, thread-token consumption, `TRY_RECV2`, and async
   `CreateFile` all on the normal shipped path

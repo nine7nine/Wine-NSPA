@@ -425,7 +425,7 @@ That logic is runtime feature detection, not a release ladder:
 
 | Item | Value |
 |---|---|
-| Kernel module srcversion | `F1A9EA24E257A35BB21341D` |
+| Kernel module srcversion | `25751C3E41E15401318758E` |
 | Wine userspace state | Dispatcher-owned ring and aggregate-wait loop are shipped; async `CreateFile` and burst drain both build on the same base |
 | Current wait shape | `AGGREGATE_WAIT` over channel + uring eventfd + shutdown eventfd |
 | Current follow-ons on top of this base | dispatcher-owned async `CreateFile`; post-reply `TRY_RECV2` burst drain |

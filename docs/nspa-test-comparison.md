@@ -43,7 +43,7 @@ So the current matrix version remains v8.
 | socket `RECVMSG` / `SENDMSG` default-on | `socket-io` deferred path + Ableton smoke | throughput `+6.5%`; p99 latency `-6.8%`; `0/2000` failures; Ableton clean at `63` threads with zero new errors vs earlier shipped socket baseline |
 | local-file widening | workload comparison | `create_file` handler count `7,845` -> `5,658`; handler time `137 ms` -> `50 ms` |
 | local sections default-on | workload comparison | `nspa_create_mapping_from_unix_fd` count `2,664` -> `~800`; same-process map-after-file-close shape clean |
-| current ntsync production module | native channel / aggregate / stress reruns | receive snapshot fix, dedicated slab caches, and lockless `SEND_PI` scan validated on current srcversion `F1A9EA24E257A35BB21341D` |
+| current ntsync production module | native channel / aggregate / stress reruns | receive snapshot fix, dedicated slab caches, the wait-queue cache, and the lockless `SEND_PI` scan validated on current srcversion `25751C3E41E15401318758E` |
 | RT-keyed memory follow-ons | targeted shell harnesses | `test-mlock-ws.sh 4/4 PASS`; `test-huge-auto.sh 3/3 PASS`; `test-heap-hugepage.sh 3/3 PASS` |
 
 ### Reading this with the rest of the docs

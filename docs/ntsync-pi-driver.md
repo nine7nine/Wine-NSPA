@@ -98,7 +98,7 @@ window reduction on the audio hot path). The distinction matters: Section 16 dis
     .nt-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .nt-yellow { fill: #e0af68; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .nt-violet { fill: #bb9af7; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
-    .nt-line { stroke: #c0caf5; stroke-width: 1.4; }
+    .nt-line { stroke: #9ece6a; stroke-width: 1.4; }
     .nt-link-b { stroke: #7aa2f7; stroke-width: 1.4; }
     .nt-link-v { stroke: #bb9af7; stroke-width: 1.4; }
     .nt-dash { stroke: #6b7398; stroke-width: 1.2; stroke-dasharray: 6,4; }
@@ -1051,8 +1051,10 @@ validated with a dedicated native aggregate-wait suite:
 
 The first production result was module srcversion
 `CFF56DE1EF28D693BB597CD`, which is the post-1009 base plus 1010 and
-its PI-ordering follow-ups. The current production module
-`10124FB81FDC76797EF1F91` then carries 1011 on top.
+its PI-ordering follow-ups. The next production module
+`10124FB81FDC76797EF1F91` then carries 1011 on top, and the current
+module keeps both surfaces while adding the later hardening and
+cache-isolation work.
 
 ### 10.1 Burst drain with `CHANNEL_TRY_RECV2`
 
@@ -1359,7 +1361,9 @@ A four-dimension audit covering the entire post-1014 file:
     .pc-y { fill: #e0af68; font: bold 10px 'JetBrains Mono', monospace; }
     .pc-g { fill: #9ece6a; font: bold 10px 'JetBrains Mono', monospace; }
     .pc-v { fill: #bb9af7; font: bold 10px 'JetBrains Mono', monospace; }
-    .pc-line { stroke: #c0caf5; stroke-width: 1.2; fill: none; }
+    .pc-line-y { stroke: #e0af68; stroke-width: 1.2; fill: none; }
+    .pc-line-g { stroke: #9ece6a; stroke-width: 1.2; fill: none; }
+    .pc-line-v { stroke: #bb9af7; stroke-width: 1.2; fill: none; }
   </style>
 
   <rect x="0" y="0" width="940" height="360" class="pc-bg"/>
@@ -1391,12 +1395,12 @@ A four-dimension audit covering the entire post-1014 file:
   <text x="470" y="252" text-anchor="middle" class="pc-s">cache_from_obj derefs operand; explicit NULL guard added at site 2089</text>
   <text x="470" y="268" text-anchor="middle" class="pc-s">(obj-&gt;u.event.pending_pi.new_ep free in ntsync_free_obj)</text>
 
-  <line x1="175" y1="168" x2="320" y2="208" class="pc-line"/>
-  <line x1="470" y1="168" x2="470" y2="208" class="pc-line"/>
-  <line x1="765" y1="168" x2="620" y2="208" class="pc-line"/>
+  <line x1="175" y1="168" x2="320" y2="208" class="pc-line-y"/>
+  <line x1="470" y1="168" x2="470" y2="208" class="pc-line-g"/>
+  <line x1="765" y1="168" x2="620" y2="208" class="pc-line-v"/>
 
   <rect x="40" y="296" width="860" height="48" class="pc-box"/>
-  <text x="470" y="320" text-anchor="middle" class="pc-t">production module srcversion `F1A9EA24E257A35BB21341D` (post-1014a)</text>
+  <text x="470" y="320" text-anchor="middle" class="pc-t">post-1014a production module srcversion `F1A9EA24E257A35BB21341D`</text>
   <text x="470" y="334" text-anchor="middle" class="pc-s">KASAN-clean over ~14M ops; running on prod kernel `6.19.11-rt1-1-nspa` since 2026-05-04</text>
 </svg>
 </div>
@@ -1596,7 +1600,8 @@ applications for one logical change.
     .wq-g { fill: #9ece6a; font: bold 10px 'JetBrains Mono', monospace; }
     .wq-v { fill: #bb9af7; font: bold 10px 'JetBrains Mono', monospace; }
     .wq-line { stroke: #c0caf5; stroke-width: 1.2; fill: none; }
-    .wq-link { stroke: #7aa2f7; stroke-width: 1.4; fill: none; }
+    .wq-link-b { stroke: #7aa2f7; stroke-width: 1.4; fill: none; }
+    .wq-link-v { stroke: #bb9af7; stroke-width: 1.4; fill: none; }
   </style>
 
   <rect x="0" y="0" width="940" height="360" class="wq-bg"/>
@@ -1620,8 +1625,8 @@ applications for one logical change.
   <text x="780" y="120" text-anchor="middle" class="wq-s">pre-1015 home: kmalloc-1k</text>
   <text x="780" y="138" text-anchor="middle" class="wq-s">kmalloc-1k delta = 0 across load</text>
 
-  <line x1="310" y1="103" x2="365" y2="103" class="wq-link"/>
-  <line x1="605" y1="103" x2="660" y2="103" class="wq-link"/>
+  <line x1="310" y1="103" x2="365" y2="103" class="wq-link-b"/>
+  <line x1="605" y1="103" x2="660" y2="103" class="wq-link-v"/>
 
   <rect x="40" y="178" width="860" height="50" class="wq-cache-pre"/>
   <text x="470" y="200" text-anchor="middle" class="wq-y">Pre-SLAB_NO_MERGE on prod kernel: all four caches silently merged into generic kmalloc-N</text>
@@ -1764,8 +1769,9 @@ After cross-build to the production kernel `6.19.11-rt1-1-nspa` (no debug instru
 **Cumulative on production kernel: post-1009 baseline ~370 M ops on
 `A250A77651C8D5DAB719FE2`, then aggregate-wait on
 `CFF56DE1EF28D693BB597CD`, then 1011 / TRY_RECV2 on
-`10124FB81FDC76797EF1F91`, then 1012 / 1013 / 1014 (1014a) on the
-current `F1A9EA24E257A35BB21341D`; 0 syscall errors, 0 dmesg splats,
+`10124FB81FDC76797EF1F91`, then 1012 / 1013 / 1014 (1014a) on
+`F1A9EA24E257A35BB21341D`, and now 1015 / cache-isolated waits on the
+current `25751C3E41E15401318758E`; 0 syscall errors, 0 dmesg splats,
 refcnt=0 post-soak.**
 
 The post-1014a build was also re-validated with the full RT-suite v7

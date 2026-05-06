@@ -13,7 +13,7 @@ remaining work that is still ahead.
 3. [Active subsystems](#3-active-subsystems)
 4. [Validation and performance](#4-validation-and-performance)
 5. [Open work, in priority order](#5-open-work-in-priority-order)
-6. [Recent landed arc](#6-recent-landed-arc-2026-04-30-to-2026-05-03)
+6. [Recent landed arc](#6-recent-landed-arc-2026-04-30-to-2026-05-05)
 7. [Configuration reference](#7-configuration-reference)
 8. [Doc index](#8-doc-index)
 
@@ -21,7 +21,7 @@ remaining work that is still ahead.
 
 ## 1. Overview
 
-The public 2026-05-03 state is no longer just "aggregate-wait plus a faster
+The public 2026-05-05 state is no longer just "aggregate-wait plus a faster
 dispatcher". Four larger client-side follow-ons now sit on top of that base:
 
 - the **spawn-main + `ntdll_sched` substrate**, now default-on as the per-process
@@ -41,8 +41,8 @@ the earlier timer work: move latency-sensitive common-case work out of the
 single-threaded wineserver path while keeping honest fallback paths for
 cross-process or server-authoritative semantics.
 
-What the project looks like today: one small kernel overlay
-(`1003-1014` on top of upstream `ntsync`) plus a Wine fork that increasingly
+What the project looks like today: one small ntsync kernel overlay on top of
+upstream `ntsync` plus a Wine fork that increasingly
 routes work through kernel-mediated channels, client-range sync objects,
 bounded shared-memory rings, local NT stubs, per-process scheduler hosts, and
 RT-keyed memory tuning. When `NSPA_RT_PRIO` is unset, the RT-specific paths
@@ -59,9 +59,9 @@ still stand down and upstream-Wine behaviour remains available.
 | Kernel | `6.19.11-rt1-1-nspa` |
 | Scheduler | `PREEMPT_RT_FULL` |
 | ntsync `.ko` | `/lib/modules/6.19.11-rt1-1-nspa/kernel/drivers/misc/ntsync.ko` |
-| ntsync srcversion | `F1A9EA24E257A35BB21341D` |
+| ntsync srcversion | `25751C3E41E15401318758E` |
 | Module ref count | 0 idle |
-| Sources | upstream `drivers/misc/ntsync.{c,h}` + NSPA patch stack `1003-1014` |
+| Sources | upstream `drivers/misc/ntsync.{c,h}` + NSPA patch stack `1003-1015` |
 
 ### 2.2 Userspace baseline
 
@@ -90,8 +90,9 @@ still stand down and upstream-Wine behaviour remains available.
 | 1010 | Aggregate-wait | Heterogeneous object+fd wait; channel notify-only path used by the gamma dispatcher | Shipped |
 | 1011 | Channel TRY_RECV2 | `NTSYNC_IOC_CHANNEL_TRY_RECV2`: non-blocking `RECV2` for post-dispatch burst drain | Shipped |
 | 1012 | Receive snapshot fix | snapshots popped channel-entry fields under `obj_lock`; closes post-1011 slab UAF on `RECV` / `RECV2` | Shipped |
-| 1013 | Dedicated slab caches | moves hot ntsync allocation classes into dedicated `kmem_cache`s with `SLAB_HWCACHE_ALIGN` | Shipped |
+| 1013 | Dedicated slab caches | moves the three hot small ntsync allocation classes into dedicated `kmem_cache`s with `SLAB_HWCACHE_ALIGN` | Shipped |
 | 1014 | Lockless SEND_PI target scan | `list_empty_careful` fast-path avoids a wasted `wq->lock` round-trip on the common empty-queue case | Shipped |
+| 1015 | Wait-queue cache and cache isolation | adds a dedicated `ntsync_wait_q` cache for common waits and applies `SLAB_NO_MERGE` across all four ntsync caches so the isolation story holds on the production kernel | Shipped |
 
 ### 2.4 2026-04-30 dispatcher and flush follow-ons
 
@@ -132,13 +133,13 @@ still stand down and upstream-Wine behaviour remains available.
 
 | Change | Shipped effect |
 |---|---|
-| ntsync `1012-1014` landed in production | current module advanced to `F1A9EA24E257A35BB21341D` |
+| ntsync wait-queue cache and cache isolation | current module advanced to `25751C3E41E15401318758E`; all four ntsync caches now stay unmerged on the production kernel |
 | RT-keyed `mlockall()` | perf page faults `561/s` -> `451/s`; bpf page faults `869/s` -> `629/s`; max futex wait `94us` -> `49us`; `VmLck` around `300848kB` |
 | RT-keyed transparent hugetlb | conservative hugepage auto-promotion is now keyed only off `NSPA_RT_PRIO` |
 | RT-keyed heap arena hugetlb backing | hugepage regions `3/6` -> `104`; dTLB miss / insn -> `0.071%`; `mmap` rate `33-61/s` -> `0.13/s`; `mprotect` rate `56-90/s` -> `0.03/s`; page-faults `753-869/s` -> `2.8/s` |
 | memory gate cleanup | per-feature memory env gates removed; `NSPA_RT_PRIO` is now the single public RT memory gate |
 
-### 2.9 Validation baseline against `F1A9EA24E257A35BB21341D`
+### 2.9 Validation baseline against `25751C3E41E15401318758E`
 
 | Layer | Run | Result | Ops | Errors |
 |---|---|---|---|---|
@@ -150,7 +151,7 @@ still stand down and upstream-Wine behaviour remains available.
 
 **Layer 1 totals: 3 PASS / 0 FAIL. Layer 2 totals: 24 PASS / 0 FAIL /
 0 TIMEOUT. The full-suite public boundary is still those totals; the
-newer `1012-1014` and memory carries are documented as targeted
+newer `1012-1015` and memory carries are documented as targeted
 follow-on validation on top of that base.**
 
 NTSync detail now lives on two public pages:
@@ -235,7 +236,7 @@ own correctness proof and gate.
     .cs-tag-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .cs-tag-yellow { fill: #e0af68; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .cs-tag-violet { fill: #bb9af7; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
-    .cs-line { stroke: #7aa2f7; stroke-width: 1.3; }
+    .cs-line { stroke: #9ece6a; stroke-width: 1.3; }
   </style>
 
   <rect x="0" y="0" width="940" height="500" class="cs-bg"/>
@@ -244,7 +245,7 @@ own correctness proof and gate.
   <rect x="50" y="70" width="250" height="150" class="cs-green"/>
   <text x="175" y="96" text-anchor="middle" class="cs-tag-green">Kernel / sync substrate</text>
   <text x="175" y="122" text-anchor="middle" class="cs-label">NTSync PI + dispatcher kernel surfaces</text>
-  <text x="175" y="140" text-anchor="middle" class="cs-small">PI waits, channel transport, aggregate-wait, burst drain</text>
+  <text x="175" y="140" text-anchor="middle" class="cs-small">PI waits, channel transport, aggregate-wait, cache-isolated waits</text>
   <text x="175" y="164" text-anchor="middle" class="cs-label">CS-PI + condvar PI</text>
   <text x="175" y="182" text-anchor="middle" class="cs-small">all RT paths gate on NSPA_RT_PRIO</text>
 
@@ -297,7 +298,7 @@ own correctness proof and gate.
 
 ### 4.1 Full-suite baseline still in force
 
-- current prod ntsync module `F1A9EA24E257A35BB21341D` against kernel
+- current prod ntsync module `25751C3E41E15401318758E` against kernel
   `6.19.11-rt1-1-nspa`, with the public full-suite boundary still anchored
   to the earlier `3 PASS / 0 FAIL` native + `24 PASS / 0 FAIL / 0 TIMEOUT`
   PE matrix totals.
@@ -424,6 +425,7 @@ System-wide samples: `38,588 -> 19,415` per 30s.
 | 2026-05-03 | widened local-file envelope | more regular-file, directory, metadata, flush, and EOF traffic stays client-side |
 | 2026-05-03 | local sections default ON | eligible unnamed file-backed sections stay client-side for create / map / query / unmap / close |
 | 2026-05-04 | ntsync hardening follow-ons | receive snapshot fix, dedicated slab caches, and lockless `SEND_PI` target scan land in the production kernel module |
+| 2026-05-05 | ntsync wait-queue cache follow-on | dedicated `ntsync_wait_q` cache ships, and `SLAB_NO_MERGE` is applied across all four ntsync caches so cache isolation is real on the production kernel |
 | 2026-05-05 | RT memory follow-ons | `mlockall()`, transparent hugetlb promotion, and heap-arena hugetlb backing ship under `NSPA_RT_PRIO` |
 
 ---
@@ -500,5 +502,5 @@ local sections, memory follow-ons, msg-ring, and the decomposition notes.
 
 ---
 
-*Generated 2026-05-05. State board reflects the shipped 2026-05-05 set. ntsync `F1A9EA24E257A35BB21341D`, kernel
+*Generated 2026-05-05. State board reflects the shipped 2026-05-05 set. ntsync `25751C3E41E15401318758E`, kernel
 `6.19.11-rt1-1-nspa`.*

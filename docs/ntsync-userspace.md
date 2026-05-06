@@ -541,8 +541,8 @@ Layer 2 published full-suite boundary remains
 sanity is `3 PASS / 0 FAIL`. The cross-build production-kernel runs
 on the post-1011 module advanced through `~370 M` ops on the
 post-1009 baseline, then through aggregate-wait, then through 1011 /
-TRY_RECV2, and now the post-1014a module
-(`F1A9EA24E257A35BB21341D`) -- with zero syscall errors and zero
+TRY_RECV2, and now the current cache-isolated module
+(`25751C3E41E15401318758E`) -- with zero syscall errors and zero
 dmesg splats at every step.
 
 ---

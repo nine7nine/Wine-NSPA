@@ -499,7 +499,7 @@ with `io_uring`.
 | dropped follow-ons | Dropped | not worthwhile or blocked by server-managed architecture |
 | E2 bitmap (server `sock.c`) | Shipped | engaged when the client-owned socket poll path is active |
 | ntsync `uring_fd` extension | Shipped (kernel patch) | Wakes ntsync waits on CQE |
-| ntsync PI kernel + audit fixes | Shipped (kernel patch) | Module srcversion `F1A9EA24E257A35BB21341D` |
+| ntsync PI kernel + audit fixes | Shipped (kernel patch) | Module srcversion `25751C3E41E15401318758E` |
 | Audit §4.1 retry-loop hardening | Shipped (wine) | Superproject `a7e34c7` |
 
 ### Next Actions
