@@ -864,20 +864,6 @@ The kernel side -- the PI mutex behavior, the futex round-trip latency under PRE
 - `/home/ninez/pkgbuilds/Wine-NSPA/wine-rt-claude/wine/dlls/mmdevapi/main.c` -- PE-side wrappers for the Phase F unix calls
 - `/home/ninez/pkgbuilds/Wine-NSPA/wine-rt-claude/wine/dlls/mmdevapi/mmdevapi.spec` -- exports the Phase F wrappers
 
-### Memory entries
-
-- `project_winejack_drv.md` -- Phase 1 ship + Phase 2 plan
-- `plan_winejack_wasapi_audio.md` -- Phase 2 implementation plan, ALSA driver audit, wineasio research, ASIO2WASAPI study
-- `project_asio2wasapi_bridge.md` -- Phase 3 design, ASIO-as-WASAPI-exclusive
-- `project_phase_f_implementation.md` -- Phase F implementation, futex handshake, files changed
-- `plan_winejack_wasapi_rework.md` -- Phases A through F: per-channel double buffers, fast path, zero-interleave, final Phase F path
-- `project_jackmidi_bugs_and_fixes.md` -- the six MIDI bugs and their fixes
-- `project_winejack_feature_gaps.md` -- gaps and won't-implement list
-- `project_drop_other_audio_drivers.md` -- plan to drop `winealsa`, `winepulse`, `wineoss`
-- `project_session_20260413_audio_final.md` -- Phase F + 6 MIDI fixes shipped, Chromaphone validated
-- `project_phase_f_implementation.md` -- futex protocol details
-- `feedback_asio_log_naming.md` -- log strings should say "ASIO Initialize", not "Phase F"
-
 ### Related Wine-NSPA docs
 
 - `cs-pi.gen.html` -- the PI mutex used by `winejack.drv`'s process-callback `trylock`

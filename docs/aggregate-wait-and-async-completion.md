@@ -488,5 +488,3 @@ needs to prove the syscall shape from scratch; it can build on a production cons
   - `8cc157c` — userspace per-process uring infrastructure
   - `f21c6e1` — userspace aggregate-wait dispatcher
   - `b36e36d` — aggregate-wait default-on
-- In-tree handoff:
-  - `wine/nspa/docs/session-handoff-20260429-phase-4.md`

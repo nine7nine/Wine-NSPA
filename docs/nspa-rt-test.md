@@ -44,7 +44,7 @@ exercises `inproc_wait` -> ntsync ioctls directly and does **not** hit
 loop. `dispatcher-burst` is the first PE-side workload in the published
 matrix that covers that path.
 
-The 2026-05-02 through 2026-05-05 shipped follow-ons did **not** introduce a new
+The 2026-05-02 through 2026-05-06 shipped follow-ons did **not** introduce a new
 full matrix version. They were validated with targeted harnesses instead:
 
 - `run-rt-probe-validation.sh` covers the sched-hosted `local_timer` and
@@ -83,18 +83,22 @@ The PE binary runs in two modes:
 - **Layer 2 PE matrix:** 24 PASS / 0 FAIL / 0 TIMEOUT (12 tests x
   baseline + RT), including `dispatcher-burst`.
 
-### Targeted Follow-On Validators (2026-05-02 through 2026-05-05)
+### Targeted Follow-On Validators (2026-05-02 through 2026-05-06)
 
 - **sched RT-probe script:** `run-rt-probe-validation.sh` -- `10/10 PASS`
   for the `wine-sched-rt` migration of `local_timer` and
   `local_wm_timer`
 - **socket deferred path:** `socket-io` continues to pass in baseline + RT
   while now exercising the shipped `RECVMSG` / `SENDMSG` SQE path
+- **thread / process shared-state path:** targeted A/B harnesses for the
+  7 thread classes, 6 process classes, and zero-time process wait stayed clean;
+  `ThreadBasicInformation` remains intentionally on the RPC path
 - **local-file / local-section workload path:** same-process map-after-file-close
   is clean; local-file and section carries reduce file and mapping traffic
   without changing the published full-suite boundary
 - **RT-keyed memory follow-ons:** `test-mlock-ws.sh` `4/4 PASS`,
-  `test-huge-auto.sh` `3/3 PASS`, `test-heap-hugepage.sh` `3/3 PASS`
+  `test-huge-auto.sh` `3/3 PASS`, `test-heap-hugepage.sh` `3/3 PASS`,
+  `test-huge-decommit.sh` clean, and `test-huge-rwx.sh` clean
 - **real workload smoke:** Ableton boot / library scan / project load /
   playback remained clean after the client-scheduler, local-event, and
   socket, local-file, and local-section follow-ons

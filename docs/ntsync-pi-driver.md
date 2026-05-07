@@ -1936,23 +1936,6 @@ In `wine/nspa/tests/`:
 - `wine-rt-claude/ntsync-patches/validate-1015.sh` -- 1015 native ioctl soak driver (covers both `setup_wait` and `ntsync_aggregate_setup` alloc paths)
 - `wine-rt-claude/ntsync-patches/validate-1015-slabinfo-watch.sh` -- 1015 Ableton-side `/proc/slabinfo` 1Hz capture for absorption / isolation evidence
 
-### Audit / handoff documentation
-
-In project memory (`/home/ninez/.claude/projects/-home-ninez-pkgbuilds-Wine-NSPA/memory/`):
-
-- `project_ntsync_session_20260427_results.md` -- the 4-bug-fix session summary
-- `project_ntsync_prod_kernel_validation_20260427.md` -- prod-kernel revalidation totals
-- `project_ntsync_kfree_under_raw_spinlock.md` -- 1006 root-cause writeup
-- `project_ntsync_channel_reply_uaf_20260427.md` -- 1009 KASAN trace + minimal-fix discussion
-- `project_ntsync_session_20260504_evening_kasan.md` -- 1012 channel field-snapshot UAF discovery + fix
-- `project_ntsync_session_20260504_late_kmem_cache_audit.md` -- 1014a NULL-deref crash + 4-dim audit
-- `feedback_dont_shotgun_audit_into_unfound_bug.md` -- the lesson behind Section 16
-- `feedback_kmem_cache_free_not_null_safe.md` -- the 1014a lesson captured
-- `feedback_slub_debug_skews_benchmarks.md` -- why debug-vs-prod throughput numbers don't compare
-- `wine/nspa/docs/ntsync-1012-1014-architectural-notes-20260504.md` -- canonical in-tree notes for 1012 / 1013 / 1014 / 1014a / 1015
-- `wine/nspa/docs/ntsync-rt-audit.md` -- in-tree audit doc
-- `project_ntsync_1015_shipped_20260505.md` -- 1015 + `SLAB_NO_MERGE` retro-correction shipped + Ableton-validated
-
 ### Cross-references
 
 - `ntsync-userspace.gen.html` -- the Wine ntdll handle-to-fd cache, server-owned vs client-created anonymous sync handles, dispatcher ioctl wrappers, and PE-side wait coverage that consume the kernel surface documented here.

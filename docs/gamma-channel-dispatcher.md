@@ -507,8 +507,7 @@ extra wake/round-trip once the next entry is already queued.
 The gamma redesign was scoped tightly:
 
 - **One dispatcher pthread per client process.** Not per thread; not
-  router/handler split (deferred to a later phase, see
-  `project_gamma_dispatcher_audit_and_split_plan.md`). Just one
+  router/handler split. Just one
   pthread that drains the channel sequentially.
 - **Single ioctl per request on the sender side.** Enqueue + boost +
   block-for-reply must be one syscall, not three. Anything less leaks
@@ -1181,8 +1180,7 @@ correctness bugs** after the `baf088c290f` refcount + process-
 membership patch. The handler runs under `global_lock` exactly as
 v1.5 did, so handler-internal correctness is inherited from upstream
 Wine. The dispatcher loop has no spin-loops, no missing locks, and
-no lifetime races. The full audit lives at
-`wine/nspa/docs/gamma-dispatcher-audit-and-split-plan.md`.
+no lifetime races.
 
 ### 13.2 ntsync patch 1007 -- channel exclusive recv (priority inversion)
 
@@ -1193,7 +1191,7 @@ gamma does not actually use, but the test-channel-stress harness does)
 the wake-all caused a real priority inversion: a low-prio waiter
 could win the race and delay the high-prio waiter behind a sleep.
 Patch 1007 narrowed RECV to `wait_event_interruptible_exclusive` +
-`wake_up_interruptible`. Audit doc at `wine/nspa/docs/ntsync-rt-audit.md`.
+`wake_up_interruptible`.
 
 ### 13.3 ntsync patch 1008 -- EVENT_SET_PI deferred boost
 
@@ -1221,11 +1219,9 @@ shared with other potential consumers and the fix is unconditional.
 ### 13.5 The lockup audit (2026-04-27)
 
 After the ~370M-ops ntsync validation proved the kernel sound, the
-lockup investigation moved to wine-NSPA userspace. The audit doc at
-`wine/nspa/docs/wine-nspa-lockup-audit-20260427.md` covers F1-F9
-wineserver-side findings and MR1-MR8 msg_ring findings; gamma
-itself was scored clean. The shipped fixes (MR1 reply-slot ABA, MR2
-FUTEX_PRIVATE on shared memfd, MR4 POST wake-loss) are all in
+lockup investigation moved to wine-NSPA userspace. That audit covered
+both wineserver-side findings and the MR1/MR2/MR4 msg-ring bugs; gamma
+itself was scored clean. The shipped msg-ring fixes are all in
 `dlls/win32u/nspa/msg_ring.c` and orthogonal to gamma.
 
 ### 13.6 Don't-shotgun-the-audit feedback
@@ -1256,9 +1252,6 @@ this discipline applies to its own future evolution as well.
 | `wine/server/nspa/uring.h` | -- | per-process `nspa_uring_instance` API consumed by the dispatcher-owned ring and aggregate-wait path |
 | `wine/server/nspa/shmem_channel.h` | 1-48 | Public header |
 | `wine/server/nspa/fd_lockdrop.c` | 47-125 | `nspa_openat_lockdrop` -- open-path lock-drop integration |
-| `wine/nspa/docs/gamma-dispatcher-audit-and-split-plan.md` | -- | Audit + future router/handler split plan |
-| `wine/nspa/docs/wine-nspa-lockup-audit-20260427.md` | -- | F1-F9 + MR1-MR8 lockup-investigation findings |
-| `wine/nspa/docs/ntsync-rt-audit.md` | -- | ntsync 1007/1008/1009 audit |
 
 ### 14.2 Kernel source
 
@@ -1274,17 +1267,7 @@ this discipline applies to its own future evolution as well.
 | `ntsync-patches/1010-ntsync-aggregate-wait.patch` | -- | heterogeneous wait primitive used by the post-1010 dispatcher |
 | `ntsync-patches/1011-ntsync-channel-try-recv2.patch` | -- | non-blocking `RECV2` used for post-dispatch burst drain |
 
-### 14.3 Memory / handoff documents
-
-| Doc | Topic |
-|---|---|
-| `project_gamma_dispatcher_audit_and_split_plan.md` | 2026-04-26 audit + T1/T2/T3 + router/handler split plan |
-| `project_msg_ring_v2_mr1_mr2_mr4_shipped_20260427.md` | MR1/MR2/MR4 + Ableton run-3 config |
-| `project_ntsync_session_20260427_results.md` | 30M-ops cumulative validation, 4 bugs fixed |
-| `project_ntsync_kfree_under_raw_spinlock.md` | 1006 alloc-hoist (unblocked open-path lock-drop default-on) |
-| `feedback_dont_shotgun_audit_into_unfound_bug.md` | KASAN-first / audit-second discipline |
-
-### 14.4 Predecessor docs
+### 14.3 Predecessor docs
 
 The published `shmem-ipc.gen.html` describes v1.5 (per-thread
 dispatcher) and v2.4 (cached-CAS + manual prio cache) and is

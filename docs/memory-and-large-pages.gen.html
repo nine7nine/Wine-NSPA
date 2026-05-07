@@ -109,8 +109,8 @@
 <h1 id="wine-nspa--memory-sections-large-pages-and-working-set-support">Wine-NSPA &ndash; Memory, Sections, Large Pages, and Working-Set Support</h1>
 
 <p>This page documents Wine-NSPA&rsquo;s shipped memory surface: local sections,
-RT-keyed page locking and hugetlb, working-set support, and shared-memory
-backing choices.</p>
+large-page mappings, RT-keyed page locking and hugetlb, working-set support,
+and shared-memory backing choices.</p>
 
 <h2 id="table-of-contents">Table of Contents</h2>
 
@@ -134,12 +134,14 @@ backing choices.</p>
 <p>Wine-NSPA has a real memory subsystem story now. It is not just large-page
 syscall support and it is not just <code>memfd</code> everywhere.</p>
 
-<p>Four distinct pieces are shipped:</p>
+<p>Five distinct pieces are shipped:</p>
 
 <ul>
 <li>client-side file-backed sections built on top of local-file handles</li>
 <li>large-page support for anonymous and section-backed mappings</li>
-<li>RT-keyed page locking and hugetlb promotion for the hot anonymous-memory path</li>
+<li>RT-keyed page locking and automatic hugetlb promotion for the hot anonymous-memory path</li>
+<li>hugetlb safety and fallback rules so transparent promotion stays honest under
+pool pressure, partial operations, and JIT RWX allocation</li>
 <li>working-set reporting plus working-set quota bookkeeping</li>
 <li>selective shared-memory backing choices for bypass state</li>
 </ul>
@@ -186,12 +188,24 @@ mechanism.</p>
 <td> When <code>NSPA_RT_PRIO</code> is set, process startup issues <code>mlockall(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT)</code> so touched pages stay locked without pretending Wine has a full working-set manager. </td>
 </tr>
 <tr>
-<td> RT-keyed transparent hugetlb </td>
-<td> When <code>NSPA_RT_PRIO</code> is set, eligible anonymous <code>RESERVE|COMMIT</code> RW allocations auto-promote onto the existing large-page mapping path. </td>
+<td> RT-keyed automatic hugetlb promotion </td>
+<td> When <code>NSPA_RT_PRIO</code> is set, eligible anonymous <code>RESERVE|COMMIT</code> allocations auto-promote onto the existing large-page mapping path, including <code>PAGE_EXECUTE_READWRITE</code> JIT-style arenas. </td>
 </tr>
 <tr>
 <td> RT-keyed heap arena hugetlb backing </td>
 <td> When <code>NSPA_RT_PRIO</code> is set, eligible growable heap arenas round up and full-commit onto huge pages, eliminating most heap-driven <code>mmap</code> / <code>mprotect</code> / page-fault traffic from the hot path. </td>
+</tr>
+<tr>
+<td> hugetlb pool pressure handling </td>
+<td> auto-promotion now stops when free hugepages drop below a 10% watermark, and auto-promoted allocations fall back to regular pages instead of failing when the pool is exhausted </td>
+</tr>
+<tr>
+<td> partial-op demote </td>
+<td> sub-hugepage <code>MEM_DECOMMIT</code>, partial <code>MEM_RELEASE</code>, or partial <code>VirtualProtect</code> on an auto-promoted view first demote the view back to regular pages so NT semantics stay correct </td>
+</tr>
+<tr>
+<td> <code>MEM_RESET</code> under <code>mlockall()</code> </td>
+<td> <code>MEM_RESET</code> now uses <code>munlock + MADV_DONTNEED</code>, so pages can really leave RAM before their next touch </td>
 </tr>
 <tr>
 <td> local file-backed sections </td>
@@ -251,10 +265,10 @@ guessed at.</p>
 
 <h2 id="4-large-page-allocation-and-mapping">4. Large-page allocation and mapping</h2>
 
-<p>Large-page support now has three shipped shapes: explicit Windows large-page
-APIs, RT-keyed anonymous-memory promotion, and heap-arena backing that rides on
-that same anonymous path. Section-backed mappings remain the one large-page
-shape that still crosses wineserver once for backing creation.</p>
+<p>Large-page support now has three shipped allocation shapes: explicit Windows
+large-page APIs, RT-keyed anonymous-memory promotion, and heap-arena backing
+that rides on that same anonymous path. Section-backed mappings remain the one
+large-page shape that still crosses wineserver once for backing creation.</p>
 
 <div class="diagram-container">
 <svg width="100%" viewBox="0 0 960 430" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
@@ -337,6 +351,81 @@ shape that still crosses wineserver once for backing creation.</p>
 <p>That last point matters. The feature is not just about getting <code>mmap()</code>
 flags accepted. It is about keeping the Windows-visible memory story coherent
 from allocation to reporting.</p>
+
+<h3 id="41-automatic-hugetlb-promotion-safety-rules">4.1 Automatic hugetlb promotion safety rules</h3>
+
+<p>Transparent promotion is shipped as an optimization, not as a new Windows API.
+That means the fast path also needs a clear &ldquo;stay honest&rdquo; rule set:</p>
+
+<ul>
+<li>if the free hugetlb pool drops below 10%, stop auto-promoting and leave the
+reserve for explicit large-page callers</li>
+<li>if an auto-promoted allocation hits pool exhaustion anyway, fall back to
+regular pages and succeed instead of failing the ordinary allocation</li>
+<li>if an app later performs a sub-hugepage partial operation on an
+auto-promoted view, demote that view back to regular pages first so
+<code>MEM_DECOMMIT</code>, <code>MEM_RELEASE</code>, and <code>VirtualProtect</code> retain NT semantics</li>
+<li>if <code>MEM_RESET</code> runs under <code>mlockall()</code>, unlock before <code>MADV_DONTNEED</code> so the
+kernel can actually reclaim the pages</li>
+</ul>
+
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 960 380" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
+  <style>
+    .ha-bg { fill: #1a1b26; }
+    .ha-box { fill: #24283b; stroke: #7aa2f7; stroke-width: 1.7; rx: 8; }
+    .ha-green { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.7; rx: 8; }
+    .ha-yellow { fill: #2a2418; stroke: #e0af68; stroke-width: 1.7; rx: 8; }
+    .ha-purple { fill: #2a2137; stroke: #bb9af7; stroke-width: 1.7; rx: 8; }
+    .ha-title { fill: #7aa2f7; font-size: 14px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .ha-label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+    .ha-small { fill: #a9b1d6; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+    .ha-tag-g { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .ha-tag-y { fill: #e0af68; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .ha-tag-p { fill: #bb9af7; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .ha-line-g { stroke: #9ece6a; stroke-width: 1.2; fill: none; }
+    .ha-line-b { stroke: #7aa2f7; stroke-width: 1.2; fill: none; }
+    .ha-line-y { stroke: #e0af68; stroke-width: 1.2; fill: none; }
+  </style>
+
+  <rect x="0" y="0" width="960" height="380" class="ha-bg" rx="6"/>
+  <text x="480" y="26" text-anchor="middle" class="ha-title">Automatic hugetlb promotion: promote when safe, demote or fall back when not</text>
+
+  <rect x="50" y="76" width="220" height="92" class="ha-green" rx="6"/>
+  <text x="160" y="102" text-anchor="middle" class="ha-tag-g">eligible alloc</text>
+  <text x="160" y="124" text-anchor="middle" class="ha-label">anonymous `RESERVE|COMMIT`</text>
+  <text x="160" y="144" text-anchor="middle" class="ha-small">RW or RWX, RT gate enabled, size and alignment fit</text>
+
+  <rect x="330" y="76" width="280" height="110" class="ha-box" rx="6"/>
+  <text x="470" y="102" text-anchor="middle" class="ha-label">promotion checks</text>
+  <text x="470" y="124" text-anchor="middle" class="ha-small">free-pool watermark: refuse below 10%</text>
+  <text x="470" y="140" text-anchor="middle" class="ha-small">pool exhaust on auto-promote: retry on regular pages</text>
+  <text x="470" y="156" text-anchor="middle" class="ha-small">explicit large-page callers still keep fail-fast semantics</text>
+
+  <rect x="670" y="76" width="240" height="92" class="ha-green" rx="6"/>
+  <text x="790" y="102" text-anchor="middle" class="ha-tag-g">steady state</text>
+  <text x="790" y="124" text-anchor="middle" class="ha-label">hugetlb-backed view</text>
+  <text x="790" y="144" text-anchor="middle" class="ha-small">or regular-page fallback if transparent promotion was refused</text>
+
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="270" y1="122" x2="330" y2="122" class="ha-line-g"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="610" y1="122" x2="670" y2="122" class="ha-line-b"/>
+
+  <rect x="120" y="236" width="300" height="92" class="ha-purple" rx="6"/>
+  <text x="270" y="262" text-anchor="middle" class="ha-tag-p">partial-op guard</text>
+  <text x="270" y="284" text-anchor="middle" class="ha-label">sub-hugepage decommit / release / protect</text>
+  <text x="270" y="304" text-anchor="middle" class="ha-small">demote auto-promoted view before the NT operation runs</text>
+
+  <rect x="540" y="236" width="300" height="92" class="ha-yellow" rx="6"/>
+  <text x="690" y="262" text-anchor="middle" class="ha-tag-y">reclaim guard</text>
+  <text x="690" y="284" text-anchor="middle" class="ha-label">`MEM_RESET` under `mlockall()`</text>
+  <text x="690" y="304" text-anchor="middle" class="ha-small">`munlock + MADV_DONTNEED` so the page can really leave RAM</text>
+
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="470" y1="186" x2="270" y2="236" class="ha-line-b"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="470" y1="186" x2="690" y2="236" class="ha-line-y"/>
+</svg>
+</div>
+
 
 <hr />
 
@@ -517,8 +606,12 @@ targeted shell harnesses:</p>
 <li><code>mlockall()</code> under <code>NSPA_RT_PRIO</code> cut perf page faults from <code>561/s</code> to
 <code>451/s</code>, cut bpf page faults from <code>869/s</code> to <code>629/s</code>, and tightened max
 futex wait from <code>94us</code> to <code>49us</code>, with <code>VmLck</code> around <code>300848kB</code>.</li>
-<li>transparent hugetlb auto-promotion stayed conservative and is now keyed only
+<li>automatic hugetlb promotion stayed conservative and is now keyed only
 off <code>NSPA_RT_PRIO</code>; the cleanup pass ended with <code>test-huge-auto.sh</code> <code>3/3 PASS</code>.</li>
+<li>the demote / fallback / reclaim follow-ons are now also on the shipped path:
+<code>test-huge-decommit.sh</code> validates zero-on-recommit after partial decommit,
+<code>test-huge-rwx.sh</code> validates RWX JIT-style promotion, and pool-pressure cases
+now fall back instead of failing an ordinary allocation</li>
 <li>heap arena hugetlb backing increased hugepage regions from <code>3</code> or <code>6</code> to
 <code>104</code>, reduced dTLB miss / insn to <code>0.071%</code>, reduced <code>mmap</code> rate from
 <code>33-61/s</code> to <code>0.13/s</code>, reduced <code>mprotect</code> rate from <code>56-90/s</code> to <code>0.03/s</code>,
@@ -558,8 +651,12 @@ and reduced page-faults from <code>753-869/s</code> to <code>2.8/s</code>.</li>
 <td> <code>GetLargePageMinimum()</code> </td>
 </tr>
 <tr>
+<td> <code>dlls/ntdll/unix/nspa/huge_auto.c</code> </td>
+<td> automatic hugetlb-promotion eligibility, watermarking, and demote helper for auto-promoted views </td>
+</tr>
+<tr>
 <td> <code>dlls/ntdll/unix/virtual.c</code> </td>
-<td> anonymous large-page allocation, transparent hugetlb promotion, large-page view tracking, <code>QueryWorkingSetEx()</code> reporting </td>
+<td> anonymous large-page allocation, automatic hugetlb promotion, fallback and demote call sites, <code>MEM_RESET</code>, large-page view tracking, <code>QueryWorkingSetEx()</code> reporting </td>
 </tr>
 <tr>
 <td> <code>dlls/ntdll/unix/process.c</code> </td>

@@ -329,6 +329,13 @@ handle to an fd with `get_inproc_sync()`, collects an optional alert
 fd, adds the optional `io_uring` eventfd, and then calls
 `linux_wait_objs()`.
 
+One special-case shipped above that common helper: `WaitForSingleObject(process,
+0)` can now answer from the published `process_shm` snapshot before any ntsync
+or server wait path runs. If the process is still alive the call returns
+timeout locally; if the exit code is published it returns signaled locally. The
+ordinary blocking and multi-object wait shapes still go through the ntsync path
+described here.
+
 The full wait path is therefore a *userspace + kernel* design:
 
 - ntdll does handle-to-fd resolution and cache management

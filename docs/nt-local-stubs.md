@@ -16,7 +16,7 @@ surfaces built on it.
     2. [anonymous local events -- `NtCreateEvent` fast path](#72-anonymous-local-events--ntcreateevent-fast-path)
     3. [`nspa_local_timer` -- `NtSetTimer` fast path](#73-nspa_local_timer--ntsettimer-fast-path)
     4. [`nspa_local_wm_timer` -- `WM_TIMER` dispatcher](#74-nspa_local_wm_timer--wm_timer-dispatcher)
-8. [Future stubs (roadmap)](#8-future-stubs-roadmap)
+8. [Stub boundaries and adjacent surfaces](#8-stub-boundaries-and-adjacent-surfaces)
 9. [Connection to wineserver decomposition](#9-connection-to-wineserver-decomposition)
 10. [References](#10-references)
 
@@ -43,7 +43,7 @@ arbitration is required. Each stub picks an NT surface, owns its own
 data structures (a private handle range, a per-process table, a shmem
 region, a dispatcher thread), and short-circuits the server when it can.
 
-The pattern is already shipping. As of 2026-05-05 there are four live
+The pattern is already shipping. As of 2026-05-06 there are four live
 NT-local stub surfaces in tree:
 
 | Stub | NT surface | Lives in |
@@ -133,10 +133,8 @@ NT-local stub surfaces in tree:
 Each stub is independent -- they do not share state and do not coordinate.
 Together they
 form a *strategy*: shrink wineserver request-by-request, until the
-handlers that remain are honest and small. The end state -- which is
-the long arc of `wine/nspa/docs/wineserver-decomposition-plan.md` -- is
-a metadata service for cross-process arbitration only, not an application
-server.
+handlers that remain are honest and small. The end state is a metadata
+service for cross-process arbitration only, not an application server.
 
 ---
 
@@ -365,15 +363,16 @@ References:
 | `nspa_local_file` | `nspa_local_file_get_or_promote_server_handle` (`dlls/ntdll/unix/nspa/local_file.c:1414`) | `nspa_create_file_from_unix_fd` |
 | `nspa_local_file` (sections) | `NtCreateSection` intercept | `nspa_create_mapping_from_unix_fd` |
 | NTSync direct-sync | client-range handle promote on dup | existing wineserver `dup_handle` |
-| `nspa_local_timer` | (none -- backing event is server-allocated up front) | `NtCreateEvent` |
+| `nspa_local_timer` | (none -- anonymous backing event is client-created on the local-event path) | none on the eligible path |
 | `nspa_local_wm_timer` | (none -- pure shmem dispatch) | n/a |
 
 Notice that the `nspa_local_timer` stub takes a different design:
-rather than returning a private handle and lazily promoting, it
-returns a server-allocated `NtCreateEvent` handle from the start.
-The bypass is in the *expiry path* (zero-RTT `NtSetEvent` instead of
-a server timer-fire), not in the *creation path*. Same goal -- avoid
-RPCs on the hot path -- different mechanics. Per-stub design choice.
+rather than returning a private timer handle and lazily promoting, it
+keeps the timer's backing event on the shipped anonymous local-event
+path when the call stays inside the local envelope. The bypass is still
+in the *expiry path* (zero-RTT `NtSetEvent` instead of a server
+timer-fire), not in the *creation path*. Same goal -- avoid RPCs on the
+hot path -- different mechanics. Per-stub design choice.
 
 ---
 
@@ -650,12 +649,10 @@ The bypass is still in the *firing* path. On expiry the timer code issues
 client-range by default, expiry stays entirely on the local fast path unless
 the event later crosses into a server-managed async surface.
 
-**Dispatch host:** when RT is available and
-`NSPA_SCHED_USE_FOR_LOCAL_TIMER` is left at its default setting, timer expiry
-is hosted on the shared `wine-sched-rt` thread instead of a dedicated helper
-pthread. The priority class stays the same (`SCHED_FIFO` at
-`NSPA_RT_PRIO - 1`); the win is consolidation and shared infrastructure, not a
-different scheduler policy.
+**Dispatch host:** when RT is available, timer expiry is hosted on the shared
+`wine-sched-rt` thread instead of a dedicated helper pthread. The priority
+class stays the same (`SCHED_FIFO` at `NSPA_RT_PRIO - 1`); the win is
+consolidation and shared infrastructure, not a different scheduler policy.
 
 **Eligibility:** anonymous only (`!attr->ObjectName`). Named timers
 fall through to the server because their cross-process visibility
@@ -675,9 +672,6 @@ the deadline queue. `fire_timer` (which calls `NtSetEvent` and
 `NtQueueApcThread`) runs *outside* the lock with a refcount on the
 entry. The dispatcher loop at `local_timer.c:346-437` is the
 canonical drop-fire-reacquire pattern.
-
-**Scheduler boundary:** `NSPA_SCHED_USE_FOR_LOCAL_TIMER=0` keeps the
-older dedicated RT helper thread instead of the shared sched host.
 
 ### 7.4 `nspa_local_wm_timer` -- `WM_TIMER` dispatcher
 
@@ -746,9 +740,6 @@ without taking the lock -- the slot's state byte is the
 synchronisation point with the consumer. The dispatcher does not
 issue any wineserver RPC.
 
-**Scheduler boundary:** `NSPA_SCHED_USE_FOR_WM_TIMER=0` keeps the
-older dedicated RT helper thread instead of the shared sched host.
-
 **2026-04-30 follow-up:** [`78947c1`](https://github.com/nine7nine/Wine-NSPA/commit/78947c1)
 tightened the eligibility predicate so `TIMERPROC` and cross-thread
 `SetTimer` cases now refuse the stub and defer to the server. That is
@@ -758,48 +749,29 @@ to the authoritative server path.
 
 ---
 
-## 8. Future stubs (roadmap)
+## 8. Stub boundaries and adjacent surfaces
 
-The pattern is generalisable. A handful of high-volume NT surfaces
-remain in the server today; each is a candidate for a future stub.
+Not every client-side carry in Wine-NSPA is an NT-local stub, and not every
+case within a stubbed surface stays local.
 
-**`NtQueryDirectoryFile`.** Directory enumerations dominate certain
-workloads (file dialogs, plugin scanners, installers). A stub backed
-by a per-process directory-handle table and `getdents64` syscalls,
-returning a private handle range, is a natural extension of the
-local-file bypass. Eligibility predicate: read-only directory open,
-no notify, single-process consumer. Cross-process visibility is not
-a concern -- directory contents are filesystem state, the kernel is
-the source of truth, no wineserver mediation is needed once the
-handle is in our table.
+**Named or cross-process boundaries stay server-owned.** The shipped
+local-section path is intentionally limited to eligible unnamed file-backed
+sections in one process. Named sections, cross-process duplication, and image
+mapping semantics still cross back into wineserver because that is where the
+authoritative naming and handle-coordination rules live.
 
-**`NtFsControlFile` for named-pipe and registry ops.** Many FSCTLs
-(query mountpoint, query partition, registry queries) are read-only
-and don't need server arbitration. Per-FSCTL stubbing is feasible.
+**Message dispatch is adjacent, not the same pattern.** Same-process
+`PostMessage` / `SendMessage`, the redraw push ring, paint-cache, and the
+`get_message` empty-poll cache all move traffic out of wineserver, but they do
+it through per-queue shared memory rather than a private NT handle range. That
+surface is documented separately on [msg-ring-architecture](msg-ring-architecture.gen.html).
 
-**Richer section and mapping cases.** The shipped local-section path
-already absorbs eligible unnamed file-backed sections in the same
-process. What still remains server-owned is the harder edge of the
-surface: named sections, cross-process duplication, and image-mapping
-semantics.
-
-**More message-queue carve-outs.** The `nspa_msg_ring` v2 work
-(see `MEMORY.md` indices) is a stub-shaped bypass for message
-posting and peeking. The direct `get_message` bypass continues this
-direction: the shipped bucketing diagnostic
-(`project_msg_ring_v2_phase_c_stage1_validated`) identified that
-server-generated `WM_PAINT` / hardware / winevent messages dominate
-the Ableton workload's get_message traffic. A stub for those classes
-would push the consumer side fully off the server's `find_msg_to_get`
-path.
-
-**Timer further work.** The `NtSetTimerEx` variant with completion
-ports is currently always server-routed. A completion-port-aware
-local-timer stub would extend `nspa_local_timer` to handle that
-case, at the cost of building a per-process completion-port-mux.
-
-The roadmap section of `wineserver-decomposition-plan.md` has the
-broader timeline; this list is the NT-local-stub-shaped subset.
+**Timer callbacks keep an honest server boundary.** The shipped
+`local_wm_timer` path refuses `TIMERPROC` and cross-thread `SetTimer` cases,
+and the anonymous local-timer path still leaves completion-port variants on the
+server path. The rule stays the same across every stub: if the local envelope
+cannot model the Win32 semantics exactly, the original server path remains in
+charge.
 
 ---
 
@@ -816,28 +788,12 @@ highest-frequency NT calls (file opens, anonymous timers, owner-
 process WM_TIMERs); the channel traffic is shrinking in those
 classes.
 
-**Mid-term:** as more stubs ship -- directory enumeration,
-named-pipe FSCTLs, named or cross-process section cases -- the channel traffic that
-remains in the server is exactly the cross-process arbitration set
-of §4 of the decomposition plan. At that point the §3.2
-"router/handler split" of the decomposition plan becomes natural:
-the router's "fast-path" is just "pass to a stub if a stub claims
-the call". Most of the codebase is already structured this way --
-the stub call is the first thing the NT entry point does, so the
-"router" is the current control flow. Decomposition becomes folding
-existing handlers into nt-local stubs, not rewriting wineserver.
-
-**End-state:** wineserver is a metadata service. Cross-process
-object naming, process / thread lifecycle, handle inheritance,
-NT-specific path resolution -- the §4 list. At that point the §3.4
-"lock partitioning" question is not "should we" but "is it worth
-the audit". If the metadata service is doing < 0.5% CPU end-to-end
-under audio + UI load, the answer is probably no -- and the lock
-stays a single global pi_mutex_t because there's nothing left to
-contend on.
-
-**The migration is complete when wineserver is small enough that it is
-no longer a meaningful hot-path component.**
+The current architectural consequence is straightforward: the router/handler
+split described on the wineserver-decomposition page gets a smaller and cleaner
+problem because the NT entry points for files, local sections, anonymous
+events, and eligible timers already try the client-local path first. The more
+traffic those shipped stubs absorb, the less residual work remains under the
+server's global lock.
 
 ---
 
@@ -857,7 +813,6 @@ no longer a meaningful hot-path component.**
 | `dlls/win32u/nspa/local_wm_timer.c:227` | `publish_timer_slot` (peer-shmem ring write) |
 | `dlls/win32u/nspa/local_wm_timer.c:457` | `nspa_local_wm_timer_set` (cross-process refusal) |
 | `dlls/win32u/message.c:4694` | `NtUserSetTimer` call-site for WM_TIMER stub |
-| `wine/nspa/docs/wineserver-decomposition-plan.md` | Long-arc decomposition plan (NT-local stubs are §3.x) |
-| `wine/nspa/docs/wine-nspa-lockup-audit-20260427.md` | Lock-discipline audit confirming every stub holds locks briefly |
-| `wine/nspa/docs/local-file-bypass-design.md` | Original design doc for the local-file bypass |
-| `MEMORY.md: project_msg_ring_v2_phase_c_stage1_validated` | msg-ring bucketing diag (basis for future message-queue stubs) |
+| `wineserver-decomposition.gen.html` | Residual wineserver problem after the shipped stub set |
+| `client-scheduler-architecture.gen.html` | Shared sched host that now runs eligible local timer work |
+| `msg-ring-architecture.gen.html` | Adjacent message-queue bypasses that complement the stub model |

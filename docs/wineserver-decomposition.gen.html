@@ -172,17 +172,20 @@ bypasses and the remaining decomposition roadmap.</p>
 </ul>
 
 
-<p>The audience this doc is written for: a developer who has read the bypass overview, has skimmed the gamma-channel-dispatcher and ntsync split docs, and wants to understand the architectural arc that the bypass work <em>enables</em>. If you&rsquo;re implementing a single bypass and want a checklist, read the bypass detail doc for that bypass; if you&rsquo;re implementing one roadmap slice from this page, read the in-tree handoff doc (<code>wine/nspa/docs/wineserver-decomposition-plan.md</code>) which has line-level kernel landmarks. This doc is the why, not the how.</p>
+<p>The audience this doc is written for: a developer who has read the bypass overview, has skimmed the gamma-channel-dispatcher and ntsync split docs, and wants to understand the architectural arc that the bypass work <em>enables</em>. If you&rsquo;re implementing a single bypass and want a checklist, read the bypass detail doc for that bypass. This doc is the why, not the how.</p>
 
-<p>The main 2026-05-03 correction is scope: some of the work this page once
+<p>The main 2026-05-06 correction is scope: some of the work this page once
 treated as &ldquo;future wineserver-internal decomposition pressure&rdquo; is now
 already shipping client-side. Timer dispatch for eligible local timers and
 <code>WM_TIMER</code>s lives on the per-process scheduler host, anonymous events no
 longer require a server-created helper object by default, and PE-side socket
 deferred I/O is already on client <code>io_uring</code> rings. On top of that, local-file
 follow-ons and client-side local sections now retire more <code>create_file</code>,
-mapping, and metadata traffic before it ever becomes wineserver work. That
-does <strong>not</strong> make the decomposition plan obsolete. It means the residual
+mapping, and metadata traffic before it ever becomes wineserver work. The
+2026-05-06 shared-state readers remove another slice of read-mostly
+thread/process query traffic, and the shipped <code>get_message</code> empty-poll cache
+cuts repeated empty queue polls before they become handler work. That does
+<strong>not</strong> make the decomposition plan obsolete. It means the residual
 wineserver problem is smaller and more concentrated than it was when this page
 was first drafted.</p>
 
@@ -264,7 +267,7 @@ residual server-owned timer queue, not the whole timer surface.</p>
 
 <p>NSPA addresses the wineserver bottleneck along two complementary directions, and this doc is about the second one. They are not alternatives &ndash; they compose.</p>
 
-<p><strong>Direction A: move state out.</strong> Each NSPA bypass picks a class of NT-API state, hosts it in the client process via a local stub or kernel-mediated primitive, and falls back to the server only when the bypass envelope is exceeded. Sync primitives go to NTSync. File and socket I/O go to <code>io_uring</code>. Hooks get a Tier 1+2 cache. Read-only file opens go to local_file. Anonymous events and eligible timers now live on client-local stubs and scheduler hosts. Cross-thread same-process messages go through msg-ring. Each bypass shrinks the residual surface that wineserver still has to authoritatively serve.</p>
+<p><strong>Direction A: move state out.</strong> Each NSPA bypass picks a class of NT-API state, hosts it in the client process via a local stub or kernel-mediated primitive, and falls back to the server only when the bypass envelope is exceeded. Sync primitives go to NTSync. File and socket I/O go to <code>io_uring</code>. Hooks get a Tier 1+2 cache. Read-only file opens go to local_file. Anonymous events and eligible timers now live on client-local stubs and scheduler hosts. Cross-thread same-process messages go through msg-ring, and repeated empty queue polls now short-circuit in the client. Read-mostly thread/process queries and zero-time process waits now hit server-published snapshots first. Each bypass shrinks the residual surface that wineserver still has to authoritatively serve.</p>
 
 <p><strong>Direction B: restructure what remains.</strong> Once the residual surface is small enough, wineserver can be split into multiple cooperating threads with finer-grained locks. The split has three components:</p>
 
@@ -502,7 +505,7 @@ to wineserver&rsquo;s authoritative domain.</p>
 
 <p>Today, the main loop is RT and spends most of its time blocked in <code>poll()</code> or <code>epoll_wait()</code>. The wait itself doesn&rsquo;t actually need RT priority &ndash; only the <em>response</em> to the wait does. RT priority matters for the work that happens after the wait returns, not for the act of sleeping in the kernel.</p>
 
-<p>The 2026-05-02 through 2026-05-05 shipped follow-ons narrow this split&rsquo;s
+<p>The 2026-05-02 through 2026-05-06 shipped follow-ons narrow this split&rsquo;s
 motivation. Deferred socket recv/send no longer depend on wineserver fd wakeups
 in the common PE path because they already submit <code>IORING_OP_RECVMSG</code> /
 <code>IORING_OP_SENDMSG</code> from the client side. Local sections and widened local-file
@@ -839,7 +842,6 @@ descriptors that remain after those client-side surfaces have peeled away.</p>
 <li><code>ntsync-userspace.gen.html</code> &ndash; the Wine in-process sync page that pairs with the kernel overlay.</li>
 <li><code>nspa-local-file-architecture.gen.html</code>, <code>msg-ring-architecture.gen.html</code>, <code>io_uring-architecture.gen.html</code>, <code>cs-pi.gen.html</code>, <code>condvar-pi-requeue.gen.html</code> &ndash; the per-subsystem detail docs whose work composes with the decomposition arc.</li>
 <li><code>architecture.gen.html</code> &ndash; the integrated NSPA architecture overview; this doc is the wineserver-internals lens of that architecture.</li>
-<li>In-tree handoff: <code>wine/nspa/docs/wineserver-decomposition-plan.md</code> &ndash; the session-handoff version of this plan, with line-level kernel landmarks and active-session details. Use that doc when implementing the queued and long-horizon splits; use this doc when reasoning about the trajectory.</li>
 </ul>
 
 

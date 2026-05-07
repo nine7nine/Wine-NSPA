@@ -9,7 +9,7 @@ current consumers routed through them.
 2. [Thread model](#2-thread-model)
 3. [API surface](#3-api-surface)
 4. [Shipped consumers](#4-shipped-consumers)
-5. [Validation and gates](#5-validation-and-gates)
+5. [Validation and current controls](#5-validation-and-current-controls)
 6. [Relationship to the rest of Wine-NSPA](#6-relationship-to-the-rest-of-wine-nspa)
 7. [References](#7-references)
 
@@ -334,17 +334,19 @@ This sampler remains default OFF.
 
 ---
 
-## 5. Validation and gates
+## 5. Validation and current controls
 
 The public status here is based on targeted validation of the shipped
 consumers, not on a new full-suite publish.
 
-| Item | Default | Override | Validation state |
-|---|---|---|---|
-| `NSPA_USE_SCHED_THREAD` | `1` | `NSPA_USE_SCHED_THREAD=0` | shipped default ON after async close queue landed and Ableton validation held |
-| `NSPA_SCHED_USE_FOR_WM_TIMER` | ON when RT available | `NSPA_SCHED_USE_FOR_WM_TIMER=0` | shipped default ON; part of the 10/10 RT-probe regression pass |
-| `NSPA_SCHED_USE_FOR_LOCAL_TIMER` | ON when RT available | `NSPA_SCHED_USE_FOR_LOCAL_TIMER=0` | shipped default ON; part of the 10/10 RT-probe regression pass |
-| `NSPA_SCHED_OBS_INTERVAL_MS` | OFF | set positive integer ms | shipped opt-in sampler |
+The shipped scheduler consumers no longer expose per-feature opt-out gates in
+the public surface. Async close routing, `local_timer`, and `local_wm_timer`
+all run on the normal path when their own eligibility checks pass and RT is
+available. The one remaining public control here is the optional sampler:
+
+| Item | Default | Purpose |
+|---|---|---|
+| `NSPA_SCHED_OBS_INTERVAL_MS` | OFF | opt-in scheduler-host sampler for observability only |
 
 Targeted 2026-05-02 results:
 

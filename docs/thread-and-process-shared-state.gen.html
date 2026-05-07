@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Wine-NSPA -- Thread and Process Shared-State Bypass</title>
+<style>
+  :root {
+    --bg: #1a1b26; --fg: #c0caf5; --accent: #7aa2f7;
+    --green: #9ece6a; --red: #f7768e; --yellow: #e0af68;
+    --surface: #24283b; --border: #3b4261; --muted: #8c92b3;
+    --purple: #bb9af7; --orange: #ff9e64; --cyan: #7dcfff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+    background: var(--bg); color: var(--fg);
+    max-width: 1100px; margin: 0 auto; padding: 2rem 1.5rem;
+    line-height: 1.7;
+  }
+  .page-nav {
+    display: flex;
+    justify-content: flex-end;
+    margin-bottom: 0.5rem;
+  }
+  .page-nav a {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.35rem 0.7rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: rgba(36, 40, 59, 0.9);
+    color: var(--accent);
+    font-size: 0.78rem;
+    line-height: 1;
+  }
+  .page-nav a:hover {
+    background: var(--surface);
+    color: var(--cyan);
+    text-decoration: none;
+  }
+  h1 { color: var(--accent); font-size: 1.5rem; margin: 1.5rem 0 0.5rem; }
+  h2 { color: var(--accent); font-size: 1.2rem; margin: 2rem 0 0.75rem;
+       border-bottom: 1px solid var(--border); padding-bottom: 0.3rem; }
+  h3 { color: var(--yellow); font-size: 1rem; margin: 1.25rem 0 0.5rem; }
+  h4 { color: var(--cyan); font-size: 0.95rem; margin: 1rem 0 0.4rem; }
+  p, li { font-size: 0.85rem; margin-bottom: 0.5rem; }
+  ul, ol { padding-left: 1.5rem; margin-bottom: 0.75rem; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  table {
+    width: 100%; border-collapse: collapse;
+    margin: 0.75rem 0 1rem; font-size: 0.8rem;
+  }
+  th, td {
+    padding: 0.4rem 0.75rem; text-align: left;
+    border: 1px solid var(--border);
+  }
+  th { background: var(--surface); color: var(--accent); font-weight: 600; }
+  td { background: var(--bg); }
+  code {
+    background: var(--surface); padding: 0.15rem 0.4rem;
+    border-radius: 3px; font-size: 0.82rem; color: var(--cyan);
+  }
+  pre {
+    background: var(--surface); padding: 1rem 1.1rem; border-radius: 8px;
+    overflow-x: auto; margin: 0.75rem 0 1rem;
+    border: 1px solid var(--border);
+  }
+  pre code {
+    display: block; background: transparent; padding: 0;
+    font-size: 0.8rem; color: inherit;
+  }
+  pre code.hljs,
+  code.hljs {
+    background: transparent;
+    padding: 0;
+  }
+  blockquote {
+    background: var(--surface); border-left: 3px solid var(--accent);
+    padding: 0.75rem 1rem; margin: 1rem 0; border-radius: 0 4px 4px 0;
+    font-size: 0.82rem;
+  }
+  blockquote strong { color: var(--yellow); }
+  hr { border: none; border-top: 1px solid var(--border); margin: 2rem 0; }
+  strong { color: var(--fg); }
+  em { color: var(--muted); font-style: italic; }
+  .diagram-container {
+    display: flex; justify-content: center;
+    margin: 1.25rem auto 1.5rem; padding: 0.75rem;
+    background: rgba(36, 40, 59, 0.55);
+    border: 1px solid var(--border); border-radius: 10px;
+    overflow-x: auto;
+  }
+  .diagram-container svg {
+    display: block;
+    width: 100% !important;
+    max-width: 100%;
+    height: auto !important;
+    margin: 0 auto;
+    flex: 0 0 auto;
+  }
+</style>
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/tokyo-night-dark.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
+</head><body>
+<div class="page-nav"><a href="index.html">Docs Home</a></div>
+<h1 id="wine-nspa--thread-and-process-shared-state-bypass">Wine-NSPA &ndash; Thread and Process Shared-State Bypass</h1>
+
+<p>This page documents the shipped shared-state bypass for read-mostly thread and
+process queries, plus the zero-time process-wait fast path built on the same
+published process snapshot.</p>
+
+<h2 id="table-of-contents">Table of Contents</h2>
+
+<ol>
+<li><a href="#1-overview">Overview</a></li>
+<li><a href="#2-what-is-shipped">What is shipped</a></li>
+<li><a href="#3-architecture">Architecture</a></li>
+<li><a href="#4-thread-query-coverage">Thread query coverage</a></li>
+<li><a href="#5-process-query-coverage-and-zero-time-wait">Process query coverage and zero-time wait</a></li>
+<li><a href="#6-correctness-boundaries">Correctness boundaries</a></li>
+<li><a href="#7-related-docs">Related docs</a></li>
+</ol>
+
+
+<hr />
+
+<h2 id="1-overview">1. Overview</h2>
+
+<p>Wine already had an upstream shared-object publication mechanism for queue,
+window, class, input, and desktop state. Wine-NSPA now extends that same
+seqlock-published shape to thread and process state, so a set of
+<code>NtQueryInformationThread()</code> and <code>NtQueryInformationProcess()</code> classes can be
+answered from shared memory instead of a wineserver RPC.</p>
+
+<p>The same process snapshot also powers a new <code>WaitForSingleObject(process, 0)</code>
+fast path. For zero-timeout liveness polls, ntdll can answer from the shared
+process exit code instead of paying an ntsync wait ioctl.</p>
+
+<hr />
+
+<h2 id="2-what-is-shipped">2. What is shipped</h2>
+
+<table>
+<thead>
+<tr>
+<th> Surface </th>
+<th> Shipped behavior </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> Thread shared-state publication </td>
+<td> wineserver publishes a per-thread shared object with seqlock update discipline and a per-handle locator RPC (<code>get_thread_shm</code>) for first resolve </td>
+</tr>
+<tr>
+<td> Process shared-state publication </td>
+<td> wineserver publishes a per-process shared object with the same seqlock shape and a matching first-resolve RPC (<code>get_process_shm</code>) </td>
+</tr>
+<tr>
+<td> Thread query bypass </td>
+<td> 7 <code>NtQueryInformationThread()</code> classes are served shmem-first with RPC fallback </td>
+</tr>
+<tr>
+<td> Process query bypass </td>
+<td> 6 <code>NtQueryInformationProcess()</code> classes are served shmem-first with RPC fallback </td>
+</tr>
+<tr>
+<td> Zero-time process wait </td>
+<td> <code>WaitForSingleObject(process, 0)</code> can answer from <code>process_shm</code> and skip the ntsync ioctl on a hit </td>
+</tr>
+<tr>
+<td> Cache discipline </td>
+<td> first use resolves the locator once; later reads are local; stale-slot detection and negative-cache entries force safe fallback instead of silent drift </td>
+</tr>
+</tbody>
+</table>
+
+
+<p>The shipped query coverage is:</p>
+
+<ul>
+<li>Thread: <code>ThreadAffinityMask</code>, <code>ThreadQuerySetWin32StartAddress</code>,
+<code>ThreadGroupInformation</code>, <code>ThreadIsTerminated</code>, <code>ThreadSuspendCount</code>,
+<code>ThreadHideFromDebugger</code>, <code>ThreadPriorityBoost</code></li>
+<li>Process: <code>ProcessBasicInformation</code>, <code>ProcessTimes</code>, <code>ProcessPriorityBoost</code>,
+<code>ProcessAffinityMask</code>, <code>ProcessSessionInformation</code>, <code>ProcessPriorityClass</code></li>
+</ul>
+
+
+<p><code>ThreadBasicInformation</code> is intentionally left on the server path. The existing
+reply applies server-side transforms that are not mirrored in the published
+snapshot, so the public design keeps that one class authoritative instead of
+adding a special-case partial mirror.</p>
+
+<hr />
+
+<h2 id="3-architecture">3. Architecture</h2>
+
+<p>The bypass has two layers:</p>
+
+<ol>
+<li>wineserver publishes thread and process snapshots inside the existing shared
+object union, using the normal seqlock write protocol</li>
+<li>ntdll resolves a handle to its published object once, caches the locator,
+then serves later queries from a single seqlock snapshot read</li>
+</ol>
+
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 960 420" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
+  <style>
+    .sb-bg { fill: #1a1b26; }
+    .sb-box { fill: #24283b; stroke: #7aa2f7; stroke-width: 1.7; rx: 8; }
+    .sb-green { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.7; rx: 8; }
+    .sb-purple { fill: #2a2137; stroke: #bb9af7; stroke-width: 1.7; rx: 8; }
+    .sb-yellow { fill: #2a2418; stroke: #e0af68; stroke-width: 1.7; rx: 8; }
+    .sb-title { fill: #7aa2f7; font-size: 14px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .sb-label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+    .sb-small { fill: #a9b1d6; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+    .sb-tag-g { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .sb-tag-p { fill: #bb9af7; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .sb-tag-y { fill: #e0af68; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .sb-line-b { stroke: #7aa2f7; stroke-width: 1.2; fill: none; }
+    .sb-line-p { stroke: #bb9af7; stroke-width: 1.2; fill: none; }
+    .sb-line-g { stroke: #9ece6a; stroke-width: 1.2; fill: none; }
+  </style>
+
+  <rect x="0" y="0" width="960" height="420" class="sb-bg" rx="6"/>
+  <text x="480" y="26" text-anchor="middle" class="sb-title">Shared-state query bypass: one resolve RPC, then local seqlock reads</text>
+
+  <rect x="40" y="70" width="210" height="78" class="sb-box" rx="6"/>
+  <text x="145" y="96" text-anchor="middle" class="sb-label">Win32 query call site</text>
+  <text x="145" y="118" text-anchor="middle" class="sb-small">NtQueryInformationThread / Process</text>
+  <text x="145" y="134" text-anchor="middle" class="sb-small">same handle may be queried repeatedly</text>
+
+  <rect x="300" y="70" width="220" height="96" class="sb-purple" rx="6"/>
+  <text x="410" y="96" text-anchor="middle" class="sb-tag-p">first use only</text>
+  <text x="410" y="118" text-anchor="middle" class="sb-label">resolve shared object</text>
+  <text x="410" y="138" text-anchor="middle" class="sb-small">`get_thread_shm` / `get_process_shm` returns locator</text>
+  <text x="410" y="154" text-anchor="middle" class="sb-small">locator id cached with object pointer</text>
+
+  <rect x="570" y="70" width="220" height="96" class="sb-green" rx="6"/>
+  <text x="680" y="96" text-anchor="middle" class="sb-tag-g">steady state</text>
+  <text x="680" y="118" text-anchor="middle" class="sb-label">single seqlock snapshot read</text>
+  <text x="680" y="138" text-anchor="middle" class="sb-small">thread/process fields copied locally</text>
+  <text x="680" y="154" text-anchor="middle" class="sb-small">class-specific reply built without wineserver</text>
+
+  <rect x="320" y="236" width="320" height="110" class="sb-box" rx="6"/>
+  <text x="480" y="262" text-anchor="middle" class="sb-label">server-published shared object</text>
+  <text x="480" y="284" text-anchor="middle" class="sb-small">wineserver updates fields under `SHARED_WRITE_BEGIN` / `END`</text>
+  <text x="480" y="300" text-anchor="middle" class="sb-small">client retries until the seqlock cycle is stable</text>
+  <text x="480" y="316" text-anchor="middle" class="sb-small">object id is rechecked after read to catch slot recycling</text>
+
+  <rect x="680" y="236" width="220" height="110" class="sb-yellow" rx="6"/>
+  <text x="790" y="262" text-anchor="middle" class="sb-tag-y">safe miss path</text>
+  <text x="790" y="284" text-anchor="middle" class="sb-small">no query access, stale slot, or map failure</text>
+  <text x="790" y="300" text-anchor="middle" class="sb-small">negative cache or stale-id eviction</text>
+  <text x="790" y="316" text-anchor="middle" class="sb-small">caller falls back to the original RPC</text>
+
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="250" y1="110" x2="300" y2="110" class="sb-line-b"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="520" y1="118" x2="570" y2="118" class="sb-line-p"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="680" y1="166" x2="680" y2="206" class="sb-line-g"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="680" y1="206" x2="560" y2="206" class="sb-line-g"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="560" y1="206" x2="560" y2="236" class="sb-line-g"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="790" y1="166" x2="790" y2="236" class="sb-line-p"/>
+</svg>
+</div>
+
+
+<p>The public point of the design is simple:</p>
+
+<ul>
+<li>first query on a handle may still pay a small resolve RPC</li>
+<li>later queries on that same handle do not</li>
+<li>any ambiguity falls back to the original authoritative path</li>
+</ul>
+
+
+<p>That is why this feature can land safely without changing Win32-visible
+semantics.</p>
+
+<hr />
+
+<h2 id="4-thread-query-coverage">4. Thread query coverage</h2>
+
+<p>The thread snapshot carries the fields needed by the shipped read-mostly thread
+classes:</p>
+
+<ul>
+<li>affinity</li>
+<li>entry point</li>
+<li>suspend count</li>
+<li>priority-boost disable bit</li>
+<li>terminated bit</li>
+<li>debugger-hidden bit</li>
+<li>thread and process ids</li>
+</ul>
+
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 960 330" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
+  <style>
+    .th-bg { fill: #1a1b26; }
+    .th-box { fill: #24283b; stroke: #7aa2f7; stroke-width: 1.7; rx: 8; }
+    .th-green { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.7; rx: 8; }
+    .th-red { fill: #2a1a1a; stroke: #f7768e; stroke-width: 1.7; rx: 8; }
+    .th-title { fill: #7aa2f7; font-size: 14px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .th-label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+    .th-small { fill: #a9b1d6; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+    .th-tag-g { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .th-tag-r { fill: #f7768e; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+  </style>
+
+  <rect x="0" y="0" width="960" height="330" class="th-bg" rx="6"/>
+  <text x="480" y="26" text-anchor="middle" class="th-title">Thread query coverage: shipped snapshot classes vs. retained RPC classes</text>
+
+  <rect x="40" y="70" width="420" height="210" class="th-green" rx="6"/>
+  <text x="250" y="96" text-anchor="middle" class="th-tag-g">served from `thread_shm`</text>
+  <text x="250" y="126" text-anchor="middle" class="th-label">`ThreadAffinityMask`</text>
+  <text x="250" y="146" text-anchor="middle" class="th-label">`ThreadQuerySetWin32StartAddress`</text>
+  <text x="250" y="166" text-anchor="middle" class="th-label">`ThreadGroupInformation`</text>
+  <text x="250" y="186" text-anchor="middle" class="th-label">`ThreadIsTerminated`</text>
+  <text x="250" y="206" text-anchor="middle" class="th-label">`ThreadSuspendCount`</text>
+  <text x="250" y="226" text-anchor="middle" class="th-label">`ThreadHideFromDebugger`</text>
+  <text x="250" y="246" text-anchor="middle" class="th-label">`ThreadPriorityBoost`</text>
+
+  <rect x="500" y="70" width="420" height="210" class="th-red" rx="6"/>
+  <text x="710" y="96" text-anchor="middle" class="th-tag-r">retained on RPC</text>
+  <text x="710" y="126" text-anchor="middle" class="th-label">`ThreadBasicInformation`</text>
+  <text x="710" y="146" text-anchor="middle" class="th-small">server reply still applies effective-priority and exit-status transforms</text>
+  <text x="710" y="178" text-anchor="middle" class="th-label">`ThreadAmILastThread`</text>
+  <text x="710" y="198" text-anchor="middle" class="th-small">depends on process-scoped last-thread computation</text>
+  <text x="710" y="230" text-anchor="middle" class="th-label">`ThreadNameInformation`</text>
+  <text x="710" y="250" text-anchor="middle" class="th-small">variable-length payload stays on the original reply path</text>
+</svg>
+</div>
+
+
+<p>This boundary is deliberate. The point is not to force every thread query onto
+shared memory. The point is to retire the cheap, high-frequency, fixed-shape
+queries and leave the odd or transformed replies on the authoritative path.</p>
+
+<hr />
+
+<h2 id="5-process-query-coverage-and-zero-time-wait">5. Process query coverage and zero-time wait</h2>
+
+<p>The process snapshot carries enough state to answer the six shipped
+<code>NtQueryInformationProcess()</code> classes and to answer one additional hot liveness
+question: &ldquo;has this process already exited?&rdquo;</p>
+
+<p>That second use matters because Wine&rsquo;s in-process sync path already resolves a
+process handle to an ntsync-backed wait object. For <code>WaitForSingleObject(proc,
+0)</code>, ntdll can now short-circuit before the wait ioctl:</p>
+
+<ul>
+<li>if <code>process_shm.exit_code</code> still says the process is alive, return
+<code>STATUS_TIMEOUT</code></li>
+<li>if the exit code has already been published, return <code>STATUS_WAIT_0</code></li>
+</ul>
+
+
+<p>This is both faster and slightly more correct for Wine&rsquo;s own layering, because
+it removes the small gap between the already-shipped process info snapshot and
+the separate wait path.</p>
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 960 360" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
+  <style>
+    .pw-bg { fill: #1a1b26; }
+    .pw-box { fill: #24283b; stroke: #7aa2f7; stroke-width: 1.7; rx: 8; }
+    .pw-green { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.7; rx: 8; }
+    .pw-yellow { fill: #2a2418; stroke: #e0af68; stroke-width: 1.7; rx: 8; }
+    .pw-title { fill: #7aa2f7; font-size: 14px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .pw-label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+    .pw-small { fill: #a9b1d6; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+    .pw-tag-g { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .pw-tag-y { fill: #e0af68; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .pw-line-b { stroke: #7aa2f7; stroke-width: 1.2; fill: none; }
+    .pw-line-g { stroke: #9ece6a; stroke-width: 1.2; fill: none; }
+  </style>
+
+  <rect x="0" y="0" width="960" height="360" class="pw-bg" rx="6"/>
+  <text x="480" y="26" text-anchor="middle" class="pw-title">Zero-time process wait: shared-state answer before the wait ioctl</text>
+
+  <rect x="50" y="76" width="240" height="86" class="pw-box" rx="6"/>
+  <text x="170" y="102" text-anchor="middle" class="pw-label">`WaitForSingleObject(process, 0)`</text>
+  <text x="170" y="124" text-anchor="middle" class="pw-small">single handle, zero timeout, non-alertable only</text>
+  <text x="170" y="140" text-anchor="middle" class="pw-small">ordinary waits still use the normal ntsync path</text>
+
+  <rect x="360" y="76" width="240" height="104" class="pw-green" rx="6"/>
+  <text x="480" y="102" text-anchor="middle" class="pw-tag-g">shmem fast path</text>
+  <text x="480" y="124" text-anchor="middle" class="pw-label">read `process_shm.exit_code`</text>
+  <text x="480" y="144" text-anchor="middle" class="pw-small">alive -> `STATUS_TIMEOUT`</text>
+  <text x="480" y="160" text-anchor="middle" class="pw-small">dead  -> `STATUS_WAIT_0`</text>
+
+  <rect x="670" y="76" width="240" height="104" class="pw-yellow" rx="6"/>
+  <text x="790" y="102" text-anchor="middle" class="pw-tag-y">fallback</text>
+  <text x="790" y="124" text-anchor="middle" class="pw-label">resolve fd and issue wait ioctl</text>
+  <text x="790" y="144" text-anchor="middle" class="pw-small">used on cache miss, access miss, multi-handle,</text>
+  <text x="790" y="160" text-anchor="middle" class="pw-small">alertable wait, or non-zero timeout</text>
+
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="290" y1="118" x2="360" y2="118" class="pw-line-b"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="600" y1="128" x2="670" y2="128" class="pw-line-g"/>
+
+  <rect x="170" y="236" width="620" height="74" class="pw-box" rx="6"/>
+  <text x="480" y="262" text-anchor="middle" class="pw-label">measured synthetic poll cost</text>
+  <text x="480" y="284" text-anchor="middle" class="pw-small">ntsync ioctl path: ~10000 ns/poll (`9916`, `10030`, `10141`)</text>
+  <text x="480" y="300" text-anchor="middle" class="pw-small">shmem fast path: ~144 ns/poll (`130`, `130`, `171`) — about `70x` faster per poll</text>
+</svg>
+</div>
+
+
+<p>The public process-query coverage is:</p>
+
+<ul>
+<li><code>ProcessBasicInformation</code></li>
+<li><code>ProcessTimes</code></li>
+<li><code>ProcessPriorityBoost</code></li>
+<li><code>ProcessAffinityMask</code></li>
+<li><code>ProcessSessionInformation</code></li>
+<li><code>ProcessPriorityClass</code></li>
+</ul>
+
+
+<p>The fixed-shape, read-mostly part of that surface is now local. Process image
+name queries, debug-object queries, variable-length payloads, and other server
+authority cases still use the original RPC path.</p>
+
+<hr />
+
+<h2 id="6-correctness-boundaries">6. Correctness boundaries</h2>
+
+<p>Three parts make this safe enough to ship as the default behavior:</p>
+
+<ul>
+<li><strong>slot recycling check</strong>: the cached locator id is rechecked against the
+current shared object id after each read; mismatch evicts the cache entry and
+forces fallback</li>
+<li><strong>negative cache entries</strong>: handles that cannot resolve to a usable snapshot
+cache that miss explicitly, so repeat polls do not burn a fresh resolve RPC</li>
+<li><strong>class-by-class fallback</strong>: unsupported or transformed reply shapes stay on
+wineserver instead of being half-mirrored</li>
+</ul>
+
+
+<p>That is the important discipline for this feature family. It is not trying to
+be clever about every thread or process query. It is publishing the read-mostly
+state that Wine can mirror honestly, reading it with the existing seqlock
+pattern, and refusing the rest.</p>
+
+<hr />
+
+<h2 id="7-related-docs">7. Related docs</h2>
+
+<ul>
+<li><a href="architecture.gen.html">Architecture Overview</a></li>
+<li><a href="ntsync-userspace.gen.html">NTSync Userspace Sync</a></li>
+<li><a href="gamma-channel-dispatcher.gen.html">Gamma Channel Dispatcher</a></li>
+<li><a href="msg-ring-architecture.gen.html">Message Ring Architecture</a></li>
+<li><a href="wineserver-decomposition.gen.html">Wineserver Decomposition</a></li>
+<li><a href="current-state.gen.html">State of The Art</a></li>
+</ul>
+
+
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+  document.querySelectorAll("pre code").forEach(function (block) {
+    hljs.highlightElement(block);
+  });
+});
+</script>
+</body></html>

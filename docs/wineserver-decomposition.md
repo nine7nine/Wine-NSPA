@@ -42,17 +42,20 @@ A few framing notes before getting into the details:
 - This is not chronological reading. Several decomposition-adjacent slices are already shipped: `open_fd` lock-drop default-on, thread-token pass-through default-on, aggregate-wait plus the gamma dispatcher consumer, spawn-main + `ntdll_sched`, anonymous local events default-on, sched-hosted `local_timer` / `local_wm_timer`, and socket `RECVMSG` / `SENDMSG`. The roadmap table in section 7 is the canonical status; the body sections describe each component split in isolation.
 - This is not a one-author plan. Several pieces (the gamma dispatcher itself, NTSync's PI machinery, the open_fd lock-drop framing) emerged from the kernel + wineserver co-design sessions and have been shaped over many iterations under real-workload validation. The road map here reflects what those iterations have converged on, not a top-down architectural mandate.
 
-The audience this doc is written for: a developer who has read the bypass overview, has skimmed the gamma-channel-dispatcher and ntsync split docs, and wants to understand the architectural arc that the bypass work *enables*. If you're implementing a single bypass and want a checklist, read the bypass detail doc for that bypass; if you're implementing one roadmap slice from this page, read the in-tree handoff doc (`wine/nspa/docs/wineserver-decomposition-plan.md`) which has line-level kernel landmarks. This doc is the why, not the how.
+The audience this doc is written for: a developer who has read the bypass overview, has skimmed the gamma-channel-dispatcher and ntsync split docs, and wants to understand the architectural arc that the bypass work *enables*. If you're implementing a single bypass and want a checklist, read the bypass detail doc for that bypass. This doc is the why, not the how.
 
-The main 2026-05-03 correction is scope: some of the work this page once
+The main 2026-05-06 correction is scope: some of the work this page once
 treated as "future wineserver-internal decomposition pressure" is now
 already shipping client-side. Timer dispatch for eligible local timers and
 `WM_TIMER`s lives on the per-process scheduler host, anonymous events no
 longer require a server-created helper object by default, and PE-side socket
 deferred I/O is already on client `io_uring` rings. On top of that, local-file
 follow-ons and client-side local sections now retire more `create_file`,
-mapping, and metadata traffic before it ever becomes wineserver work. That
-does **not** make the decomposition plan obsolete. It means the residual
+mapping, and metadata traffic before it ever becomes wineserver work. The
+2026-05-06 shared-state readers remove another slice of read-mostly
+thread/process query traffic, and the shipped `get_message` empty-poll cache
+cuts repeated empty queue polls before they become handler work. That does
+**not** make the decomposition plan obsolete. It means the residual
 wineserver problem is smaller and more concentrated than it was when this page
 was first drafted.
 
@@ -101,7 +104,7 @@ The `open_fd` lock-drop work attacked one specific instance of this -- the long 
 
 NSPA addresses the wineserver bottleneck along two complementary directions, and this doc is about the second one. They are not alternatives -- they compose.
 
-**Direction A: move state out.** Each NSPA bypass picks a class of NT-API state, hosts it in the client process via a local stub or kernel-mediated primitive, and falls back to the server only when the bypass envelope is exceeded. Sync primitives go to NTSync. File and socket I/O go to `io_uring`. Hooks get a Tier 1+2 cache. Read-only file opens go to local_file. Anonymous events and eligible timers now live on client-local stubs and scheduler hosts. Cross-thread same-process messages go through msg-ring. Each bypass shrinks the residual surface that wineserver still has to authoritatively serve.
+**Direction A: move state out.** Each NSPA bypass picks a class of NT-API state, hosts it in the client process via a local stub or kernel-mediated primitive, and falls back to the server only when the bypass envelope is exceeded. Sync primitives go to NTSync. File and socket I/O go to `io_uring`. Hooks get a Tier 1+2 cache. Read-only file opens go to local_file. Anonymous events and eligible timers now live on client-local stubs and scheduler hosts. Cross-thread same-process messages go through msg-ring, and repeated empty queue polls now short-circuit in the client. Read-mostly thread/process queries and zero-time process waits now hit server-published snapshots first. Each bypass shrinks the residual surface that wineserver still has to authoritatively serve.
 
 **Direction B: restructure what remains.** Once the residual surface is small enough, wineserver can be split into multiple cooperating threads with finer-grained locks. The split has three components:
 
@@ -317,7 +320,7 @@ This work is **still queued**. The decision depends on the PREEMPT_RT epoll expe
 
 Today, the main loop is RT and spends most of its time blocked in `poll()` or `epoll_wait()`. The wait itself doesn't actually need RT priority -- only the *response* to the wait does. RT priority matters for the work that happens after the wait returns, not for the act of sleeping in the kernel.
 
-The 2026-05-02 through 2026-05-05 shipped follow-ons narrow this split's
+The 2026-05-02 through 2026-05-06 shipped follow-ons narrow this split's
 motivation. Deferred socket recv/send no longer depend on wineserver fd wakeups
 in the common PE path because they already submit `IORING_OP_RECVMSG` /
 `IORING_OP_SENDMSG` from the client side. Local sections and widened local-file
@@ -607,4 +610,3 @@ The visual point of the ladder: the bottom two slices are done, the middle slice
 - `ntsync-userspace.gen.html` -- the Wine in-process sync page that pairs with the kernel overlay.
 - `nspa-local-file-architecture.gen.html`, `msg-ring-architecture.gen.html`, `io_uring-architecture.gen.html`, `cs-pi.gen.html`, `condvar-pi-requeue.gen.html` -- the per-subsystem detail docs whose work composes with the decomposition arc.
 - `architecture.gen.html` -- the integrated NSPA architecture overview; this doc is the wineserver-internals lens of that architecture.
-- In-tree handoff: `wine/nspa/docs/wineserver-decomposition-plan.md` -- the session-handoff version of this plan, with line-level kernel landmarks and active-session details. Use that doc when implementing the queued and long-horizon splits; use this doc when reasoning about the trajectory.

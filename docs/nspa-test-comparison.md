@@ -6,7 +6,7 @@ RT = `NSPA_RT_PRIO=80 NSPA_RT_POLICY=FF WINEPRELOADREMAPVDSO=force`
 This doc tracks Wine-NSPA test-suite evolution from v3 through v8. The
 current published full-suite snapshot remains v8 / 2026-04-30
 (1003-1011 kernel stack, 24 PASS / 0 FAIL / 0 TIMEOUT PE matrix,
-`dispatcher-burst` added). The shipped 2026-05-02 through 2026-05-05
+`dispatcher-burst` added). The shipped 2026-05-02 through 2026-05-06
 follow-ons below are validated by targeted harnesses and smoke runs
 rather than a new v9 full-suite publish. Earlier version sections are
 retained below as historical snapshots.
@@ -21,20 +21,21 @@ retained below as historical snapshots.
 
 ---
 
-## Post-v8 shipped follow-ons (2026-05-02 through 2026-05-05) -- targeted validators, not a new matrix version
+## Post-v8 shipped follow-ons (2026-05-02 through 2026-05-06) -- targeted validators, not a new matrix version
 
 ### Why this is not labeled v9
 
 The public project has shipped meaningful new client-side work since v8:
 spawn-main + `ntdll_sched`, sched-hosted timer migrations, anonymous
 local events default-on, socket `RECVMSG` / `SENDMSG` default-on, wider
-local-file coverage, default-on local sections, RT-keyed memory
+local-file coverage, default-on local sections, thread/process shared-state
+readers, the `get_message` empty-poll cache, RT-keyed memory
 follow-ons, and the current ntsync production module. Those changes were
 validated with targeted harnesses and real-workload smoke, but they have
 **not** yet been rolled into a new published full-suite matrix version.
 So the current matrix version remains v8.
 
-### Targeted 2026-05-02 through 2026-05-05 results
+### Targeted 2026-05-02 through 2026-05-06 results
 
 | Area | Validation surface | Published result |
 |------|--------------------|------------------|
@@ -43,14 +44,17 @@ So the current matrix version remains v8.
 | socket `RECVMSG` / `SENDMSG` default-on | `socket-io` deferred path + Ableton smoke | throughput `+6.5%`; p99 latency `-6.8%`; `0/2000` failures; Ableton clean at `63` threads with zero new errors vs earlier shipped socket baseline |
 | local-file widening | workload comparison | `create_file` handler count `7,845` -> `5,658`; handler time `137 ms` -> `50 ms` |
 | local sections default-on | workload comparison | `nspa_create_mapping_from_unix_fd` count `2,664` -> `~800`; same-process map-after-file-close shape clean |
+| thread / process shared-state readers | targeted A/B harnesses | 7 thread classes and 6 process classes clean; `ThreadBasicInformation` intentionally remains on RPC |
+| zero-time process wait fast path | synthetic poll harness | ioctl path `~10000 ns/poll`; shared-state path `~144 ns/poll` |
+| `get_message` empty-poll cache | Ableton 60s targeted capture | `get_message` calls `3,880` -> `866`; handler time `16.5 ms` -> `2.2 ms`; total handler time `46.8 ms` -> `36.9 ms` |
 | current ntsync production module | native channel / aggregate / stress reruns | receive snapshot fix, dedicated slab caches, the wait-queue cache, and the lockless `SEND_PI` scan validated on current srcversion `25751C3E41E15401318758E` |
-| RT-keyed memory follow-ons | targeted shell harnesses | `test-mlock-ws.sh 4/4 PASS`; `test-huge-auto.sh 3/3 PASS`; `test-heap-hugepage.sh 3/3 PASS` |
+| RT-keyed memory follow-ons | targeted shell harnesses | `test-mlock-ws.sh 4/4 PASS`; `test-huge-auto.sh 3/3 PASS`; `test-heap-hugepage.sh 3/3 PASS`; `test-huge-decommit.sh` clean; `test-huge-rwx.sh` clean |
 
 ### Reading this with the rest of the docs
 
 Use this page for the current published matrix boundary. Use
 `current-state.gen.html` for the exact shipped defaults and targeted
-2026-05-02 through 2026-05-05 validation numbers that landed after v8.
+2026-05-02 through 2026-05-06 validation numbers that landed after v8.
 
 ---
 
@@ -390,9 +394,10 @@ Priority wakeup order: correct in all configs across all versions.
   `feedback_slub_debug_skews_benchmarks`.)
 - The 2026-04-26 -> 2026-04-28 audit cycle paid bills against the
   ntsync surface and the wine ring-retry loop. Both surfaces are
-  stable as of v7. Velocity is now back on the bypass roadmap (msg-ring
-  v2 Phase C get_message bypass paused mid-development is the next
-  resume target).
+  stable as of v7. Later shipped follow-ons moved additional message-pump,
+  shared-state query, and local-memory traffic out of wineserver; those newer
+  targeted results live on [current-state](current-state.gen.html) rather than
+  being folded back into this historical v8 snapshot.
 
 ---
 

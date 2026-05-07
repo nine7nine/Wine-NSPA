@@ -108,7 +108,10 @@
 <div class="page-nav"><a href="index.html">Docs Home</a></div>
 <h1 id="wine-nspa--message-ring-architecture">Wine-NSPA — Message Ring Architecture</h1>
 
-<p>This page explains how the message rings replace same-process wineserver message traffic, how the reply and paint-cache pieces fit into the same substrate, and where the paused <code>get_message</code> work sits.</p>
+<p>This page explains how the message rings replace same-process wineserver
+message traffic, how the redraw and paint follow-ons fit into the same
+substrate, and how the shipped <code>get_message</code> empty-poll cache trims the
+remaining message-pump RPCs.</p>
 
 <hr />
 
@@ -127,7 +130,7 @@
 <li><a href="#10-wake-loss-rollback-mr4">Wake-loss rollback (MR4)</a></li>
 <li><a href="#11-redraw_window-push-ring"><code>redraw_window</code> push ring</a></li>
 <li><a href="#12-paint-cache-fast-path">Paint cache fast path</a></li>
-<li><a href="#13-direct-get_message-bypass-paused">Direct <code>get_message</code> bypass (paused)</a></li>
+<li><a href="#13-get_message-empty-poll-cache"><code>get_message</code> empty-poll cache</a></li>
 <li><a href="#14-nspa_shm_retry_guard"><code>NSPA_SHM_RETRY_GUARD</code> — bounded retry primitive</a></li>
 <li><a href="#15-footnote-why-memfd">Footnote — why memfd, not session shmem</a></li>
 <li><a href="#16-history">History</a></li>
@@ -173,9 +176,9 @@ space and handle table).</p>
 <p>This document is the canonical reference for the entire ring family.
 The original POST / SEND / REPLY ring landed first (2026-04, see
 <a href="#16-history">§16 history</a>). Subsequent additions —
-the <code>redraw_window</code> push ring, the paint cache fast path, the direct
-<code>get_message</code> bypass work, and the MR1 / MR2 / MR4 audit fix-pack from
-2026-04-27 — extend or harden the same substrate. They share the
+the <code>redraw_window</code> push ring, the paint cache fast path, the
+<code>get_message</code> empty-poll cache, and the MR1 / MR2 / MR4 audit fix-pack
+from 2026-04-27 — extend or harden the same substrate. They share the
 per-queue memfd, the slot state machine, the cache discipline, and the
 fast-path atomics. The doc treats them as one evolving design rather
 than versioned sub-systems.</p>
@@ -250,6 +253,10 @@ dominates this profile.</p>
 <tr>
 <td> paint cache fast path </td>
 <td> Reads <code>queue_shm</code>, not the message ring; co-resident in the same fastpath taxonomy. </td>
+</tr>
+<tr>
+<td> <code>get_message</code> empty-poll cache </td>
+<td> Reads <code>queue_shm-&gt;nspa_change_seq</code>, runs after local ring pops, and short-circuits a repeated empty poll when server-visible queue state has not changed. </td>
 </tr>
 </tbody>
 </table>
@@ -398,10 +405,10 @@ map + lock) is paid once per peer, off the RT-critical path.</li>
 <li><strong>Bounded retry loops.</strong> Every seqlock-style read in this subsystem
 uses <code>NSPA_SHM_RETRY_GUARD</code> (see <a href="#14-nspa_shm_retry_guard">§14</a>)
 to bound spin to 256 PAUSEs and fall back to RPC on exhaustion.</li>
-<li><strong>Layered opt-in / opt-out gates.</strong> Each capability is an
-independent <code>NSPA_*</code> environment variable. Production-default
-posture (default-on or default-off) is fixed per-feature and
-documented inline.</li>
+<li><strong>Minimal hot-path gating.</strong> Once a message-path feature is validated
+as the default behavior, the A/B gate is removed from the hot path.
+The shipped ring, paint-cache, and empty-poll cache all follow that
+rule.</li>
 <li><strong>Minimal protocol surface.</strong> Two server requests:
 <code>nspa_get_thread_queue</code> (peer lookup + memfd send) and
 <code>nspa_ensure_own_bypass</code> (own bootstrap). Server handlers reuse a
@@ -1286,8 +1293,7 @@ back to the state-only check. In current code, every SEND stamps
 
 <h3 id="81-the-hazard">8.1 The hazard</h3>
 
-<p>The MR1 audit finding (<code>wine/nspa/docs/wine-nspa-lockup-audit-20260427.md</code>
-§MR1) identified a real correctness bug in the original ring design:
+<p>The MR1 audit finding identified a real correctness bug in the original ring design:
 <code>nspa_reply_slot_t::generation</code> was bumped on reserve but never compared
 by the receiver. Sequence to misdeliver a reply:</p>
 
@@ -1983,129 +1989,120 @@ simple: paint-cache is part of the normal path.</p>
 
 <hr />
 
-<h2 id="13-direct-get_message-bypass-paused">13. Direct <code>get_message</code> bypass (paused)</h2>
+<h2 id="13-get_message-empty-poll-cache">13. <code>get_message</code> empty-poll cache</h2>
 
-<h3 id="131-status">13.1 Status</h3>
-
-<p><strong>Paused mid-development 2026-04-25.</strong> Design notes at
-<code>wine/nspa/docs/msg-ring-v2-phase-bc-handoff.md</code>. Diagnostic stage 1
-(<code>get_message</code> residual bucketing) was shipped in <code>6e83fa72420</code> and
-removed after the Phase C Stage 1 validation cycle (<code>79bb7c77c40</code>).
-The actual coverage extension is queued.</p>
-
-<h3 id="132-what-remains-uncovered">13.2 What remains uncovered</h3>
-
-<p><code>dlls/win32u/nspa/msg_ring.c</code> drains <em>cross-thread</em> <code>PostMessage</code> and
-<code>SendMessage</code> to the recipient&rsquo;s per-queue ring. After the shipped push-ring landing there is
-still residual <code>get_message</code> traffic — about 29.7k RPCs / 120 s of
-Ableton playback. Inspection candidates (from the handoff doc):</p>
+<p>The shipped message-ring work now includes a narrower <code>get_message</code>
+optimization that does not attempt to bypass the full server-generated
+message surface. Instead it targets the common empty-poll case:</p>
 
 <ol>
-<li><strong>Self-thread messages</strong> — messages this thread posted to itself
-(<code>PostMessage(hwnd, ..., 0)</code> where the target&rsquo;s queue == sender&rsquo;s
-queue). v1 may exclude these because the wake-bit synthesis is
-queue-local already.</li>
-<li><strong>System messages</strong> — <code>WM_TIMER</code>, <code>WM_PAINT</code>, <code>WM_QUIT</code>, hardware
-messages that the server synthesises into the queue. v1 doesn&rsquo;t
-write these; server does. (<code>WM_TIMER</code> already has its own
-class-isolated <code>nspa_timer_ring</code>; the local-WM-timer dispatcher
-covers this for in-process timers but server-generated ticks still
-route via RPC.)</li>
-<li><strong>Cross-process messages</strong> — if v1&rsquo;s ring is per-process memfd,
-cross-process traffic falls back to RPC. Confirm via peer-cache
-logic.</li>
-<li><strong>Late-binding cases</strong> — when the ring&rsquo;s bypass shm isn&rsquo;t
-bootstrapped yet (early in process startup).</li>
+<li><code>peek_message()</code> checks the local SEND / TIMER / POST-class rings first</li>
+<li>if nothing local was popped, it captures <code>queue_shm-&gt;nspa_change_seq</code></li>
+<li>if the same thread later asks the same filter again and that sequence has
+not advanced, it returns <code>STATUS_PENDING</code> locally instead of issuing the
+same <code>get_message</code> RPC again</li>
 </ol>
 
 
+<p>The cache is per-thread TLS, 8 entries deep, and keyed by the full
+<code>peek_message_filter</code> plus the last empty-poll sequence value. The server bumps
+<code>nspa_change_seq</code> inside <code>set_queue_bits()</code>, which is already the funnel for
+server-visible queue-state changes.</p>
+
 <div class="diagram-container">
-<svg width="100%" viewBox="0 0 940 430" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
+<svg width="100%" viewBox="0 0 940 400" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
   <style>
     .gm-bg { fill: #1a1b26; }
-    .gm-box { fill: #24283b; stroke: #7aa2f7; stroke-width: 2; rx: 8; }
+    .gm-box { fill: #24283b; stroke: #7aa2f7; stroke-width: 1.8; rx: 8; }
     .gm-fast { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
-    .gm-server { fill: #2a1a1a; stroke: #f7768e; stroke-width: 1.8; rx: 8; }
-    .gm-wip { fill: #1f2535; stroke: #bb9af7; stroke-width: 1.8; rx: 8; }
+    .gm-mid { fill: #2a2137; stroke: #bb9af7; stroke-width: 1.8; rx: 8; }
+    .gm-note { fill: #2a2418; stroke: #e0af68; stroke-width: 1.8; rx: 8; }
+    .gm-title { fill: #7aa2f7; font-size: 14px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
     .gm-label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
     .gm-small { fill: #a9b1d6; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
-    .gm-title { fill: #7aa2f7; font-size: 14px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
-    .gm-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
-    .gm-red { fill: #f7768e; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
-    .gm-violet { fill: #bb9af7; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
-    .gm-line-b { stroke: #7aa2f7; stroke-width: 1.15; }
-    .gm-line-v { stroke: #bb9af7; stroke-width: 1.15; }
-    .gm-line-g { stroke: #9ece6a; stroke-width: 1.15; }
+    .gm-tag-g { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .gm-tag-v { fill: #bb9af7; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .gm-tag-y { fill: #e0af68; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .gm-line-b { stroke: #7aa2f7; stroke-width: 1.2; fill: none; }
+    .gm-line-v { stroke: #bb9af7; stroke-width: 1.2; fill: none; }
+    .gm-line-g { stroke: #9ece6a; stroke-width: 1.2; fill: none; }
   </style>
 
-  <rect x="0" y="0" width="940" height="430" class="gm-bg" rx="6"/>
-  <text x="470" y="28" text-anchor="middle" class="gm-title">Queued direct `get_message` goal: shrink residual wineserver traffic</text>
+  <rect x="0" y="0" width="940" height="400" class="gm-bg" rx="6"/>
+  <text x="470" y="28" text-anchor="middle" class="gm-title">`get_message` empty-poll cache: repeat the empty answer locally</text>
 
-  <rect x="70" y="88" width="250" height="108" class="gm-fast" rx="6"/>
-  <text x="195" y="114" text-anchor="middle" class="gm-green">Already bypassed</text>
-  <text x="195" y="140" text-anchor="middle" class="gm-label">cross-thread POST / SEND</text>
-  <text x="195" y="158" text-anchor="middle" class="gm-small">producer writes forward ring, receiver drains locally</text>
-  <text x="195" y="176" text-anchor="middle" class="gm-small">sync reply goes through sender's reply ring</text>
+  <rect x="60" y="82" width="240" height="92" class="gm-fast" rx="6"/>
+  <text x="180" y="108" text-anchor="middle" class="gm-tag-g">step 1</text>
+  <text x="180" y="130" text-anchor="middle" class="gm-label">local ring pops still run first</text>
+  <text x="180" y="150" text-anchor="middle" class="gm-small">SEND, TIMER, and POST-class client traffic gets first chance</text>
 
-  <rect x="345" y="66" width="250" height="152" class="gm-server" rx="6"/>
-  <text x="470" y="92" text-anchor="middle" class="gm-red">Residual `get_message` RPC bucket</text>
-  <text x="470" y="118" text-anchor="middle" class="gm-label">server-generated `WM_PAINT` / hardware / winevent</text>
-  <text x="470" y="136" text-anchor="middle" class="gm-small">bucket B dominated Stage 1 captures</text>
-  <text x="470" y="160" text-anchor="middle" class="gm-label">self-thread + late bootstrap + cross-process edge cases</text>
-  <text x="470" y="178" text-anchor="middle" class="gm-small">smaller buckets stay on authoritative path</text>
+  <rect x="350" y="82" width="240" height="92" class="gm-mid" rx="6"/>
+  <text x="470" y="108" text-anchor="middle" class="gm-tag-v">step 2</text>
+  <text x="470" y="130" text-anchor="middle" class="gm-label">capture `queue_shm->nspa_change_seq`</text>
+  <text x="470" y="150" text-anchor="middle" class="gm-small">same full filter + same seq means the server-visible queue has not changed</text>
 
-  <rect x="620" y="88" width="250" height="108" class="gm-wip" rx="6"/>
-  <text x="745" y="114" text-anchor="middle" class="gm-violet">Queued direction</text>
-  <text x="745" y="140" text-anchor="middle" class="gm-label">new server-side push category in queue shm</text>
-  <text x="745" y="158" text-anchor="middle" class="gm-small">co-locate with existing bypass region</text>
-  <text x="745" y="176" text-anchor="middle" class="gm-small">leave hard cases on RPC fallback</text>
+  <rect x="640" y="82" width="240" height="92" class="gm-fast" rx="6"/>
+  <text x="760" y="108" text-anchor="middle" class="gm-tag-g">step 3</text>
+  <text x="760" y="130" text-anchor="middle" class="gm-label">return `STATUS_PENDING` locally</text>
+  <text x="760" y="150" text-anchor="middle" class="gm-small">skip the repeated empty `get_message` RPC on a cache hit</text>
 
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="320" y1="142" x2="345" y2="142" class="gm-line-b"/>
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="595" y1="142" x2="620" y2="142" class="gm-line-v"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="300" y1="128" x2="350" y2="128" class="gm-line-b"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="590" y1="128" x2="640" y2="128" class="gm-line-v"/>
 
-  <rect x="140" y="274" width="220" height="92" class="gm-box" rx="6"/>
-  <text x="250" y="300" text-anchor="middle" class="gm-label">keep local semantics</text>
-  <text x="250" y="326" text-anchor="middle" class="gm-small">queue owner still dispatches its own messages</text>
-  <text x="250" y="344" text-anchor="middle" class="gm-small">same-process priority and wake model unchanged</text>
-
-  <rect x="580" y="274" width="220" height="92" class="gm-box" rx="6"/>
-  <text x="690" y="300" text-anchor="middle" class="gm-label">shrink server default path</text>
-  <text x="690" y="326" text-anchor="middle" class="gm-small">goal is fewer `get_message` RTTs, not zero corner cases</text>
-  <text x="690" y="344" text-anchor="middle" class="gm-small">fallback remains the correctness envelope</text>
-
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="470" y1="218" x2="250" y2="274" class="gm-line-g"/>
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="470" y1="218" x2="690" y2="274" class="gm-line-g"/>
+  <rect x="140" y="238" width="660" height="106" class="gm-note" rx="6"/>
+  <text x="470" y="264" text-anchor="middle" class="gm-tag-y">correctness envelope</text>
+  <text x="470" y="286" text-anchor="middle" class="gm-small">cache miss -> authoritative RPC; seq mismatch -> invalidate stale entry and RPC</text>
+  <text x="470" y="302" text-anchor="middle" class="gm-small" style="font-size:8px; letter-spacing:-0.15px">filter match uses the full filter struct, so there is no hash-collision silent drop class</text>
+  <text x="470" y="318" text-anchor="middle" class="gm-small">server wake-bit changes still bump `set_queue_bits`,</text>
+  <text x="470" y="334" text-anchor="middle" class="gm-small">so `nspa_change_seq` stays authoritative here</text>
 </svg>
 </div>
 
 
-<p>The Phase C Stage 1 bucketing diag (now removed) was instrumented to
-attribute <code>get_message</code> RPCs to one of these categories. Stage 1
-results from the validated 2026-04-26 capture: Bucket B (server-
-generated <code>WM_PAINT</code> / hardware / winevent) dominates 99.9%; A/C/D/E
-negligible on the Ableton workload. Stage 2 / 3 would carve a server-
-side ring for the dominant category — most likely a hardware-input or
-winevent push ring co-located in <code>nspa_queue_bypass_shm_t</code>.</p>
+<p>This is narrower than a full direct <code>get_message</code> bypass, but it still matters
+on the shipped workload:</p>
 
-<h3 id="133-why-paused">13.3 Why paused</h3>
+<table>
+<thead>
+<tr>
+<th> Metric </th>
+<th style="text-align:right;"> Before </th>
+<th style="text-align:right;"> After </th>
+<th style="text-align:right;"> Delta </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> <code>get_message</code> calls / 60 s </td>
+<td style="text-align:right;"> 3,880 </td>
+<td style="text-align:right;"> 866 </td>
+<td style="text-align:right;"> <code>-78%</code> </td>
+</tr>
+<tr>
+<td> <code>get_message</code> handler time </td>
+<td style="text-align:right;"> 16.5 ms </td>
+<td style="text-align:right;"> 2.2 ms </td>
+<td style="text-align:right;"> <code>-87%</code> </td>
+</tr>
+<tr>
+<td> total wineserver handler time </td>
+<td style="text-align:right;"> 46.8 ms </td>
+<td style="text-align:right;"> 36.9 ms </td>
+<td style="text-align:right;"> <code>-21%</code> </td>
+</tr>
+<tr>
+<td> total RPC count </td>
+<td style="text-align:right;"> 16,576 </td>
+<td style="text-align:right;"> 15,692 </td>
+<td style="text-align:right;"> <code>-5%</code> </td>
+</tr>
+</tbody>
+</table>
 
-<p>Phase B1.0 (paint cache) hit the 5-min lockup on its first default-on
-validation run, and the audit walked back through the entire
-ring-family critical path. MR1 / MR2 / MR4 fix-pack shipped before
-Phase C resumes. The next queued message-path work item is Phase C per
-<code>project_msg_ring_v2_phase_c_stage1_validated.md</code>.</p>
 
-<h3 id="134-files-queued-for-phase-c">13.4 Files queued for Phase C</h3>
-
-<ul>
-<li><code>dlls/win32u/message.c</code>: instrumentation, fast paths.</li>
-<li><code>dlls/win32u/nspa/msg_ring.c</code>: any new ring categories or coverage
-extension.</li>
-<li><code>server/queue.c</code>: server-side ring writers if a new category is
-added.</li>
-<li><code>server/protocol.def</code>: layout extension if a new ring is added.</li>
-</ul>
-
+<p>The design point is the same as the rest of this page: preserve the
+authoritative path, but stop paying it again when the same queue state has
+already proven &ldquo;nothing to deliver.&rdquo;</p>
 
 <hr />
 
@@ -2427,7 +2424,7 @@ this footnote.</p>
 </table>
 
 
-<h3 id="164-direct-get_message-bypass">16.4 Direct <code>get_message</code> bypass</h3>
+<h3 id="164-get_message-empty-poll-cache">16.4 <code>get_message</code> empty-poll cache</h3>
 
 <table>
 <thead>
@@ -2439,14 +2436,14 @@ this footnote.</p>
 </thead>
 <tbody>
 <tr>
-<td> <code>6e83fa72420</code> </td>
-<td> Phase C Stage 1 — <code>get_message</code> residual bucketing diag </td>
-<td> Bucket B dominant 99.9% </td>
+<td> <code>569ac8f6a5f</code> </td>
+<td> <code>get_message</code> empty-poll cache </td>
+<td> same-filter empty polls now short-circuit locally via <code>queue_shm-&gt;nspa_change_seq</code> </td>
 </tr>
 <tr>
-<td> <code>79bb7c77c40</code> </td>
-<td> Phase C Stage 1 — remove diag </td>
-<td> Diag source removed; coverage extension queued </td>
+<td> <code>c94136ac0ee</code> </td>
+<td> remove empty-poll cache gate </td>
+<td> feature stays on the normal path; hot-path A/B branch removed </td>
 </tr>
 </tbody>
 </table>
@@ -2467,11 +2464,6 @@ this footnote.</p>
 <td> <code>9b4172e2bbc</code> </td>
 <td> MR1 ABA + MR2 cross-process futex + MR4 POST wake-loss </td>
 <td> Three bugs shipped, validated by run-3 + run-4 </td>
-</tr>
-<tr>
-<td> <code>ac823311aba</code> </td>
-<td> Audit doc </td>
-<td> <code>wine/nspa/docs/wine-nspa-lockup-audit-20260427.md</code> </td>
 </tr>
 </tbody>
 </table>
@@ -2566,7 +2558,7 @@ bypass ring.</li>
 
 <h2 id="17-references">17. References</h2>
 
-<h3 id="171-source-files-absolute-paths">17.1 Source files (absolute paths)</h3>
+<h3 id="171-source-files">17.1 Source files</h3>
 
 <table>
 <thead>
@@ -2577,94 +2569,52 @@ bypass ring.</li>
 </thead>
 <tbody>
 <tr>
-<td> <code>/home/ninez/pkgbuilds/Wine-NSPA/wine-rt-claude/wine/dlls/win32u/nspa/msg_ring.c</code> </td>
-<td> Client-side POST/SEND/REPLY ring + caches (1633 LOC) </td>
+<td> <code>dlls/win32u/nspa/msg_ring.c</code> </td>
+<td> client-side POST / SEND / REPLY ring plus the ring-local helpers </td>
 </tr>
 <tr>
-<td> <code>/home/ninez/pkgbuilds/Wine-NSPA/wine-rt-claude/wine/server/protocol.def</code> </td>
-<td> Slot struct definitions, lines 1020-1214 </td>
+<td> <code>dlls/win32u/message.c</code> </td>
+<td> <code>peek_message</code>, reply integration, and the empty-poll cache call sites </td>
 </tr>
 <tr>
-<td> <code>/home/ninez/pkgbuilds/Wine-NSPA/wine-rt-claude/wine/server/queue.c</code> </td>
-<td> Server-side memfd alloc, ring arbitration, signal paths </td>
+<td> <code>dlls/win32u/nspa/get_msg_cache.c</code> </td>
+<td> per-thread empty-poll cache keyed by filter + <code>nspa_change_seq</code> </td>
 </tr>
 <tr>
-<td> <code>/home/ninez/pkgbuilds/Wine-NSPA/wine-rt-claude/wine/server/nspa/redraw_ring.c</code> </td>
-<td> Phase A server drain (87 LOC) </td>
+<td> <code>dlls/win32u/dce.c</code> </td>
+<td> redraw push-ring producer and paint-cache fast path </td>
 </tr>
 <tr>
-<td> <code>/home/ninez/pkgbuilds/Wine-NSPA/wine-rt-claude/wine/dlls/win32u/dce.c</code> </td>
-<td> Phase A producer + Phase B1.0 paint cache fastpath </td>
+<td> <code>dlls/win32u/input.c</code> </td>
+<td> wake-bit synthesis through the local queue state </td>
 </tr>
 <tr>
-<td> <code>/home/ninez/pkgbuilds/Wine-NSPA/wine-rt-claude/wine/dlls/win32u/message.c</code> </td>
-<td> Integration in <code>send_inter_thread_message</code>, <code>peek_message</code>, <code>reply_message</code> </td>
+<td> <code>dlls/win32u/win32u_private.h</code> </td>
+<td> <code>NSPA_SHM_RETRY_GUARD</code>, <code>peek_message_filter</code>, and related declarations </td>
 </tr>
 <tr>
-<td> <code>/home/ninez/pkgbuilds/Wine-NSPA/wine-rt-claude/wine/dlls/win32u/input.c</code> </td>
-<td> Wake-bit synthesis through own ring </td>
+<td> <code>server/queue.c</code> </td>
+<td> memfd allocation, ring arbitration, and <code>set_queue_bits</code> / <code>nspa_change_seq</code> publication </td>
 </tr>
 <tr>
-<td> <code>/home/ninez/pkgbuilds/Wine-NSPA/wine-rt-claude/wine/dlls/win32u/win32u_private.h</code> </td>
-<td> <code>NSPA_SHM_RETRY_GUARD</code> macro, ring prototypes </td>
+<td> <code>server/protocol.def</code> </td>
+<td> queue shared-state and memfd-backed bypass layout </td>
+</tr>
+<tr>
+<td> <code>server/nspa/redraw_ring.c</code> </td>
+<td> server-side redraw push-ring drain </td>
 </tr>
 </tbody>
 </table>
 
 
-<h3 id="172-audit--design-docs">17.2 Audit + design docs</h3>
-
-<table>
-<thead>
-<tr>
-<th> Path </th>
-<th> Role </th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> <code>/home/ninez/pkgbuilds/Wine-NSPA/wine-rt-claude/wine/nspa/docs/wine-nspa-lockup-audit-20260427.md</code> </td>
-<td> MR1-MR8 + F1-F9 + P2/P3/P5 audit findings (612 LOC) </td>
-</tr>
-<tr>
-<td> <code>/home/ninez/pkgbuilds/Wine-NSPA/wine-rt-claude/wine/nspa/docs/msg-ring-v2-phase-bc-handoff.md</code> </td>
-<td> Phase B + C handoff (paused state, prerequisites for resume) </td>
-</tr>
-<tr>
-<td> <code>/home/ninez/pkgbuilds/Wine-NSPA/wine-rt-claude/wine/nspa/docs/msg-ring-v2-design-idea.md</code> </td>
-<td> Original v2 thesis (Vyukov MPMC; superseded — see handoff §7) </td>
-</tr>
-<tr>
-<td> <code>/home/ninez/pkgbuilds/Wine-NSPA/wine-rt-claude/wine/nspa/docs/nspa-bypass-audit.md</code> </td>
-<td> Whole-surface bypass audit (gates Q3+Q4+R6.4 for resuming Phase B/C) </td>
-</tr>
-<tr>
-<td> <code>/home/ninez/pkgbuilds/Wine-NSPA/wine-rt-claude/wine/nspa/docs/msg-ring-memfd-redesign.md</code> </td>
-<td> Memfd redesign implementation plan (historical) </td>
-</tr>
-</tbody>
-</table>
-
-
-<h3 id="173-memory-entries-claudeprojectsmemory">17.3 Memory entries (<code>~/.claude/projects/.../memory/</code>)</h3>
+<h3 id="172-related-docs">17.2 Related docs</h3>
 
 <ul>
-<li><code>project_msg_ring_v2_mr1_mr2_mr4_shipped_20260427.md</code> — Audit fix-pack ship report.</li>
-<li><code>project_ableton_run4_paintcache_pass_20260428.md</code> — Run-4 with paint-cache enabled, F5 likely fixed by MR1/MR4.</li>
-<li><code>project_msg_ring_v2_b10_shipped.md</code> — B1.0 ship + same-day rollback.</li>
-<li><code>project_msg_ring_v2_phase_c_stage1_validated.md</code> — Phase C Stage 1 results (Bucket B 99.9% dominant).</li>
-<li><code>project_msg_ring_v2_paused.md</code> — Pause memo (superseded post-fix-pack).</li>
-<li><code>project_audit_4_1_retry_hardening_shipped.md</code> — <code>NSPA_SHM_RETRY_GUARD</code> ship + Subtest A/B results.</li>
-<li><code>feedback_validate_before_default_on.md</code> — Discipline rule: ship default-off, validate, then flip.</li>
-<li><code>feedback_dont_shotgun_audit_into_unfound_bug.md</code> — Discipline rule: KASAN/trace first, audit second.</li>
-</ul>
-
-
-<h3 id="174-related-architecture-docs-in-this-site">17.4 Related architecture docs in this site</h3>
-
-<ul>
-<li><a href="current-state.md">current-state.md</a> — Wine-NSPA state of the art.</li>
-<li><a href="gamma-channel-dispatcher.md">gamma-channel-dispatcher.md</a> — gamma backbone for in-process wineserver dispatch.</li>
+<li><a href="current-state.gen.html">State of The Art</a></li>
+<li><a href="architecture.gen.html">Architecture Overview</a></li>
+<li><a href="gamma-channel-dispatcher.gen.html">Gamma Channel Dispatcher</a></li>
+<li><a href="nt-local-stubs.gen.html">NT Local Stubs</a></li>
 <li><a href="shmem-ipc.gen.html">shmem-ipc.gen.html</a> — Shmem v1.5 (orthogonal to the message ring; both share NTSync).</li>
 <li><a href="io_uring-architecture.gen.html">io_uring-architecture.gen.html</a> — Orthogonal I/O bypass layer.</li>
 <li><a href="nspa-local-file-architecture.md">nspa-local-file-architecture.md</a> — Local-file bypass; bucket-lock context for the F8 / MR8 audit thread.</li>
