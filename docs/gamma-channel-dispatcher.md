@@ -676,10 +676,6 @@ The post-1010 loop is structurally:
             shutdown eventfd
 
         ret = ioctl(dev_fd, NTSYNC_IOC_AGGREGATE_WAIT, &agg);
-        if (ret < 0 && errno == ENOTTY) {
-            agg_supported = 0;
-            continue;   /* use legacy path on next iteration */
-        }
         if (ret < 0) {
             if (errno == EINTR) continue;
             break;
@@ -698,24 +694,26 @@ The post-1010 loop is structurally:
 
         /* source == channel */
         ret = ioctl(channel_fd, NTSYNC_IOC_CHANNEL_RECV2, &recv);
-        if (ret < 0 && errno == ENOTTY)
-            recv2_state = 0;
+        if (ret < 0) {
+            if (errno == EINTR) continue;
+            if (errno == EAGAIN) continue;
+            break;
+        }
         dispatch request;
-        while (try_recv2_state) {
+        for (;;) {
             ret = ioctl(channel_fd, NTSYNC_IOC_CHANNEL_TRY_RECV2, &recv);
             if (ret == 0) {
                 dispatch request;
                 continue;
             }
-            if (errno == ENOTTY)
-                try_recv2_state = 0;
+            if (errno == EINTR) continue;
             break;
         }
     }
 
-The legacy fallback path is still the old direct `RECV2` / `RECV`
-receive loop. That is now compatibility logic, not the preferred
-production shape.
+Current userspace assumes the post-1011 ntsync surface. The earlier
+aggregate-wait / `RECV2` / `TRY_RECV2` sticky-fallback ladder was
+retired once that surface became the project baseline.
 
 Key invariants:
 
@@ -731,9 +729,9 @@ Key invariants:
   channel fd alone is not a reliable wake source once the kernel holds
   its own reference during aggregate-wait registration, so the
   dispatcher also waits on `shutdown_efd`.
-- **Fallback is sticky per dispatcher.** After the first `-ENOTTY` on
-  aggregate-wait, `RECV2`, or `TRY_RECV2`, that dispatcher stays on
-  the older compatible path for the rest of its lifetime.
+- **Kernel baseline is fixed.** The shipped dispatcher now requires
+  aggregate-wait plus `RECV2` / `TRY_RECV2`; there is no longer a
+  runtime compatibility ladder inside this loop.
 
 The detached-thread exit property remains the same: destroy wakes the
 dispatcher, the dispatcher cleans up its own context, and no join is
@@ -971,11 +969,10 @@ those replies -- the deregister cannot race with the dispatcher
 doing the work.
 
 If a sender's thread happens to be unregistered (very early
-pre-init traffic, or a build against an old kernel without 1005),
+pre-init traffic, before normal registration is in place),
 `recv.thread_token` is zero and the dispatcher falls back to
 `get_thread_from_id` + `release_object`. The fallback path is
-identical to the pre-token behaviour and is exercised every time
-RECV2 returns ENOTTY (line 161-166).
+identical to the pre-token behaviour for that one request.
 
 ### 9.4 Performance
 
@@ -1237,10 +1234,10 @@ well.
 
 | File | Lines | Role |
 |---|---|---|
-| `wine/dlls/ntdll/unix/server.c` | 311-436 | Sender shim `nspa_send_request_channel` + UAPI fallback |
+| `wine/dlls/ntdll/unix/server.c` | 311-436 | Sender shim `nspa_send_request_channel` |
 | `wine/dlls/ntdll/unix/server.c` | 442-461 | `server_call_unlocked` gating logic |
-| `wine/server/nspa/shmem_channel.c` | 60-139 | UAPI fallback for pre-1005 / pre-1010 kernel headers |
-| `wine/server/nspa/shmem_channel.c` | 158-390 | dispatcher context + aggregate-wait loop + legacy fallback loop |
+| `wine/server/nspa/shmem_channel.c` | 60-139 | UAPI header compat for the shipped ntsync surface |
+| `wine/server/nspa/shmem_channel.c` | 158-390 | dispatcher context + aggregate-wait loop + burst drain |
 | `wine/server/nspa/shmem_channel.c` | 474-581 | dispatcher create/destroy path, shutdown eventfd lifetime |
 | `wine/server/nspa/shmem_channel.c` | 310-340 | T2 thread-token register/deregister |
 | `wine/server/nspa/uring.h` | -- | per-process `nspa_uring_instance` API consumed by the dispatcher-owned ring and aggregate-wait path |

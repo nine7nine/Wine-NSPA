@@ -227,12 +227,10 @@ struct ntsync_aggregate_wait_args {
   the actual entry.
 - **Object-source PI remains visible.** The dispatcher blocked inside aggregate-wait
   must still be discoverable by the existing channel and event PI paths.
-- **Pre-1010 kernels are supported.** Userspace detects `-ENOTTY` on the first
-  aggregate-wait attempt and permanently falls back to the legacy direct
-  `CHANNEL_RECV2` loop for that dispatcher.
-
-That last point is operationally important: public docs can describe the new default
-without pretending the code lost its rollback path.
+- **Current userspace requires the full dispatcher wait surface.** The shipped
+  dispatcher assumes `AGGREGATE_WAIT`, `CHANNEL_RECV2`, and `CHANNEL_TRY_RECV2`.
+  The older sticky fallback ladder was retired once that kernel surface became
+  the project baseline.
 
 ---
 
@@ -321,7 +319,7 @@ The dispatcher now waits on three sources:
   <rect x="160" y="392" width="660" height="94" class="note"/>
   <text x="490" y="418" text-anchor="middle" class="y">Operational invariants</text>
   <text x="490" y="440" text-anchor="middle" class="s">same RT thread receives the request, drains completion, and signals the reply</text>
-  <text x="490" y="458" text-anchor="middle" class="s">aggregate-wait `-ENOTTY` selects the legacy direct `CHANNEL_RECV2` loop</text>
+  <text x="490" y="458" text-anchor="middle" class="s">aggregate-wait, `RECV2`, and `TRY_RECV2` keep receive, drain, and reply on one loop</text>
 </svg>
 </div>
 
@@ -343,79 +341,19 @@ The loop is now:
 5. if the fired source is `shutdown_efd`:
    - exit cleanly and free the dispatcher-owned context
 
-### 4.4 Fallback behavior
+### 4.4 Required kernel surface
 
-Userspace still handles two older-kernel shapes:
+The current dispatcher runtime assumes the full post-1011 wait surface:
 
-- **no aggregate-wait support**: aggregate-wait returns `-ENOTTY`, dispatcher permanently falls back to direct `CHANNEL_RECV2`
-- **no thread-token receive support**: `CHANNEL_RECV2` returns `-ENOTTY`, dispatcher falls back to legacy `CHANNEL_RECV`
+- `NTSYNC_IOC_AGGREGATE_WAIT`
+- `NTSYNC_IOC_CHANNEL_RECV2`
+- `NTSYNC_IOC_CHANNEL_TRY_RECV2`
 
-That logic is runtime feature detection, not a release ladder:
-
-<div class="diagram-container">
-<svg width="100%" viewBox="0 0 980 430" xmlns="http://www.w3.org/2000/svg">
-  <style>
-    .bg { fill: #1a1b26; }
-    .done { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
-    .curr { fill: #1f2535; stroke: #bb9af7; stroke-width: 2; rx: 8; }
-    .note { fill: #24283b; stroke: #7aa2f7; stroke-width: 2; rx: 8; }
-    .warn { fill: #2a2418; stroke: #e0af68; stroke-width: 1.8; rx: 8; }
-    .t { fill: #c0caf5; font: 11px 'JetBrains Mono', monospace; }
-    .s { fill: #a9b1d6; font: 9px 'JetBrains Mono', monospace; }
-    .h { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
-    .g { fill: #9ece6a; font: bold 10px 'JetBrains Mono', monospace; }
-    .v { fill: #bb9af7; font: bold 10px 'JetBrains Mono', monospace; }
-    .y { fill: #e0af68; font: bold 10px 'JetBrains Mono', monospace; }
-    .line-v { stroke: #bb9af7; stroke-width: 1.4; fill: none; }
-    .line-g { stroke: #9ece6a; stroke-width: 1.4; fill: none; }
-    .line-y { stroke: #e0af68; stroke-width: 1.4; fill: none; }
-  </style>
-
-  <rect x="0" y="0" width="980" height="430" class="bg"/>
-  <text x="490" y="26" text-anchor="middle" class="h">Dispatcher compatibility decisions</text>
-
-  <rect x="330" y="62" width="320" height="70" class="curr"/>
-  <text x="490" y="88" text-anchor="middle" class="v">dispatcher startup / first wait</text>
-  <text x="490" y="108" text-anchor="middle" class="s">probe once, then cache the supported receive shape in the dispatcher context</text>
-
-  <rect x="70" y="178" width="260" height="92" class="done"/>
-  <text x="200" y="204" text-anchor="middle" class="g">1. try `NTSYNC_IOC_AGGREGATE_WAIT`</text>
-  <text x="200" y="224" text-anchor="middle" class="s">channel object + uring eventfd + shutdown eventfd</text>
-  <text x="200" y="242" text-anchor="middle" class="s">production path on post-1010 kernels</text>
-
-  <rect x="390" y="178" width="200" height="92" class="note"/>
-  <text x="490" y="204" text-anchor="middle" class="t">if `-ENOTTY`</text>
-  <text x="490" y="224" text-anchor="middle" class="s">kernel lacks aggregate-wait support</text>
-  <text x="490" y="242" text-anchor="middle" class="s">disable aggregate-wait for this dispatcher</text>
-
-  <rect x="650" y="178" width="260" height="92" class="done"/>
-  <text x="780" y="204" text-anchor="middle" class="g">2. use direct `CHANNEL_RECV2` loop</text>
-  <text x="780" y="224" text-anchor="middle" class="s">channel transport still intact</text>
-  <text x="780" y="242" text-anchor="middle" class="s">older dispatcher wait shape</text>
-
-  <rect x="390" y="300" width="200" height="92" class="note"/>
-  <text x="490" y="326" text-anchor="middle" class="t">if `CHANNEL_RECV2` returns `-ENOTTY`</text>
-  <text x="490" y="346" text-anchor="middle" class="s">kernel lacks thread-token receive support</text>
-  <text x="490" y="364" text-anchor="middle" class="s">disable `RECV2` for this dispatcher</text>
-
-  <rect x="650" y="300" width="260" height="92" class="warn"/>
-  <text x="780" y="326" text-anchor="middle" class="y">3. fall back to `CHANNEL_RECV`</text>
-  <text x="780" y="346" text-anchor="middle" class="s">oldest supported channel shape</text>
-  <text x="780" y="364" text-anchor="middle" class="s">no thread-token carried in the receive result</text>
-
-  <path d="M490 132 L490 156 L200 156 L200 178" class="line-v"/>
-  <path d="M490 132 L490 156 L780 156 L780 178" class="line-v"/>
-  <line x1="330" y1="224" x2="390" y2="224" class="line-y"/>
-  <line x1="590" y1="224" x2="650" y2="224" class="line-g"/>
-  <line x1="780" y1="270" x2="780" y2="300" class="line-g"/>
-  <line x1="590" y1="346" x2="650" y2="346" class="line-y"/>
-
-  <rect x="70" y="300" width="260" height="92" class="curr"/>
-  <text x="200" y="326" text-anchor="middle" class="v">steady-state production loop</text>
-  <text x="200" y="346" text-anchor="middle" class="s">aggregate-wait blocks once on channel, uring, and shutdown</text>
-  <text x="200" y="364" text-anchor="middle" class="s">same thread receives, drains CQEs, and replies</text>
-</svg>
-</div>
+That requirement is now deliberate. The older sticky fallback ladder was
+useful while aggregate-wait and thread-token receive were landing, but it was
+retired once those ioctls became the project baseline. The current production
+loop is therefore simpler: one aggregate wait, one `RECV2`, zero or more
+`TRY_RECV2` drains, and the same-thread reply path.
 
 ---
 

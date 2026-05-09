@@ -884,10 +884,6 @@ loop is now the aggregate-wait shape:</p>
         shutdown eventfd
 
     ret = ioctl(dev_fd, NTSYNC_IOC_AGGREGATE_WAIT, &amp;agg);
-    if (ret &lt; 0 &amp;&amp; errno == ENOTTY) {
-        agg_supported = 0;
-        continue;   /* use legacy path on next iteration */
-    }
     if (ret &lt; 0) {
         if (errno == EINTR) continue;
         break;
@@ -906,25 +902,27 @@ loop is now the aggregate-wait shape:</p>
 
     /* source == channel */
     ret = ioctl(channel_fd, NTSYNC_IOC_CHANNEL_RECV2, &amp;recv);
-    if (ret &lt; 0 &amp;&amp; errno == ENOTTY)
-        recv2_state = 0;
+    if (ret &lt; 0) {
+        if (errno == EINTR) continue;
+        if (errno == EAGAIN) continue;
+        break;
+    }
     dispatch request;
-    while (try_recv2_state) {
+    for (;;) {
         ret = ioctl(channel_fd, NTSYNC_IOC_CHANNEL_TRY_RECV2, &amp;recv);
         if (ret == 0) {
             dispatch request;
             continue;
         }
-        if (errno == ENOTTY)
-            try_recv2_state = 0;
+        if (errno == EINTR) continue;
         break;
     }
 }
 </code></pre>
 
-<p>The legacy fallback path is still the old direct <code>RECV2</code> / <code>RECV</code>
-receive loop. That is now compatibility logic, not the preferred
-production shape.</p>
+<p>Current userspace assumes the post-1011 ntsync surface. The earlier
+aggregate-wait / <code>RECV2</code> / <code>TRY_RECV2</code> sticky-fallback ladder was
+retired once that surface became the project baseline.</p>
 
 <p>Key invariants:</p>
 
@@ -941,9 +939,9 @@ dispatcher&rsquo;s process and has a live <code>request_shm</code> mapping.</li>
 channel fd alone is not a reliable wake source once the kernel holds
 its own reference during aggregate-wait registration, so the
 dispatcher also waits on <code>shutdown_efd</code>.</li>
-<li><strong>Fallback is sticky per dispatcher.</strong> After the first <code>-ENOTTY</code> on
-aggregate-wait, <code>RECV2</code>, or <code>TRY_RECV2</code>, that dispatcher stays on
-the older compatible path for the rest of its lifetime.</li>
+<li><strong>Kernel baseline is fixed.</strong> The shipped dispatcher now requires
+aggregate-wait plus <code>RECV2</code> / <code>TRY_RECV2</code>; there is no longer a
+runtime compatibility ladder inside this loop.</li>
 </ul>
 
 
@@ -1257,11 +1255,10 @@ those replies &ndash; the deregister cannot race with the dispatcher
 doing the work.</p>
 
 <p>If a sender&rsquo;s thread happens to be unregistered (very early
-pre-init traffic, or a build against an old kernel without 1005),
+pre-init traffic, before normal registration is in place),
 <code>recv.thread_token</code> is zero and the dispatcher falls back to
 <code>get_thread_from_id</code> + <code>release_object</code>. The fallback path is
-identical to the pre-token behaviour and is exercised every time
-RECV2 returns ENOTTY (line 161-166).</p>
+identical to the pre-token behaviour for that one request.</p>
 
 <h3 id="94-performance">9.4 Performance</h3>
 
@@ -1643,7 +1640,7 @@ well.</p>
 <tr>
 <td> <code>wine/dlls/ntdll/unix/server.c</code> </td>
 <td> 311-436 </td>
-<td> Sender shim <code>nspa_send_request_channel</code> + UAPI fallback </td>
+<td> Sender shim <code>nspa_send_request_channel</code> </td>
 </tr>
 <tr>
 <td> <code>wine/dlls/ntdll/unix/server.c</code> </td>
@@ -1653,12 +1650,12 @@ well.</p>
 <tr>
 <td> <code>wine/server/nspa/shmem_channel.c</code> </td>
 <td> 60-139 </td>
-<td> UAPI fallback for pre-1005 / pre-1010 kernel headers </td>
+<td> UAPI header compat for the shipped ntsync surface </td>
 </tr>
 <tr>
 <td> <code>wine/server/nspa/shmem_channel.c</code> </td>
 <td> 158-390 </td>
-<td> dispatcher context + aggregate-wait loop + legacy fallback loop </td>
+<td> dispatcher context + aggregate-wait loop + burst drain </td>
 </tr>
 <tr>
 <td> <code>wine/server/nspa/shmem_channel.c</code> </td>

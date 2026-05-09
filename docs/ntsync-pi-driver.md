@@ -546,7 +546,7 @@ Two new ioctls:
 | `NTSYNC_IOC_CHANNEL_REGISTER_THREAD`     | Install or replace `(tid, token)`            |
 | `NTSYNC_IOC_CHANNEL_DEREGISTER_THREAD`   | Evict entry for tid (idempotent)             |
 
-Plus `NTSYNC_IOC_CHANNEL_RECV2` -- same as `RECV` but returns an extra `thread_token` field. Old `RECV` remains for backward compat: wineserver tries `RECV2` first, falls back to `RECV` + userspace `get_thread_from_id` on `-ENOTTY` (old kernel).
+Plus `NTSYNC_IOC_CHANNEL_RECV2` -- same as `RECV` but returns an extra `thread_token` field. The older `RECV` ioctl still exists in the UAPI, but current Wine-NSPA userspace requires `RECV2` and no longer ships the old fallback ladder.
 
 ### v2 design: lookup at RECV2, not SEND_PI
 
@@ -570,9 +570,9 @@ Together these ensure `RECV2` always sees a non-zero token for a still-live thre
 
 When a channel is freed, any leftover `(tid, token)` registrations are dropped. By construction the channel is unreachable at `ntsync_free_obj()` time (no senders, no dispatchers can have an FD), so no concurrent access is possible -- a single pass through the buckets, kfreeing each `ntsync_thread_reg`.
 
-### Backward compat
+### Current runtime expectation
 
-Old `RECV` entries always carry `thread_token = 0` (initialized in `kzalloc`). Userspace that calls `RECV` instead of `RECV2` simply never sees a non-zero token and falls through to the legacy `get_thread_from_id` path. New kernel + old wineserver -> works. Old kernel + new wineserver -> works (the `RECV2` ioctl returns `-ENOTTY` and the wineserver retries with `RECV`).
+Old `RECV` entries still carry `thread_token = 0` (initialized in `kzalloc`), so older consumers can continue using the legacy shape if they exist. Current Wine-NSPA userspace, however, assumes `RECV2`/`TRY_RECV2` and resolves sender threads from the returned token on the normal path.
 
 ---
 
@@ -1069,9 +1069,9 @@ dispatcher needs under bursty server-bound RPC load:
 - dispatch and reply
 - then issue `TRY_RECV2` until the channel is empty
 
-The ioctl is purely additive. On older kernels userspace sees
-`-ENOTTY`, disables the feature gate for that dispatcher, and remains
-functionally correct on the one-entry-per-wake path.
+The ioctl is additive at the kernel interface level, but current
+Wine-NSPA userspace assumes it is present. The old sticky fallback
+ladder was retired once aggregate-wait became the project baseline.
 
 ---
 

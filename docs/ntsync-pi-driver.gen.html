@@ -883,7 +883,7 @@ returns empty.</p>
 </table>
 
 
-<p>Plus <code>NTSYNC_IOC_CHANNEL_RECV2</code> &ndash; same as <code>RECV</code> but returns an extra <code>thread_token</code> field. Old <code>RECV</code> remains for backward compat: wineserver tries <code>RECV2</code> first, falls back to <code>RECV</code> + userspace <code>get_thread_from_id</code> on <code>-ENOTTY</code> (old kernel).</p>
+<p>Plus <code>NTSYNC_IOC_CHANNEL_RECV2</code> &ndash; same as <code>RECV</code> but returns an extra <code>thread_token</code> field. The older <code>RECV</code> ioctl still exists in the UAPI, but current Wine-NSPA userspace requires <code>RECV2</code> and no longer ships the old fallback ladder.</p>
 
 <h3 id="v2-design-lookup-at-recv2-not-send_pi">v2 design: lookup at RECV2, not SEND_PI</h3>
 
@@ -913,9 +913,9 @@ returns empty.</p>
 
 <p>When a channel is freed, any leftover <code>(tid, token)</code> registrations are dropped. By construction the channel is unreachable at <code>ntsync_free_obj()</code> time (no senders, no dispatchers can have an FD), so no concurrent access is possible &ndash; a single pass through the buckets, kfreeing each <code>ntsync_thread_reg</code>.</p>
 
-<h3 id="backward-compat">Backward compat</h3>
+<h3 id="current-runtime-expectation">Current runtime expectation</h3>
 
-<p>Old <code>RECV</code> entries always carry <code>thread_token = 0</code> (initialized in <code>kzalloc</code>). Userspace that calls <code>RECV</code> instead of <code>RECV2</code> simply never sees a non-zero token and falls through to the legacy <code>get_thread_from_id</code> path. New kernel + old wineserver -> works. Old kernel + new wineserver -> works (the <code>RECV2</code> ioctl returns <code>-ENOTTY</code> and the wineserver retries with <code>RECV</code>).</p>
+<p>Old <code>RECV</code> entries still carry <code>thread_token = 0</code> (initialized in <code>kzalloc</code>), so older consumers can continue using the legacy shape if they exist. Current Wine-NSPA userspace, however, assumes <code>RECV2</code>/<code>TRY_RECV2</code> and resolves sender threads from the returned token on the normal path.</p>
 
 <hr />
 
@@ -1499,9 +1499,9 @@ dispatcher needs under bursty server-bound RPC load:</p>
 </ul>
 
 
-<p>The ioctl is purely additive. On older kernels userspace sees
-<code>-ENOTTY</code>, disables the feature gate for that dispatcher, and remains
-functionally correct on the one-entry-per-wake path.</p>
+<p>The ioctl is additive at the kernel interface level, but current
+Wine-NSPA userspace assumes it is present. The old sticky fallback
+ladder was retired once aggregate-wait became the project baseline.</p>
 
 <hr />
 
