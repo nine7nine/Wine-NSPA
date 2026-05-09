@@ -82,81 +82,76 @@ exceeded.
   <!-- Client layer -->
   <rect x="20" y="60" width="940" height="140" class="layer-c"/>
   <text x="40" y="80" class="lbl-grn">CLIENT (PE process)</text>
-  <text x="40" y="94" class="lbl-mut">application code, ntdll, win32u, sched hosts, drivers</text>
+  <text x="40" y="94" class="lbl-mut">application code, ntdll, win32u, local state, sched hosts, drivers</text>
 
   <rect x="40"  y="105" width="120" height="40" class="box"/>
   <text x="100" y="123" text-anchor="middle" class="lbl-sm">application code</text>
   <text x="100" y="137" text-anchor="middle" class="lbl-mut">PE side</text>
 
-  <rect x="170" y="105" width="120" height="40" class="box"/>
-  <text x="230" y="123" text-anchor="middle" class="lbl-sm">ntdll</text>
-  <text x="230" y="137" text-anchor="middle" class="lbl-mut">unix sync + shared-state + TEB hot path</text>
+  <rect x="170" y="105" width="150" height="40" class="box"/>
+  <text x="245" y="123" text-anchor="middle" class="lbl-sm">ntdll</text>
+  <text x="245" y="137" text-anchor="middle" class="lbl-mut">unix sync + waits + TEB hot path</text>
 
-  <rect x="300" y="105" width="120" height="40" class="box"/>
-  <text x="360" y="123" text-anchor="middle" class="lbl-sm">win32u + nspa</text>
-  <text x="360" y="137" text-anchor="middle" class="lbl-mut">msg-ring + TEB caches + empty-poll cache</text>
+  <rect x="330" y="105" width="150" height="40" class="box"/>
+  <text x="405" y="123" text-anchor="middle" class="lbl-sm">win32u + nspa</text>
+  <text x="405" y="137" text-anchor="middle" class="lbl-mut">msg-ring + TEB caches + empty-poll cache</text>
 
-  <rect x="430" y="105" width="180" height="40" class="box-hot"/>
-  <text x="520" y="123" text-anchor="middle" class="lbl-yel">NT-local stubs</text>
-  <text x="520" y="137" text-anchor="middle" class="lbl-mut">file / section / event / timer</text>
+  <rect x="490" y="105" width="160" height="40" class="box-hot"/>
+  <text x="570" y="123" text-anchor="middle" class="lbl-yel">NT-local stubs</text>
+  <text x="570" y="137" text-anchor="middle" class="lbl-mut">file / section / event / timer</text>
 
-  <rect x="620" y="105" width="120" height="40" class="box"/>
-  <text x="680" y="123" text-anchor="middle" class="lbl-sm">winejack.drv</text>
-  <text x="680" y="137" text-anchor="middle" class="lbl-mut">audio + MIDI</text>
+  <rect x="660" y="105" width="130" height="40" class="box"/>
+  <text x="725" y="123" text-anchor="middle" class="lbl-sm">shared-state readers</text>
+  <text x="725" y="137" text-anchor="middle" class="lbl-mut">thread/process query + zero-time waits</text>
 
-  <rect x="750" y="105" width="120" height="40" class="box"/>
-  <text x="810" y="123" text-anchor="middle" class="lbl-sm">nspaASIO</text>
-  <text x="810" y="137" text-anchor="middle" class="lbl-mut">direct callback path</text>
+  <rect x="800" y="105" width="140" height="40" class="box"/>
+  <text x="870" y="123" text-anchor="middle" class="lbl-sm">winejack + nspaASIO</text>
+  <text x="870" y="137" text-anchor="middle" class="lbl-mut">audio, MIDI, direct callback</text>
 
-  <rect x="40"  y="155" width="240" height="35" class="box"/>
-  <text x="160" y="172" text-anchor="middle" class="lbl-sm">CS-PI v2.3 (RTL_CRITICAL_SECTION)</text>
-  <text x="160" y="184" text-anchor="middle" class="lbl-mut">FUTEX_LOCK_PI on LockSemaphore</text>
+  <rect x="40"  y="155" width="220" height="35" class="box"/>
+  <text x="150" y="172" text-anchor="middle" class="lbl-sm">CS-PI v2.3 (RTL_CRITICAL_SECTION)</text>
+  <text x="150" y="184" text-anchor="middle" class="lbl-mut">FUTEX_LOCK_PI on LockSemaphore</text>
 
-  <rect x="290" y="155" width="240" height="35" class="box"/>
-  <text x="410" y="172" text-anchor="middle" class="lbl-sm">condvar PI requeue (SleepCondVarCS)</text>
-  <text x="410" y="184" text-anchor="middle" class="lbl-mut">FUTEX_WAIT_REQUEUE_PI</text>
+  <rect x="270" y="155" width="220" height="35" class="box"/>
+  <text x="380" y="172" text-anchor="middle" class="lbl-sm">condvar PI requeue (SleepCondVarCS)</text>
+  <text x="380" y="184" text-anchor="middle" class="lbl-mut">FUTEX_WAIT_REQUEUE_PI</text>
 
-  <rect x="540" y="155" width="200" height="35" class="box"/>
-  <text x="640" y="172" text-anchor="middle" class="lbl-sm">hook tier 1+2 cache</text>
-  <text x="640" y="184" text-anchor="middle" class="lbl-mut">shmem, server publishes invalidations</text>
+  <rect x="500" y="155" width="180" height="35" class="box"/>
+  <text x="590" y="172" text-anchor="middle" class="lbl-sm">hook tier 1+2 cache</text>
+  <text x="590" y="184" text-anchor="middle" class="lbl-mut">shmem, server publishes invalidations</text>
 
-  <rect x="750" y="155" width="120" height="35" class="box"/>
-  <text x="810" y="172" text-anchor="middle" class="lbl-sm">wine-sched hosts</text>
-  <text x="810" y="184" text-anchor="middle" class="lbl-mut">close queue + RT timers</text>
+  <rect x="690" y="155" width="250" height="35" class="box"/>
+  <text x="815" y="172" text-anchor="middle" class="lbl-sm">wine-sched hosts</text>
+  <text x="815" y="184" text-anchor="middle" class="lbl-mut">close queue + RT timers + timer dispatch</text>
 
   <!-- Wineserver layer -->
   <rect x="20" y="220" width="940" height="130" class="layer-s"/>
-  <text x="40" y="240" class="lbl-pur">WINESERVER (RT request plane + residual supervisor)</text>
-  <text x="40" y="254" class="lbl-mut">gamma dispatcher, handler tables, lifecycle, cross-process authority</text>
+  <text x="40" y="240" class="lbl-pur">WINESERVER (RT request plane + residual authority)</text>
+  <text x="40" y="254" class="lbl-mut">gamma dispatcher, handler tables, lifecycle, cross-process state</text>
 
-  <rect x="40"  y="265" width="180" height="70" class="box-hot"/>
-  <text x="130" y="283" text-anchor="middle" class="lbl-yel">gamma aggregate-wait dispatcher</text>
-  <text x="130" y="297" text-anchor="middle" class="lbl-mut">per-process channel + uring</text>
-  <text x="130" y="311" text-anchor="middle" class="lbl-mut">aggregate-wait -&gt; RECV2 -&gt; TRY_RECV2</text>
-  <text x="130" y="325" text-anchor="middle" class="lbl-cy">same-thread CQE drain + REPLY</text>
+  <rect x="40"  y="265" width="200" height="70" class="box-hot"/>
+  <text x="140" y="283" text-anchor="middle" class="lbl-yel">gamma aggregate-wait dispatcher</text>
+  <text x="140" y="297" text-anchor="middle" class="lbl-mut">per-process channel + uring</text>
+  <text x="140" y="311" text-anchor="middle" class="lbl-mut">aggregate-wait -&gt; RECV2 -&gt; TRY_RECV2</text>
+  <text x="140" y="325" text-anchor="middle" class="lbl-cy">same-thread CQE drain + REPLY</text>
 
-  <rect x="240" y="265" width="180" height="70" class="box"/>
-  <text x="330" y="283" text-anchor="middle" class="lbl-sm">main loop / epoll / timers</text>
-  <text x="330" y="297" text-anchor="middle" class="lbl-mut">residual fd + timeout work</text>
-  <text x="330" y="311" text-anchor="middle" class="lbl-mut">global_lock (PI-aware)</text>
-  <text x="330" y="325" text-anchor="middle" class="lbl-mut">openat lock-drop shipped</text>
+  <rect x="260" y="265" width="180" height="70" class="box"/>
+  <text x="350" y="283" text-anchor="middle" class="lbl-sm">main loop / epoll / timers</text>
+  <text x="350" y="297" text-anchor="middle" class="lbl-mut">residual fd + timeout work</text>
+  <text x="350" y="311" text-anchor="middle" class="lbl-mut">global_lock (PI-aware)</text>
+  <text x="350" y="325" text-anchor="middle" class="lbl-mut">openat lock-drop shipped</text>
 
-  <rect x="440" y="265" width="180" height="70" class="box"/>
-  <text x="530" y="283" text-anchor="middle" class="lbl-sm">handler tables</text>
-  <text x="530" y="297" text-anchor="middle" class="lbl-mut">req_handlers[]</text>
-  <text x="530" y="311" text-anchor="middle" class="lbl-mut">file / proc / thread /</text>
-  <text x="530" y="325" text-anchor="middle" class="lbl-mut">sync / hooks / queue</text>
+  <rect x="460" y="265" width="200" height="70" class="box"/>
+  <text x="560" y="283" text-anchor="middle" class="lbl-sm">handler tables</text>
+  <text x="560" y="297" text-anchor="middle" class="lbl-mut">req_handlers[]</text>
+  <text x="560" y="311" text-anchor="middle" class="lbl-mut">file / proc / thread /</text>
+  <text x="560" y="325" text-anchor="middle" class="lbl-mut">sync / hooks / queue</text>
 
-  <rect x="640" y="265" width="180" height="70" class="box"/>
-  <text x="730" y="283" text-anchor="middle" class="lbl-sm">cross-process state</text>
-  <text x="730" y="297" text-anchor="middle" class="lbl-mut">handle table + snapshot publish</text>
-  <text x="730" y="311" text-anchor="middle" class="lbl-mut">named-object registry</text>
-  <text x="730" y="325" text-anchor="middle" class="lbl-mut">lifecycle / fork tracking</text>
-
-  <rect x="840" y="265" width="100" height="70" class="box-cold"/>
-  <text x="890" y="290" text-anchor="middle" class="lbl-mut">decomposition</text>
-  <text x="890" y="304" text-anchor="middle" class="lbl-mut">roadmap</text>
-  <text x="890" y="318" text-anchor="middle" class="lbl-mut">future</text>
+  <rect x="680" y="265" width="240" height="70" class="box"/>
+  <text x="800" y="283" text-anchor="middle" class="lbl-sm">cross-process state</text>
+  <text x="800" y="297" text-anchor="middle" class="lbl-mut">handle table + snapshot publish</text>
+  <text x="800" y="311" text-anchor="middle" class="lbl-mut">named-object registry</text>
+  <text x="800" y="325" text-anchor="middle" class="lbl-mut">lifecycle / fork tracking</text>
 
   <!-- Kernel layer -->
   <rect x="20" y="370" width="940" height="190" class="layer-k"/>
@@ -199,19 +194,19 @@ exceeded.
   <text x="490" y="555" text-anchor="middle" class="lbl-mut">--- bypass routes (dashed orange) skip the wineserver layer entirely ---</text>
 
   <!-- Bypass routes: client -> kernel directly -->
-  <path d="M520 145 L520 360 L140 360 L140 415" class="ln-by"/>
-  <path d="M520 145 L520 380 L580 380 L580 415" class="ln-by"/>
-  <path d="M160 190 L160 360 L360 360 L360 415" class="ln-by"/>
-  <line x1="410" y1="190" x2="360" y2="415" class="ln-by"/>
+  <path d="M570 145 L570 360 L140 360 L140 415" class="ln-by"/>
+  <path d="M570 145 L570 380 L580 380 L580 415" class="ln-by"/>
+  <path d="M150 190 L150 360 L360 360 L360 415" class="ln-by"/>
+  <line x1="380" y1="190" x2="360" y2="415" class="ln-by"/>
 
   <!-- Wineserver routes: client -> server -->
-  <path d="M360 145 L360 225 L130 225 L130 265" class="ln"/>
-  <line x1="640" y1="190" x2="530" y2="265" class="ln"/>
+  <path d="M405 145 L405 225 L140 225 L140 265" class="ln"/>
+  <line x1="590" y1="190" x2="560" y2="265" class="ln"/>
 
   <!-- Server -> kernel -->
-  <line x1="130" y1="335" x2="140" y2="415" class="ln"/>
-  <path d="M170 335 L170 380 L580 380 L580 415" class="ln"/>
-  <line x1="330" y1="335" x2="360" y2="415" class="ln"/>
+  <line x1="140" y1="335" x2="140" y2="415" class="ln"/>
+  <path d="M180 335 L180 380 L580 380 L580 415" class="ln"/>
+  <line x1="350" y1="335" x2="360" y2="415" class="ln"/>
 
   <!-- Legend -->
   <line x1="40"  y1="585" x2="80"  y2="585" class="ln"/>
@@ -220,8 +215,6 @@ exceeded.
   <text x="330" y="589" class="lbl-mut">NSPA bypass route (skips wineserver)</text>
   <rect x="600" y="578" width="20" height="14" class="box-hot"/>
   <text x="630" y="589" class="lbl-mut">hot path / NSPA-introduced</text>
-  <rect x="800" y="578" width="20" height="14" class="box-cold"/>
-  <text x="830" y="589" class="lbl-mut">future / pending</text>
 </svg>
 </div>
 
