@@ -44,7 +44,7 @@ A few framing notes before getting into the details:
 
 The audience this doc is written for: a developer who has read the bypass overview, has skimmed the gamma-channel-dispatcher and ntsync split docs, and wants to understand the architectural arc that the bypass work *enables*. If you're implementing a single bypass and want a checklist, read the bypass detail doc for that bypass. This doc is the why, not the how.
 
-The main 2026-05-06 correction is scope: some of the work this page once
+The main 2026-05-09 correction is scope: some of the work this page once
 treated as "future wineserver-internal decomposition pressure" is now
 already shipping client-side. Timer dispatch for eligible local timers and
 `WM_TIMER`s lives on the per-process scheduler host, anonymous events no
@@ -52,9 +52,9 @@ longer require a server-created helper object by default, and PE-side socket
 deferred I/O is already on client `io_uring` rings. On top of that, local-file
 follow-ons and client-side local sections now retire more `create_file`,
 mapping, and metadata traffic before it ever becomes wineserver work. The
-2026-05-06 shared-state readers remove another slice of read-mostly
-thread/process query traffic, and the shipped `get_message` empty-poll cache
-cuts repeated empty queue polls before they become handler work. That does
+the shared-state readers remove another slice of read-mostly thread/process
+query traffic, and the shipped `get_message` empty-poll cache cuts repeated
+empty queue polls before they become handler work. That does
 **not** make the decomposition plan obsolete. It means the residual
 wineserver problem is smaller and more concentrated than it was when this page
 was first drafted.
@@ -320,7 +320,7 @@ This work is **still queued**. The decision depends on the PREEMPT_RT epoll expe
 
 Today, the main loop is RT and spends most of its time blocked in `poll()` or `epoll_wait()`. The wait itself doesn't actually need RT priority -- only the *response* to the wait does. RT priority matters for the work that happens after the wait returns, not for the act of sleeping in the kernel.
 
-The 2026-05-02 through 2026-05-06 shipped follow-ons narrow this split's
+The 2026-05-02 through 2026-05-09 shipped follow-ons narrow this split's
 motivation. Deferred socket recv/send no longer depend on wineserver fd wakeups
 in the common PE path because they already submit `IORING_OP_RECVMSG` /
 `IORING_OP_SENDMSG` from the client side. Local sections and widened local-file
@@ -491,7 +491,7 @@ These are the unresolved design questions ahead of the residual thread split. No
 2. **Aggregate-wait fairness.** If multiple sources are ready simultaneously, how are they ordered? For NTSync-object sources, "priority of the waker" is the obvious answer (it's how SEND_PI / SET_PI already work). For FD readiness, there is no waker priority. The aggregate-wait API needs a tie-break rule -- probably "object sources first, ordered by waker priority; FD sources second, ordered by registration order" -- but the call has not been made.
 3. **Timer thread vs NT timer mutability.** NT timers can be created, modified, or destroyed at any time. The timer thread needs to react to deadline changes between iterations. Two clean signals: `pthread_kill(timer_thread, SIGRTMIN)` to interrupt `clock_nanosleep` and force recompute, or have the timer thread also wait on a futex that fires on add/cancel. Aggregate-wait (4.2) makes this trivial: the timer thread waits on `(NT timer queue head deadline, futex on add/cancel)` and reacts to whichever fires. So this is partially a question of "does timer-split land before aggregate-wait or after?"
 4. **Strangler vs growth.** As the wineserver-decomposition direction continues, do we keep wineserver largely stable while pruning, or actively rewrite the parts that remain? The default recommendation is strangler -- keep the existing handler bodies, change only the dispatch and locking. But there are individual subsystems where a partial rewrite of the *handler* (not the architecture) might be cleaner once it's been pruned to a small surface. That call is per-subsystem and shouldn't be made up front.
-5. **PREEMPT_RT epoll experiment outcome.** `NSPA_DISABLE_EPOLL` (`90231fc8d21`) lets us A/B plain `poll()` vs `epoll_wait()` on PREEMPT_RT without rebuilding. If epoll behaves cleanly under the workload, the urgency on the FD poll thread split (5.3) drops; if it shows priority inversions on its internal RT-mutex-converted locks, the split moves up the priority list. The experiment should land before the residual-thread design is finalized.
+5. **PREEMPT_RT epoll experiment outcome.** `NSPA_DISABLE_EPOLL` lets us A/B plain `poll()` vs `epoll_wait()` on PREEMPT_RT without rebuilding. If epoll behaves cleanly under the workload, the urgency on the FD poll thread split (5.3) drops; if it shows priority inversions on its internal RT-mutex-converted locks, the split moves up the priority list. The experiment should land before the residual-thread design is finalized.
 6. **Where does `inproc_sync` fit?** The in-tree `server/inproc_sync.c` already handles a class of intra-process sync operations without round-tripping through the dispatcher. Some of its design lessons -- per-process state, ioctl-direct dispatch -- generalize to other request types, and the question is whether `inproc_sync` becomes a model for further router/handler-split fast paths or stays a one-off.
 7. **Handler queue priority discipline.** If the gamma dispatcher splits into router + handler tiers (5.2), the handoff queue between them needs a priority-respecting drain order. NTSync gives us PI on the channel; once a request is on a userspace queue inside wineserver, PI doesn't automatically follow. The queue drain probably needs to use NTSync as its waiter primitive (an event per handler, signalled from the router) so PI re-applies on the handoff. Not a blocker; a design detail.
 

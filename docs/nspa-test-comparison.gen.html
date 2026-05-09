@@ -114,7 +114,7 @@ RT = <code>NSPA_RT_PRIO=80 NSPA_RT_POLICY=FF WINEPRELOADREMAPVDSO=force</code></
 <p>This doc tracks Wine-NSPA test-suite evolution from v3 through v8. The
 current published full-suite snapshot remains v8 / 2026-04-30
 (1003-1011 kernel stack, 24 PASS / 0 FAIL / 0 TIMEOUT PE matrix,
-<code>dispatcher-burst</code> added). The shipped 2026-05-02 through 2026-05-06
+<code>dispatcher-burst</code> added). The shipped 2026-05-02 through 2026-05-09
 follow-ons below are validated by targeted harnesses and smoke runs
 rather than a new v9 full-suite publish. Earlier version sections are
 retained below as historical snapshots.</p>
@@ -159,7 +159,7 @@ retained below as historical snapshots.</p>
 
 <hr />
 
-<h2 id="post-v8-shipped-follow-ons-2026-05-02-through-2026-05-06--targeted-validators-not-a-new-matrix-version">Post-v8 shipped follow-ons (2026-05-02 through 2026-05-06) &ndash; targeted validators, not a new matrix version</h2>
+<h2 id="post-v8-shipped-follow-ons-2026-05-02-through-2026-05-09--targeted-validators-not-a-new-matrix-version">Post-v8 shipped follow-ons (2026-05-02 through 2026-05-09) &ndash; targeted validators, not a new matrix version</h2>
 
 <h3 id="why-this-is-not-labeled-v9">Why this is not labeled v9</h3>
 
@@ -168,12 +168,12 @@ spawn-main + <code>ntdll_sched</code>, sched-hosted timer migrations, anonymous
 local events default-on, socket <code>RECVMSG</code> / <code>SENDMSG</code> default-on, wider
 local-file coverage, default-on local sections, thread/process shared-state
 readers, the <code>get_message</code> empty-poll cache, RT-keyed memory
-follow-ons, and the current ntsync production module. Those changes were
+follow-ons, and the current ntsync overlay. Those changes were
 validated with targeted harnesses and real-workload smoke, but they have
 <strong>not</strong> yet been rolled into a new published full-suite matrix version.
 So the current matrix version remains v8.</p>
 
-<h3 id="targeted-2026-05-02-through-2026-05-06-results">Targeted 2026-05-02 through 2026-05-06 results</h3>
+<h3 id="targeted-2026-05-02-through-2026-05-09-results">Targeted 2026-05-02 through 2026-05-09 results</h3>
 
 <table>
 <thead>
@@ -220,14 +220,29 @@ So the current matrix version remains v8.</p>
 <td> ioctl path <code>~10000 ns/poll</code>; shared-state path <code>~144 ns/poll</code> </td>
 </tr>
 <tr>
+<td> zero-time thread wait fast path </td>
+<td> synthetic poll harness </td>
+<td> ioctl path <code>~11940 ns/poll</code>; shared-state path <code>~164 ns/poll</code> </td>
+</tr>
+<tr>
 <td> <code>get_message</code> empty-poll cache </td>
 <td> Ableton 60s targeted capture </td>
 <td> <code>get_message</code> calls <code>3,880</code> -> <code>866</code>; handler time <code>16.5 ms</code> -> <code>2.2 ms</code>; total handler time <code>46.8 ms</code> -> <code>36.9 ms</code> </td>
 </tr>
 <tr>
-<td> current ntsync production module </td>
+<td> x86_64 TEB hot-state carries </td>
+<td> 30 s playback counters </td>
+<td> <code>NtCurrentTeb</code> calls <code>9,961,441 -&gt; 566</code>; cumulative CPU cycles after the two TEB carries <code>257.8B -&gt; 212.4B</code> </td>
+</tr>
+<tr>
+<td> <code>inproc_sync</code> cacheline isolation </td>
+<td> 30 s playback counters </td>
+<td> false-sharing removed from hot refcount traffic while cached-handle capacity stays <code>524288</code> </td>
+</tr>
+<tr>
+<td> current ntsync overlay </td>
 <td> native channel / aggregate / stress reruns </td>
-<td> receive snapshot fix, dedicated slab caches, the wait-queue cache, and the lockless <code>SEND_PI</code> scan validated on current srcversion <code>25751C3E41E15401318758E</code> </td>
+<td> receive snapshot fix, dedicated slab caches, the wait-queue cache, and the lockless <code>SEND_PI</code> scan validated on the current shipped overlay </td>
 </tr>
 <tr>
 <td> RT-keyed memory follow-ons </td>
@@ -242,7 +257,7 @@ So the current matrix version remains v8.</p>
 
 <p>Use this page for the current published matrix boundary. Use
 <code>current-state.gen.html</code> for the exact shipped defaults and targeted
-2026-05-02 through 2026-05-06 validation numbers that landed after v8.</p>
+2026-05-02 through 2026-05-09 validation numbers that landed after v8.</p>
 
 <hr />
 
@@ -253,8 +268,7 @@ So the current matrix version remains v8.</p>
 <p>A cleaner current two-layer surface:</p>
 
 <ul>
-<li><strong>Layer 1 (native ntsync suite):</strong> <code>3 PASS / 0 FAIL</code> against
-production module <code>10124FB81FDC76797EF1F91</code>
+<li><strong>Layer 1 (native ntsync suite):</strong> <code>3 PASS / 0 FAIL</code>
 (<code>test-event-set-pi</code>, <code>test-channel-recv-exclusive</code>,
 <code>test-aggregate-wait</code> 9/9 including kitchen-sink 86,528 wakes /
 0 timeouts / 0 errors).</li>
@@ -266,11 +280,10 @@ drain loop, which the rest of the PE matrix mostly does not touch.</li>
 </ul>
 
 
-<h3 id="layer-1-results--current-production-module">Layer 1 results &ndash; current production module</h3>
+<h3 id="layer-1-results">Layer 1 results</h3>
 
-<p>Module under test: <code>srcversion 10124FB81FDC76797EF1F91</code>
-(1003-1011, post-1010 PI follow-ups, <code>NTSYNC_IOC_CHANNEL_TRY_RECV2</code>
-present).</p>
+<p>Kernel side under test: the then-current burst-drain-capable ntsync
+overlay (<code>TRY_RECV2</code> present, aggregate-wait already shipped).</p>
 
 <table>
 <thead>
@@ -533,7 +546,7 @@ historical snapshot.</li>
 
 <h3 id="layer-1-results--370m-ops-zero-kasan-zero-dmesg-splats">Layer 1 results &ndash; ~370M ops, zero KASAN, zero dmesg splats</h3>
 
-<p>Module under test: <code>srcversion A250A77651C8D5DAB719FE2</code>. All four bugs
+<p>Kernel side under test: the then-current post-fix ntsync overlay. All four bugs
 caught during the 2026-04-26 -> 2026-04-28 KASAN-armed debug-kernel
 session are fixed. Cumulative ops since the audit session opened.</p>
 
@@ -596,7 +609,7 @@ setup_wait (rolled back)</li>
 
 
 <p>These remain in-tree as documentation of what was tried and why it was
-reverted (memory: <code>feedback_dont_shotgun_audit_into_unfound_bug</code>).</p>
+reverted.</p>
 
 <h3 id="layer-2-pe-matrix--2222-pass">Layer 2 PE matrix &ndash; 22/22 PASS</h3>
 
@@ -668,7 +681,7 @@ reverted (memory: <code>feedback_dont_shotgun_audit_into_unfound_bug</code>).</p
 <td> socket-io </td>
 <td> PASS </td>
 <td> PASS </td>
-<td> io_uring Phase 2 bypass code path </td>
+<td> io_uring socket bypass code path </td>
 </tr>
 <tr>
 <td> srw-bench </td>
@@ -706,7 +719,7 @@ io_uring subsystems healthy.</p>
 </tr>
 <tr>
 <td> Wine ring code </td>
-<td> Audit §4.1 retry-loop hardening shipped (superproject <code>a7e34c7</code>) </td>
+<td> Audit §4.1 retry-loop hardening shipped </td>
 <td> 7 sites + <code>NSPA_SHM_RETRY_GUARD</code>; subtests A+B PASS </td>
 </tr>
 <tr>
@@ -716,7 +729,7 @@ io_uring subsystems healthy.</p>
 </tr>
 <tr>
 <td> io_uring socket bypass </td>
-<td> Renumbered to Phase 2 </td>
+<td> landed on the deferred socket path </td>
 <td> PE socket-io test still PASSed against that build </td>
 </tr>
 </tbody>
@@ -771,7 +784,7 @@ patches, module loaded). Wine-NSPA 11.6, <code>nspa_rt_test.exe</code> v4 via
 
 <h3 id="io_uring-socket-io-bypass-new-in-v4">io_uring Socket I/O Bypass [NEW in v4]</h3>
 
-<p>(Numbered &ldquo;Phase 3&rdquo; in the v4 report; renumbered to Phase 2 in 2026-04-28.)</p>
+<p>This was the first shipped io_uring socket bypass pass in the public reports.</p>
 
 <table>
 <thead>
@@ -928,13 +941,13 @@ patches, module loaded). Wine-NSPA 11.6, <code>nspa_rt_test.exe</code> v4 via
 <td> Less PI overhead </td>
 </tr>
 <tr>
-<td> socket-io Phase B avg </td>
+<td> socket-io overlapped avg </td>
 <td> &ndash; </td>
 <td> <strong>113 us</strong> </td>
 <td> NEW: io_uring overlapped socket bypass </td>
 </tr>
 <tr>
-<td> socket-io Phase B throughput </td>
+<td> socket-io overlapped throughput </td>
 <td> &ndash; </td>
 <td> <strong>8837 msg/s</strong> </td>
 <td> NEW: +18% vs baseline </td>
@@ -1205,7 +1218,7 @@ deadlock, double completion, ALERTED/PENDING race). 5th approach
 <h2 id="v5---v6-2026-04-1617--incremental-tuning">v5 -> v6 (2026-04-16/17) &ndash; incremental tuning</h2>
 
 <p>Stable matrix; no new test subcommands. Tuning passes on the gamma
-channel scaffolding and msg-ring v2 Phase A (redraw_window push ring)
+channel scaffolding and the msg-ring redraw push ring
 landed in this window. PE matrix continued to pass 20/20 throughout.</p>
 
 <hr />
@@ -1294,10 +1307,9 @@ which are stable):</p>
 
 <ul>
 <li>Benchmark numbers (latency, throughput) are run-to-run noisy and
-also skew when slub_debug / KFENCE are on. The authoritative signal
+also skew when <code>slub_debug</code> / KFENCE are on. The authoritative signal
 across versions is <strong>PASS/FAIL plus presence of KASAN splats</strong> &ndash;
-not specific microsecond or ops/sec deltas. (Memory:
-<code>feedback_slub_debug_skews_benchmarks</code>.)</li>
+not specific microsecond or ops/sec deltas.</li>
 <li>The 2026-04-26 -> 2026-04-28 audit cycle paid bills against the
 ntsync surface and the wine ring-retry loop. Both surfaces are
 stable as of v7. Later shipped follow-ons moved additional message-pump,
@@ -1310,8 +1322,8 @@ being folded back into this historical v8 snapshot.</li>
 <hr />
 
 <p>Generated: 2026-05-01 | Wine-NSPA RT test harness v8 historical snapshot
-(Layer 1 + Layer 2) &ndash; <code>10124FB81FDC76797EF1F91</code>, 3 PASS / 0 FAIL
-native, 24 PASS / 0 FAIL / 0 TIMEOUT PE matrix.</p>
+(Layer 1 + Layer 2) &ndash; the then-current burst-drain-capable overlay,
+3 PASS / 0 FAIL native, 24 PASS / 0 FAIL / 0 TIMEOUT PE matrix.</p>
 
 <script>
 document.addEventListener("DOMContentLoaded", function () {

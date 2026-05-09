@@ -50,7 +50,7 @@ The same RT thread handles the full lifecycle.
 |---|---|---|
 | Kernel | `NTSYNC_IOC_AGGREGATE_WAIT` | One wait covers NTSync objects plus pollable fds |
 | Kernel | Channel notify-only support inside aggregate-wait | lets the dispatcher block on the channel without consuming the entry in the aggregate ioctl itself |
-| Kernel | follow-up PI fixes (`072bfee`) | stable boost propagation for aggregate-waiting dispatchers |
+| Kernel | post-aggregate-wait PI follow-ons | stable boost propagation for aggregate-waiting dispatchers |
 | Userspace | `struct nspa_uring_instance` per process | dispatcher-local ring + eventfd + fixed pending pool |
 | Userspace | `struct nspa_dispatcher_ctx` | single owner for channel fd, shutdown eventfd, and ring lifetime |
 | Userspace | aggregate-wait dispatcher loop | same-thread request receive, CQE drain, and reply |
@@ -187,7 +187,7 @@ The dispatcher is the first consumer, but the primitive is intentionally general
 
   <rect x="160" y="286" width="660" height="74" class="note"/>
   <text x="490" y="312" text-anchor="middle" class="t">Kernel follow-ups required for production stability</text>
-  <text x="490" y="330" text-anchor="middle" class="s">`072bfee` added SEND_PI any-waiters fallback and wake-after-boost ordering</text>
+  <text x="490" y="330" text-anchor="middle" class="s">post-1010 follow-ups added SEND_PI any-waiters fallback and wake-after-boost ordering</text>
   <text x="490" y="344" text-anchor="middle" class="s">so aggregate-waiting dispatchers inherit priority correctly</text>
 </svg>
 </div>
@@ -425,7 +425,7 @@ That logic is runtime feature detection, not a release ladder:
 
 | Item | Value |
 |---|---|
-| Kernel module srcversion | `25751C3E41E15401318758E` |
+| Kernel side | Wine-NSPA ntsync overlay with aggregate-wait and burst drain support |
 | Wine userspace state | Dispatcher-owned ring and aggregate-wait loop are shipped; async `CreateFile` and burst drain both build on the same base |
 | Current wait shape | `AGGREGATE_WAIT` over channel + uring eventfd + shutdown eventfd |
 | Current follow-ons on top of this base | dispatcher-owned async `CreateFile`; post-reply `TRY_RECV2` burst drain |
@@ -442,10 +442,10 @@ That logic is runtime feature detection, not a release ladder:
 | Ableton level 2/3 on the shipped path | PASS |
 | Aggregate-wait in normal production use | PASS |
 
-The follow-up kernel fixes in `072bfee` matter here. The first 1010 cut exposed exactly
+The follow-up kernel fixes matter here. The first 1010 cut exposed exactly
 the kind of PI edge that the dispatcher cannot tolerate: an aggregate-waiting dispatcher
 must still be visible to SEND_PI wake/boost logic and must not be woken before the new
-boost state is established. The production module includes those corrections.
+boost state is established. The current shipped overlay includes those corrections.
 
 ---
 
@@ -482,9 +482,7 @@ needs to prove the syscall shape from scratch; it can build on a production cons
 - `wine/server/nspa/shmem_channel.c` — dispatcher context, aggregate-wait loop, shutdown path
 - `wine/server/nspa/uring.h` — per-process `nspa_uring_instance` public surface
 - `ntsync-patches/1010-ntsync-aggregate-wait.patch` — aggregate-wait kernel patch
-- Superproject commits:
-  - `1879e2c` — ntsync 1010 first cut
-  - `072bfee` — SEND_PI any_waiters fallback + wake-after-boost reorder
-  - `8cc157c` — userspace per-process uring infrastructure
-  - `f21c6e1` — userspace aggregate-wait dispatcher
-  - `b36e36d` — aggregate-wait default-on
+- kernel overlay follow-ons: aggregate-wait first cut plus the later SEND_PI
+  visibility and wake-order corrections
+- Wine-side follow-ons: per-process dispatcher uring infrastructure, the
+  aggregate-wait dispatcher loop, and the later default-on flip

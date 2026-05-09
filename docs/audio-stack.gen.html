@@ -268,13 +268,14 @@
   <text x="440" y="278" text-anchor="middle" class="lbl-sm">fast path: per-channel double-buf</text>
 
   <rect x="560" y="258" width="240" height="32" class="box-driver" rx="6"/>
-  <text x="680" y="278" text-anchor="middle" class="lbl-sm">Phase F: register_asio + futex pair</text>
+  <text x="680" y="278" text-anchor="middle" class="lbl-sm">direct callback path: register_asio + futex pair</text>
 
-  <text x="460" y="310" text-anchor="middle" class="lbl-yel">single JACK process callback services every active stream (shared / excl / Phase F)</text>
-  <text x="460" y="326" text-anchor="middle" class="lbl-mut">pi_mutex_trylock against WASAPI threads -- no blocking inside RT callback</text>
+  <text x="460" y="310" text-anchor="middle" class="lbl-yel">single JACK callback services shared, exclusive,</text>
+  <text x="460" y="324" text-anchor="middle" class="lbl-yel">and direct-callback streams</text>
+  <text x="460" y="340" text-anchor="middle" class="lbl-mut">pi_mutex_trylock against WASAPI threads -- no blocking inside RT callback</text>
 
   <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="210" y1="340" x2="210" y2="370" class="conn"/>
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="460" y1="340" x2="460" y2="370" class="conn"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="460" y1="352" x2="460" y2="370" class="conn"/>
   <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="710" y1="340" x2="710" y2="370" class="conn"/>
 
   <text x="20" y="392" class="lbl-tier">JACK</text>
@@ -294,7 +295,7 @@
   <rect x="100" y="522" width="720" height="40" class="box-hw" rx="6"/>
   <text x="460" y="546" text-anchor="middle" class="lbl-yel">ALSA hw: device -- USB / PCI audio interface, sample-rate clock owner</text>
 
-  <text x="710" y="200" class="lbl-acc">Phase F shortcut:</text>
+  <text x="710" y="200" class="lbl-acc">direct callback shortcut:</text>
   <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="710" y1="160" x2="710" y2="172" class="conn-fast"/>
   <text x="855" y="280" class="lbl-mut">same-period</text>
   <text x="855" y="294" class="lbl-mut">zero-copy</text>
@@ -304,7 +305,7 @@
 </div>
 
 
-<p>The Phase F path (rightmost column) removes an extra JACK-period staging step. Instead of filling an intermediate ring and waiting for the next callback to consume it, the host&rsquo;s <code>bufferSwitch</code> data is emitted in the same JACK period in which it was produced.</p>
+<p>The direct callback path (rightmost column) removes an extra JACK-period staging step. Instead of filling an intermediate ring and waiting for the next callback to consume it, the host&rsquo;s <code>bufferSwitch</code> data is emitted in the same JACK period in which it was produced.</p>
 
 <h2 id="4-winejackdrv-the-jack-backend-for-wine">4. winejack.drv: the JACK backend for Wine</h2>
 
@@ -430,7 +431,7 @@
 
 <h2 id="6-exclusive-mode-and-the-fast-path">6. Exclusive mode and the fast path</h2>
 
-<p>WASAPI exclusive mode with <code>AUDCLNT_STREAMFLAGS_EVENTCALLBACK</code> is the path serious audio applications take. It is the path Ableton takes when configured against a WASAPI device. It is the path that an ASIO host&rsquo;s WASAPI fallback uses, and it is the path that <code>nspaASIO</code> uses when Phase F is unavailable.</p>
+<p>WASAPI exclusive mode with <code>AUDCLNT_STREAMFLAGS_EVENTCALLBACK</code> is the path serious audio applications take. It is the path Ableton takes when configured against a WASAPI device. It is the path that an ASIO host&rsquo;s WASAPI fallback uses, and it is the path that <code>nspaASIO</code> uses when the direct callback path is unavailable.</p>
 
 <p>The exclusive contract is tight:</p>
 
@@ -486,9 +487,9 @@
 <thead>
 <tr>
 <th> Stage </th>
-<th> Pre-Phase-F </th>
+<th> Before direct callback path </th>
 <th> After fast path </th>
-<th> With Phase F </th>
+<th> With direct callback path </th>
 </tr>
 </thead>
 <tbody>
@@ -538,7 +539,7 @@
 </table>
 
 
-<p>Phase F&rsquo;s full additive overhead per period, on top of the JACK period itself, is a couple of memcpys plus the futex round trip &ndash; on the order of 30 microseconds for typical channel counts. That is well below the variance of the kernel scheduler and not measurable end-to-end against a clean JACK reference.</p>
+<p>The direct callback path&rsquo;s full additive overhead per period, on top of the JACK period itself, is a couple of memcpys plus the futex round trip &ndash; on the order of 30 microseconds for typical channel counts. That is well below the variance of the kernel scheduler and not measurable end-to-end against a clean JACK reference.</p>
 
 <h2 id="7-midi">7. MIDI</h2>
 
@@ -849,7 +850,7 @@ play_thread (thread T_play, Wine, SCHED_FIFO):
     .handshake { stroke: #bb9af7; stroke-width: 1.2; }
   </style>
 
-  <text x="400" y="22" text-anchor="middle" class="lbl-hdr">One JACK period under Phase F</text>
+  <text x="400" y="22" text-anchor="middle" class="lbl-hdr">One JACK period under the direct callback path</text>
 
   <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="80" y1="60" x2="80" y2="320" class="period" />
   <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="720" y1="60" x2="720" y2="320" class="period" />
@@ -947,7 +948,7 @@ play_thread (thread T_play, Wine, SCHED_FIFO):
     .conn-loop { stroke: #bb9af7; stroke-width: 1.15; fill: none; }
   </style>
 
-  <text x="460" y="26" text-anchor="middle" class="lbl-hdr">Phase F handshake state machine -- one period</text>
+  <text x="460" y="26" text-anchor="middle" class="lbl-hdr">Direct callback handshake state machine -- one period</text>
   <text x="460" y="44" text-anchor="middle" class="lbl-mut">int handshake_state shared between T_jack and T_play; CAS transitions only</text>
 
   <rect x="380" y="70" width="160" height="78" rx="8" class="state"/>
@@ -1045,13 +1046,13 @@ play_thread (thread T_play, Wine, SCHED_FIFO):
 
 <p><strong><code>IMMNotificationClient</code> device-change notifications.</strong> Applications that respond to audio-device hotplug (changing output to a USB headset on connect) don&rsquo;t get notified because the notifications aren&rsquo;t fired. Same root cause as the hotplug deferral.</p>
 
-<p><strong>Capture fast path.</strong> Only the render path has the per-channel double-buffer fast path. Capture goes through the general interleaved path. Low priority because ASIO capture uses Phase F directly, and the capture rate of typical DAW workloads is far less critical than the render rate.</p>
+<p><strong>Capture fast path.</strong> Only the render path has the per-channel double-buffer fast path. Capture goes through the general interleaved path. Low priority because ASIO capture uses the direct callback path directly, and the capture rate of typical DAW workloads is far less critical than the render rate.</p>
 
 <p><strong>ASIO control panel.</strong> <code>controlPanel()</code> is a no-op. Some DAWs offer &ldquo;Open Driver Panel&rdquo; as a convenience for setting buffer sizes and channel counts. A simple Wine dialog could expose JACK buffer-size and channel-count selection. Nice UX improvement, not on the critical path.</p>
 
 <p><strong>ASIO future selectors.</strong> <code>future()</code> rejects every selector. <code>kAsioCanReportOverload</code>, <code>kAsioSupportsTimeInfo</code>, <code>kAsioCanTimeCode</code> should respond correctly where supported.</p>
 
-<p><strong>ASIO <code>outputReady</code>.</strong> Returns <code>ASE_NotPresent</code>. With Phase F driving timing from the JACK callback, this could return <code>ASE_OK</code> and let some hosts optimize. Marginal.</p>
+<p><strong>ASIO <code>outputReady</code>.</strong> Returns <code>ASE_NotPresent</code>. With the direct callback path driving timing from the JACK callback, this could return <code>ASE_OK</code> and let some hosts optimize. Marginal.</p>
 
 <p><strong>Multiple ASIO device entries.</strong> Some DAWs expect one ASIO driver per physical audio device. nspaASIO appears as a single driver. The DAW&rsquo;s device selector inside nspaASIO would have to expose JACK port groupings as virtual devices. Doable, not done.</p>
 
@@ -1059,9 +1060,9 @@ play_thread (thread T_play, Wine, SCHED_FIFO):
 
 <h2 id="12-other-audio-drivers">12. Other audio drivers</h2>
 
-<p><code>winealsa.drv</code>, <code>winepulse.drv</code>, and <code>wineoss.drv</code> are all still present in the source tree because Wine&rsquo;s build system expects them and because they share function-table definitions with <code>winejack.drv</code> via <code>mmdevapi/unixlib.h</code>. The four new function-table entries Phase F added (<code>register_asio</code>, <code>unregister_asio</code>, <code>asio_wait_callback</code>, <code>asio_signal_complete</code>) have stub implementations in each of those drivers that return <code>STATUS_NOT_IMPLEMENTED</code>. The MIDI delegation that <code>winealsa.drv</code> does (<code>alsa_midi_get_driver</code> returning the winejack MIDI driver when <code>NSPA_JACK_MIDI=1</code> is set) is still wired up.</p>
+<p><code>winealsa.drv</code>, <code>winepulse.drv</code>, and <code>wineoss.drv</code> are all still present in the source tree because Wine&rsquo;s build system expects them and because they share function-table definitions with <code>winejack.drv</code> via <code>mmdevapi/unixlib.h</code>. The four new function-table entries that support the direct callback path (<code>register_asio</code>, <code>unregister_asio</code>, <code>asio_wait_callback</code>, <code>asio_signal_complete</code>) have stub implementations in each of those drivers that return <code>STATUS_NOT_IMPLEMENTED</code>. The MIDI delegation that <code>winealsa.drv</code> does (<code>alsa_midi_get_driver</code> returning the winejack MIDI driver when <code>NSPA_JACK_MIDI=1</code> is set) is still wired up.</p>
 
-<p>The plan, once <code>winejack.drv</code> is fully validated for shared, exclusive, and ASIO paths and the deferred items are no longer blocking, is to drop these other drivers from the Wine-NSPA build entirely. The user runs PipeWire with the JACK interface; everything routes through JACK already; the other drivers add no value and can interfere with routing. Disabling them in <code>configure.ac</code> (or removing them from the build set) is mechanical. At that point the stub function-table entries become dead code and the Phase F additions to <code>mmdevapi/unixlib.h</code> can be split into a winejack-specific header rather than the shared one.</p>
+<p>The plan, once <code>winejack.drv</code> is fully validated for shared, exclusive, and ASIO paths and the deferred items are no longer blocking, is to drop these other drivers from the Wine-NSPA build entirely. The user runs PipeWire with the JACK interface; everything routes through JACK already; the other drivers add no value and can interfere with routing. Disabling them in <code>configure.ac</code> (or removing them from the build set) is mechanical. At that point the stub function-table entries become dead code and the direct-callback additions to <code>mmdevapi/unixlib.h</code> can be split into a winejack-specific header rather than the shared one.</p>
 
 <p>This is filed as future work and not yet executed. The drivers stay in the build for now, as a safety net during the period when winejack still has deferred items.</p>
 
@@ -1070,9 +1071,9 @@ play_thread (thread T_play, Wine, SCHED_FIFO):
 <p>The audio stack has been exercised against a handful of real-world DAW workloads during development. A non-exhaustive list:</p>
 
 <ul>
-<li><strong>Ableton Live 12</strong> at 48 kHz, 64-frame and 128-frame JACK periods, both via the WASAPI exclusive path and via nspaASIO with Phase F. Tracked sessions of 30+ tracks with VST instruments and effects, drum-rack lookups during playback, plugin-window UI redraw under transport.</li>
+<li><strong>Ableton Live 12</strong> at 48 kHz, 64-frame and 128-frame JACK periods, both via the WASAPI exclusive path and via nspaASIO with the direct callback path. Tracked sessions of 30+ tracks with VST instruments and effects, drum-rack lookups during playback, plugin-window UI redraw under transport.</li>
 <li><strong>vsthost</strong> as a lightweight ASIO host, used to validate <code>nspaASIO</code> against synthetic plugin chains &ndash; known good for catching <code>bufferSwitch</code> reentrancy and timing bugs without a full DAW&rsquo;s complexity.</li>
-<li><strong>Chromaphone 3</strong> (32-bit and 64-bit builds) as a standalone ASIO synthesizer, validated end-to-end through <code>nspaASIO</code> Phase F. The 32-bit build doubles as a Wow64 bridge test for the audio path.</li>
+<li><strong>Chromaphone 3</strong> (32-bit and 64-bit builds) as a standalone ASIO synthesizer, validated end-to-end through <code>nspaASIO</code>&rsquo;s direct callback path. The 32-bit build doubles as a Wow64 bridge test for the audio path.</li>
 <li><strong>Various media players and browsers</strong> on the WASAPI shared path, validating that shared streams coexist with active ASIO streams without underrun on either side.</li>
 </ul>
 
@@ -1088,16 +1089,16 @@ play_thread (thread T_play, Wine, SCHED_FIFO):
 <h3 id="source">Source</h3>
 
 <ul>
-<li><code>/home/ninez/pkgbuilds/Wine-NSPA/wine-rt-claude/wine/dlls/winejack.drv/jack.c</code> &ndash; WASAPI audio over JACK, JACK process callback, Phase F registration interface, format conversion</li>
-<li><code>/home/ninez/pkgbuilds/Wine-NSPA/wine-rt-claude/wine/dlls/winejack.drv/jackmidi.c</code> &ndash; WinMM MIDI over JACK MIDI</li>
-<li><code>/home/ninez/pkgbuilds/Wine-NSPA/wine-rt-claude/wine/dlls/winejack.drv/unixlib.h</code> &ndash; shared function table for the audio side</li>
-<li><code>/home/ninez/pkgbuilds/Wine-NSPA/wine-rt-claude/wine/dlls/winejack.drv/Makefile.in</code> &ndash; build configuration, links libjack</li>
-<li><code>/home/ninez/pkgbuilds/Wine-NSPA/wine-rt-claude/wine/dlls/nspaasio/nspaasio.c</code> &ndash; IASIO COM implementation, WASAPI exclusive client, Phase F registration call</li>
-<li><code>/home/ninez/pkgbuilds/Wine-NSPA/wine-rt-claude/wine/dlls/nspaasio/nspaasio.spec</code> &ndash; DLL exports</li>
-<li><code>/home/ninez/pkgbuilds/Wine-NSPA/wine-rt-claude/wine/dlls/nspaasio/asio.h</code> &ndash; vendored ASIO SDK header</li>
-<li><code>/home/ninez/pkgbuilds/Wine-NSPA/wine-rt-claude/wine/dlls/mmdevapi/unixlib.h</code> &ndash; shared function table including the four Phase F entries</li>
-<li><code>/home/ninez/pkgbuilds/Wine-NSPA/wine-rt-claude/wine/dlls/mmdevapi/main.c</code> &ndash; PE-side wrappers for the Phase F unix calls</li>
-<li><code>/home/ninez/pkgbuilds/Wine-NSPA/wine-rt-claude/wine/dlls/mmdevapi/mmdevapi.spec</code> &ndash; exports the Phase F wrappers</li>
+<li><code>wine/dlls/winejack.drv/jack.c</code> &ndash; WASAPI audio over JACK, JACK process callback, direct-callback registration interface, format conversion</li>
+<li><code>wine/dlls/winejack.drv/jackmidi.c</code> &ndash; WinMM MIDI over JACK MIDI</li>
+<li><code>wine/dlls/winejack.drv/unixlib.h</code> &ndash; shared function table for the audio side</li>
+<li><code>wine/dlls/winejack.drv/Makefile.in</code> &ndash; build configuration, links libjack</li>
+<li><code>wine/dlls/nspaasio/nspaasio.c</code> &ndash; IASIO COM implementation, WASAPI exclusive client, direct-callback registration call</li>
+<li><code>wine/dlls/nspaasio/nspaasio.spec</code> &ndash; DLL exports</li>
+<li><code>wine/dlls/nspaasio/asio.h</code> &ndash; vendored ASIO SDK header</li>
+<li><code>wine/dlls/mmdevapi/unixlib.h</code> &ndash; shared function table including the four direct-callback entries</li>
+<li><code>wine/dlls/mmdevapi/main.c</code> &ndash; PE-side wrappers for the direct-callback unix calls</li>
+<li><code>wine/dlls/mmdevapi/mmdevapi.spec</code> &ndash; exports the direct-callback wrappers</li>
 </ul>
 
 

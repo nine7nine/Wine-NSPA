@@ -26,6 +26,9 @@ Three pieces are shipped in production:
 - dispatcher-owned async `CreateFile` on the per-process server ring
 - PE-side socket `RECVMSG` / `SENDMSG`, default on via
   `NSPA_URING_RECV=1` and `NSPA_URING_SEND=1`
+- hot-path helper trimming around the steady-state wait path, including the
+  inline empty check in `ntdll_io_uring_flush_deferred()` and the inline
+  eventfd getter
 
 The important boundary correction from 2026-05-02 is that `io_uring` does
 **not** subsume named-pipe or named-event completion. Those remain
@@ -496,11 +499,12 @@ with `io_uring`.
 | sync poll + async file I/O | Shipped, default-on | `NtReadFile` / `NtWriteFile` |
 | async `CreateFile` via dispatcher ring | Shipped | server-side consumer on the per-process ring |
 | socket I/O (deferred path) | Shipped, default-on | `NSPA_URING_RECV=1`, `NSPA_URING_SEND=1`; validated on `socket-io` and Ableton |
+| wait-path helper trimming | Shipped | removes tiny helper-call overhead on the steady-state wait path |
 | dropped follow-ons | Dropped | not worthwhile or blocked by server-managed architecture |
 | E2 bitmap (server `sock.c`) | Shipped | engaged when the client-owned socket poll path is active |
 | ntsync `uring_fd` extension | Shipped (kernel patch) | Wakes ntsync waits on CQE |
-| ntsync PI kernel + audit fixes | Shipped (kernel patch) | Module srcversion `25751C3E41E15401318758E` |
-| Audit §4.1 retry-loop hardening | Shipped (wine) | Superproject `a7e34c7` |
+| ntsync PI kernel + audit fixes | Shipped (kernel patch) | current Wine-NSPA ntsync overlay |
+| Audit §4.1 retry-loop hardening | Shipped (wine) | `NSPA_SHM_RETRY_GUARD` is on the normal path |
 
 ### Next Actions
 

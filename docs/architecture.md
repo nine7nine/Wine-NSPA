@@ -27,7 +27,12 @@ This page is the system map for Wine-NSPA. Use it to understand the major layers
 
 ## 1. What Wine-NSPA is
 
-Wine-NSPA is a PREEMPT_RT-tuned fork of Wine 11.x. It targets `PREEMPT_RT_FULL` Linux kernels, grafts kernel-level priority inheritance onto every Win32 sync primitive, replaces Wine's single-threaded wineserver event loop in the hot path with kernel-mediated channels and bounded shmem rings, and ships a custom `ntsync` kernel module that gives `/dev/ntsync` Windows-faithful priority semantics with PI boost.
+Wine-NSPA is a PREEMPT_RT-tuned fork of Wine 11.8. It targets
+`PREEMPT_RT_FULL` Linux kernels, grafts kernel-level priority inheritance onto
+every Win32 sync primitive, replaces Wine's single-threaded wineserver event
+loop in the hot path with kernel-mediated channels and bounded shmem rings, and
+ships a custom `ntsync` kernel module that gives `/dev/ntsync`
+Windows-faithful priority semantics with PI boost.
 
 Scope covers latency-sensitive and correctness-sensitive Wine surfaces on PREEMPT_RT: synchronization, wineserver IPC, UI dispatch, startup and steady-state file I/O, hook dispatch, timer delivery, and audio callback paths. Audio workloads are part of the validation matrix, but the architecture is not audio-specific.
 
@@ -85,11 +90,11 @@ exceeded.
 
   <rect x="170" y="105" width="120" height="40" class="box"/>
   <text x="230" y="123" text-anchor="middle" class="lbl-sm">ntdll</text>
-  <text x="230" y="137" text-anchor="middle" class="lbl-mut">PE + unix + sync + shared-state</text>
+  <text x="230" y="137" text-anchor="middle" class="lbl-mut">unix sync + shared-state + TEB hot path</text>
 
   <rect x="300" y="105" width="120" height="40" class="box"/>
   <text x="360" y="123" text-anchor="middle" class="lbl-sm">win32u + nspa</text>
-  <text x="360" y="137" text-anchor="middle" class="lbl-mut">msg-ring + empty-poll cache</text>
+  <text x="360" y="137" text-anchor="middle" class="lbl-mut">msg-ring + TEB caches + empty-poll cache</text>
 
   <rect x="430" y="105" width="180" height="40" class="box-hot"/>
   <text x="520" y="123" text-anchor="middle" class="lbl-yel">NT-local stubs</text>
@@ -241,7 +246,7 @@ heterogeneous waits, and `TRY_RECV2` for post-dispatch burst drain. The
 userspace half now also includes the client-created anonymous sync path
 for mutexes, semaphores, and events, so the public story is a kernel
 overlay plus a Wine-side in-process sync layer rather than “just a
-driver.” The current production module is `25751C3E41E15401318758E`.
+driver.”
 
 All four paths are gated on `NSPA_RT_PRIO`. When unset, every PI code path short-circuits and Wine behaves byte-for-byte like upstream. **Detail: see [NTSync PI Kernel](ntsync-pi-driver.gen.html), [NTSync Userspace Sync](ntsync-userspace.gen.html), [cs-pi](cs-pi.gen.html), [condvar-pi-requeue](condvar-pi-requeue.gen.html).**
 
@@ -310,7 +315,16 @@ dedicated thread.
 
 The Win32 message pump is the second-hottest source of wineserver round-trips (after `NtCreateFile`, which `nspa_local_file` already drains). A typical Win32 application calls `GetMessage` / `PeekMessage` on every UI tick; cross-thread `PostMessage` and `SendMessage` go through the server even when sender and receiver are in the same process; `RedrawWindow` and `InvalidateRect` push paint flags into the server.
 
-NSPA's msg-ring v1 ships a per-thread bounded MPMC shmem ring for cross-thread same-process `PostMessage` / `SendMessage` / reply, signalled via NTSync events. The same substrate now also carries the `redraw_window` push ring, the paint-cache fast path, and a shipped `get_message` empty-poll cache. That cache keeps a per-thread snapshot of the last empty filter tuple plus `queue_shm->nspa_change_seq`; if the same filter comes back before the sequence changes, Wine returns `STATUS_PENDING` locally instead of paying another wineserver round-trip.
+NSPA's msg-ring v1 ships a per-thread bounded MPMC shmem ring for cross-thread
+same-process `PostMessage` / `SendMessage` / reply, signalled via NTSync
+events. The same substrate now also carries the `redraw_window` push ring, the
+paint-cache fast path, and a shipped `get_message` empty-poll cache. That
+cache keeps a per-thread snapshot of the last empty filter tuple plus
+`queue_shm->nspa_change_seq`; if the same filter comes back before the sequence
+changes, Wine returns `STATUS_PENDING` locally instead of paying another
+wineserver round-trip. The message path now also reads its own hot per-thread
+caches through `TEB->Win32ClientInfo` instead of repeated
+`pthread_getspecific()` calls.
 
 Three pre-existing wine-userspace bugs in `dlls/win32u/nspa/msg_ring.c` were found and fixed in the 2026-04-27 audit (MR1 reply-slot ABA, MR2 `FUTEX_PRIVATE` on `MAP_SHARED` memfd, MR4 POST wake-loss on dual-signal-fail rollback), all of the silent-contract-violation class.
 
@@ -321,8 +335,9 @@ Three pre-existing wine-userspace bugs in `dlls/win32u/nspa/msg_ring.c` were fou
 Wine-NSPA now publishes read-mostly thread and process snapshots into shared
 objects so a set of `NtQueryInformationThread()` and
 `NtQueryInformationProcess()` classes can answer locally. The shipped coverage
-is seven thread classes, six process classes, and the zero-time
-`WaitForSingleObject(process, 0)` liveness poll. The client path uses a seqlock
+is seven thread classes, six process classes, the zero-time
+`WaitForSingleObject(process, 0)` liveness poll, and the zero-time
+`WaitForSingleObject(thread, 0)` liveness poll. The client path uses a seqlock
 read discipline over server-published snapshots; if the snapshot is missing or
 the information class still needs server-side transformation, the original RPC
 path remains in place.
@@ -404,9 +419,9 @@ Each bypass moves a specific class of NT-API state or I/O work out of wineserver
 
 The current topology covers the shipped bypass surfaces plus the
 residual wineserver floor (process/thread lifecycle, cross-process
-naming, path resolution, handle inheritance). As of 2026-05-06, the
+naming, path resolution, handle inheritance). As of 2026-05-09, the
 shipped/default-on set includes sync primitives, hook caching,
-thread/process shared-state readers, zero-time process wait polling,
+thread/process shared-state readers, zero-time process and thread wait polling,
 NT-local file and section handling, local events, sched-hosted timer dispatch,
 the client scheduler substrate, `io_uring` regular-file I/O, gamma's
 aggregate-wait + `TRY_RECV2` dispatcher path, async `CreateFile`,
@@ -424,7 +439,17 @@ This staging keeps regression scope local and rebase cost bounded. The shipped p
 
 ## 5. Wineserver residual design
 
-The decomposition plan for wineserver is now mostly about the residual server-owned timer, fd-poll, routing, and lock-partitioning work that remains after the shipped bypass set above. Timer splitting becomes tractable after `nspa_local_timer` reduces server ownership. fd-poll splitting becomes tractable after `io_uring` absorbs the regular-file and socket surfaces. Lock partitioning becomes tractable only after the residual lock holders are a small, auditable set. The 2026-05-06 shared-state readers and message-pump empty-poll cache reduce that residual further by draining read-mostly query traffic and repeated empty queue polls before they ever become wineserver work.
+The decomposition plan for wineserver is now mostly about the residual
+server-owned timer, fd-poll, routing, and lock-partitioning work that remains
+after the shipped bypass set above. Timer splitting becomes tractable after
+`nspa_local_timer` reduces server ownership. fd-poll splitting becomes
+tractable after `io_uring` absorbs the regular-file and socket surfaces. Lock
+partitioning becomes tractable only after the residual lock holders are a
+small, auditable set. The shared-state readers, zero-time waits, and
+message-pump empty-poll cache reduced that residual further by draining
+read-mostly query traffic and repeated empty queue polls before they ever
+became wineserver work; the later hot-path carries then lowered the cost of
+those already-local paths further.
 
 The target is not elimination of wineserver. Process and thread lifecycle, cross-process named-object registration, NT path resolution (`\??\`, NT object directory, 8.3 names, case-insensitive behavior on case-sensitive filesystems), and handle-inheritance coordination at `CreateProcess` time remain centralized. The objective is to reduce wineserver to the authoritative metadata and lifecycle surfaces that cannot be safely decentralized.
 
@@ -474,7 +499,7 @@ The mapping is governed by these env vars:
 
 ## 7. Status reference
 
-The canonical status board lives at **[current-state](current-state.gen.html)**. It tracks shipped surfaces, remaining A/B toggles, pending work, the current production module / validation posture, and the current dispatcher and memory tuning notes.
+The canonical status board lives at **[current-state](current-state.gen.html)**. It tracks shipped surfaces, current defaults, validation totals, and the current dispatcher and memory tuning notes.
 
 This document describes system structure. `current-state.md` records current validation and default polarity.
 
@@ -497,7 +522,8 @@ Master overview (this doc) plus dedicated subsystem pages.
 | `nspa-local-file-architecture.gen.html` | NT-local file path for bounded regular-file and explicit-directory opens |
 | `msg-ring-architecture.gen.html` | Same-process message rings, redraw push ring, paint cache, and the shipped `get_message` empty-poll cache |
 | `memory-and-large-pages.gen.html` | large pages, working-set reporting, automatic hugetlb promotion, quota bookkeeping, and shared-memory backing choices |
-| `thread-and-process-shared-state.gen.html` | server-published thread/process snapshots, query bypass coverage, and zero-time process wait |
+| `hot-path-optimizations.gen.html` | cross-cutting optimization choices: published-state caching, TEB-relative hot state, cache/slab layout, helper inlining, and GUI flush trims |
+| `thread-and-process-shared-state.gen.html` | server-published thread/process snapshots, query bypass coverage, and zero-time process/thread waits |
 | `hook-cache.gen.html` | Tier 1+2 Win32 hook-chain cache |
 | `ntsync-pi-driver.gen.html` | NTSync PI kernel overlay: PI baseline, channel transport, aggregate-wait, and later kernel hardening |
 | `ntsync-userspace.gen.html` | Wine in-process sync path: handle-to-fd cache, client-created sync objects, direct wait/signal helpers, and dispatcher-facing wrappers |
@@ -506,14 +532,14 @@ Master overview (this doc) plus dedicated subsystem pages.
 | `io_uring-architecture.gen.html` | `io_uring` file I/O, async `CreateFile`, and shipped socket SQEs |
 | `audio-stack.gen.html` | winejack.drv + nspaASIO low-latency audio path |
 | `nspa-rt-test.gen.html` | nspa_rt_test PE harness reference |
-| `decoration-loop-investigation.gen.html` | Wine 11.6 X11 decoration-loop bug 57955 case study |
+| `decoration-loop-investigation.gen.html` | X11 decoration-loop bug 57955 case study |
 | `sync-primitives-research.gen.html` | Background research on sync-primitive selection |
 | `shmem-ipc.gen.html` | Historical -- legacy shmem dispatcher (superseded by gamma) |
 
-The live defaults, current production module, and exact validation
+The live defaults, current shipped overlay, and exact validation
 totals are maintained on `current-state.gen.html` rather than repeated
 here.
 
 ---
 
-*Master overview updated 2026-05-06. Current production ntsync module `25751C3E41E15401318758E`, kernel `6.19.11-rt1-1-nspa`. Per-subsystem detail is in the dedicated pages linked above; live state is in `current-state.gen.html`.*
+*Master overview updated 2026-05-09. Per-subsystem detail is in the dedicated pages linked above; live shipped state is in `current-state.gen.html`.*

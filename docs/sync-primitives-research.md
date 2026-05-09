@@ -102,7 +102,7 @@ condvar-PI, and SRW-spin design choices.
 
 | Aspect | Upstream Wine | Wine-NSPA (v5) |
 | --- | --- | --- |
-| Spin count | 0 -- straight to RtlWaitOnAddress | **256 iterations** (commit `005b55b4d8d`) |
+| Spin count | 0 -- straight to RtlWaitOnAddress | **256 iterations** |
 | RT behavior | Same as normal threads | **RT threads skip spin entirely** (SCHED_FIFO starvation prevention) |
 | Wait path | RtlWaitOnAddress -> FIFO queue -> futex_wait | Same (spin is before this path) |
 | PI support | None | None (SRW PI deferred -- unsolved problem) |
@@ -125,7 +125,7 @@ No spin in RtlWaitOnAddress itself -- the spin phase is in the acquire functions
 | Aspect | Upstream Wine | Wine-NSPA (v5) |
 | --- | --- | --- |
 | Win32 condvar (RtlSleepConditionVariableCS) | RtlWaitOnAddress, no PI | Same (no PI -- uses RtlWaitOnAddress, not pi_cond) |
-| Unix-side condvar (pi_cond_t) | Not present | **FUTEX_WAIT_REQUEUE_PI** (commit `43862d8b591`) |
+| Unix-side condvar (pi_cond_t) | Not present | **FUTEX_WAIT_REQUEUE_PI** |
 | pi_cond consumers | N/A | ntdll file I/O, virtual memory, audio drivers, gstreamer |
 | PI gap on wake | N/A | **Closed** -- kernel atomically requeues waiter onto PI mutex |
 
@@ -195,13 +195,13 @@ SRW locks have no owner by design. PI requires an owner. This is unsolved even i
 
 ## 7. Implementation Status
 
-1. **B -- SRW spin phase** -- **IMPLEMENTED** (commit `005b55b4d8d`)
+1. **B -- SRW spin phase** -- **IMPLEMENTED**
    - 256-iteration spin in `RtlAcquireSRWLockExclusive` and `RtlAcquireSRWLockShared`
    - RT threads (NSPA_RT_PRIO active) skip spinning entirely
    - Disabled on single-CPU systems
    - Validated: 429 ntdll sync tests, 0 failures. RT suite 20/20 PASS.
 
-2. **C1 -- pi_cond requeue-PI** -- **IMPLEMENTED** (commit `43862d8b591`)
+2. **C1 -- pi_cond requeue-PI** -- **IMPLEMENTED**
    - `FUTEX_WAIT_REQUEUE_PI` / `FUTEX_CMP_REQUEUE_PI` in `libs/librtpi/rtpi.h`
    - Closes PI gap across all pi_cond consumers (ntdll, audio, gstreamer)
    - Benchmark: worst-case max 53.8us -> 31.6us (-41%) under RT load

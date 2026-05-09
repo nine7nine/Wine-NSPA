@@ -39,9 +39,9 @@ Wine-NSPA now carries a shipped kernel overlay that extends upstream
 - the channel and aggregate-wait primitives that back the gamma dispatcher
 - the later hardening and hot-path cleanup work needed for production use
 
-The current production module is srcversion `25751C3E41E15401318758E`
-on kernel `6.19.11-rt1-1-nspa` (post-1015, with `SLAB_NO_MERGE` applied
-to all four ntsync caches; see Section 14). The feature-by-feature
+The current shipped overlay on kernel `6.19.11-rt1-1-nspa` includes the
+dedicated wait-queue cache plus `SLAB_NO_MERGE` across all four ntsync
+caches (see Section 14). The feature-by-feature
 detail below keeps the patch numbers for traceability, but the public
 reading order is by capability rather than by patch label.
 
@@ -582,7 +582,7 @@ This is a **safety patch**, not a feature: it fixes six sites in the driver wher
 
 ### The kernel oops
 
-After installing the freshly-built thread-token `ntsync.ko` (srcversion `635D3C3857C859418827A5C`), Ableton hard-froze the host 13 minutes into a session:
+After installing the first thread-token `ntsync.ko` build, Ableton hard-froze the host 13 minutes into a session:
 
     BUG: kernel NULL pointer dereference, address: 0x9a
     RIP: ___slab_alloc+0x316  (xor (%rbx,%rdx,1),%rax  RBX=0x3a)
@@ -1002,7 +1002,7 @@ in one syscall, while still keeping channel PI visible.
 
   <rect x="140" y="254" width="660" height="62" class="ag-note"/>
   <text x="470" y="278" text-anchor="middle" class="ag-t">Load-bearing follow-up in production</text>
-  <text x="470" y="296" text-anchor="middle" class="ag-s">the installed production module also carries SEND_PI any-waiters fallback</text>
+  <text x="470" y="296" text-anchor="middle" class="ag-s">the installed shipped build also carries SEND_PI any-waiters fallback</text>
   <text x="470" y="310" text-anchor="middle" class="ag-s">and 1011 then layers TRY_RECV2 burst drain on top of this wait surface</text>
 </svg>
 </div>
@@ -1049,12 +1049,10 @@ validated with a dedicated native aggregate-wait suite:
 - channel notify-only behavior
 - channel-PI propagation while blocked in aggregate-wait
 
-The first production result was module srcversion
-`CFF56DE1EF28D693BB597CD`, which is the post-1009 base plus 1010 and
-its PI-ordering follow-ups. The next production module
-`10124FB81FDC76797EF1F91` then carries 1011 on top, and the current
-module keeps both surfaces while adding the later hardening and
-cache-isolation work.
+The first shipped result was the post-1009 base plus aggregate-wait and
+its PI-ordering follow-ups. The next shipped overlay added burst drain
+on top, and the current overlay keeps both surfaces while adding the
+later hardening and cache-isolation work.
 
 ### 10.1 Burst drain with `CHANNEL_TRY_RECV2`
 
@@ -1400,7 +1398,7 @@ A four-dimension audit covering the entire post-1014 file:
   <line x1="765" y1="168" x2="620" y2="208" class="pc-line-v"/>
 
   <rect x="40" y="296" width="860" height="48" class="pc-box"/>
-  <text x="470" y="320" text-anchor="middle" class="pc-t">post-1014a production module srcversion `F1A9EA24E257A35BB21341D`</text>
+  <text x="470" y="320" text-anchor="middle" class="pc-t">post-1014a shipped build with dedicated caches and lockless SEND_PI scan</text>
   <text x="470" y="334" text-anchor="middle" class="pc-s">KASAN-clean over ~14M ops; running on prod kernel `6.19.11-rt1-1-nspa` since 2026-05-04</text>
 </svg>
 </div>
@@ -1652,7 +1650,7 @@ applications for one logical change.
   <text x="782" y="282" text-anchor="middle" class="wq-s">704B slot · ≤16-entry q + fallback</text>
   <text x="782" y="300" text-anchor="middle" class="wq-s">SLAB_HWCACHE_ALIGN | SLAB_NO_MERGE</text>
 
-  <text x="470" y="338" text-anchor="middle" class="wq-t">production module srcversion `25751C3E41E15401318758E` (post-1015 + SLAB_NO_MERGE)</text>
+  <text x="470" y="338" text-anchor="middle" class="wq-t">current shipped build: post-1015 with `SLAB_NO_MERGE` on all four ntsync caches</text>
 </svg>
 </div>
 
@@ -1660,44 +1658,40 @@ applications for one logical change.
 
 ## 15. Validation
 
-### Module srcversion lineage
+### Shipped overlay progression
 
-| srcversion                  | Patches loaded                  | Notes                                                              |
-|-----------------------------|---------------------------------|--------------------------------------------------------------------|
-| `2C3B9BE710704D550141CAA`   | 1003+1004+1005+1006             | Post-1006 baseline; channel-recv hangs (Bug 2 latent); silent EVENT_SET_PI miss (Bug 3 latent); REPLY UAF latent (Bug 4) |
-| `11E8385A83FF3B2D6958088`   | + Bug 2 fix (1007)              | Channel exclusive recv only                                        |
-| `00C857BD7E51AB4F006B0BB`   | + Bug 3 fix (1008)              | EVENT_SET_PI deferred boost; 100% pass on event-set-pi (was 4% flake) |
-| `A250A77651C8D5DAB719FE2`   | + Bug 4 fix (1009)              | post-1009 production baseline; ~370M mixed ops validated          |
-| `CFF56DE1EF28D693BB597CD`   | + 1010 + post-1010 PI follow-ups| aggregate-wait production module; same-thread dispatcher default-on |
-| `10124FB81FDC76797EF1F91`   | + 1011                          | TRY_RECV2 available for burst drain                                |
-| `F1A9EA24E257A35BB21341D`   | + 1012 + 1013 + 1014 (1014a)    | post-1014a; channel snapshot UAF closed, dedicated kmem_caches (debug-merged on prod, see 14), lockless SEND_PI target scan |
-| `F31543CEDB86AC07AE7C06E`   | + 1015 (initial)                | Wait-q kmem_cache landed; first boot revealed all 4 ntsync caches were silently SLUB-merged on prod kernel |
-| `25751C3E41E15401318758E`   | + 1015 (with `SLAB_NO_MERGE`)   | current production module; `SLAB_NO_MERGE` retro-applied to all four ntsync caches, isolation now actually holds on prod |
-| `BD93BECF70D336DC1A80337`   | (rolled-back Codex 1007-1011)   | Historical only; do not load                                       |
+| Stage | What landed | Notes |
+|-------|-------------|-------|
+| PI baseline | 1003 + 1004 + 1005 + 1006 | priority inheritance, channel transport, thread-token return, and RT-safe alloc/free discipline |
+| Channel wake correctness | 1007 + 1008 + 1009 | exclusive receive wakeup, deferred event boost, and channel-entry lifetime fix |
+| Aggregate-wait | 1010 | heterogeneous wait over objects plus fds, with channel notify-only support |
+| Burst drain | 1011 | non-blocking `TRY_RECV2` after one aggregate-wait wake |
+| Snapshot + cache hardening | 1012 + 1013 + 1014 + 1014a | receive snapshot fix, dedicated caches, lockless SEND_PI fast path, and the free-site NULL guard |
+| Wait-queue cache isolation | 1015 | dedicated wait-queue cache plus `SLAB_NO_MERGE` across all four ntsync caches |
 
-The current production module at `/lib/modules/6.19.11-rt1-1-nspa/kernel/drivers/misc/ntsync.ko` is `25751C3E41E15401318758E`.
+The current shipped module at `/lib/modules/6.19.11-rt1-1-nspa/kernel/drivers/misc/ntsync.ko` carries the full shipped overlay above.
 
 ### Stress validation (debug kernel, KASAN-on)
 
-| Test                              | Module srcver | Ops                | KASAN | Result          |
-|-----------------------------------|---------------|--------------------|-------|-----------------|
-| test-event-set-pi-stress 30s/4x4  | `00C857BD...` | 1.5M signaler      | 0     | PASS            |
-| test-event-set-pi-stress 60s/8x8  | `00C857BD...` | 2.8M sig + 3.4M waiter | 0 | PASS            |
-| test-mutex-pi-stress 30s/8+4mtx   | `00C857BD...` | 726K acq+rel matched, 632K PI events | 0 | PASS |
-| test-channel-stress 30s/4x4       | `00C857BD...` | KASAN UAF caught at ~30s | 1 | EXPECTED FAIL (Bug 4 found) |
-| test-channel-stress 30s/4x4       | `A250A77...`  | 819K SEND_PI = 819K REPLY | 0 | PASS         |
-| test-event-set-pi-stress 60s/8x8  | `A250A77...`  | 2.7M sig + 3.5M waiter | 0 | PASS            |
-| test-event-set-pi 20x sanity      | `A250A77...`  | 20/20 PASS         | 0     | PASS            |
-| test-channel-recv-exclusive 20x   | `A250A77...`  | 20/20 PASS         | 0     | PASS            |
-| test-mixed-load-stress 5min/13W   | `A250A77...`  | ~10.3M ops, all paths | 0   | PASS            |
-| test-aggregate-wait 9/9           | `CFF56DE...`  | functional + PI sub-tests | n/a | PASS         |
-| aggregate-wait 1k mixed stress    | `CFF56DE...`  | 1k iterations      | 0     | PASS            |
-| aggregate-wait 30k + native suite | `CFF56DE...`  | long stress + full suite | 0 | PASS       |
-| test-channel-stress (post-1012)   | `F1A9EA24...` | 1.34M ops (post-1012 KASAN re-soak) | 0 | PASS       |
-| test-channel-try-recv2-stress     | `F1A9EA24...` | 2.6M TRY_RECV2 ops          | 0     | PASS            |
-| test-mixed-load-stress 300s/13W   | `F1A9EA24...` | 5.28M chan SEND/REPLY, 1.99M audio waits, 12.6M REG/DEREG | 0 | PASS |
-| test-channel-stress 60s/4x4 (1014a) | `F1A9EA24...` | 1.40M SEND/REPLY, 1.40M RECV+RECV2 | 0 | PASS    |
-| test-channel-try-recv2-stress 30s | `F1A9EA24...` | 62k SEND, 2.68M attempts, 97.68% EAGAIN | 0 | PASS  |
+| Test                              | Build stage | Ops                | KASAN | Result          |
+|-----------------------------------|-------------|--------------------|-------|-----------------|
+| test-event-set-pi-stress 30s/4x4  | deferred-boost fix build | 1.5M signaler      | 0     | PASS            |
+| test-event-set-pi-stress 60s/8x8  | deferred-boost fix build | 2.8M sig + 3.4M waiter | 0 | PASS            |
+| test-mutex-pi-stress 30s/8+4mtx   | deferred-boost fix build | 726K acq+rel matched, 632K PI events | 0 | PASS |
+| test-channel-stress 30s/4x4       | deferred-boost fix build | KASAN UAF caught at ~30s | 1 | EXPECTED FAIL (Bug 4 found) |
+| test-channel-stress 30s/4x4       | post-channel-entry fix build | 819K SEND_PI = 819K REPLY | 0 | PASS         |
+| test-event-set-pi-stress 60s/8x8  | post-channel-entry fix build | 2.7M sig + 3.5M waiter | 0 | PASS            |
+| test-event-set-pi 20x sanity      | post-channel-entry fix build | 20/20 PASS         | 0     | PASS            |
+| test-channel-recv-exclusive 20x   | post-channel-entry fix build | 20/20 PASS         | 0     | PASS            |
+| test-mixed-load-stress 5min/13W   | post-channel-entry fix build | ~10.3M ops, all paths | 0   | PASS            |
+| test-aggregate-wait 9/9           | aggregate-wait build | functional + PI sub-tests | n/a | PASS         |
+| aggregate-wait 1k mixed stress    | aggregate-wait build | 1k iterations      | 0     | PASS            |
+| aggregate-wait 30k + native suite | aggregate-wait build | long stress + full suite | 0 | PASS       |
+| test-channel-stress (post-1012)   | snapshot + cache-hardening build | 1.34M ops (post-1012 KASAN re-soak) | 0 | PASS       |
+| test-channel-try-recv2-stress     | snapshot + cache-hardening build | 2.6M TRY_RECV2 ops          | 0     | PASS            |
+| test-mixed-load-stress 300s/13W   | snapshot + cache-hardening build | 5.28M chan SEND/REPLY, 1.99M audio waits, 12.6M REG/DEREG | 0 | PASS |
+| test-channel-stress 60s/4x4 (1014a) | snapshot + cache-hardening build | 1.40M SEND/REPLY, 1.40M RECV+RECV2 | 0 | PASS    |
+| test-channel-try-recv2-stress 30s | snapshot + cache-hardening build | 62k SEND, 2.68M attempts, 97.68% EAGAIN | 0 | PASS  |
 
 Cumulative debug-kernel: ~30 million operations through post-1009;
 post-1014a adds another ~14 million ntsync ops (channel SEND_PI hit
@@ -1722,7 +1716,7 @@ kernel/userspace pair rather than only in isolation:
 - dmesg clean after 30k stress + native suite
 
 This matters because 1010 is load-bearing only when the userspace
-dispatcher is actually blocked inside it. The production module result
+dispatcher is actually blocked inside it. The shipped build result
 therefore includes both the syscall itself and the post-1010 wake/boost
 ordering fixes.
 
@@ -1766,12 +1760,10 @@ After cross-build to the production kernel `6.19.11-rt1-1-nspa` (no debug instru
 | 1 stress             | mixed-load 300s 13 workers           | PASS      | ~145M     | 0      |
 | 2 PE matrix          | nspa_rt_test.exe baseline+rt         | 24 PASS / 0 FAIL / 0 TIMEOUT | n/a | 0 |
 
-**Cumulative on production kernel: post-1009 baseline ~370 M ops on
-`A250A77651C8D5DAB719FE2`, then aggregate-wait on
-`CFF56DE1EF28D693BB597CD`, then 1011 / TRY_RECV2 on
-`10124FB81FDC76797EF1F91`, then 1012 / 1013 / 1014 (1014a) on
-`F1A9EA24E257A35BB21341D`, and now 1015 / cache-isolated waits on the
-current `25751C3E41E15401318758E`; 0 syscall errors, 0 dmesg splats,
+**Cumulative on the production kernel: post-channel-entry baseline
+~370 M ops, then aggregate-wait, then burst drain, then the receive
+snapshot and dedicated-cache hardening carries, and now the wait-queue
+cache plus full cache isolation; 0 syscall errors, 0 dmesg splats,
 refcnt=0 post-soak.**
 
 The post-1014a build was also re-validated with the full RT-suite v7
@@ -1820,7 +1812,7 @@ concurrency, not throughput; per-second alloc rate would need
 `/sys/kernel/slab/ntsync_wait_q/alloc_calls` deltas (not a gate, just
 a refinement).
 
-Per the slub_debug benchmark caveat (`feedback_slub_debug_skews_benchmarks.md`), only PASS/FAIL is authoritative across debug vs production kernels; throughput numbers aren't directly comparable (debug-kernel `slub_debug=FZPU` + kfence + KASAN tax dominates).
+Only PASS/FAIL is authoritative across debug vs production kernels; throughput numbers aren't directly comparable because the debug-kernel `slub_debug=FZPU` + kfence + KASAN tax dominates.
 
 ### Original 1003-era PI metrics (still valid)
 
@@ -1882,10 +1874,6 @@ Independent CRIT findings can still be filed as separate tickets/patches, but th
 A small surface area that is clearly correct in isolation (e.g. a refcount discipline patch with a real KASAN trace) can ship -- but only after asking: "is this fixing damage I caused with adjacent work, or real upstream-relevant correctness?" 1009 was the latter.
 
 This is also why 1006 was safe to ship in-flurry while the rolled-back 1007-1011 wasn't: 1006 has an oracle (`CONFIG_DEBUG_ATOMIC_SLEEP`), the rolled-back series had only Codex's argument.
-
-### Reference
-
-`feedback_dont_shotgun_audit_into_unfound_bug.md` in the project memory documents this lesson in operational terms.
 
 ---
 

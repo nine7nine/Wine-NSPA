@@ -6,7 +6,7 @@ remains unvalidated.
 
 **Bug:** WineHQ bug 57955 -- maximized/resized window decorations oscillate
 **Affects:** All compositors (KDE/KWin, GNOME/Mutter), both X11 and Wayland drivers, also Wine desktop mode
-**Regression range:** Wine 8.21 -> late 9.0-rc (likely commit `cb1c03b926c`, Wine 9.16)
+**Regression range:** Wine 8.21 -> late 9.0-rc (likely around Wine 9.16)
 ---
 
 ## The Bug
@@ -71,7 +71,7 @@ Any visible rect change that triggers a new surface forces `SWP_FRAMECHANGED`, w
 
 ## The Likely Regression Commit
 
-**`cb1c03b926c`** (Wine 9.16) -- "Move visible rect computation out of the drivers"
+**Wine 9.16** -- "Move visible rect computation out of the drivers"
 
 This commit:
 1. Created `get_mwm_decorations_for_style()` split from `get_mwm_decorations()`
@@ -181,9 +181,9 @@ In `window_update_client_config`, suppress position/size updates when the delta 
 ### 5. Bisect the upstream regression
 
 The bug was introduced between Wine 8.21 and 9.0-rc. Key commits to examine:
-- `cb1c03b926c` (Wine 9.16): Moved visible rect computation from drivers to win32u
-- `c2d46eaa1ef` (Wine 9.15): Merged CreateLayeredWindow with CreateWindowSurface
-- `659e3b3e14e` (Wine 10.8): Fixed uninitialized ex_style_mask from 9.16
+- Wine 9.16: moved visible rect computation from drivers to win32u
+- Wine 9.15: merged `CreateLayeredWindow` with `CreateWindowSurface`
+- Wine 10.8: fixed the uninitialized `ex_style_mask` follow-on from the 9.16 change
 
 ### 6. Compare with how Windows handles this
 

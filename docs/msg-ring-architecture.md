@@ -66,7 +66,9 @@ the `redraw_window` push ring, the paint cache fast path, the
 `get_message` empty-poll cache, and the MR1 / MR2 / MR4 audit fix-pack
 from 2026-04-27 — extend or harden the same substrate. They share the
 per-queue memfd, the slot state machine, the cache discipline, and the
-fast-path atomics. The doc treats them as one evolving design rather
+fast-path atomics. The newer hot-path follow-ons also move the per-thread
+message caches into `TEB->Win32ClientInfo`, so lookup overhead around that
+substrate is lower too. The doc treats them as one evolving design rather
 than versioned sub-systems.
 
 ### 1.1 Motivating profile
@@ -259,7 +261,7 @@ several class-isolated rings under one memfd:
         int                  nspa_hook_walk_counts[NB_HOOKS];   /* Tier 1 hook */
         nspa_hook_chain_t    nspa_hook_chains[NB_HOOKS];        /* Tier 2 hook */
         unsigned char        nspa_hook_module_pool[...];        /* Tier 2 strings */
-        nspa_redraw_ring_t   nspa_redraw_ring;  /* Phase A: redraw_window push */
+        nspa_redraw_ring_t   nspa_redraw_ring;  /* redraw_window push ring */
     } nspa_queue_bypass_shm_t;
 
 Class isolation: each ring has its own producer / consumer roles
@@ -599,9 +601,9 @@ is `tid` set with `mapped_ptr` NULL, used for cross-process or
 otherwise-unreachable peers so the lookup doesn't re-issue an RPC for
 each subsequent send.
 
-### 4.2 Own-bypass TLS
+### 4.2 Own-bypass cache
 
-Each thread's own bypass shm is also cached in TLS, separately
+Each thread's own bypass shm is also cached per-thread, separately
 (`nspa_own_tls_key`). Sentinel values:
 
     NULL          = never queried
@@ -1020,7 +1022,7 @@ when paint or hook chains stall a window proc.
 
 The MR1 + MR4 reframing in the audit was that this class of silent
 contract violation looks like the same family as the upstream Wine
-`Disallow Win32 va_list in Unix libraries` fix (`6366775e82a`) — the
+`Disallow Win32 va_list in Unix libraries` fix — the
 symptom is not a deadlock at the bug site but cascading state
 corruption that eventually hangs the process via a downstream
 state-machine that trusted the corrupted value. Both MR1 and MR4 are
@@ -1170,8 +1172,7 @@ replacement for `NtWaitForSingleObject` on `queue->sync`. The
 `_PRIVATE` flag was carried over reflexively — most futex code uses
 `_PRIVATE` because most futexes are process-local mutexes — without
 auditing the underlying shared-page lifetime. The MR2 audit caught it
-on a focused walk of the futex flag arguments. Lesson logged as part
-of the broader `wine-nspa-lockup-audit-20260427.md` follow-up patterns.
+on a focused walk of the futex flag arguments.
 
 ---
 
@@ -1273,8 +1274,8 @@ handles "no reply arrived" as a first-class failure mode.
 
 ### 11.1 Status
 
-**Shipped, default-on.** The redraw push ring landed in wine commit `72d7a9055a8`
-(2026-04-25). Eliminates the synchronous `redraw_window` round-trip on
+**Shipped, default-on.** The redraw push ring landed on 2026-04-25.
+It eliminates the synchronous `redraw_window` round-trip on
 the hot UI path.
 
 ### 11.2 Rationale
@@ -1415,12 +1416,12 @@ failed, tight-loop repainted, eventually wedged KWin/X11. Same shape
 as the gamma offset corruption fix — different mechanism. Fixed by
 snapshot/restore.
 
-### 11.6 Empirical results
+### 11.6 Validation snapshot
 
-Ableton Live 12 Lite, gamma + Tier 1+2 hook + Phase A, ~120 s with
+Ableton Live 12 Lite, gamma + Tier 1+2 hook + redraw push ring, ~120 s with
 demo song + menus + window-move:
 
-| RPC | Pre-Phase-A | Post-Phase-A | Delta |
+| RPC | Before redraw push ring | After redraw push ring | Delta |
 | --- | --- | --- | --- |
 | `redraw_window` | 10,930 | **0** | -100% |
 | `get_update_region` | 18,185 | 9,633 | -47% (secondary effect) |
@@ -1430,7 +1431,7 @@ mean fewer paint probe cycles. Plus workload variance.
 
 ### 11.7 Cross-thread caveat
 
-Phase A intentionally accepts cross-thread `RedrawWindow` into the
+The redraw push ring intentionally accepts cross-thread `RedrawWindow` into the
 **caller's** queue ring. When server drains,
 `nspa_redraw_apply(current_thread, ...)` is called — `current_thread`
 is the producer thread, not the window-owner. The server-side
@@ -1600,8 +1601,8 @@ Hit/miss counters are gated behind `NSPA_PAINT_DIAG=1` because they ran
 unconditionally on every `get_update_flags` call across every Wine
 process — measurable cost on Ableton's polling UI thread (~3,227 calls
 per session even before paint-cache became part of the normal shipped
-path, since the miss counter sat outside the fast-path check). Gated
-post-`f4a1671973b`.
+path, since the miss counter sat outside the fast-path check). The
+always-on counter cost is now gone.
 
 ### 12.6 Historical note
 
@@ -1741,7 +1742,7 @@ line of NSPA-flavored logic per audit §4.1 plus the NSPA reorg style
 
 All four exit the seqlock retry loop deterministically and fall back to
 the safe path. Validated by `nspa_rt_test`'s seqlock-bound subtests A
-and B (`9b13a757860`, `01efcd076c6`):
+and B:
 
 - Subtest A: paint fastpath under writer thrash — paint_max 67 µs,
   hard=0.
@@ -1814,55 +1815,55 @@ this footnote.
 
 ### 16.1 Original POST/SEND/REPLY ring
 
-| Step | Wine commit | Outcome |
-| --- | --- | --- |
-| `c9daf83afe9` | alloc-side-effect isolation probes | Ruled out poison fill, ID sensitivity |
-| `924df6727db` | opt-in `NSPA_MSG_RING_EXCLUDE_MAIN` gate | Workaround for library panel; first-thread specific |
-| `54802c6351d` | Memfd redesign implementation plan doc | Plan captured |
-| `75de316f9ad` | Phase 1+2 memfd alloc + client mmap | POST capture validated (~95 RTTs/s saved) |
-| `4eaf876a118` | Phase 4 `ensure_own_bypass` protocol + client TLS | SEND infrastructure in place |
-| `106735ff791` | Phase 4 opt-in gate (default off) | Avoided premature-default stale-slot storm |
-| `1d18cb7c4e8` | Phase 4.5 wake-bit synthesis via memfd | Fixed client-side wake-bit blindness |
-| `657c16691f5` | Phase 4.6 client-side ring-SEND dispatch | Full SEND bypass validated |
-| `70ea71f8c7b` | Design doc update with ballpark reduction | Docs current |
+| Step | Outcome |
+| --- | --- |
+| alloc-side-effect isolation probes | Ruled out poison fill, ID sensitivity |
+| first-thread exclusion gate | Workaround for library panel; first-thread specific |
+| memfd redesign plan | Plan captured |
+| memfd alloc + client mmap | POST capture validated (~95 RTTs/s saved) |
+| `ensure_own_bypass` protocol + client cache | SEND infrastructure in place |
+| opt-in gate | Avoided premature-default stale-slot storm |
+| wake-bit synthesis via memfd | Fixed client-side wake-bit blindness |
+| client-side ring-SEND dispatch | Full SEND bypass validated |
+| documentation refresh | Docs current |
 
 ### 16.2 `redraw_window` push ring
 
-| Step | Wine commit | Outcome |
-| --- | --- | --- |
-| `72d7a9055a8` | redraw_window push ring | 10,930 -> 0 RPCs / 120 s; default-on |
+| Step | Outcome |
+| --- | --- |
+| redraw_window push ring | 10,930 -> 0 RPCs / 120 s; default-on |
 
 ### 16.3 Paint cache fast path
 
-| Step | Wine commit | Outcome |
-| --- | --- | --- |
-| `c763761b928` | paint-cache implementation + diag | initial rollout |
-| `70d55350bef` | default-on flip post-1006 | Locked Ableton at ~5 min; reverted same day |
-| `4f2c29bb1b2` | temporary revert | Rolled back while the hardening work was still incomplete |
-| `f4a1671973b` | Gate hit/miss counters behind `NSPA_PAINT_DIAG=1` | Removed always-on counter cost |
+| Step | Outcome |
+| --- | --- |
+| paint-cache implementation + diag | initial rollout |
+| first default-on flip | Locked Ableton at ~5 min; reverted same day |
+| temporary revert | Rolled back while the hardening work was still incomplete |
+| hit/miss counters gated behind `NSPA_PAINT_DIAG=1` | Removed always-on counter cost |
 | (validation) | run-4 2026-04-28 with paint-cache on | PASS past historical 5-min lockup; F5 likely fixed by MR1/MR4 |
 | (current) | shipped state | paint-cache is part of the normal path |
 
 ### 16.4 `get_message` empty-poll cache
 
-| Phase | Wine commit | Outcome |
-| --- | --- | --- |
-| `569ac8f6a5f` | `get_message` empty-poll cache | same-filter empty polls now short-circuit locally via `queue_shm->nspa_change_seq` |
-| `c94136ac0ee` | remove empty-poll cache gate | feature stays on the normal path; hot-path A/B branch removed |
+| Phase | Outcome |
+| --- | --- |
+| `get_message` empty-poll cache | same-filter empty polls now short-circuit locally via `queue_shm->nspa_change_seq` |
+| gate removal | feature stays on the normal path; hot-path A/B branch removed |
 
 ### 16.5 MR1/MR2/MR4 audit fix-pack
 
-| Phase | Wine commit | Outcome |
-| --- | --- | --- |
-| `9b4172e2bbc` | MR1 ABA + MR2 cross-process futex + MR4 POST wake-loss | Three bugs shipped, validated by run-3 + run-4 |
+| Phase | Outcome |
+| --- | --- |
+| MR1 ABA + MR2 cross-process futex + MR4 POST wake-loss | Three bugs shipped, validated by run-3 + run-4 |
 
 ### 16.6 NSPA_SHM_RETRY_GUARD audit §4.1
 
-| Phase | Wine commit | Outcome |
-| --- | --- | --- |
-| `9e51ed5f907` | Harden retry loops at SCHED_FIFO callsites (audit §4.1) | 7 sites + the macro |
-| `01efcd076c6` | `nspa_rt_test` seqlock-bound subtest A | Paint max 67 µs, hard=0 |
-| `9b13a757860` | `nspa_rt_test` seqlock-bound subtest B | Queue-bits max 945 µs, hard=0 |
+| Phase | Outcome |
+| --- | --- |
+| Harden retry loops at SCHED_FIFO callsites (audit §4.1) | 7 sites + the macro |
+| `nspa_rt_test` seqlock-bound subtest A | Paint max 67 µs, hard=0 |
+| `nspa_rt_test` seqlock-bound subtest B | Queue-bits max 945 µs, hard=0 |
 
 ### 16.7 Bugs left as-is per audit
 

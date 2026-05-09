@@ -13,7 +13,7 @@ architecture boundary.
 3. [Active subsystems](#3-active-subsystems)
 4. [Validation and performance](#4-validation-and-performance)
 5. [Open work, in priority order](#5-open-work-in-priority-order)
-6. [Recent landed arc](#6-recent-landed-arc-2026-04-30-to-2026-05-06)
+6. [Recent landed arc](#6-recent-landed-arc-2026-04-30-to-2026-05-09)
 7. [Configuration reference](#7-configuration-reference)
 8. [Doc index](#8-doc-index)
 
@@ -21,7 +21,7 @@ architecture boundary.
 
 ## 1. Overview
 
-The public 2026-05-06 state is no longer just "aggregate-wait plus a faster
+The public 2026-05-09 state is no longer just "aggregate-wait plus a faster
 dispatcher". The current shipped stack now layers several larger client-side
 and shared-state follow-ons on top of that base:
 
@@ -37,12 +37,15 @@ and shared-state follow-ons on top of that base:
   directory, and write-class traffic from wineserver
 - the **thread / process shared-state readers**, which serve read-mostly query
   classes from seqlock-published shared objects and now also power the
-  zero-time process wait fast path
+  zero-time process and thread wait fast paths
 - the **message-pump empty-poll cache**, which retires a large chunk of
   same-filter `get_message` empty polls without pretending the whole message
   pump is client-complete
 - the **RT memory safety follow-ons**, which keep the hugetlb path honest under
   pool pressure, partial view operations, `MEM_RESET`, and RWX JIT allocation
+- the **hot-path optimization layer**, which now also includes x86_64
+  TEB-relative thread state, msg-ring per-thread cache lookups inside the TEB,
+  cacheline-isolated `inproc_sync` entries, and smaller wait-path helper cost
 
 The important architectural distinction is that these are not isolated feature
 flags. They continue the same direction as gamma, local-file, msg-ring, and
@@ -62,28 +65,28 @@ remains available.
 
 ## 2. Current shipped state
 
-### 2.1 Kernel and module
+### 2.1 Kernel and ntsync overlay
 
 | Item | Value |
 |---|---|
 | Kernel | `6.19.11-rt1-1-nspa` |
 | Scheduler | `PREEMPT_RT_FULL` |
 | ntsync `.ko` | `/lib/modules/6.19.11-rt1-1-nspa/kernel/drivers/misc/ntsync.ko` |
-| ntsync srcversion | `25751C3E41E15401318758E` |
 | Module ref count | 0 idle |
-| Sources | upstream `drivers/misc/ntsync.{c,h}` + NSPA patch stack `1003-1015` |
+| Sources | upstream `drivers/misc/ntsync.{c,h}` plus the Wine-NSPA ntsync overlay |
 
 ### 2.2 Userspace baseline
 
 | Item | Value |
 |---|---|
-| Wine base | Wine 11.6 + NSPA fork |
+| Wine base | Wine 11.8 + NSPA fork |
 | Dispatcher shape | gamma + aggregate-wait + post-1011 `TRY_RECV2` burst drain |
 | Client scheduler | spawn-main + `ntdll_sched`, default-class and RT-class consumers live |
 | Async file path | dispatcher-owned async `CreateFile` on the per-process ring |
 | Async socket path | `io_uring` `RECVMSG` / `SENDMSG` shipped on the deferred path |
-| Shared-state query path | thread + process shared-object readers shipped; zero-time process wait can short-circuit from `process_shm` |
-| Message-pump cache | empty same-filter `get_message` polls can now return locally when `queue_shm->nspa_change_seq` has not advanced |
+| Shared-state query path | thread + process shared-object readers shipped; zero-time process wait can short-circuit from `process_shm`, and zero-time thread wait can short-circuit from `thread_shm` |
+| Message-pump cache | empty same-filter `get_message` polls can now return locally when `queue_shm->nspa_change_seq` has not advanced, and msg-ring per-thread caches now read through TEB-backed state |
+| Hot-path optimization layer | x86_64 unix-side `NtCurrentTeb()` is inline, `get_thread_data()` reads through a TEB backpointer, `inproc_sync` entries are cacheline-isolated, and dormant `io_uring` helper calls are inlined away |
 | Memory surface | local sections, large pages, current-process `QueryWorkingSetEx`, working-set quota bookkeeping, RT-keyed `mlockall()`, automatic hugetlb promotion, and heap arena hugetlb backing shipped |
 | Local sync path | anonymous events client-range by default; timers piggyback on that base |
 | X11 flush policy | `NSPA_FLUSH_THROTTLE_MS=8`, default ON |
@@ -113,14 +116,14 @@ remains available.
 | `NSPA_FLUSH_THROTTLE_MS=8` | `x11drv_surface_flush`: `8.23%` -> `4.74%` (`-43%`); `copy_rect_32` memmove: `4.38%` -> `2.49%` (`-43%`); MainThread CPU recovered: `~5.4` percentage points |
 | aggregate-wait + `TRY_RECV2` burst drain | dispatcher drains multiple queued entries per wake instead of paying N aggregate-wait round-trips |
 | dispatcher-owned async `CreateFile` | removes the `open()` lock-drop critical section from the audio xrun path |
-| hot-path follow-ons (`1d85c558ceb`, `c0f5c515cd7`, `2870c9629ce`, `0802dadc750`) | removes queue-helper call overhead, strips allocator-debug tax from production, and inlines `read_request_shm` on the dispatcher path |
+| dispatcher helper inlining and lighter fences | removes queue-helper call overhead, strips allocator-debug tax from production, and inlines `read_request_shm` on the dispatcher path |
 
 ### 2.5 2026-05-01 compatibility and GUI follow-ons
 
-| Commit | Landed change | Observed effect |
+| Change | Landed effect | Observed result |
 |---|---|---|
-| `527647bac3e` | AVX2-vectorize the alpha-bit OR loop in `dlls/winex11.drv/bitblt.c::x11drv_surface_flush` | `x11drv_surface_flush`: `6.72%` -> `2.39%` (`-4.33pp`, `-64%`); total `winex11.so`: `6.76%` -> `2.43%` (`-4.33pp`) |
-| `97aff17da45` + `206f32b3de9` | once-guard dominant stub FIXMEs and real-impl `ShutdownBlockReasonCreate/Destroy` as silent success | top stub noise drops from `~565` prints per Ableton run to `~5` first-time prints |
+| AVX2 alpha-bit flush | `dlls/winex11.drv/bitblt.c::x11drv_surface_flush` is vectorized | `x11drv_surface_flush`: `6.72%` -> `2.39%` (`-4.33pp`, `-64%`); total `winex11.so`: `6.76%` -> `2.43%` (`-4.33pp`) |
+| Tier 1 log-noise cleanup | dominant stub FIXMEs are once-guarded and `ShutdownBlockReasonCreate/Destroy` succeed silently | top stub noise drops from `~565` prints per Ableton run to `~5` first-time prints |
 
 ### 2.6 2026-05-02 client-side follow-ons
 
@@ -145,13 +148,13 @@ remains available.
 
 | Change | Shipped effect |
 |---|---|
-| ntsync wait-queue cache and cache isolation | current module advanced to `25751C3E41E15401318758E`; all four ntsync caches now stay unmerged on the production kernel |
+| ntsync wait-queue cache and cache isolation | all four ntsync caches now stay unmerged on the production kernel, including the dedicated wait-queue cache |
 | RT-keyed `mlockall()` | perf page faults `561/s` -> `451/s`; bpf page faults `869/s` -> `629/s`; max futex wait `94us` -> `49us`; `VmLck` around `300848kB` |
 | RT-keyed automatic hugetlb promotion | conservative hugepage auto-promotion is now keyed only off `NSPA_RT_PRIO` |
 | RT-keyed heap arena hugetlb backing | hugepage regions `3/6` -> `104`; dTLB miss / insn -> `0.071%`; `mmap` rate `33-61/s` -> `0.13/s`; `mprotect` rate `56-90/s` -> `0.03/s`; page-faults `753-869/s` -> `2.8/s` |
 | memory gate cleanup | per-feature memory env gates removed; `NSPA_RT_PRIO` is now the single public RT memory gate |
 
-### 2.9 2026-05-06 bypass and memory follow-ons
+### 2.9 Shared-state, message, and memory follow-ons
 
 | Change | Shipped effect |
 |---|---|
@@ -162,7 +165,17 @@ remains available.
 | hugetlb safety + fallback | auto-promoted views now demote before sub-huge partial ops, fall back cleanly on pool exhaustion, respect a 10% free-pool watermark, and allow `PAGE_EXECUTE_READWRITE` auto-promotion |
 | `MEM_RESET` reclaim under `mlockall()` | `MEM_RESET` now uses `munlock + MADV_DONTNEED`, so reclaimed pages can actually leave RAM before their next touch |
 
-### 2.10 Validation baseline against `25751C3E41E15401318758E`
+### 2.10 Hot-path optimization follow-ons
+
+| Change | Shipped effect |
+|---|---|
+| zero-time thread wait fast path | `WaitForSingleObject(thread, 0)` can answer from `THREAD_SHM_FLAG_TERMINATED`, cutting synthetic poll cost from `~11940 ns` to `~164 ns` |
+| x86_64 inline `NtCurrentTeb()` | 30 s playback counters: CPU cycles `257.8B -> 220.9B`, iTLB-load-misses `242M -> 185M`, `NtCurrentTeb` function calls `9,961,441 -> 566` |
+| msg-ring TEB-backed per-thread caches | 30 s playback counters: CPU cycles `220.9B -> 212.4B`, `pthread_getspecific` self time `0.46% -> 0.09%`, `nspa_get_own_bypass_shm` `0.26% -> 0.20%` |
+| `inproc_sync` cacheline isolation + capacity restore | each entry now occupies one cacheline, removing cross-handle false sharing on hot refcount `LOCK` ops while keeping total cacheable handle capacity at `524288` |
+| `io_uring` helper inlining | `ntdll_io_uring_flush_deferred()` empty-path cost (`0.82%` audio-thread time) and `ntdll_io_uring_get_eventfd()` helper cost (`0.15%`) are removed from the steady-state wait path |
+
+### 2.11 Validation baseline
 
 | Layer | Run | Result | Ops | Errors |
 |---|---|---|---|---|
@@ -228,7 +241,7 @@ own correctness proof and gate.
 | **msg-ring v1 (POST/SEND/REPLY)** | Shipped | ON | Bounded mpmc shmem ring for `PostMessage` / `SendMessage` / reply between Wine threads in the same process. |
 | **msg-ring paint cache** | Shipped | ON | Cross-process redraw cache for `WM_PAINT` on top of the msg-ring publication path. |
 | **`get_message` empty-poll cache** | Shipped | ON | per-thread 8-entry TLS cache keyed by full filter + `queue_shm->nspa_change_seq`; repeats a known empty poll locally instead of issuing the same `get_message` RPC again. |
-| **Thread / process shared-state bypass** | Shipped | ON | server-published shared-object snapshots answer 7 thread query classes, 6 process query classes, and the zero-time process wait liveness poll without a wineserver RTT on a hit. |
+| **Thread / process shared-state bypass** | Shipped | ON | server-published shared-object snapshots answer 7 thread query classes, 6 process query classes, and the zero-time process and thread wait polls without a wineserver RTT on a hit. |
 | **Memory and large pages** | Shipped | ON where supported | local sections, `GetLargePageMinimum`, `VirtualAlloc(MEM_LARGE_PAGES)`, `CreateFileMapping(SEC_LARGE_PAGES)`, current-process `QueryWorkingSetEx`, working-set quota bookkeeping, and RT-keyed `mlockall()` / hugetlb follow-ons are live. |
 | **`io_uring` file I/O bypass** | Shipped | ON when `NSPA_RT_PRIO` set | sync poll replacement plus async `NtReadFile` / `NtWriteFile` bypass on the PE side. |
 | **Aggregate-wait dispatcher** | Shipped | ON | Per-process server-side `io_uring` infrastructure plus aggregate-wait dispatcher loop. Same RT thread receives requests, drains CQEs, and signals replies. |
@@ -264,7 +277,7 @@ own correctness proof and gate.
   </style>
 
   <rect x="0" y="0" width="940" height="500" class="cs-bg"/>
-  <text x="470" y="28" text-anchor="middle" class="cs-title">2026-05-06 deployment board: shipped state, diagnostics, and remaining work</text>
+  <text x="470" y="28" text-anchor="middle" class="cs-title">2026-05-09 deployment board: shipped state, diagnostics, and remaining work</text>
 
   <rect x="50" y="70" width="250" height="150" class="cs-green"/>
   <text x="175" y="96" text-anchor="middle" class="cs-tag-green">Kernel / sync substrate</text>
@@ -296,11 +309,12 @@ own correctness proof and gate.
   <text x="175" y="382" text-anchor="middle" class="cs-small">kept for validation and regression isolation, not as the shipped default</text>
 
   <rect x="345" y="270" width="250" height="140" class="cs-green"/>
-  <text x="470" y="296" text-anchor="middle" class="cs-tag-green">2026-05-06 follow-ons</text>
+  <text x="470" y="296" text-anchor="middle" class="cs-tag-green">2026-05-06 to 2026-05-09 follow-ons</text>
   <text x="470" y="322" text-anchor="middle" class="cs-label">thread/process shared-state bypass</text>
-  <text x="470" y="340" text-anchor="middle" class="cs-small">query RTTs and zero-time process waits now hit shared snapshots first</text>
-  <text x="470" y="364" text-anchor="middle" class="cs-label">message-pump + hugetlb safety</text>
-  <text x="470" y="382" text-anchor="middle" class="cs-small">empty get_message polls and auto-promoted memory edge cases are now handled locally</text>
+  <text x="470" y="340" text-anchor="middle" class="cs-small">query RTTs and zero-time process/thread waits now hit shared snapshots first</text>
+  <text x="470" y="364" text-anchor="middle" class="cs-label">message-pump + hot-path + hugetlb safety</text>
+  <text x="470" y="382" text-anchor="middle" class="cs-small">empty get_message polls, TEB hot state, and hugetlb edge cases</text>
+  <text x="470" y="396" text-anchor="middle" class="cs-small">now stay local more often</text>
 
   <rect x="640" y="270" width="250" height="140" class="cs-wip"/>
   <text x="765" y="296" text-anchor="middle" class="cs-tag-violet">Longer horizon</text>
@@ -322,9 +336,9 @@ own correctness proof and gate.
 
 ### 4.1 Full-suite baseline still in force
 
-- current prod ntsync module `25751C3E41E15401318758E` against kernel
-  `6.19.11-rt1-1-nspa`, with the public full-suite boundary still anchored
-  to the earlier `3 PASS / 0 FAIL` native + `24 PASS / 0 FAIL / 0 TIMEOUT`
+- current shipped ntsync overlay against kernel `6.19.11-rt1-1-nspa`,
+  with the public full-suite boundary still anchored to the earlier
+  `3 PASS / 0 FAIL` native + `24 PASS / 0 FAIL / 0 TIMEOUT`
   PE matrix totals.
 - Native suite: **3 PASS / 0 FAIL** (`test-event-set-pi`,
   `test-channel-recv-exclusive`, `test-aggregate-wait`).
@@ -334,12 +348,12 @@ own correctness proof and gate.
 - `dispatcher-burst` remains the PE-side harness that exercises the gamma hot
   path directly.
 
-The 2026-05-02 through 2026-05-06 work did not publish a new full-suite
+The 2026-05-02 through 2026-05-09 work did not publish a new full-suite
 version. What it added was targeted validation for the newly-landed scheduler,
 timer, event, socket, local-file, local-section, shared-state, msg-ring,
-ntsync-hardening, and RT memory surfaces.
+ntsync-hardening, RT memory, and hot-path optimization surfaces.
 
-### 4.2 Targeted 2026-05-02 through 2026-05-06 validation
+### 4.2 Targeted 2026-05-02 through 2026-05-09 validation
 
 | Surface | Validation | Result |
 |---|---|---|
@@ -357,7 +371,10 @@ ntsync-hardening, and RT memory surfaces.
 | widened local-file path | workload comparison | `create_file` count `7,845` -> `5,658`, handler time `137 ms` -> `50 ms` |
 | thread / process shared-state readers | A/B harness + smoke validation | clean; 7 thread classes and 6 process classes shipped, with `ThreadBasicInformation` intentionally retained on RPC |
 | zero-time process wait fast path | synthetic poll harness | ioctl path `~10000 ns/poll`; shared-state path `~144 ns/poll` |
+| zero-time thread wait fast path | synthetic poll harness | ioctl path `~11940 ns/poll`; shared-state path `~164 ns/poll` |
 | `get_message` empty-poll cache | Ableton 60 s playback | `get_message` `3,880 -> 866`; `get_message` time `16.5 ms -> 2.2 ms`; total handler time `46.8 ms -> 36.9 ms` |
+| x86_64 TEB-relative hot state | 30 s Ableton playback counters | `NtCurrentTeb` calls `9,961,441 -> 566`; cumulative CPU cycles after the two TEB carries `257.8B -> 212.4B` |
+| `inproc_sync` cacheline isolation | 30 s Ableton playback counters | distributed hot-symbol drops after eliminating false sharing on refcount `LOCK` ops; cache capacity restored to `524288` handles |
 | RT-keyed `mlockall()` | targeted shell harness | `test-mlock-ws.sh 4/4 PASS`; `VmLck` `301,884 kB` on-gate vs `28 kB` off-gate |
 | RT-keyed automatic hugetlb promotion | targeted shell harness | `test-huge-auto.sh 3/3 PASS` |
 | RT-keyed heap arena hugetlb backing | targeted shell harness | `test-heap-hugepage.sh 3/3 PASS`; hugepage regions `1` on-gate vs `0` off-gate |
@@ -395,7 +412,7 @@ System-wide samples: `38,588 -> 19,415` per 30s.
 | total `winex11.so` AVX2 | 6.76% | 2.43% | −4.33pp |
 | total kernel after AVX2 | 10.22% | 8.58% | −1.64pp |
 
-#### 2026-05-02 through 2026-05-06 feature-specific wins
+#### 2026-05-02 through 2026-05-09 feature-specific wins
 
 | Feature | Result |
 |---|---|
@@ -404,13 +421,15 @@ System-wide samples: `38,588 -> 19,415` per 30s.
 | local sections | `nspa_create_mapping_from_unix_fd` count `2,664` -> `~800` (`-70%`); total wineserver handler time `1,991 ms` -> `1,077 ms` on the cleanest run |
 | `get_message` empty-poll cache | `get_message` `3,880 -> 866` calls / 60 s (`-78%`); direct `get_message` handler time `16.5 ms -> 2.2 ms` (`-87%`); total handler time `46.8 ms -> 36.9 ms` (`-21%`) |
 | zero-time process wait | process-handle poll loop `~10000 ns/poll` -> `~144 ns/poll` |
+| zero-time thread wait | thread-handle poll loop `~11940 ns/poll` -> `~164 ns/poll` |
+| x86_64 TEB hot state | cumulative playback CPU cycles `257.8B -> 212.4B` across inline `NtCurrentTeb()` plus msg-ring TEB-cache carries |
 | local-file EOF path | direct handler-time saving `~8 ms / snapshot`, plus eligible `ftruncate()` no longer blocks the wineserver loop inline |
 | RT-keyed heap arena hugetlb backing | hugepage regions `3/6` -> `104`; `mmap` rate `33-61/s` -> `0.13/s`; `mprotect` rate `56-90/s` -> `0.03/s`; page-faults `753-869/s` -> `2.8/s` |
 
 ### 4.4 Residual caveats
 
 - The last published full PE matrix is still the 2026-04-30 `24 PASS / 0 FAIL /
-  0 TIMEOUT` run. The 2026-05-02 through 2026-05-06 features are covered by
+  0 TIMEOUT` run. The 2026-05-02 through 2026-05-09 features are covered by
   targeted validation, not a new full-suite publish yet.
 - Local events default-ON still exposes a known cosmetic log line in some
   Ableton runs: `wined3d_cs_destroy` "Closing present event failed". It is not
@@ -424,7 +443,7 @@ System-wide samples: `38,588 -> 19,415` per 30s.
 
 1. **Longer paint-cache soak** — different day / cold start plus a
    longer runtime window so the default-on path has a cleaner public record.
-2. **Full-suite rerun against the 2026-05-06 stack** — the last published
+2. **Full-suite rerun against the 2026-05-09 stack** — the last published
    matrix is still v8 / 2026-04-30; the new scheduler / event / socket surfaces
    deserve a fresh public matrix.
 3. **Longer local-event, local-section, shared-state, and socket soak** — targeted validations are clean;
@@ -438,7 +457,7 @@ System-wide samples: `38,588 -> 19,415` per 30s.
 
 ---
 
-## 6. Recent landed arc (2026-04-30 to 2026-05-06)
+## 6. Recent landed arc (2026-04-30 to 2026-05-09)
 
 | Date | Shipped work | Public result |
 |---|---|---|
@@ -459,6 +478,9 @@ System-wide samples: `38,588 -> 19,415` per 30s.
 | 2026-05-06 | zero-time process wait fast path | `WaitForSingleObject(process, 0)` can answer from `process_shm` instead of paying the wait ioctl on a hit |
 | 2026-05-06 | `get_message` empty-poll cache | same-filter empty polls can return locally when `queue_shm->nspa_change_seq` has not advanced |
 | 2026-05-06 | hugetlb safety follow-ons | auto-promoted views now demote safely on partial ops, fall back cleanly under pool pressure, reclaim correctly on `MEM_RESET`, and include RWX JIT allocations when eligible |
+| 2026-05-08 | zero-time thread wait fast path | `WaitForSingleObject(thread, 0)` can answer from `thread_shm` via the published termination flag |
+| 2026-05-09 | x86_64 TEB hot-state carries | inline `NtCurrentTeb()` and msg-ring TEB-backed per-thread caches remove repeated thread-local helper overhead |
+| 2026-05-09 | `inproc_sync` cache layout follow-ons | cacheline isolation lands on the userspace sync cache and the original `524288`-handle capacity is restored |
 
 ---
 
@@ -504,17 +526,18 @@ State boards and architecture deep-dives produced by the project:
 
 | Doc | Subject |
 |---|---|
-| `current-state.md` | This document — state of the art on 2026-05-06 |
+| `current-state.md` | This document — state of the art on 2026-05-09 |
 | `client-scheduler-architecture.gen.html` | spawn-main + `ntdll_sched`, default-class and RT-class scheduler hosts, and the shipped consumers routed through them |
 | `cs-pi.gen.html` | Critical Section Priority Inheritance (CS-PI v2.3) — twelve-section deep dive |
 | `condvar-pi-requeue.gen.html` | `RtlSleepConditionVariableCS` `FUTEX_WAIT_REQUEUE_PI` slow path |
 | `aggregate-wait-and-async-completion.gen.html` | Aggregate-wait plus same-thread async completion architecture |
 | `gamma-channel-dispatcher.gen.html` | Gamma request/reply transport plus post-1010 aggregate-wait dispatcher loop |
-| `thread-and-process-shared-state.gen.html` | server-published thread/process snapshots, query bypass coverage, and the zero-time process wait fast path |
+| `thread-and-process-shared-state.gen.html` | server-published thread/process snapshots, query bypass coverage, and zero-time process/thread waits |
 | `ntsync-pi-driver.gen.html` | NTSync PI kernel overlay: PI baseline, channel transport, aggregate-wait, and later kernel hardening |
 | `ntsync-userspace.gen.html` | Wine in-process sync path: handle-to-fd cache, client-created sync objects, direct wait/signal helpers, and dispatcher-facing wrappers |
 | `io_uring-architecture.gen.html` | `io_uring` integration for file I/O, async `CreateFile`, and shipped socket RECVMSG / SENDMSG |
 | `local-section-architecture.gen.html` | client-side file-backed sections built on top of local-file handles |
+| `hot-path-optimizations.gen.html` | cross-cutting optimization choices: published-state caching, TEB-relative hot state, cache/slab layout, helper inlining, and GUI flush trims |
 | `msg-ring-architecture.gen.html` | msg-ring v1 + v2 design notes |
 | `memory-and-large-pages.gen.html` | large pages, working-set reporting, working-set quota bookkeeping, and shared-memory backing choices |
 | `nspa-local-file-architecture.gen.html` | NT-local file bypass (`NtCreateFile` short-circuit) |
@@ -522,16 +545,15 @@ State boards and architecture deep-dives produced by the project:
 | `shmem-ipc.gen.html` | NSPA shmem IPC primitives (γ + redraw + paint-cache) |
 | `nspa-rt-test.gen.html` | nspa_rt_test PE harness reference |
 | `architecture.gen.html` | Whole-system architecture overview |
-| `decoration-loop-investigation.gen.html` | Wine 11.6 X11 windowing decoration-loop bug 57955 |
+| `decoration-loop-investigation.gen.html` | X11 windowing decoration-loop bug 57955 case study |
 | `sync-primitives-research.gen.html` | Background research on sync primitive selection |
 
-The architecture-heavy pieces added through 2026-05-06 are now covered
+The architecture-heavy pieces added through 2026-05-09 are now covered
 in the public docs set, including the client scheduler, local events,
 socket `io_uring`, gamma, aggregate-wait, hook cache, thread/process
-shared-state readers, local-file, local sections, memory follow-ons,
-msg-ring, and the decomposition notes.
+shared-state readers, local-file, local sections, hot-path optimizations,
+memory follow-ons, msg-ring, and the decomposition notes.
 
 ---
 
-*Generated 2026-05-06. State board reflects the shipped 2026-05-06 set. ntsync `25751C3E41E15401318758E`, kernel
-`6.19.11-rt1-1-nspa`.*
+*Generated 2026-05-09. State board reflects the shipped 2026-05-09 set on kernel `6.19.11-rt1-1-nspa`.*

@@ -531,9 +531,9 @@ The gamma redesign was scoped tightly:
 
 ## 4. Kernel Channel Object and ioctls
 
-The kernel side lives in `drivers/misc/ntsync.c` (Linux-NSPA tree at
-`/home/ninez/pkgbuilds/Linux-NSPA-pkgbuild/linux-nspa-6.19.11-1.src/linux-nspa/src/linux-6.19.11/drivers/misc/ntsync.c`,
-lines 1190-1494 for the channel object). Each NTSync channel is:
+The kernel side lives in `drivers/misc/ntsync.c` in the Linux-NSPA tree.
+The channel object occupies the `ntsync_channel` / `ntsync_channel_entry`
+code range in that file. Each NTSync channel is:
 
     struct ntsync_channel {
         struct ntsync_obj   obj;          /* base */
@@ -758,7 +758,7 @@ This holds because of three kernel-side properties of
 On post-1010 kernels there is one extra requirement: a dispatcher
 blocked in `NTSYNC_IOC_AGGREGATE_WAIT` on the channel source must still
 be visible to the channel's SEND_PI wake/boost logic. The production
-1010 follow-up (`072bfee`) is part of gamma's correctness story for
+aggregate-wait follow-up is part of gamma's correctness story for
 exactly that reason; without it, aggregate-wait would have reintroduced
 a priority gap on the receive side.
 
@@ -1065,18 +1065,15 @@ but Wine's own conformance tests do) see the same values.
 
 System-wide samples: 38,588 -> 19,415 per 30s.
 
-This profile shift is the combined effect of
-[`1d85c558`](https://github.com/nine7nine/Wine-NSPA/commit/1d85c558)
-(dispatcher ACQ_REL fences + inline accessor) and
-[`01d528f5`](https://github.com/nine7nine/Wine-NSPA/commit/01d528f5)
-(TRY_RECV2 burst-drain) on top of the 1011 kernel primitive.
+This profile shift is the combined effect of dispatcher helper/fence cleanup
+plus `TRY_RECV2` burst drain on top of the 1011 kernel primitive.
 
 #### Post-ship hot-path follow-ons
 
-| Commit | Implemented change | Exact observed effect |
+| Follow-on | Implemented change | Exact observed effect |
 |---|---|---|
-| `c0f5c515cd7` + `2870c9629ce` | gate `mark_block_*` poison and the paired valgrind annotations behind `NSPA_DEBUG_POISON_ALLOCS` | `mark_block_uninitialized` was sampled at `1.34%` wineserver-relative under `dispatcher-burst`; the combined change reclaims the full `1.34pp` and drops the symbol out of the top-20 |
-| `0802dadc750` | inline `read_request_shm` at the dispatcher call site | `read_request_shm` was sampled at `3.55%` wineserver-relative under `dispatcher-burst`; after inlining it disappears from the symbol table and saves `~1pp` more on the dispatcher path |
+| allocator-debug gating | gate `mark_block_*` poison and the paired valgrind annotations behind `NSPA_DEBUG_POISON_ALLOCS` | `mark_block_uninitialized` was sampled at `1.34%` wineserver-relative under `dispatcher-burst`; the combined change reclaims the full `1.34pp` and drops the symbol out of the top-20 |
+| request-reader inlining | inline `read_request_shm` at the dispatcher call site | `read_request_shm` was sampled at `3.55%` wineserver-relative under `dispatcher-burst`; after inlining it disappears from the symbol table and saves `~1pp` more on the dispatcher path |
 
 These follow-ons do not change the dispatcher architecture. They remove
 residual per-RPC overhead that remained after the bigger structural
@@ -1097,9 +1094,8 @@ entries per `AGG_WAIT` wake instead of paying N round-trips.
 
 ### 11.3 Production validation shape
 
-For the 2026-05-05 shipped path:
+For the current shipped path:
 
-- Module: `25751C3E41E15401318758E`
 - `NSPA_RT_POLICY=FF`
 - aggregate-wait, thread-token consumption, `TRY_RECV2`, and async
   `CreateFile` all on the normal shipped path
@@ -1173,11 +1169,11 @@ Gamma is the smallest design that closes all three.
 Gamma has been validated under sustained stress and through several
 KASAN-caught bugs. Tracking them here for completeness.
 
-### 13.1 The 2026-04-26 read-only audit (Wine commit 75a3c534d5f)
+### 13.1 The 2026-04-26 read-only audit
 
 A static audit of `server/nspa/shmem_channel.c` found **no latent
-correctness bugs** after the `baf088c290f` refcount + process-
-membership patch. The handler runs under `global_lock` exactly as
+correctness bugs** after the refcount + process-membership correction.
+The handler runs under `global_lock` exactly as
 v1.5 did, so handler-internal correctness is inherited from upstream
 Wine. The dispatcher loop has no spin-loops, no missing locks, and
 no lifetime races.
@@ -1224,16 +1220,14 @@ both wineserver-side findings and the MR1/MR2/MR4 msg-ring bugs; gamma
 itself was scored clean. The shipped msg-ring fixes are all in
 `dlls/win32u/nspa/msg_ring.c` and orthogonal to gamma.
 
-### 13.6 Don't-shotgun-the-audit feedback
+### 13.6 Audit discipline
 
-A separate behavioural-feedback note
-(`feedback_dont_shotgun_audit_into_unfound_bug`) documents that
-ntsync patches 1007-1011 originally shipped five patches as "audit
-findings" without ever tracing the original `EVENT_SET_PI` slab
-UAF; they were rolled back, reduced to the four genuinely-needed
-fixes (1006/1007/1008/1009), and re-shipped. The lesson: KASAN /
-trace first, audit second. Gamma's design is small enough that
-this discipline applies to its own future evolution as well.
+Ntsync patches 1007-1011 originally shipped several "audit findings"
+without ever tracing the original `EVENT_SET_PI` slab UAF; they were
+rolled back, reduced to the genuinely-needed fixes, and re-shipped.
+The lesson: KASAN / trace first, audit second. Gamma's design is small
+enough that this discipline applies to its own future evolution as
+well.
 
 ---
 

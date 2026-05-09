@@ -180,7 +180,9 @@ the <code>redraw_window</code> push ring, the paint cache fast path, the
 <code>get_message</code> empty-poll cache, and the MR1 / MR2 / MR4 audit fix-pack
 from 2026-04-27 — extend or harden the same substrate. They share the
 per-queue memfd, the slot state machine, the cache discipline, and the
-fast-path atomics. The doc treats them as one evolving design rather
+fast-path atomics. The newer hot-path follow-ons also move the per-thread
+message caches into <code>TEB-&gt;Win32ClientInfo</code>, so lookup overhead around that
+substrate is lower too. The doc treats them as one evolving design rather
 than versioned sub-systems.</p>
 
 <h3 id="11-motivating-profile">1.1 Motivating profile</h3>
@@ -431,7 +433,7 @@ several class-isolated rings under one memfd:</p>
     int                  nspa_hook_walk_counts[NB_HOOKS];   /* Tier 1 hook */
     nspa_hook_chain_t    nspa_hook_chains[NB_HOOKS];        /* Tier 2 hook */
     unsigned char        nspa_hook_module_pool[...];        /* Tier 2 strings */
-    nspa_redraw_ring_t   nspa_redraw_ring;  /* Phase A: redraw_window push */
+    nspa_redraw_ring_t   nspa_redraw_ring;  /* redraw_window push ring */
 } nspa_queue_bypass_shm_t;
 </code></pre>
 
@@ -815,9 +817,9 @@ is <code>tid</code> set with <code>mapped_ptr</code> NULL, used for cross-proces
 otherwise-unreachable peers so the lookup doesn&rsquo;t re-issue an RPC for
 each subsequent send.</p>
 
-<h3 id="42-own-bypass-tls">4.2 Own-bypass TLS</h3>
+<h3 id="42-own-bypass-cache">4.2 Own-bypass cache</h3>
 
-<p>Each thread&rsquo;s own bypass shm is also cached in TLS, separately
+<p>Each thread&rsquo;s own bypass shm is also cached per-thread, separately
 (<code>nspa_own_tls_key</code>). Sentinel values:</p>
 
 <pre><code class="code-block">NULL          = never queried
@@ -1321,7 +1323,7 @@ when paint or hook chains stall a window proc.</p>
 
 <p>The MR1 + MR4 reframing in the audit was that this class of silent
 contract violation looks like the same family as the upstream Wine
-<code>Disallow Win32 va_list in Unix libraries</code> fix (<code>6366775e82a</code>) — the
+<code>Disallow Win32 va_list in Unix libraries</code> fix — the
 symptom is not a deadlock at the bug site but cascading state
 corruption that eventually hangs the process via a downstream
 state-machine that trusted the corrupted value. Both MR1 and MR4 are
@@ -1517,8 +1519,7 @@ replacement for <code>NtWaitForSingleObject</code> on <code>queue-&gt;sync</code
 <code>_PRIVATE</code> flag was carried over reflexively — most futex code uses
 <code>_PRIVATE</code> because most futexes are process-local mutexes — without
 auditing the underlying shared-page lifetime. The MR2 audit caught it
-on a focused walk of the futex flag arguments. Lesson logged as part
-of the broader <code>wine-nspa-lockup-audit-20260427.md</code> follow-up patterns.</p>
+on a focused walk of the futex flag arguments.</p>
 
 <hr />
 
@@ -1622,8 +1623,8 @@ handles &ldquo;no reply arrived&rdquo; as a first-class failure mode.</p>
 
 <h3 id="111-status">11.1 Status</h3>
 
-<p><strong>Shipped, default-on.</strong> The redraw push ring landed in wine commit <code>72d7a9055a8</code>
-(2026-04-25). Eliminates the synchronous <code>redraw_window</code> round-trip on
+<p><strong>Shipped, default-on.</strong> The redraw push ring landed on 2026-04-25.
+It eliminates the synchronous <code>redraw_window</code> round-trip on
 the hot UI path.</p>
 
 <h3 id="112-rationale">11.2 Rationale</h3>
@@ -1767,17 +1768,17 @@ failed, tight-loop repainted, eventually wedged KWin/X11. Same shape
 as the gamma offset corruption fix — different mechanism. Fixed by
 snapshot/restore.</p>
 
-<h3 id="116-empirical-results">11.6 Empirical results</h3>
+<h3 id="116-validation-snapshot">11.6 Validation snapshot</h3>
 
-<p>Ableton Live 12 Lite, gamma + Tier 1+2 hook + Phase A, ~120 s with
+<p>Ableton Live 12 Lite, gamma + Tier 1+2 hook + redraw push ring, ~120 s with
 demo song + menus + window-move:</p>
 
 <table>
 <thead>
 <tr>
 <th> RPC </th>
-<th> Pre-Phase-A </th>
-<th> Post-Phase-A </th>
+<th> Before redraw push ring </th>
+<th> After redraw push ring </th>
 <th> Delta </th>
 </tr>
 </thead>
@@ -1803,7 +1804,7 @@ mean fewer paint probe cycles. Plus workload variance.</p>
 
 <h3 id="117-cross-thread-caveat">11.7 Cross-thread caveat</h3>
 
-<p>Phase A intentionally accepts cross-thread <code>RedrawWindow</code> into the
+<p>The redraw push ring intentionally accepts cross-thread <code>RedrawWindow</code> into the
 <strong>caller&rsquo;s</strong> queue ring. When server drains,
 <code>nspa_redraw_apply(current_thread, ...)</code> is called — <code>current_thread</code>
 is the producer thread, not the window-owner. The server-side
@@ -1976,8 +1977,8 @@ the seqlock retry loop; on retry exhaustion, falls back to RPC.</p>
 unconditionally on every <code>get_update_flags</code> call across every Wine
 process — measurable cost on Ableton&rsquo;s polling UI thread (~3,227 calls
 per session even before paint-cache became part of the normal shipped
-path, since the miss counter sat outside the fast-path check). Gated
-post-<code>f4a1671973b</code>.</p>
+path, since the miss counter sat outside the fast-path check). The
+always-on counter cost is now gone.</p>
 
 <h3 id="126-historical-note">12.6 Historical note</h3>
 
@@ -2179,7 +2180,7 @@ line of NSPA-flavored logic per audit §4.1 plus the NSPA reorg style
 
 <p>All four exit the seqlock retry loop deterministically and fall back to
 the safe path. Validated by <code>nspa_rt_test</code>&rsquo;s seqlock-bound subtests A
-and B (<code>9b13a757860</code>, <code>01efcd076c6</code>):</p>
+and B:</p>
 
 <ul>
 <li>Subtest A: paint fastpath under writer thrash — paint_max 67 µs,
@@ -2305,54 +2306,44 @@ this footnote.</p>
 <thead>
 <tr>
 <th> Step </th>
-<th> Wine commit </th>
 <th> Outcome </th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td> <code>c9daf83afe9</code> </td>
 <td> alloc-side-effect isolation probes </td>
 <td> Ruled out poison fill, ID sensitivity </td>
 </tr>
 <tr>
-<td> <code>924df6727db</code> </td>
-<td> opt-in <code>NSPA_MSG_RING_EXCLUDE_MAIN</code> gate </td>
+<td> first-thread exclusion gate </td>
 <td> Workaround for library panel; first-thread specific </td>
 </tr>
 <tr>
-<td> <code>54802c6351d</code> </td>
-<td> Memfd redesign implementation plan doc </td>
+<td> memfd redesign plan </td>
 <td> Plan captured </td>
 </tr>
 <tr>
-<td> <code>75de316f9ad</code> </td>
-<td> Phase 1+2 memfd alloc + client mmap </td>
+<td> memfd alloc + client mmap </td>
 <td> POST capture validated (~95 RTTs/s saved) </td>
 </tr>
 <tr>
-<td> <code>4eaf876a118</code> </td>
-<td> Phase 4 <code>ensure_own_bypass</code> protocol + client TLS </td>
+<td> <code>ensure_own_bypass</code> protocol + client cache </td>
 <td> SEND infrastructure in place </td>
 </tr>
 <tr>
-<td> <code>106735ff791</code> </td>
-<td> Phase 4 opt-in gate (default off) </td>
+<td> opt-in gate </td>
 <td> Avoided premature-default stale-slot storm </td>
 </tr>
 <tr>
-<td> <code>1d18cb7c4e8</code> </td>
-<td> Phase 4.5 wake-bit synthesis via memfd </td>
+<td> wake-bit synthesis via memfd </td>
 <td> Fixed client-side wake-bit blindness </td>
 </tr>
 <tr>
-<td> <code>657c16691f5</code> </td>
-<td> Phase 4.6 client-side ring-SEND dispatch </td>
+<td> client-side ring-SEND dispatch </td>
 <td> Full SEND bypass validated </td>
 </tr>
 <tr>
-<td> <code>70ea71f8c7b</code> </td>
-<td> Design doc update with ballpark reduction </td>
+<td> documentation refresh </td>
 <td> Docs current </td>
 </tr>
 </tbody>
@@ -2365,13 +2356,11 @@ this footnote.</p>
 <thead>
 <tr>
 <th> Step </th>
-<th> Wine commit </th>
 <th> Outcome </th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td> <code>72d7a9055a8</code> </td>
 <td> redraw_window push ring </td>
 <td> 10,930 -> 0 RPCs / 120 s; default-on </td>
 </tr>
@@ -2385,40 +2374,33 @@ this footnote.</p>
 <thead>
 <tr>
 <th> Step </th>
-<th> Wine commit </th>
 <th> Outcome </th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td> <code>c763761b928</code> </td>
 <td> paint-cache implementation + diag </td>
 <td> initial rollout </td>
 </tr>
 <tr>
-<td> <code>70d55350bef</code> </td>
-<td> default-on flip post-1006 </td>
+<td> first default-on flip </td>
 <td> Locked Ableton at ~5 min; reverted same day </td>
 </tr>
 <tr>
-<td> <code>4f2c29bb1b2</code> </td>
 <td> temporary revert </td>
 <td> Rolled back while the hardening work was still incomplete </td>
 </tr>
 <tr>
-<td> <code>f4a1671973b</code> </td>
-<td> Gate hit/miss counters behind <code>NSPA_PAINT_DIAG=1</code> </td>
+<td> hit/miss counters gated behind <code>NSPA_PAINT_DIAG=1</code> </td>
 <td> Removed always-on counter cost </td>
 </tr>
 <tr>
 <td> (validation) </td>
-<td> run-4 2026-04-28 with paint-cache on </td>
-<td> PASS past historical 5-min lockup; F5 likely fixed by MR1/MR4 </td>
+<td> run-4 2026-04-28 with paint-cache on | PASS past historical 5-min lockup; F5 likely fixed by MR1/MR4 </td>
 </tr>
 <tr>
 <td> (current) </td>
-<td> shipped state </td>
-<td> paint-cache is part of the normal path </td>
+<td> shipped state | paint-cache is part of the normal path </td>
 </tr>
 </tbody>
 </table>
@@ -2430,19 +2412,16 @@ this footnote.</p>
 <thead>
 <tr>
 <th> Phase </th>
-<th> Wine commit </th>
 <th> Outcome </th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td> <code>569ac8f6a5f</code> </td>
 <td> <code>get_message</code> empty-poll cache </td>
 <td> same-filter empty polls now short-circuit locally via <code>queue_shm-&gt;nspa_change_seq</code> </td>
 </tr>
 <tr>
-<td> <code>c94136ac0ee</code> </td>
-<td> remove empty-poll cache gate </td>
+<td> gate removal </td>
 <td> feature stays on the normal path; hot-path A/B branch removed </td>
 </tr>
 </tbody>
@@ -2455,13 +2434,11 @@ this footnote.</p>
 <thead>
 <tr>
 <th> Phase </th>
-<th> Wine commit </th>
 <th> Outcome </th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td> <code>9b4172e2bbc</code> </td>
 <td> MR1 ABA + MR2 cross-process futex + MR4 POST wake-loss </td>
 <td> Three bugs shipped, validated by run-3 + run-4 </td>
 </tr>
@@ -2475,23 +2452,19 @@ this footnote.</p>
 <thead>
 <tr>
 <th> Phase </th>
-<th> Wine commit </th>
 <th> Outcome </th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td> <code>9e51ed5f907</code> </td>
 <td> Harden retry loops at SCHED_FIFO callsites (audit §4.1) </td>
 <td> 7 sites + the macro </td>
 </tr>
 <tr>
-<td> <code>01efcd076c6</code> </td>
 <td> <code>nspa_rt_test</code> seqlock-bound subtest A </td>
 <td> Paint max 67 µs, hard=0 </td>
 </tr>
 <tr>
-<td> <code>9b13a757860</code> </td>
 <td> <code>nspa_rt_test</code> seqlock-bound subtest B </td>
 <td> Queue-bits max 945 µs, hard=0 </td>
 </tr>

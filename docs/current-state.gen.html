@@ -122,7 +122,7 @@ architecture boundary.</p>
 <li><a href="#3-active-subsystems">Active subsystems</a></li>
 <li><a href="#4-validation-and-performance">Validation and performance</a></li>
 <li><a href="#5-open-work-in-priority-order">Open work, in priority order</a></li>
-<li><a href="#6-recent-landed-arc-2026-04-30-to-2026-05-06">Recent landed arc</a></li>
+<li><a href="#6-recent-landed-arc-2026-04-30-to-2026-05-09">Recent landed arc</a></li>
 <li><a href="#7-configuration-reference">Configuration reference</a></li>
 <li><a href="#8-doc-index">Doc index</a></li>
 </ol>
@@ -132,7 +132,7 @@ architecture boundary.</p>
 
 <h2 id="1-overview">1. Overview</h2>
 
-<p>The public 2026-05-06 state is no longer just &ldquo;aggregate-wait plus a faster
+<p>The public 2026-05-09 state is no longer just &ldquo;aggregate-wait plus a faster
 dispatcher&rdquo;. The current shipped stack now layers several larger client-side
 and shared-state follow-ons on top of that base:</p>
 
@@ -149,12 +149,15 @@ file-backed sections client-side and retires more file metadata, flush, EOF,
 directory, and write-class traffic from wineserver</li>
 <li>the <strong>thread / process shared-state readers</strong>, which serve read-mostly query
 classes from seqlock-published shared objects and now also power the
-zero-time process wait fast path</li>
+zero-time process and thread wait fast paths</li>
 <li>the <strong>message-pump empty-poll cache</strong>, which retires a large chunk of
 same-filter <code>get_message</code> empty polls without pretending the whole message
 pump is client-complete</li>
 <li>the <strong>RT memory safety follow-ons</strong>, which keep the hugetlb path honest under
 pool pressure, partial view operations, <code>MEM_RESET</code>, and RWX JIT allocation</li>
+<li>the <strong>hot-path optimization layer</strong>, which now also includes x86_64
+TEB-relative thread state, msg-ring per-thread cache lookups inside the TEB,
+cacheline-isolated <code>inproc_sync</code> entries, and smaller wait-path helper cost</li>
 </ul>
 
 
@@ -176,7 +179,7 @@ remains available.</p>
 
 <h2 id="2-current-shipped-state">2. Current shipped state</h2>
 
-<h3 id="21-kernel-and-module">2.1 Kernel and module</h3>
+<h3 id="21-kernel-and-ntsync-overlay">2.1 Kernel and ntsync overlay</h3>
 
 <table>
 <thead>
@@ -199,16 +202,12 @@ remains available.</p>
 <td> <code>/lib/modules/6.19.11-rt1-1-nspa/kernel/drivers/misc/ntsync.ko</code> </td>
 </tr>
 <tr>
-<td> ntsync srcversion </td>
-<td> <code>25751C3E41E15401318758E</code> </td>
-</tr>
-<tr>
 <td> Module ref count </td>
 <td> 0 idle </td>
 </tr>
 <tr>
 <td> Sources </td>
-<td> upstream <code>drivers/misc/ntsync.{c,h}</code> + NSPA patch stack <code>1003-1015</code> </td>
+<td> upstream <code>drivers/misc/ntsync.{c,h}</code> plus the Wine-NSPA ntsync overlay </td>
 </tr>
 </tbody>
 </table>
@@ -226,7 +225,7 @@ remains available.</p>
 <tbody>
 <tr>
 <td> Wine base </td>
-<td> Wine 11.6 + NSPA fork </td>
+<td> Wine 11.8 + NSPA fork </td>
 </tr>
 <tr>
 <td> Dispatcher shape </td>
@@ -246,11 +245,15 @@ remains available.</p>
 </tr>
 <tr>
 <td> Shared-state query path </td>
-<td> thread + process shared-object readers shipped; zero-time process wait can short-circuit from <code>process_shm</code> </td>
+<td> thread + process shared-object readers shipped; zero-time process wait can short-circuit from <code>process_shm</code>, and zero-time thread wait can short-circuit from <code>thread_shm</code> </td>
 </tr>
 <tr>
 <td> Message-pump cache </td>
-<td> empty same-filter <code>get_message</code> polls can now return locally when <code>queue_shm-&gt;nspa_change_seq</code> has not advanced </td>
+<td> empty same-filter <code>get_message</code> polls can now return locally when <code>queue_shm-&gt;nspa_change_seq</code> has not advanced, and msg-ring per-thread caches now read through TEB-backed state </td>
+</tr>
+<tr>
+<td> Hot-path optimization layer </td>
+<td> x86_64 unix-side <code>NtCurrentTeb()</code> is inline, <code>get_thread_data()</code> reads through a TEB backpointer, <code>inproc_sync</code> entries are cacheline-isolated, and dormant <code>io_uring</code> helper calls are inlined away </td>
 </tr>
 <tr>
 <td> Memory surface </td>
@@ -385,7 +388,7 @@ remains available.</p>
 <td> removes the <code>open()</code> lock-drop critical section from the audio xrun path </td>
 </tr>
 <tr>
-<td> hot-path follow-ons (<code>1d85c558ceb</code>, <code>c0f5c515cd7</code>, <code>2870c9629ce</code>, <code>0802dadc750</code>) </td>
+<td> dispatcher helper inlining and lighter fences </td>
 <td> removes queue-helper call overhead, strips allocator-debug tax from production, and inlines <code>read_request_shm</code> on the dispatcher path </td>
 </tr>
 </tbody>
@@ -397,20 +400,20 @@ remains available.</p>
 <table>
 <thead>
 <tr>
-<th> Commit </th>
-<th> Landed change </th>
-<th> Observed effect </th>
+<th> Change </th>
+<th> Landed effect </th>
+<th> Observed result </th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td> <code>527647bac3e</code> </td>
-<td> AVX2-vectorize the alpha-bit OR loop in <code>dlls/winex11.drv/bitblt.c::x11drv_surface_flush</code> </td>
+<td> AVX2 alpha-bit flush </td>
+<td> <code>dlls/winex11.drv/bitblt.c::x11drv_surface_flush</code> is vectorized </td>
 <td> <code>x11drv_surface_flush</code>: <code>6.72%</code> -> <code>2.39%</code> (<code>-4.33pp</code>, <code>-64%</code>); total <code>winex11.so</code>: <code>6.76%</code> -> <code>2.43%</code> (<code>-4.33pp</code>) </td>
 </tr>
 <tr>
-<td> <code>97aff17da45</code> + <code>206f32b3de9</code> </td>
-<td> once-guard dominant stub FIXMEs and real-impl <code>ShutdownBlockReasonCreate/Destroy</code> as silent success </td>
+<td> Tier 1 log-noise cleanup </td>
+<td> dominant stub FIXMEs are once-guarded and <code>ShutdownBlockReasonCreate/Destroy</code> succeed silently </td>
 <td> top stub noise drops from <code>~565</code> prints per Ableton run to <code>~5</code> first-time prints </td>
 </tr>
 </tbody>
@@ -493,7 +496,7 @@ remains available.</p>
 <tbody>
 <tr>
 <td> ntsync wait-queue cache and cache isolation </td>
-<td> current module advanced to <code>25751C3E41E15401318758E</code>; all four ntsync caches now stay unmerged on the production kernel </td>
+<td> all four ntsync caches now stay unmerged on the production kernel, including the dedicated wait-queue cache </td>
 </tr>
 <tr>
 <td> RT-keyed <code>mlockall()</code> </td>
@@ -515,7 +518,7 @@ remains available.</p>
 </table>
 
 
-<h3 id="29-2026-05-06-bypass-and-memory-follow-ons">2.9 2026-05-06 bypass and memory follow-ons</h3>
+<h3 id="29-shared-state-message-and-memory-follow-ons">2.9 Shared-state, message, and memory follow-ons</h3>
 
 <table>
 <thead>
@@ -553,7 +556,41 @@ remains available.</p>
 </table>
 
 
-<h3 id="210-validation-baseline-against-25751c3e41e15401318758e">2.10 Validation baseline against <code>25751C3E41E15401318758E</code></h3>
+<h3 id="210-hot-path-optimization-follow-ons">2.10 Hot-path optimization follow-ons</h3>
+
+<table>
+<thead>
+<tr>
+<th> Change </th>
+<th> Shipped effect </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> zero-time thread wait fast path </td>
+<td> <code>WaitForSingleObject(thread, 0)</code> can answer from <code>THREAD_SHM_FLAG_TERMINATED</code>, cutting synthetic poll cost from <code>~11940 ns</code> to <code>~164 ns</code> </td>
+</tr>
+<tr>
+<td> x86_64 inline <code>NtCurrentTeb()</code> </td>
+<td> 30 s playback counters: CPU cycles <code>257.8B -&gt; 220.9B</code>, iTLB-load-misses <code>242M -&gt; 185M</code>, <code>NtCurrentTeb</code> function calls <code>9,961,441 -&gt; 566</code> </td>
+</tr>
+<tr>
+<td> msg-ring TEB-backed per-thread caches </td>
+<td> 30 s playback counters: CPU cycles <code>220.9B -&gt; 212.4B</code>, <code>pthread_getspecific</code> self time <code>0.46% -&gt; 0.09%</code>, <code>nspa_get_own_bypass_shm</code> <code>0.26% -&gt; 0.20%</code> </td>
+</tr>
+<tr>
+<td> <code>inproc_sync</code> cacheline isolation + capacity restore </td>
+<td> each entry now occupies one cacheline, removing cross-handle false sharing on hot refcount <code>LOCK</code> ops while keeping total cacheable handle capacity at <code>524288</code> </td>
+</tr>
+<tr>
+<td> <code>io_uring</code> helper inlining </td>
+<td> <code>ntdll_io_uring_flush_deferred()</code> empty-path cost (<code>0.82%</code> audio-thread time) and <code>ntdll_io_uring_get_eventfd()</code> helper cost (<code>0.15%</code>) are removed from the steady-state wait path </td>
+</tr>
+</tbody>
+</table>
+
+
+<h3 id="211-validation-baseline">2.11 Validation baseline</h3>
 
 <table>
 <thead>
@@ -784,7 +821,7 @@ own correctness proof and gate.</p>
 <td> <strong>Thread / process shared-state bypass</strong> </td>
 <td> Shipped </td>
 <td> ON </td>
-<td> server-published shared-object snapshots answer 7 thread query classes, 6 process query classes, and the zero-time process wait liveness poll without a wineserver RTT on a hit. </td>
+<td> server-published shared-object snapshots answer 7 thread query classes, 6 process query classes, and the zero-time process and thread wait polls without a wineserver RTT on a hit. </td>
 </tr>
 <tr>
 <td> <strong>Memory and large pages</strong> </td>
@@ -886,7 +923,7 @@ own correctness proof and gate.</p>
   </style>
 
   <rect x="0" y="0" width="940" height="500" class="cs-bg" rx="6"/>
-  <text x="470" y="28" text-anchor="middle" class="cs-title">2026-05-06 deployment board: shipped state, diagnostics, and remaining work</text>
+  <text x="470" y="28" text-anchor="middle" class="cs-title">2026-05-09 deployment board: shipped state, diagnostics, and remaining work</text>
 
   <rect x="50" y="70" width="250" height="150" class="cs-green" rx="6"/>
   <text x="175" y="96" text-anchor="middle" class="cs-tag-green">Kernel / sync substrate</text>
@@ -918,11 +955,12 @@ own correctness proof and gate.</p>
   <text x="175" y="382" text-anchor="middle" class="cs-small">kept for validation and regression isolation, not as the shipped default</text>
 
   <rect x="345" y="270" width="250" height="140" class="cs-green" rx="6"/>
-  <text x="470" y="296" text-anchor="middle" class="cs-tag-green">2026-05-06 follow-ons</text>
+  <text x="470" y="296" text-anchor="middle" class="cs-tag-green">2026-05-06 to 2026-05-09 follow-ons</text>
   <text x="470" y="322" text-anchor="middle" class="cs-label">thread/process shared-state bypass</text>
-  <text x="470" y="340" text-anchor="middle" class="cs-small">query RTTs and zero-time process waits now hit shared snapshots first</text>
-  <text x="470" y="364" text-anchor="middle" class="cs-label">message-pump + hugetlb safety</text>
-  <text x="470" y="382" text-anchor="middle" class="cs-small">empty get_message polls and auto-promoted memory edge cases are now handled locally</text>
+  <text x="470" y="340" text-anchor="middle" class="cs-small">query RTTs and zero-time process/thread waits now hit shared snapshots first</text>
+  <text x="470" y="364" text-anchor="middle" class="cs-label">message-pump + hot-path + hugetlb safety</text>
+  <text x="470" y="382" text-anchor="middle" class="cs-small">empty get_message polls, TEB hot state, and hugetlb edge cases</text>
+  <text x="470" y="396" text-anchor="middle" class="cs-small">now stay local more often</text>
 
   <rect x="640" y="270" width="250" height="140" class="cs-wip" rx="6"/>
   <text x="765" y="296" text-anchor="middle" class="cs-tag-violet">Longer horizon</text>
@@ -946,9 +984,9 @@ own correctness proof and gate.</p>
 <h3 id="41-full-suite-baseline-still-in-force">4.1 Full-suite baseline still in force</h3>
 
 <ul>
-<li>current prod ntsync module <code>25751C3E41E15401318758E</code> against kernel
-<code>6.19.11-rt1-1-nspa</code>, with the public full-suite boundary still anchored
-to the earlier <code>3 PASS / 0 FAIL</code> native + <code>24 PASS / 0 FAIL / 0 TIMEOUT</code>
+<li>current shipped ntsync overlay against kernel <code>6.19.11-rt1-1-nspa</code>,
+with the public full-suite boundary still anchored to the earlier
+<code>3 PASS / 0 FAIL</code> native + <code>24 PASS / 0 FAIL / 0 TIMEOUT</code>
 PE matrix totals.</li>
 <li>Native suite: <strong>3 PASS / 0 FAIL</strong> (<code>test-event-set-pi</code>,
 <code>test-channel-recv-exclusive</code>, <code>test-aggregate-wait</code>).</li>
@@ -960,12 +998,12 @@ path directly.</li>
 </ul>
 
 
-<p>The 2026-05-02 through 2026-05-06 work did not publish a new full-suite
+<p>The 2026-05-02 through 2026-05-09 work did not publish a new full-suite
 version. What it added was targeted validation for the newly-landed scheduler,
 timer, event, socket, local-file, local-section, shared-state, msg-ring,
-ntsync-hardening, and RT memory surfaces.</p>
+ntsync-hardening, RT memory, and hot-path optimization surfaces.</p>
 
-<h3 id="42-targeted-2026-05-02-through-2026-05-06-validation">4.2 Targeted 2026-05-02 through 2026-05-06 validation</h3>
+<h3 id="42-targeted-2026-05-02-through-2026-05-09-validation">4.2 Targeted 2026-05-02 through 2026-05-09 validation</h3>
 
 <table>
 <thead>
@@ -1047,9 +1085,24 @@ ntsync-hardening, and RT memory surfaces.</p>
 <td> ioctl path <code>~10000 ns/poll</code>; shared-state path <code>~144 ns/poll</code> </td>
 </tr>
 <tr>
+<td> zero-time thread wait fast path </td>
+<td> synthetic poll harness </td>
+<td> ioctl path <code>~11940 ns/poll</code>; shared-state path <code>~164 ns/poll</code> </td>
+</tr>
+<tr>
 <td> <code>get_message</code> empty-poll cache </td>
 <td> Ableton 60 s playback </td>
 <td> <code>get_message</code> <code>3,880 -&gt; 866</code>; <code>get_message</code> time <code>16.5 ms -&gt; 2.2 ms</code>; total handler time <code>46.8 ms -&gt; 36.9 ms</code> </td>
+</tr>
+<tr>
+<td> x86_64 TEB-relative hot state </td>
+<td> 30 s Ableton playback counters </td>
+<td> <code>NtCurrentTeb</code> calls <code>9,961,441 -&gt; 566</code>; cumulative CPU cycles after the two TEB carries <code>257.8B -&gt; 212.4B</code> </td>
+</tr>
+<tr>
+<td> <code>inproc_sync</code> cacheline isolation </td>
+<td> 30 s Ableton playback counters </td>
+<td> distributed hot-symbol drops after eliminating false sharing on refcount <code>LOCK</code> ops; cache capacity restored to <code>524288</code> handles </td>
 </tr>
 <tr>
 <td> RT-keyed <code>mlockall()</code> </td>
@@ -1205,7 +1258,7 @@ ntsync-hardening, and RT memory surfaces.</p>
 </table>
 
 
-<h4 id="2026-05-02-through-2026-05-06-feature-specific-wins">2026-05-02 through 2026-05-06 feature-specific wins</h4>
+<h4 id="2026-05-02-through-2026-05-09-feature-specific-wins">2026-05-02 through 2026-05-09 feature-specific wins</h4>
 
 <table>
 <thead>
@@ -1236,6 +1289,14 @@ ntsync-hardening, and RT memory surfaces.</p>
 <td> process-handle poll loop <code>~10000 ns/poll</code> -> <code>~144 ns/poll</code> </td>
 </tr>
 <tr>
+<td> zero-time thread wait </td>
+<td> thread-handle poll loop <code>~11940 ns/poll</code> -> <code>~164 ns/poll</code> </td>
+</tr>
+<tr>
+<td> x86_64 TEB hot state </td>
+<td> cumulative playback CPU cycles <code>257.8B -&gt; 212.4B</code> across inline <code>NtCurrentTeb()</code> plus msg-ring TEB-cache carries </td>
+</tr>
+<tr>
 <td> local-file EOF path </td>
 <td> direct handler-time saving <code>~8 ms / snapshot</code>, plus eligible <code>ftruncate()</code> no longer blocks the wineserver loop inline </td>
 </tr>
@@ -1251,7 +1312,7 @@ ntsync-hardening, and RT memory surfaces.</p>
 
 <ul>
 <li>The last published full PE matrix is still the 2026-04-30 <code>24 PASS / 0 FAIL /
-0 TIMEOUT</code> run. The 2026-05-02 through 2026-05-06 features are covered by
+0 TIMEOUT</code> run. The 2026-05-02 through 2026-05-09 features are covered by
 targeted validation, not a new full-suite publish yet.</li>
 <li>Local events default-ON still exposes a known cosmetic log line in some
 Ableton runs: <code>wined3d_cs_destroy</code> &ldquo;Closing present event failed&rdquo;. It is not
@@ -1268,7 +1329,7 @@ smoke level 0 + 1 only.</li>
 <ol>
 <li><strong>Longer paint-cache soak</strong> — different day / cold start plus a
 longer runtime window so the default-on path has a cleaner public record.</li>
-<li><strong>Full-suite rerun against the 2026-05-06 stack</strong> — the last published
+<li><strong>Full-suite rerun against the 2026-05-09 stack</strong> — the last published
 matrix is still v8 / 2026-04-30; the new scheduler / event / socket surfaces
 deserve a fresh public matrix.</li>
 <li><strong>Longer local-event, local-section, shared-state, and socket soak</strong> — targeted validations are clean;
@@ -1284,7 +1345,7 @@ timer/fd-poll/router splits remain longer-horizon work.</li>
 
 <hr />
 
-<h2 id="6-recent-landed-arc-2026-04-30-to-2026-05-06">6. Recent landed arc (2026-04-30 to 2026-05-06)</h2>
+<h2 id="6-recent-landed-arc-2026-04-30-to-2026-05-09">6. Recent landed arc (2026-04-30 to 2026-05-09)</h2>
 
 <table>
 <thead>
@@ -1379,6 +1440,21 @@ timer/fd-poll/router splits remain longer-horizon work.</li>
 <td> 2026-05-06 </td>
 <td> hugetlb safety follow-ons </td>
 <td> auto-promoted views now demote safely on partial ops, fall back cleanly under pool pressure, reclaim correctly on <code>MEM_RESET</code>, and include RWX JIT allocations when eligible </td>
+</tr>
+<tr>
+<td> 2026-05-08 </td>
+<td> zero-time thread wait fast path </td>
+<td> <code>WaitForSingleObject(thread, 0)</code> can answer from <code>thread_shm</code> via the published termination flag </td>
+</tr>
+<tr>
+<td> 2026-05-09 </td>
+<td> x86_64 TEB hot-state carries </td>
+<td> inline <code>NtCurrentTeb()</code> and msg-ring TEB-backed per-thread caches remove repeated thread-local helper overhead </td>
+</tr>
+<tr>
+<td> 2026-05-09 </td>
+<td> <code>inproc_sync</code> cache layout follow-ons </td>
+<td> cacheline isolation lands on the userspace sync cache and the original <code>524288</code>-handle capacity is restored </td>
 </tr>
 </tbody>
 </table>
@@ -1520,7 +1596,7 @@ REALTIME-class priorities scale linearly below it.</p>
 <tbody>
 <tr>
 <td> <code>current-state.md</code> </td>
-<td> This document — state of the art on 2026-05-06 </td>
+<td> This document — state of the art on 2026-05-09 </td>
 </tr>
 <tr>
 <td> <code>client-scheduler-architecture.gen.html</code> </td>
@@ -1544,7 +1620,7 @@ REALTIME-class priorities scale linearly below it.</p>
 </tr>
 <tr>
 <td> <code>thread-and-process-shared-state.gen.html</code> </td>
-<td> server-published thread/process snapshots, query bypass coverage, and the zero-time process wait fast path </td>
+<td> server-published thread/process snapshots, query bypass coverage, and zero-time process/thread waits </td>
 </tr>
 <tr>
 <td> <code>ntsync-pi-driver.gen.html</code> </td>
@@ -1561,6 +1637,10 @@ REALTIME-class priorities scale linearly below it.</p>
 <tr>
 <td> <code>local-section-architecture.gen.html</code> </td>
 <td> client-side file-backed sections built on top of local-file handles </td>
+</tr>
+<tr>
+<td> <code>hot-path-optimizations.gen.html</code> </td>
+<td> cross-cutting optimization choices: published-state caching, TEB-relative hot state, cache/slab layout, helper inlining, and GUI flush trims </td>
 </tr>
 <tr>
 <td> <code>msg-ring-architecture.gen.html</code> </td>
@@ -1592,7 +1672,7 @@ REALTIME-class priorities scale linearly below it.</p>
 </tr>
 <tr>
 <td> <code>decoration-loop-investigation.gen.html</code> </td>
-<td> Wine 11.6 X11 windowing decoration-loop bug 57955 </td>
+<td> X11 windowing decoration-loop bug 57955 case study </td>
 </tr>
 <tr>
 <td> <code>sync-primitives-research.gen.html</code> </td>
@@ -1602,16 +1682,15 @@ REALTIME-class priorities scale linearly below it.</p>
 </table>
 
 
-<p>The architecture-heavy pieces added through 2026-05-06 are now covered
+<p>The architecture-heavy pieces added through 2026-05-09 are now covered
 in the public docs set, including the client scheduler, local events,
 socket <code>io_uring</code>, gamma, aggregate-wait, hook cache, thread/process
-shared-state readers, local-file, local sections, memory follow-ons,
-msg-ring, and the decomposition notes.</p>
+shared-state readers, local-file, local sections, hot-path optimizations,
+memory follow-ons, msg-ring, and the decomposition notes.</p>
 
 <hr />
 
-<p><em>Generated 2026-05-06. State board reflects the shipped 2026-05-06 set. ntsync <code>25751C3E41E15401318758E</code>, kernel
-<code>6.19.11-rt1-1-nspa</code>.</em></p>
+<p><em>Generated 2026-05-09. State board reflects the shipped 2026-05-09 set on kernel <code>6.19.11-rt1-1-nspa</code>.</em></p>
 
 <script>
 document.addEventListener("DOMContentLoaded", function () {

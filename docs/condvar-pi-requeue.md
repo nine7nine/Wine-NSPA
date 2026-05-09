@@ -534,4 +534,4 @@ matrix), no regressions after the later `dispatcher-burst` addition.
 
 ---
 
-Wine-NSPA Win32 Condvar PI Reference | Generated 2026-04-16 | Wine 11.6 + NSPA RT patchset
+Wine-NSPA Win32 Condvar PI Reference | Public 11.x documentation

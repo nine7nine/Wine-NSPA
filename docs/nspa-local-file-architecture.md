@@ -354,7 +354,7 @@ HANDLE nspa_promote_if_local( HANDLE h );
 // Returns `h` unchanged if promotion failed (caller falls back to server path).
 ```
 
-This is Phase 1A.4.a lazy-promotion. The alternative -- eagerly promoting at mint time -- was rejected because most file opens in Ableton's workload never touch a server-requiring API; they read, maybe query a position, and close. Eager promotion would cost an RPC per open; lazy promotion costs an RPC per *distinct file that escapes the read-only happy path*.
+This is the shipped lazy-promotion path. The alternative -- eagerly promoting at mint time -- was rejected because most file opens in Ableton's workload never touch a server-requiring API; they read, maybe query a position, and close. Eager promotion would cost an RPC per open; lazy promotion costs an RPC per *distinct file that escapes the read-only happy path*.
 
 <div class="diagram-container">
 <svg width="100%" viewBox="0 0 940 430" xmlns="http://www.w3.org/2000/svg">
@@ -431,9 +431,9 @@ The promote RPC forwards `ObjectAttributes->Attributes` (typically `OBJ_CASE_INS
 Three small follow-ups closed correctness gaps in the shipped local-file
 path without changing the architecture:
 
-- [`97a4216`](https://github.com/nine7nine/Wine-NSPA/commit/97a4216) populates `fd->nt_name` on directory-bypass promotion, which fixed the `start.exe` NULL-Name crash.
-- [`ef4e049`](https://github.com/nine7nine/Wine-NSPA/commit/ef4e049) rejects `FILE_NON_DIRECTORY_FILE` on the directory bypass path instead of accepting a shape that the server would reject.
-- [`2160e06`](https://github.com/nine7nine/Wine-NSPA/commit/2160e06) makes the shared-inode `check_sharing` path arbitrate `FILE_MAPPING_WRITE`, matching `server/fd.c::check_sharing`.
+- directory-bypass promotion now populates `fd->nt_name`, which fixed the `start.exe` NULL-Name crash
+- directory bypass now rejects `FILE_NON_DIRECTORY_FILE` instead of accepting a shape the server would reject
+- the shared-inode `check_sharing` path now arbitrates `FILE_MAPPING_WRITE`, matching `server/fd.c::check_sharing`
 
 These are exactly the right kind of follow-up for a shipped stub:
 preserve the fast path, preserve the fallback discipline, and close any
@@ -707,7 +707,7 @@ The same-process path is covered. Cross-process dup where the source lives in *a
 
 ### 14.2 `STARTUPINFOEX PROC_THREAD_ATTRIBUTE_HANDLE_LIST` local-range inheritance
 
-Phase 1A.9 prong A (synchronous `get_or_promote` per handle in the explicit inheritance list) was deferred because the per-handle promote RPC on the CreateProcess-calling thread surfaced as a visible menu-content-paint delay ("black menu flash"). Legacy `bInheritHandles=TRUE` via prong B (`nspa_local_file_promote_inheritable`) is unaffected and covers the common case.
+The synchronous `get_or_promote` variant for explicit handle-list inheritance was deferred because the per-handle promote RPC on the CreateProcess-calling thread surfaced as a visible menu-content-paint delay ("black menu flash"). Legacy `bInheritHandles=TRUE` via `nspa_local_file_promote_inheritable` is unaffected and covers the common case.
 
 Proper fix options (ranked):
 
@@ -743,23 +743,23 @@ path until a workload demonstrates otherwise.
 
 ## 15. History
 
-| Phase | Commit | Scope |
-|---|---|---|
-| 1A.0 | `bbea50591a4` | Diagnostic scaffolding |
-| 1A.1.a-c | `5fe0bff087c` .. `fc79ed3` | Shared inode-table shmem + publish hooks + client reader |
-| 1A.2.a-e | `8c43fcbfb1f` .. `99254f1` | Per-bucket PI lock + slot subentries + client publish API + `NtCreateFile` bypass dispatch + read/write routing |
-| 1A.3 | `836cfa2` .. `c71e8fc` | Section-handle promotion infrastructure + audit conclusions |
-| 1A.4.a | `35f8897` | Lazy server-handle promotion + PI mutex on table |
-| 1A.4 partial | `eb9c6d8454d` | `Nt*File` hooks (b-e) |
-| 1A.5 | `43f68f1` | Final ship-stable + audit findings |
-| 1A.5+ | `7a03f51` | Wider `Nt*File` coverage (audit-driven) |
-| 1A.6 | `73426aa72c4` | Promoted-fd correctness (`nt_name` plumb, `GENERIC_*` access map) |
-| 1A.6 follow-up | `69bde5a825e` | `NtQueryObject` + `NtSetInformationObject` promote |
-| 1A.7 | `2b193aa0590` | `NtDuplicateObject` same-process promote (fixes Ableton .als load) |
-| 1A.8 | `86e17b75986` | Object-generic API audit sweep (`NtCompareObjects`, security, permanence) |
-| 1A.9 | `18c209da804` | `OVERLAPPED` reject + `FILE_OPEN_IF` widen + CreateProcess inheritance (prong B) + `attributes` plumbing |
-| 1A.9 parity follow-up | `97a4216` + `ef4e049` + `2160e06` | promote-time `nt_name`, directory-bypass reject parity, `FILE_MAPPING_WRITE` sharing parity |
-| Menu-flash fix | `641dd63a313` + `72c59b04337` + `6edea95126f` | Init `nspa_lf_handle_base` at declaration + defer prong A + gate QS_TIMER synth on caller's filter |
-| Reorg A-D | `e81f4a3817f` .. `cc491efe052` | File moves into `nspa/` subdirs + intercept-site collapse + debug gating |
+| Phase | Scope |
+|---|---|
+| 1A.0 | Diagnostic scaffolding |
+| 1A.1.a-c | Shared inode-table shmem + publish hooks + client reader |
+| 1A.2.a-e | Per-bucket PI lock + slot subentries + client publish API + `NtCreateFile` bypass dispatch + read/write routing |
+| 1A.3 | Section-handle promotion infrastructure + audit conclusions |
+| 1A.4.a | Lazy server-handle promotion + PI mutex on table |
+| 1A.4 partial | `Nt*File` hooks (b-e) |
+| 1A.5 | Final ship-stable + audit findings |
+| 1A.5+ | Wider `Nt*File` coverage (audit-driven) |
+| 1A.6 | Promoted-fd correctness (`nt_name` plumb, `GENERIC_*` access map) |
+| 1A.6 follow-up | `NtQueryObject` + `NtSetInformationObject` promote |
+| 1A.7 | `NtDuplicateObject` same-process promote (fixes Ableton `.als` load) |
+| 1A.8 | Object-generic API audit sweep (`NtCompareObjects`, security, permanence) |
+| 1A.9 | `OVERLAPPED` reject + `FILE_OPEN_IF` widen + CreateProcess inheritance (prong B) + `attributes` plumbing |
+| 1A.9 parity follow-up | promote-time `nt_name`, directory-bypass reject parity, `FILE_MAPPING_WRITE` sharing parity |
+| Menu-flash fix | init `nspa_lf_handle_base` at declaration + defer prong A + gate `QS_TIMER` synth on caller's filter |
+| Reorg A-D | file moves into `nspa/` subdirs + intercept-site collapse + debug gating |
 
 ---

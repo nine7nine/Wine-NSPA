@@ -43,7 +43,7 @@ arbitration is required. Each stub picks an NT surface, owns its own
 data structures (a private handle range, a per-process table, a shmem
 region, a dispatcher thread), and short-circuits the server when it can.
 
-The pattern is already shipping. As of 2026-05-06 there are four live
+The pattern is already shipping. As of 2026-05-09 there are four live
 NT-local stub surfaces in tree:
 
 | Stub | NT surface | Lives in |
@@ -241,8 +241,8 @@ The progressive-stubs strategy lets us sequence the work:
    if wineserver is doing < 1% CPU end-to-end the answer may be "no".
 
 This is the inverted ordering relative to "monolithic rewrite" and it
-matches the de-risking discipline the rest of the project uses
-(`feedback_validate_before_default_on.md`, `feedback_ship_default_off.md`).
+matches the same de-risking discipline used across the rest of the project:
+validate the bounded slice first, then make it the normal path.
 
 ---
 
@@ -347,7 +347,6 @@ handle. Compare to the no-bypass case where the *entire* lifetime is
 RPCs.
 
 The same lazy-mint pattern shows up elsewhere. NTSync direct-sync
-(client-side sync object creation, `feedback_test_with_pe_binaries.md`)
 mints client-range NTSync handles that bypass wineserver, then
 promotes to a server handle on first cross-process duplication.
 Section objects that back local-file handles get promoted via
@@ -384,8 +383,7 @@ unrelated code. This is not optional -- it is the property that lets
 the stubs be safe to call from RT-priority client threads and from
 audio-callback contexts.
 
-The discipline, as written in `feedback_never_fifo_busyloops.md` and
-the `wine-nspa-lockup-audit-20260427.md` audit:
+The discipline is strict and shared by every shipped stub:
 
 1. **Lock taken briefly.** Acquire `pi_mutex_t`, mutate in-memory
    tables, release. Worst-case hold time is dozens of nanoseconds.
@@ -435,22 +433,9 @@ in-flight entry (`t->refcount++` before drop, `--t->refcount` after
 re-acquire) so a concurrent close can't free the entry mid-fire.
 
 This pattern -- "drop lock, do the dangerous thing, re-acquire" --
-shows up in every stub. It is the same discipline `feedback_no_blocking_under_lock.md`
-calls out for the wineserver itself; the stubs apply it locally.
-
-The 2026-04-27 audit (see `wine-nspa-lockup-audit-20260427.md`)
-explicitly verified this property for every NT-local stub:
-
-> Out of scope: ntsync.c (validated), client-side bucket_lock discipline
-> (other-process behaviour), Ableton-internal bugs, performance.
-> [...]
-> F1-F12: every NT-local stub holds its lock for in-memory mutation only.
-> No syscalls, no RPCs, no callbacks under any stub's lock. Refcount
-> patterns ensure entries survive lock drops in fire / promote paths.
-
-The audit was a precondition for re-arming the lockup repro. With the
-discipline confirmed, the path forward is more stubs -- not different
-locking.
+shows up in every shipped stub. The rule is simple: the lock protects
+in-memory state only. Once the path needs a syscall, RPC, or callback,
+the lock must already be gone.
 
 ---
 
@@ -740,8 +725,8 @@ without taking the lock -- the slot's state byte is the
 synchronisation point with the consumer. The dispatcher does not
 issue any wineserver RPC.
 
-**2026-04-30 follow-up:** [`78947c1`](https://github.com/nine7nine/Wine-NSPA/commit/78947c1)
-tightened the eligibility predicate so `TIMERPROC` and cross-thread
+**2026-04-30 follow-up:** the eligibility predicate was tightened so
+`TIMERPROC` and cross-thread
 `SetTimer` cases now refuse the stub and defer to the server. That is
 the correct NT-local-stub shape: keep the cheap owner-thread path local,
 and route anything with ambiguous ownership or callback semantics back

@@ -517,7 +517,7 @@ HANDLE nspa_promote_if_local( HANDLE h );
 </code></pre>
 
 
-<p>This is Phase 1A.4.a lazy-promotion. The alternative &ndash; eagerly promoting at mint time &ndash; was rejected because most file opens in Ableton&rsquo;s workload never touch a server-requiring API; they read, maybe query a position, and close. Eager promotion would cost an RPC per open; lazy promotion costs an RPC per <em>distinct file that escapes the read-only happy path</em>.</p>
+<p>This is the shipped lazy-promotion path. The alternative &ndash; eagerly promoting at mint time &ndash; was rejected because most file opens in Ableton&rsquo;s workload never touch a server-requiring API; they read, maybe query a position, and close. Eager promotion would cost an RPC per open; lazy promotion costs an RPC per <em>distinct file that escapes the read-only happy path</em>.</p>
 
 <div class="diagram-container">
 <svg width="100%" viewBox="0 0 940 430" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
@@ -596,9 +596,9 @@ HANDLE nspa_promote_if_local( HANDLE h );
 path without changing the architecture:</p>
 
 <ul>
-<li><a href="https://github.com/nine7nine/Wine-NSPA/commit/97a4216"><code>97a4216</code></a> populates <code>fd-&gt;nt_name</code> on directory-bypass promotion, which fixed the <code>start.exe</code> NULL-Name crash.</li>
-<li><a href="https://github.com/nine7nine/Wine-NSPA/commit/ef4e049"><code>ef4e049</code></a> rejects <code>FILE_NON_DIRECTORY_FILE</code> on the directory bypass path instead of accepting a shape that the server would reject.</li>
-<li><a href="https://github.com/nine7nine/Wine-NSPA/commit/2160e06"><code>2160e06</code></a> makes the shared-inode <code>check_sharing</code> path arbitrate <code>FILE_MAPPING_WRITE</code>, matching <code>server/fd.c::check_sharing</code>.</li>
+<li>directory-bypass promotion now populates <code>fd-&gt;nt_name</code>, which fixed the <code>start.exe</code> NULL-Name crash</li>
+<li>directory bypass now rejects <code>FILE_NON_DIRECTORY_FILE</code> instead of accepting a shape the server would reject</li>
+<li>the shared-inode <code>check_sharing</code> path now arbitrates <code>FILE_MAPPING_WRITE</code>, matching <code>server/fd.c::check_sharing</code></li>
 </ul>
 
 
@@ -1131,7 +1131,7 @@ traffic off wineserver:</p>
 
 <h3 id="142-startupinfoex-proc_thread_attribute_handle_list-local-range-inheritance">14.2 <code>STARTUPINFOEX PROC_THREAD_ATTRIBUTE_HANDLE_LIST</code> local-range inheritance</h3>
 
-<p>Phase 1A.9 prong A (synchronous <code>get_or_promote</code> per handle in the explicit inheritance list) was deferred because the per-handle promote RPC on the CreateProcess-calling thread surfaced as a visible menu-content-paint delay (&ldquo;black menu flash&rdquo;). Legacy <code>bInheritHandles=TRUE</code> via prong B (<code>nspa_local_file_promote_inheritable</code>) is unaffected and covers the common case.</p>
+<p>The synchronous <code>get_or_promote</code> variant for explicit handle-list inheritance was deferred because the per-handle promote RPC on the CreateProcess-calling thread surfaced as a visible menu-content-paint delay (&ldquo;black menu flash&rdquo;). Legacy <code>bInheritHandles=TRUE</code> via <code>nspa_local_file_promote_inheritable</code> is unaffected and covers the common case.</p>
 
 <p>Proper fix options (ranked):</p>
 
@@ -1180,90 +1180,73 @@ path until a workload demonstrates otherwise.</p>
 <thead>
 <tr>
 <th> Phase </th>
-<th> Commit </th>
 <th> Scope </th>
 </tr>
 </thead>
 <tbody>
 <tr>
 <td> 1A.0 </td>
-<td> <code>bbea50591a4</code> </td>
 <td> Diagnostic scaffolding </td>
 </tr>
 <tr>
 <td> 1A.1.a-c </td>
-<td> <code>5fe0bff087c</code> .. <code>fc79ed3</code> </td>
 <td> Shared inode-table shmem + publish hooks + client reader </td>
 </tr>
 <tr>
 <td> 1A.2.a-e </td>
-<td> <code>8c43fcbfb1f</code> .. <code>99254f1</code> </td>
 <td> Per-bucket PI lock + slot subentries + client publish API + <code>NtCreateFile</code> bypass dispatch + read/write routing </td>
 </tr>
 <tr>
 <td> 1A.3 </td>
-<td> <code>836cfa2</code> .. <code>c71e8fc</code> </td>
 <td> Section-handle promotion infrastructure + audit conclusions </td>
 </tr>
 <tr>
 <td> 1A.4.a </td>
-<td> <code>35f8897</code> </td>
 <td> Lazy server-handle promotion + PI mutex on table </td>
 </tr>
 <tr>
 <td> 1A.4 partial </td>
-<td> <code>eb9c6d8454d</code> </td>
 <td> <code>Nt*File</code> hooks (b-e) </td>
 </tr>
 <tr>
 <td> 1A.5 </td>
-<td> <code>43f68f1</code> </td>
 <td> Final ship-stable + audit findings </td>
 </tr>
 <tr>
 <td> 1A.5+ </td>
-<td> <code>7a03f51</code> </td>
 <td> Wider <code>Nt*File</code> coverage (audit-driven) </td>
 </tr>
 <tr>
 <td> 1A.6 </td>
-<td> <code>73426aa72c4</code> </td>
 <td> Promoted-fd correctness (<code>nt_name</code> plumb, <code>GENERIC_*</code> access map) </td>
 </tr>
 <tr>
 <td> 1A.6 follow-up </td>
-<td> <code>69bde5a825e</code> </td>
 <td> <code>NtQueryObject</code> + <code>NtSetInformationObject</code> promote </td>
 </tr>
 <tr>
 <td> 1A.7 </td>
-<td> <code>2b193aa0590</code> </td>
-<td> <code>NtDuplicateObject</code> same-process promote (fixes Ableton .als load) </td>
+<td> <code>NtDuplicateObject</code> same-process promote (fixes Ableton <code>.als</code> load) </td>
 </tr>
 <tr>
 <td> 1A.8 </td>
-<td> <code>86e17b75986</code> </td>
 <td> Object-generic API audit sweep (<code>NtCompareObjects</code>, security, permanence) </td>
 </tr>
 <tr>
 <td> 1A.9 </td>
-<td> <code>18c209da804</code> </td>
 <td> <code>OVERLAPPED</code> reject + <code>FILE_OPEN_IF</code> widen + CreateProcess inheritance (prong B) + <code>attributes</code> plumbing </td>
 </tr>
 <tr>
 <td> 1A.9 parity follow-up </td>
-<td> <code>97a4216</code> + <code>ef4e049</code> + <code>2160e06</code> </td>
 <td> promote-time <code>nt_name</code>, directory-bypass reject parity, <code>FILE_MAPPING_WRITE</code> sharing parity </td>
 </tr>
 <tr>
 <td> Menu-flash fix </td>
-<td> <code>641dd63a313</code> + <code>72c59b04337</code> + <code>6edea95126f</code> </td>
-<td> Init <code>nspa_lf_handle_base</code> at declaration + defer prong A + gate QS_TIMER synth on caller&rsquo;s filter </td>
+<td> init <code>nspa_lf_handle_base</code> at declaration + defer prong A + gate <code>QS_TIMER</code> synth on caller&rsquo;s filter </td>
 </tr>
 <tr>
 <td> Reorg A-D </td>
-<td> <code>e81f4a3817f</code> .. <code>cc491efe052</code> </td>
-<td> File moves into <code>nspa/</code> subdirs + intercept-site collapse + debug gating </td>
+<td> file moves into <code>nspa/</code> subdirs + intercept-site collapse + debug gating </td>
 </tr>
 </tbody>
 </table>

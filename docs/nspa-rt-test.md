@@ -44,7 +44,7 @@ exercises `inproc_wait` -> ntsync ioctls directly and does **not** hit
 loop. `dispatcher-burst` is the first PE-side workload in the published
 matrix that covers that path.
 
-The 2026-05-02 through 2026-05-06 shipped follow-ons did **not** introduce a new
+The 2026-05-02 through 2026-05-09 shipped follow-ons did **not** introduce a new
 full matrix version. They were validated with targeted harnesses instead:
 
 - `run-rt-probe-validation.sh` covers the sched-hosted `local_timer` and
@@ -76,14 +76,14 @@ The PE binary runs in two modes:
 
 ### Published Full-Suite Totals (2026-04-30)
 
-- **Layer 1 native suite:** 3 PASS / 0 FAIL against module
-  `10124FB81FDC76797EF1F91` (`test-event-set-pi`,
-  `test-channel-recv-exclusive`, `test-aggregate-wait` 9/9 including
+- **Layer 1 native suite:** 3 PASS / 0 FAIL
+  (`test-event-set-pi`, `test-channel-recv-exclusive`,
+  `test-aggregate-wait` 9/9 including
   kitchen-sink 86,528 wakes / 0 timeouts / 0 errors).
 - **Layer 2 PE matrix:** 24 PASS / 0 FAIL / 0 TIMEOUT (12 tests x
   baseline + RT), including `dispatcher-burst`.
 
-### Targeted Follow-On Validators (2026-05-02 through 2026-05-06)
+### Targeted Follow-On Validators (2026-05-02 through 2026-05-09)
 
 - **sched RT-probe script:** `run-rt-probe-validation.sh` -- `10/10 PASS`
   for the `wine-sched-rt` migration of `local_timer` and
@@ -91,8 +91,11 @@ The PE binary runs in two modes:
 - **socket deferred path:** `socket-io` continues to pass in baseline + RT
   while now exercising the shipped `RECVMSG` / `SENDMSG` SQE path
 - **thread / process shared-state path:** targeted A/B harnesses for the
-  7 thread classes, 6 process classes, and zero-time process wait stayed clean;
+  7 thread classes, 6 process classes, and zero-time process/thread waits stayed clean;
   `ThreadBasicInformation` remains intentionally on the RPC path
+- **msg-ring and hot-path follow-ons:** real-workload counters cover the
+  shipped `get_message` empty-poll cache, x86_64 inline `NtCurrentTeb()`,
+  TEB-backed msg-ring caches, and cacheline-shaped `inproc_sync` entries
 - **local-file / local-section workload path:** same-process map-after-file-close
   is clean; local-file and section carries reduce file and mapping traffic
   without changing the published full-suite boundary
@@ -479,11 +482,9 @@ to cover the gamma dispatcher hot path:
 
 The verdict is failure-count only; latency is observational. That
 keeps the test deterministic enough to live in the default matrix while
-still giving a reproducible A/B for the dispatcher burst-drain path. The subcommand
-landed in [`f087a265`](https://github.com/nine7nine/Wine-NSPA/commit/f087a265)
-and was wired into the default PE matrix by
-[`343d7ac2`](https://github.com/nine7nine/Wine-NSPA/commit/343d7ac2).
-The later dispatcher hot-path tuning commits continue to use this same
+still giving a reproducible A/B for the dispatcher burst-drain path. The
+subcommand is now part of the default PE matrix, and later dispatcher
+hot-path tuning continues to use this same
 subcommand as their PE-side oracle.
 
 Published 2026-04-30 observations:
@@ -524,8 +525,7 @@ kernel-level invariants the Win32 surface can't reach. Located at
 
 `run-rt-suite.sh` excludes two tests from the active run because they
 assert behaviour that was rolled back (the 1007-1011 patch series shipped
-as "audit findings" without a confirmed bug -- see memory entry
-`feedback_dont_shotgun_audit_into_unfound_bug`):
+as "audit findings" without a confirmed bug):
 
 - `test-cross-boost` -- asserts 1007 cross-boost cleanup
 - `test-wait-rejects-channel` -- asserts 1007 channel-reject in
@@ -544,9 +544,8 @@ the source around documents what we tried and why it was reverted.
 
 ### Validation Totals (2026-04-30 public full-suite boundary)
 
-The published full-suite boundary was collected on module
-`10124FB81FDC76797EF1F91`, which carried the 1011
-`CHANNEL_TRY_RECV2` follow-on:
+The published full-suite boundary was collected when the
+`CHANNEL_TRY_RECV2` follow-on had just landed:
 
 - Bug 1: test cleanup asymmetry stranding R1 in
   `test-channel-recv-exclusive` (test-side, fixed)
@@ -660,7 +659,7 @@ All logs are written to `$LOG_DIR` (default `/tmp/nspa_rt_test_logs/`):
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `WINE` | `/usr/bin/wine` | Wine binary path |
-| `WINEPREFIX` | `/home/ninez/Winebox/winebox-master` | Wine prefix |
+| `WINEPREFIX` | `~/.wine` or custom prefix | Wine prefix |
 | `TEST_EXE` | `nspa_rt_test.exe` | PE binary path (searched in Wine lib dirs) |
 | `LOG_DIR` | `/tmp/nspa_rt_test_logs` | Per-run log output directory |
 | `TIMEOUT_SECS` | `120` | Per-test timeout (seconds) |
@@ -831,7 +830,7 @@ on next invocation if the source is newer than the binary.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `WINE` | `/usr/bin/wine` | Path to Wine binary |
-| `WINEPREFIX` | `/home/ninez/Winebox/winebox-master` | Wine prefix directory |
+| `WINEPREFIX` | `~/.wine` or custom prefix | Wine prefix directory |
 | `TEST_EXE` | `nspa_rt_test.exe` | Path to the PE test binary |
 | `LOG_DIR` | `/tmp/nspa_rt_test_logs` | Directory for per-run log files |
 | `TIMEOUT_SECS` | `120` | Per-test timeout (shell-level, seconds) |
@@ -854,7 +853,7 @@ on next invocation if the source is newer than the binary.
 | Requirement | Check | Purpose |
 |-------------|-------|---------|
 | `ntsync` module loaded | `sudo modprobe ntsync` | Required for ntsync sub-tests + Layer 1 |
-| current ntsync production module loaded | module srcversion `25751C3E41E15401318758E` | Current shipped kernel/userspace pair for the dispatcher path |
+| current ntsync overlay loaded | current shipped kernel/userspace pair | Current dispatcher and native-suite path |
 | Hugepages reserved | `/proc/meminfo` HugePages_Total > 0 | Required for `large-pages` test |
 | RT-capable kernel | `uname -r` shows `-rt` | Required for SCHED_FIFO promotion |
 | CAP_SYS_NICE or root | `ulimit -r` | Required for RT scheduling |

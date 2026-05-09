@@ -1,8 +1,9 @@
 # Wine-NSPA -- NTSync Userspace Sync
 
 This page documents the Wine-side ntsync integration: handle-to-fd
-caching, client-created sync objects, and direct wait / signal helpers.
-The kernel half lives on [NTSync PI Kernel](ntsync-pi-driver.gen.html).
+caching, client-created sync objects, direct wait / signal helpers, and
+the current zero-time wait fast paths that sit above them. The kernel half
+lives on [NTSync PI Kernel](ntsync-pi-driver.gen.html).
 
 ## Table of Contents
 
@@ -36,6 +37,13 @@ Steady state for a supported sync object on Wine-NSPA is:
 `NtReleaseMutant` go straight to `/dev/ntsync` with no wineserver
 round-trip. The first wait or signal on a handle resolves the handle to
 an fd; subsequent operations hit the local cache.
+
+That steady state now has two important fast-path refinements above it:
+
+- single-handle zero-time waits on process handles can answer from
+  `process_shm`
+- single-handle zero-time waits on thread handles can answer from
+  `thread_shm`
 
 <div class="diagram-container">
 <svg width="100%" viewBox="0 0 940 360" xmlns="http://www.w3.org/2000/svg">
@@ -225,7 +233,7 @@ the other supported paths all go straight to `/dev/ntsync`.
 `dlls/ntdll/unix/sync.c` keeps a flat array indexed by handle of
 `struct inproc_sync`:
 
-    struct inproc_sync {
+    struct __attribute__((aligned(64))) inproc_sync {
         int           fd;
         unsigned int  refcount;
         unsigned char closed;
@@ -234,13 +242,21 @@ the other supported paths all go straight to `/dev/ntsync`.
         ...
     };
 
-    #define INPROC_SYNC_CACHE_BLOCK_SIZE  (65536 / sizeof(struct inproc_sync))
+    #define INPROC_SYNC_CACHE_BLOCK_BYTES  (256 * 1024)
+    #define INPROC_SYNC_CACHE_BLOCK_SIZE   (INPROC_SYNC_CACHE_BLOCK_BYTES / sizeof(struct inproc_sync))
     static struct inproc_sync *inproc_sync_cache[INPROC_SYNC_CACHE_ENTRIES];
     static struct inproc_sync inproc_sync_cache_initial_block[INPROC_SYNC_CACHE_BLOCK_SIZE];
 
 The cache is laid out as an array of blocks; block 0 is statically
 allocated, later blocks are `mmap`ed as handles climb. Each entry
 carries a refcount and a `closed` bit.
+
+The current shipped layout is deliberately cacheline-shaped:
+
+- each entry is padded to 64 bytes so refcount `LOCK` traffic on one handle
+  does not false-share with unrelated handles
+- block bytes were widened to 256 KiB so total cacheable handle capacity
+  stays at `524288` after the padding change
 
 ### Lookup discipline
 
@@ -329,12 +345,15 @@ handle to an fd with `get_inproc_sync()`, collects an optional alert
 fd, adds the optional `io_uring` eventfd, and then calls
 `linux_wait_objs()`.
 
-One special-case shipped above that common helper: `WaitForSingleObject(process,
-0)` can now answer from the published `process_shm` snapshot before any ntsync
-or server wait path runs. If the process is still alive the call returns
-timeout locally; if the exit code is published it returns signaled locally. The
-ordinary blocking and multi-object wait shapes still go through the ntsync path
-described here.
+Two special cases now sit above that common helper:
+
+- `WaitForSingleObject(process, 0)` can answer from `process_shm.exit_code`
+  before any ntsync wait path runs
+- `WaitForSingleObject(thread, 0)` can answer from
+  `THREAD_SHM_FLAG_TERMINATED` before any ntsync wait path runs
+
+The ordinary blocking and multi-object wait shapes still go through the ntsync
+path described here.
 
 The full wait path is therefore a *userspace + kernel* design:
 
@@ -356,6 +375,80 @@ calls `linux_set_event_obj_pi()` (which issues
 `linux_set_event()` (which issues `NTSYNC_IOC_EVENT_SET`). That is
 the userspace half of the kernel's deferred-boost behaviour from
 patch 1008.
+
+### 5.1 Zero-time process and thread waits
+
+The current zero-time wait fast paths are a small but important extension of
+the in-process sync model. By the time a process or thread handle has resolved
+to an ntsync-backed wait object, Wine also already has the published shared
+object that can answer the liveness question directly.
+
+| Handle type | Shared-state predicate | Local result |
+|---|---|---|
+| Process | `process_shm.exit_code == STILL_ACTIVE` | alive -> `STATUS_TIMEOUT`, dead -> `STATUS_WAIT_0` |
+| Thread | `THREAD_SHM_FLAG_TERMINATED` | clear -> `STATUS_TIMEOUT`, set -> `STATUS_WAIT_0` |
+
+The thread case uses the termination flag instead of `exit_code != 0` because a
+thread exit code begins at `0`, which is a valid user result.
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 960 370" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .zw-bg { fill: #1a1b26; }
+    .zw-box { fill: #24283b; stroke: #7aa2f7; stroke-width: 1.7; rx: 8; }
+    .zw-green { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.7; rx: 8; }
+    .zw-purple { fill: #2a2137; stroke: #bb9af7; stroke-width: 1.7; rx: 8; }
+    .zw-yellow { fill: #2a2418; stroke: #e0af68; stroke-width: 1.7; rx: 8; }
+    .zw-title { fill: #7aa2f7; font-size: 14px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .zw-label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+    .zw-small { fill: #a9b1d6; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+    .zw-tag-g { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .zw-tag-p { fill: #bb9af7; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .zw-tag-y { fill: #e0af68; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .zw-line-b { stroke: #7aa2f7; stroke-width: 1.2; fill: none; }
+    .zw-line-g { stroke: #9ece6a; stroke-width: 1.2; fill: none; }
+    .zw-line-p { stroke: #bb9af7; stroke-width: 1.2; fill: none; }
+  </style>
+
+  <rect x="0" y="0" width="960" height="370" class="zw-bg"/>
+  <text x="480" y="26" text-anchor="middle" class="zw-title">Zero-time waits short-circuit before the ntsync ioctl</text>
+
+  <rect x="50" y="76" width="220" height="92" class="zw-box"/>
+  <text x="160" y="102" text-anchor="middle" class="zw-label">single-handle `WaitForSingleObject(..., 0)`</text>
+  <text x="160" y="124" text-anchor="middle" class="zw-small">non-alertable only</text>
+  <text x="160" y="140" text-anchor="middle" class="zw-small">ordinary waits still go through `linux_wait_objs()`</text>
+
+  <rect x="320" y="76" width="250" height="104" class="zw-green"/>
+  <text x="445" y="102" text-anchor="middle" class="zw-tag-g">process handle</text>
+  <text x="445" y="124" text-anchor="middle" class="zw-small">read `process_shm.exit_code`</text>
+  <text x="445" y="144" text-anchor="middle" class="zw-small">alive -> `STATUS_TIMEOUT`</text>
+  <text x="445" y="160" text-anchor="middle" class="zw-small">dead -> `STATUS_WAIT_0`</text>
+
+  <rect x="620" y="76" width="250" height="104" class="zw-purple"/>
+  <text x="745" y="102" text-anchor="middle" class="zw-tag-p">thread handle</text>
+  <text x="745" y="124" text-anchor="middle" class="zw-small">read `THREAD_SHM_FLAG_TERMINATED`</text>
+  <text x="745" y="144" text-anchor="middle" class="zw-small">clear -> `STATUS_TIMEOUT`</text>
+  <text x="745" y="160" text-anchor="middle" class="zw-small">set -> `STATUS_WAIT_0`</text>
+
+  <line x1="270" y1="122" x2="320" y2="122" class="zw-line-g"/>
+  <line x1="570" y1="122" x2="620" y2="122" class="zw-line-p"/>
+
+  <rect x="200" y="232" width="560" height="86" class="zw-yellow"/>
+  <text x="480" y="258" text-anchor="middle" class="zw-tag-y">measured synthetic poll cost</text>
+  <text x="480" y="280" text-anchor="middle" class="zw-small">process handles: `~10000 ns/poll -> ~144 ns/poll`</text>
+  <text x="480" y="296" text-anchor="middle" class="zw-small">thread handles: `~11940 ns/poll -> ~164 ns/poll`</text>
+</svg>
+</div>
+
+### 5.2 Current cache layout on the hot path
+
+The `inproc_sync` cache itself is also part of the current userspace sync
+story. Hot waits and signals increment entry refcounts constantly, so false
+sharing across unrelated handles showed up as distributed coherence cost.
+
+The shipped layout now uses one cacheline per entry and keeps the original
+`524288`-handle capacity by widening each cache block instead of shrinking the
+cache.
 
 <div class="diagram-container">
 <svg width="100%" viewBox="0 0 980 430" xmlns="http://www.w3.org/2000/svg">
@@ -552,11 +645,10 @@ ntsync tests and the Layer 2 PE matrix. The split is:
 Layer 2 published full-suite boundary remains
 `24 PASS / 0 FAIL / 0 TIMEOUT` on the PE matrix; Layer 1 native
 sanity is `3 PASS / 0 FAIL`. The cross-build production-kernel runs
-on the post-1011 module advanced through `~370 M` ops on the
-post-1009 baseline, then through aggregate-wait, then through 1011 /
-TRY_RECV2, and now the current cache-isolated module
-(`25751C3E41E15401318758E`) -- with zero syscall errors and zero
-dmesg splats at every step.
+advanced from the earlier post-1009 baseline through aggregate-wait,
+burst drain, the later receive-snapshot and dedicated-cache hardening,
+and the current cache-isolated overlay -- with zero syscall errors and
+zero dmesg splats at every step.
 
 ---
 

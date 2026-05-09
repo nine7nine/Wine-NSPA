@@ -383,8 +383,8 @@ highest-priority requeued waiter on unlock".
 
 The first version of the librtpi shim (NSPA RT v2.0) used plain
 `FUTEX_WAIT` / `FUTEX_WAKE` with a sequence counter -- functionally
-correct but not requeue-PI. Commit `43862d8b591` (2026-04-15)
-upgraded it to the requeue-PI variant. After that the wait/wake gap
+correct but not requeue-PI. The 2026-04-15 follow-on upgraded it to
+the requeue-PI variant. After that the wait/wake gap
 closed: every Wine-side condvar in the converted set retains PI
 across the wake.
 
@@ -407,7 +407,7 @@ upstream patches that touched converted files, etc).
 2. **Rewrite**: walk each file's libclang AST and emit in-place
    rewrites for `pthread_*` -> `pi_*`. For
    `pthread_cond_signal` / `pthread_cond_broadcast`, look up the
-   paired mutex in the map built in phase 1. (`pi_cond_signal` and
+   paired mutex in the map built in the earlier discovery pass. (`pi_cond_signal` and
    `pi_cond_broadcast` need the paired mutex argument; upstream
    pthread does not.)
 
@@ -504,30 +504,29 @@ recursive sites are stable manual carries.
 
 ---
 
-## 10. Commit history
+## 10. Landing history
 
 The commits below trace librtpi's introduction and evolution in the
 Wine-NSPA tree. Times are author timestamps from `git log` on the
 `wine-rt-claude/wine` submodule.
 
-| Date       | Hash         | Subject                                                                |
-|------------|--------------|------------------------------------------------------------------------|
-| 2026-04-11 | `251a7fb62d7`| `libs/librtpi,nspa: NSPA RT v2.0 -- vendor librtpi + ast-grep sweep rule` |
-| 2026-04-11 | `eaa66310021`| `libs/librtpi: NSPA RT v2.0.1 -- pivot to Wine-internal header-only rtpi.h` |
-| 2026-04-11 | `fec786944e5`| `libs/librtpi: vendor PI-futex mutex library (header-only)`            |
-| 2026-04-11 | `bc835f4ab2c`| `nspa: add librtpi_sweep.py -- automated pthread -> pi_* rewriter`     |
-| 2026-04-11 | `e430344237a`| `nspa,dlls/ntdll/unix: relax sweep taint propagation + apply to ntdll/unix` |
-| 2026-04-11 | `900f8b55a49`| `dlls/ntdll: apply librtpi sweep to thread.c (NSPA RT v2.1 first pass)`|
-| 2026-04-11 | `dfe8e556c5d`| `include,dlls/win32u: sweep win32u + rtpi.h forwarder + gdi_driver.h conversion` |
-| 2026-04-11 | `0dd738115ca`| `nspa,dlls: big librtpi sweep across remaining DLLs + fix cond pairing + header fixups` |
-| 2026-04-15 | `43862d8b591`| `librtpi: upgrade pi_cond to FUTEX_WAIT_REQUEUE_PI / FUTEX_CMP_REQUEUE_PI` |
-| 2026-04-15 | `d8bec787a1e`| `nspa: add pi_cond requeue-PI benchmark`                                |
-| 2026-04-30 | `94a419cf6d4`| `nspa ntdll/unix/sched: per-instance refactor + pi_mutex (multi-class prep)` |
+| Date | Subject |
+|------------|------------------------------------------------------------------------|
+| 2026-04-11 | vendor librtpi + automated sweep rule |
+| 2026-04-11 | pivot to Wine-internal header-only `rtpi.h` |
+| 2026-04-11 | vendor PI-futex mutex library |
+| 2026-04-11 | automated `pthread_* -> pi_*` rewriter |
+| 2026-04-11 | sweep taint-propagation cleanup + ntdll/unix conversion |
+| 2026-04-11 | thread.c first-pass conversion |
+| 2026-04-11 | win32u sweep + `rtpi.h` forwarder |
+| 2026-04-11 | broad DLL sweep + cond pairing / header fixups |
+| 2026-04-15 | `pi_cond` upgrade to `FUTEX_WAIT_REQUEUE_PI / FUTEX_CMP_REQUEUE_PI` |
+| 2026-04-15 | add pi-cond requeue-PI benchmark |
+| 2026-04-30 | per-instance `sched` refactor + `pi_mutex` multi-class prep |
 
-Notable later-than-bring-up commits:
+Notable later-than-bring-up clarification:
 
-- `1099e57371e` (`nspa rpc plan: 2.A clarified as no-op (CS-PI != librtpi)`) --
-  explicit clarification that CS-PI (in `dlls/ntdll/sync.c`) and the
+- CS-PI (in `dlls/ntdll/sync.c`) and the
   librtpi sweep operate on *different* lock universes. CS-PI hooks
   Win32 `RtlEnterCriticalSection` process-wide when
   `NSPA_RT_PRIO` is set; librtpi converts Wine's *internal*

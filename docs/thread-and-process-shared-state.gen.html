@@ -109,8 +109,8 @@
 <h1 id="wine-nspa--thread-and-process-shared-state-bypass">Wine-NSPA &ndash; Thread and Process Shared-State Bypass</h1>
 
 <p>This page documents the shipped shared-state bypass for read-mostly thread and
-process queries, plus the zero-time process-wait fast path built on the same
-published process snapshot.</p>
+process queries, plus the zero-time process and thread wait fast paths built on
+the same published snapshots.</p>
 
 <h2 id="table-of-contents">Table of Contents</h2>
 
@@ -119,7 +119,7 @@ published process snapshot.</p>
 <li><a href="#2-what-is-shipped">What is shipped</a></li>
 <li><a href="#3-architecture">Architecture</a></li>
 <li><a href="#4-thread-query-coverage">Thread query coverage</a></li>
-<li><a href="#5-process-query-coverage-and-zero-time-wait">Process query coverage and zero-time wait</a></li>
+<li><a href="#5-process-query-coverage-and-zero-time-waits">Process query coverage and zero-time waits</a></li>
 <li><a href="#6-correctness-boundaries">Correctness boundaries</a></li>
 <li><a href="#7-related-docs">Related docs</a></li>
 </ol>
@@ -135,9 +135,10 @@ seqlock-published shape to thread and process state, so a set of
 <code>NtQueryInformationThread()</code> and <code>NtQueryInformationProcess()</code> classes can be
 answered from shared memory instead of a wineserver RPC.</p>
 
-<p>The same process snapshot also powers a new <code>WaitForSingleObject(process, 0)</code>
-fast path. For zero-timeout liveness polls, ntdll can answer from the shared
-process exit code instead of paying an ntsync wait ioctl.</p>
+<p>The same published state now also powers zero-time <code>WaitForSingleObject()</code>
+polls for process and thread handles. For those single-handle, non-alertable,
+timeout-0 waits, ntdll can answer from the shared snapshot instead of paying an
+ntsync wait ioctl.</p>
 
 <hr />
 
@@ -166,6 +167,10 @@ process exit code instead of paying an ntsync wait ioctl.</p>
 <tr>
 <td> Process query bypass </td>
 <td> 6 <code>NtQueryInformationProcess()</code> classes are served shmem-first with RPC fallback </td>
+</tr>
+<tr>
+<td> Zero-time thread wait </td>
+<td> <code>WaitForSingleObject(thread, 0)</code> can answer from <code>thread_shm</code> and skip the ntsync ioctl on a hit </td>
 </tr>
 <tr>
 <td> Zero-time process wait </td>
@@ -345,7 +350,7 @@ queries and leave the odd or transformed replies on the authoritative path.</p>
 
 <hr />
 
-<h2 id="5-process-query-coverage-and-zero-time-wait">5. Process query coverage and zero-time wait</h2>
+<h2 id="5-process-query-coverage-and-zero-time-waits">5. Process query coverage and zero-time waits</h2>
 
 <p>The process snapshot carries enough state to answer the six shipped
 <code>NtQueryInformationProcess()</code> classes and to answer one additional hot liveness
@@ -428,6 +433,70 @@ the separate wait path.</p>
 <p>The fixed-shape, read-mostly part of that surface is now local. Process image
 name queries, debug-object queries, variable-length payloads, and other server
 authority cases still use the original RPC path.</p>
+
+<h3 id="51-zero-time-thread-wait">5.1 Zero-time thread wait</h3>
+
+<p>Thread handles now get the same zero-time short-circuit shape, but the
+predicate is different. A thread exit code starts life at <code>0</code>, which is a
+valid user exit code, so the thread fast path cannot use <code>exit_code != 0</code> as a
+liveness test. It instead reads <code>THREAD_SHM_FLAG_TERMINATED</code> from the
+published thread snapshot:</p>
+
+<ul>
+<li>terminated flag clear -> <code>STATUS_TIMEOUT</code></li>
+<li>terminated flag set -> <code>STATUS_WAIT_0</code></li>
+</ul>
+
+
+<p>That keeps the thread wait path honest while still removing the wait ioctl from
+the common zero-time poll case.</p>
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 960 340" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
+  <style>
+    .tw-bg { fill: #1a1b26; }
+    .tw-box { fill: #24283b; stroke: #7aa2f7; stroke-width: 1.7; rx: 8; }
+    .tw-green { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.7; rx: 8; }
+    .tw-yellow { fill: #2a2418; stroke: #e0af68; stroke-width: 1.7; rx: 8; }
+    .tw-title { fill: #7aa2f7; font-size: 14px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .tw-label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+    .tw-small { fill: #a9b1d6; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+    .tw-tag-g { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .tw-tag-y { fill: #e0af68; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .tw-line-b { stroke: #7aa2f7; stroke-width: 1.2; fill: none; }
+    .tw-line-g { stroke: #9ece6a; stroke-width: 1.2; fill: none; }
+  </style>
+
+  <rect x="0" y="0" width="960" height="340" class="tw-bg" rx="6"/>
+  <text x="480" y="26" text-anchor="middle" class="tw-title">Zero-time thread wait: use the published termination flag before the wait ioctl</text>
+
+  <rect x="60" y="76" width="250" height="92" class="tw-box" rx="6"/>
+  <text x="185" y="102" text-anchor="middle" class="tw-label">`WaitForSingleObject(thread, 0)`</text>
+  <text x="185" y="124" text-anchor="middle" class="tw-small">single handle, timeout 0, non-alertable only</text>
+  <text x="185" y="140" text-anchor="middle" class="tw-small">ordinary waits still use the normal ntsync path</text>
+
+  <rect x="355" y="76" width="250" height="110" class="tw-green" rx="6"/>
+  <text x="480" y="102" text-anchor="middle" class="tw-tag-g">shmem fast path</text>
+  <text x="480" y="124" text-anchor="middle" class="tw-label">read `THREAD_SHM_FLAG_TERMINATED`</text>
+  <text x="480" y="144" text-anchor="middle" class="tw-small">clear -> `STATUS_TIMEOUT`</text>
+  <text x="480" y="160" text-anchor="middle" class="tw-small">set   -> `STATUS_WAIT_0`</text>
+
+  <rect x="650" y="76" width="250" height="110" class="tw-yellow" rx="6"/>
+  <text x="775" y="102" text-anchor="middle" class="tw-tag-y">fallback</text>
+  <text x="775" y="124" text-anchor="middle" class="tw-label">resolve fd and issue wait ioctl</text>
+  <text x="775" y="144" text-anchor="middle" class="tw-small">used on cache miss, access miss, multi-handle,</text>
+  <text x="775" y="160" text-anchor="middle" class="tw-small">alertable wait, or non-zero timeout</text>
+
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="310" y1="122" x2="355" y2="122" class="tw-line-b"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="605" y1="132" x2="650" y2="132" class="tw-line-g"/>
+
+  <rect x="170" y="236" width="620" height="74" class="tw-box" rx="6"/>
+  <text x="480" y="262" text-anchor="middle" class="tw-label">measured synthetic poll cost</text>
+  <text x="480" y="284" text-anchor="middle" class="tw-small">ntsync ioctl path: ~11940 ns/poll</text>
+  <text x="480" y="300" text-anchor="middle" class="tw-small">shmem fast path: ~164 ns/poll — about `73x` faster per poll</text>
+</svg>
+</div>
+
 
 <hr />
 

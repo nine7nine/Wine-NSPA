@@ -1,0 +1,706 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Wine-NSPA -- Hot-Path Optimizations</title>
+<style>
+  :root {
+    --bg: #1a1b26; --fg: #c0caf5; --accent: #7aa2f7;
+    --green: #9ece6a; --red: #f7768e; --yellow: #e0af68;
+    --surface: #24283b; --border: #3b4261; --muted: #8c92b3;
+    --purple: #bb9af7; --orange: #ff9e64; --cyan: #7dcfff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+    background: var(--bg); color: var(--fg);
+    max-width: 1100px; margin: 0 auto; padding: 2rem 1.5rem;
+    line-height: 1.7;
+  }
+  .page-nav {
+    display: flex;
+    justify-content: flex-end;
+    margin-bottom: 0.5rem;
+  }
+  .page-nav a {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.35rem 0.7rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: rgba(36, 40, 59, 0.9);
+    color: var(--accent);
+    font-size: 0.78rem;
+    line-height: 1;
+  }
+  .page-nav a:hover {
+    background: var(--surface);
+    color: var(--cyan);
+    text-decoration: none;
+  }
+  h1 { color: var(--accent); font-size: 1.5rem; margin: 1.5rem 0 0.5rem; }
+  h2 { color: var(--accent); font-size: 1.2rem; margin: 2rem 0 0.75rem;
+       border-bottom: 1px solid var(--border); padding-bottom: 0.3rem; }
+  h3 { color: var(--yellow); font-size: 1rem; margin: 1.25rem 0 0.5rem; }
+  h4 { color: var(--cyan); font-size: 0.95rem; margin: 1rem 0 0.4rem; }
+  p, li { font-size: 0.85rem; margin-bottom: 0.5rem; }
+  ul, ol { padding-left: 1.5rem; margin-bottom: 0.75rem; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  table {
+    width: 100%; border-collapse: collapse;
+    margin: 0.75rem 0 1rem; font-size: 0.8rem;
+  }
+  th, td {
+    padding: 0.4rem 0.75rem; text-align: left;
+    border: 1px solid var(--border);
+  }
+  th { background: var(--surface); color: var(--accent); font-weight: 600; }
+  td { background: var(--bg); }
+  code {
+    background: var(--surface); padding: 0.15rem 0.4rem;
+    border-radius: 3px; font-size: 0.82rem; color: var(--cyan);
+  }
+  pre {
+    background: var(--surface); padding: 1rem 1.1rem; border-radius: 8px;
+    overflow-x: auto; margin: 0.75rem 0 1rem;
+    border: 1px solid var(--border);
+  }
+  pre code {
+    display: block; background: transparent; padding: 0;
+    font-size: 0.8rem; color: inherit;
+  }
+  pre code.hljs,
+  code.hljs {
+    background: transparent;
+    padding: 0;
+  }
+  blockquote {
+    background: var(--surface); border-left: 3px solid var(--accent);
+    padding: 0.75rem 1rem; margin: 1rem 0; border-radius: 0 4px 4px 0;
+    font-size: 0.82rem;
+  }
+  blockquote strong { color: var(--yellow); }
+  hr { border: none; border-top: 1px solid var(--border); margin: 2rem 0; }
+  strong { color: var(--fg); }
+  em { color: var(--muted); font-style: italic; }
+  .diagram-container {
+    display: flex; justify-content: center;
+    margin: 1.25rem auto 1.5rem; padding: 0.75rem;
+    background: rgba(36, 40, 59, 0.55);
+    border: 1px solid var(--border); border-radius: 10px;
+    overflow-x: auto;
+  }
+  .diagram-container svg {
+    display: block;
+    width: 100% !important;
+    max-width: 100%;
+    height: auto !important;
+    margin: 0 auto;
+    flex: 0 0 auto;
+  }
+</style>
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/tokyo-night-dark.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
+</head><body>
+<div class="page-nav"><a href="index.html">Docs Home</a></div>
+<h1 id="wine-nspa--hot-path-optimizations">Wine-NSPA &ndash; Hot-Path Optimizations</h1>
+
+<p>This page documents the shipped implementation-level optimizations that reduce
+Wine-side overhead without changing feature boundaries or public API shape, and
+the design choices behind them.</p>
+
+<h2 id="table-of-contents">Table of Contents</h2>
+
+<ol>
+<li><a href="#1-overview">Overview</a></li>
+<li><a href="#2-optimization-classes">Optimization classes</a></li>
+<li><a href="#3-locality-and-published-state-caching">Locality and published-state caching</a></li>
+<li><a href="#4-teb-relative-hot-state">TEB-relative hot state</a></li>
+<li><a href="#5-cache-and-slab-layout">Cache and slab layout</a></li>
+<li><a href="#6-small-call-removal-on-the-wait-path">Small-call removal on the wait path</a></li>
+<li><a href="#7-gui-and-flush-path-trims">GUI and flush-path trims</a></li>
+<li><a href="#8-current-measured-effect">Current measured effect</a></li>
+<li><a href="#9-related-docs">Related docs</a></li>
+</ol>
+
+
+<hr />
+
+<h2 id="1-overview">1. Overview</h2>
+
+<p>Wine-NSPA now carries several classes of shipped optimizations that are not new
+bypass surfaces by themselves. They make existing fast paths cheaper: more
+local answers from already-published state, fewer libc TLS lookups, fewer
+cross-DSO helper calls, better cacheline and slab layout, and less pointless
+work on already-empty or already-local paths.</p>
+
+<p>These optimizations matter because the remaining hot code paths are already
+short. Once a request or wait is mostly local, wrapper overhead becomes visible.
+That makes the “why this implementation choice?” question worth documenting,
+not just the “what got faster?” result.</p>
+
+<p>Wine-NSPA also makes some deliberately narrower platform choices than upstream
+Wine. The project is Linux-only, and a subset of the newest hot-path carries is
+Linux-x86_64-specific. That is visible here: some optimizations exploit Linux
+futex, <code>io_uring</code>, and ntsync behavior generally, while others rely on the
+x86_64 TEB / GS-base setup specifically.</p>
+
+<hr />
+
+<h2 id="2-optimization-classes">2. Optimization classes</h2>
+
+<table>
+<thead>
+<tr>
+<th> Class </th>
+<th> Current shipped use </th>
+<th> Why this choice fits </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> Locality and published-state caching </td>
+<td> hook Tier 1+2, paint cache, <code>get_message</code> empty-poll cache, thread/process shared-state readers, and zero-time wait polls answer locally once state is already published </td>
+<td> these paths already had an authoritative shared state block, so the win is to reuse it instead of inventing another transport </td>
+</tr>
+<tr>
+<td> TEB-relative state access </td>
+<td> unix-side <code>NtCurrentTeb</code> is inline on Linux x86_64, <code>get_thread_data()</code> reads through a TEB backpointer, and win32u msg-ring per-thread caches read through <code>TEB-&gt;Win32ClientInfo</code> </td>
+<td> repeated thread-local helper calls were pure wrapper cost, so direct TEB reads preserve ownership while removing libc / PLT overhead </td>
+</tr>
+<tr>
+<td> Cacheline and slab layout </td>
+<td> <code>struct inproc_sync</code> entries are padded to one cacheline each, ntsync hot structs use dedicated caches, and the production kernel keeps those caches isolated with <code>SLAB_NO_MERGE</code> </td>
+<td> the work was already concurrent and hot, so layout and allocator shaping reduce coherence and slab noise without changing behavior </td>
+</tr>
+<tr>
+<td> Batching and burst drain </td>
+<td> gamma <code>TRY_RECV2</code> drains bursts after one aggregate-wait wake instead of paying one kernel round-trip per entry </td>
+<td> request bursts are real, so the right optimization is to amortize wake cost rather than only shave single-request overhead </td>
+</tr>
+<tr>
+<td> Dormant-call removal </td>
+<td> <code>ntdll_io_uring_flush_deferred()</code> now folds to an inline empty check when no deferred completions exist, and the ring eventfd getter is inline </td>
+<td> once a helper becomes “usually empty” or “just return one TLS value,” the abstraction cost outweighs the abstraction value on the hot path </td>
+</tr>
+<tr>
+<td> GUI / memory-copy tightening </td>
+<td> flush throttling and the AVX2 X11 alpha-bit flush loop cut repeated GUI flush overhead without changing surface semantics </td>
+<td> these are stable high-frequency loops, so throttling and vectorization fit better than architectural rewrites </td>
+</tr>
+</tbody>
+</table>
+
+
+<p>These are intentionally distinct from larger architectural features such as
+gamma, local-file, or shared-state readers. The feature pages explain the
+surfaces. This page explains the recurring optimization patterns that make
+those surfaces cheaper once they are already in place.</p>
+
+<hr />
+
+<h2 id="3-locality-and-published-state-caching">3. Locality and published-state caching</h2>
+
+<p>One optimization class shows up throughout Wine-NSPA: publish a small,
+authoritative, read-mostly state block once, then answer the common case
+locally until that state changes.</p>
+
+<table>
+<thead>
+<tr>
+<th> Surface </th>
+<th> Published state </th>
+<th> Local win </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> Hook cache </td>
+<td> queue-shared hook metadata </td>
+<td> no per-dispatch hook lookup RPC on the common path </td>
+</tr>
+<tr>
+<td> Paint cache </td>
+<td> queue-shared redraw state </td>
+<td> repeated paint probes avoid needless server work </td>
+</tr>
+<tr>
+<td> <code>get_message</code> empty-poll cache </td>
+<td> filter tuple + <code>queue_shm-&gt;nspa_change_seq</code> </td>
+<td> same empty poll does not pay the same RPC twice </td>
+</tr>
+<tr>
+<td> Thread / process shared-state </td>
+<td> shared object snapshots with seqlock discipline </td>
+<td> 7 thread query classes, 6 process query classes, and zero-time waits answer locally </td>
+</tr>
+<tr>
+<td> Gamma thread-token return </td>
+<td> kernel returns the registered sender token </td>
+<td> dispatcher avoids a second userspace thread lookup on each request </td>
+</tr>
+</tbody>
+</table>
+
+
+<p>The shapes differ, but the pattern is the same:</p>
+
+<ul>
+<li>publish authoritative state once</li>
+<li>cache a small local handle or filter mapping</li>
+<li>answer the cheap repeat case locally</li>
+<li>fall back immediately when the local predicate is not trustworthy</li>
+</ul>
+
+
+<p>This is why so many of the project’s measurable wins come from “small” caches.
+The point is not speculative behavior. It is to stop paying for the same answer
+over and over when the state already exists locally.</p>
+
+<hr />
+
+<h2 id="4-teb-relative-hot-state">4. TEB-relative hot state</h2>
+
+<p>The current x86_64 Unix-side hot path avoids repeated libc TLS lookups by
+reading thread-local Wine state from the TEB and adjacent per-thread structs.</p>
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 960 360" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
+  <style>
+    .tp-bg { fill: #1a1b26; }
+    .tp-box { fill: #24283b; stroke: #7aa2f7; stroke-width: 1.7; rx: 8; }
+    .tp-green { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.7; rx: 8; }
+    .tp-purple { fill: #2a2137; stroke: #bb9af7; stroke-width: 1.7; rx: 8; }
+    .tp-yellow { fill: #2a2418; stroke: #e0af68; stroke-width: 1.7; rx: 8; }
+    .tp-title { fill: #7aa2f7; font-size: 14px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .tp-label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+    .tp-small { fill: #a9b1d6; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+    .tp-tag-g { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .tp-tag-p { fill: #bb9af7; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .tp-tag-y { fill: #e0af68; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .tp-line-b { stroke: #7aa2f7; stroke-width: 1.2; fill: none; }
+    .tp-line-g { stroke: #9ece6a; stroke-width: 1.2; fill: none; }
+    .tp-line-p { stroke: #bb9af7; stroke-width: 1.2; fill: none; }
+  </style>
+
+  <rect x="0" y="0" width="960" height="360" class="tp-bg" rx="6"/>
+  <text x="480" y="26" text-anchor="middle" class="tp-title">TEB-relative hot state replaces repeated TLS helper calls</text>
+
+  <rect x="50" y="76" width="230" height="102" class="tp-box" rx="6"/>
+  <text x="165" y="102" text-anchor="middle" class="tp-label">hot Wine-side caller</text>
+  <text x="165" y="124" text-anchor="middle" class="tp-small">msg-ring, wait path, queue access, signal helpers</text>
+  <text x="165" y="146" text-anchor="middle" class="tp-small">used to bounce through `NtCurrentTeb()` / `pthread_getspecific()`</text>
+
+  <rect x="350" y="56" width="260" height="142" class="tp-green" rx="6"/>
+  <text x="480" y="82" text-anchor="middle" class="tp-tag-g">current x86_64 path</text>
+  <text x="480" y="108" text-anchor="middle" class="tp-label">inline `NtCurrentTeb()`</text>
+  <text x="480" y="128" text-anchor="middle" class="tp-small">single `mov %gs:0x30, %reg` on Linux x86_64</text>
+  <text x="480" y="154" text-anchor="middle" class="tp-label">unix-side thread data backpointer</text>
+  <text x="480" y="174" text-anchor="middle" class="tp-small">`get_thread_data()` reads via `TEB->GdiTebBatch` extension</text>
+
+  <rect x="680" y="56" width="230" height="142" class="tp-purple" rx="6"/>
+  <text x="795" y="82" text-anchor="middle" class="tp-tag-p">win32u follow-on</text>
+  <text x="795" y="108" text-anchor="middle" class="tp-label">msg-ring per-thread caches</text>
+  <text x="795" y="128" text-anchor="middle" class="tp-small">`nspa_msg_cache` and `nspa_own_bypass` live in `Win32ClientInfo`</text>
+  <text x="795" y="154" text-anchor="middle" class="tp-label">hot reads stay inside the TEB</text>
+  <text x="795" y="174" text-anchor="middle" class="tp-small">slow path still registers destructor state when needed</text>
+
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="280" y1="128" x2="350" y2="128" class="tp-line-b"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="610" y1="128" x2="680" y2="128" class="tp-line-p"/>
+
+  <rect x="150" y="238" width="660" height="86" class="tp-yellow" rx="6"/>
+  <text x="480" y="264" text-anchor="middle" class="tp-tag-y">measured effect on the shipped playback path</text>
+  <text x="480" y="286" text-anchor="middle" class="tp-small">`NtCurrentTeb` function calls: `9,961,441 -> 566` per 30 s</text>
+  <text x="480" y="302" text-anchor="middle" class="tp-small">cumulative cycles after both carries: `257.8B -> 212.4B` (`-17.6%`)</text>
+ </svg>
+</div>
+
+
+<h3 id="41-inline-ntcurrentteb-on-x86_64">4.1 Inline <code>NtCurrentTeb()</code> on x86_64</h3>
+
+<p>On Linux x86_64, Wine-NSPA now keeps <code>GS_BASE = teb</code> from thread startup, so
+most Unix-side callers can inline <code>NtCurrentTeb()</code> instead of paying a
+cross-DSO <code>pthread_getspecific()</code> call chain. This is intentionally narrower
+than upstream Wine&rsquo;s portability envelope: it trades portability for a cheaper
+thread anchor on the platform Wine-NSPA actually targets.</p>
+
+<p>Measured on a 30-second Ableton playback capture:</p>
+
+<table>
+<thead>
+<tr>
+<th> Metric </th>
+<th style="text-align:right;"> Before </th>
+<th style="text-align:right;"> After </th>
+<th style="text-align:right;"> Delta </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> CPU cycles </td>
+<td style="text-align:right;"> <code>257.8B</code> </td>
+<td style="text-align:right;"> <code>220.9B</code> </td>
+<td style="text-align:right;"> <code>-14.3%</code> </td>
+</tr>
+<tr>
+<td> Instructions </td>
+<td style="text-align:right;"> <code>309.1B</code> </td>
+<td style="text-align:right;"> <code>269.7B</code> </td>
+<td style="text-align:right;"> <code>-12.7%</code> </td>
+</tr>
+<tr>
+<td> IPC </td>
+<td style="text-align:right;"> <code>1.20</code> </td>
+<td style="text-align:right;"> <code>1.221</code> </td>
+<td style="text-align:right;"> <code>+1.7%</code> </td>
+</tr>
+<tr>
+<td> iTLB-load-misses </td>
+<td style="text-align:right;"> <code>242M</code> </td>
+<td style="text-align:right;"> <code>185M</code> </td>
+<td style="text-align:right;"> <code>-23.4%</code> </td>
+</tr>
+<tr>
+<td> LLC-load-misses </td>
+<td style="text-align:right;"> <code>537M</code> </td>
+<td style="text-align:right;"> <code>482M</code> </td>
+<td style="text-align:right;"> <code>-10.2%</code> </td>
+</tr>
+<tr>
+<td> <code>NtCurrentTeb</code> function calls / 30 s </td>
+<td style="text-align:right;"> <code>9,961,441</code> </td>
+<td style="text-align:right;"> <code>566</code> </td>
+<td style="text-align:right;"> <code>-99.994%</code> </td>
+</tr>
+</tbody>
+</table>
+
+
+<p>This is Linux-x86_64-specific by design. The public point is not the assembly
+detail. It is that a foundational thread-state accessor is no longer hot, and
+that Wine-NSPA is willing to use a Linux-x86_64-specific setup when the win is
+load-bearing on its target platform.</p>
+
+<h3 id="42-msg-ring-per-thread-caches-via-the-teb">4.2 Msg-ring per-thread caches via the TEB</h3>
+
+<p>The msg-ring hot path now reads both of its per-thread caches from
+<code>struct user_thread_info</code> inside <code>TEB-&gt;Win32ClientInfo</code>:</p>
+
+<ul>
+<li>peer cache: <code>nspa_msg_cache</code></li>
+<li>own queue-bypass mapping cache: <code>nspa_own_bypass</code></li>
+</ul>
+
+
+<p>That removes repeated <code>pthread_getspecific()</code> reads from the message path while
+keeping the destructor-bearing slow path intact for the peer cache. The choice
+here was not “invent a new cache.” It was “keep the current cache model, but
+move the hot lookup into the TEB.”</p>
+
+<p>Measured on the same workload, on top of the inline <code>NtCurrentTeb()</code> carry:</p>
+
+<table>
+<thead>
+<tr>
+<th> Metric </th>
+<th style="text-align:right;"> Before </th>
+<th style="text-align:right;"> After </th>
+<th style="text-align:right;"> Delta </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> CPU cycles </td>
+<td style="text-align:right;"> <code>220.9B</code> </td>
+<td style="text-align:right;"> <code>212.4B</code> </td>
+<td style="text-align:right;"> <code>-3.84%</code> </td>
+</tr>
+<tr>
+<td> Instructions </td>
+<td style="text-align:right;"> <code>269.7B</code> </td>
+<td style="text-align:right;"> <code>262.8B</code> </td>
+<td style="text-align:right;"> <code>-2.55%</code> </td>
+</tr>
+<tr>
+<td> iTLB-load-misses </td>
+<td style="text-align:right;"> <code>185M</code> </td>
+<td style="text-align:right;"> <code>181M</code> </td>
+<td style="text-align:right;"> <code>-2.21%</code> </td>
+</tr>
+<tr>
+<td> <code>pthread_getspecific</code> self time </td>
+<td style="text-align:right;"> <code>0.46%</code> </td>
+<td style="text-align:right;"> <code>0.09%</code> </td>
+<td style="text-align:right;"> <code>-80%</code> </td>
+</tr>
+<tr>
+<td> <code>nspa_get_own_bypass_shm</code> </td>
+<td style="text-align:right;"> <code>0.26%</code> </td>
+<td style="text-align:right;"> <code>0.20%</code> </td>
+<td style="text-align:right;"> <code>-23%</code> </td>
+</tr>
+<tr>
+<td> <code>get_shared_queue</code> </td>
+<td style="text-align:right;"> <code>1.70%</code> </td>
+<td style="text-align:right;"> <code>1.61%</code> </td>
+<td style="text-align:right;"> <code>-5%</code> </td>
+</tr>
+</tbody>
+</table>
+
+
+<hr />
+
+<h2 id="5-cache-and-slab-layout">5. Cache and slab layout</h2>
+
+<p>The current <code>inproc_sync</code> cache is optimized for concurrent hot waits and
+signals, not just for compact storage. The same optimization class also shows
+up in the kernel overlay: the hot ntsync allocation classes now live in
+dedicated caches, and the production kernel keeps those caches isolated.</p>
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 960 360" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
+  <style>
+    .ic-bg { fill: #1a1b26; }
+    .ic-box { fill: #24283b; stroke: #7aa2f7; stroke-width: 1.7; rx: 8; }
+    .ic-green { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.7; rx: 8; }
+    .ic-red { fill: #2a1a1a; stroke: #f7768e; stroke-width: 1.7; rx: 8; }
+    .ic-yellow { fill: #2a2418; stroke: #e0af68; stroke-width: 1.7; rx: 8; }
+    .ic-title { fill: #7aa2f7; font-size: 14px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .ic-label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+    .ic-small { fill: #a9b1d6; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+    .ic-tag-g { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .ic-tag-r { fill: #f7768e; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .ic-tag-y { fill: #e0af68; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .ic-line-r { stroke: #f7768e; stroke-width: 1.2; fill: none; }
+    .ic-line-g { stroke: #9ece6a; stroke-width: 1.2; fill: none; }
+  </style>
+
+  <rect x="0" y="0" width="960" height="360" class="ic-bg" rx="6"/>
+  <text x="480" y="26" text-anchor="middle" class="ic-title">`inproc_sync` cache: one entry per cacheline, original handle capacity restored</text>
+
+  <rect x="60" y="74" width="340" height="124" class="ic-red" rx="6"/>
+  <text x="230" y="100" text-anchor="middle" class="ic-tag-r">old layout</text>
+  <text x="230" y="126" text-anchor="middle" class="ic-label">16-byte entries packed 4 per 64-byte cacheline</text>
+  <text x="230" y="146" text-anchor="middle" class="ic-small">unrelated waits/signals still shared one line</text>
+  <text x="230" y="162" text-anchor="middle" class="ic-small">every refcount `LOCK` op invalidated peers on other CPUs</text>
+  <text x="230" y="182" text-anchor="middle" class="ic-small">hot cost showed up as distributed coherence pressure</text>
+
+  <rect x="560" y="74" width="340" height="124" class="ic-green" rx="6"/>
+  <text x="730" y="100" text-anchor="middle" class="ic-tag-g">current layout</text>
+  <text x="730" y="126" text-anchor="middle" class="ic-label">64-byte aligned entries, one cacheline each</text>
+  <text x="730" y="146" text-anchor="middle" class="ic-small">different handles no longer false-share refcount traffic</text>
+  <text x="730" y="162" text-anchor="middle" class="ic-small">same layout retained after capacity restore</text>
+  <text x="730" y="182" text-anchor="middle" class="ic-small">block size widened to keep `524288` cacheable handles</text>
+
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="400" y1="136" x2="560" y2="136" class="ic-line-r"/>
+
+  <rect x="210" y="238" width="540" height="76" class="ic-yellow" rx="6"/>
+  <text x="480" y="264" text-anchor="middle" class="ic-tag-y">current public contract</text>
+  <text x="480" y="286" text-anchor="middle" class="ic-small">faster concurrent wait/signal traffic with the same behavior</text>
+  <text x="480" y="302" text-anchor="middle" class="ic-small">capacity still stays at `524288` handles after the block-size increase</text>
+</svg>
+</div>
+
+
+<h3 id="51-userspace-inproc_sync-layout">5.1 Userspace <code>inproc_sync</code> layout</h3>
+
+<p>The first layout carry padded <code>struct inproc_sync</code> to one cacheline so refcount
+<code>LOCK</code> traffic no longer ping-ponged unrelated handles on the same line. The
+follow-on widened each cache block from 64 KiB to 256 KiB so the total cached
+handle capacity stayed at <code>524288</code> after the padding change.</p>
+
+<p>This is a pure internal layout change. It does not alter the handle protocol or
+the wait/signal API surface.</p>
+
+<hr />
+
+<h3 id="52-kernel-side-ntsync-cache-shaping">5.2 Kernel-side ntsync cache shaping</h3>
+
+<p>The same “shape the allocator around the hot object” pattern also exists in the
+kernel overlay:</p>
+
+<table>
+<thead>
+<tr>
+<th> Kernel-side optimization </th>
+<th> Shipped effect </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> dedicated <code>kmem_cache</code>s for hot ntsync objects </td>
+<td> hot small allocations stop competing with unrelated slab users </td>
+</tr>
+<tr>
+<td> <code>SLAB_HWCACHE_ALIGN</code> </td>
+<td> hot fields land on cacheline-friendly boundaries </td>
+</tr>
+<tr>
+<td> dedicated <code>ntsync_wait_q</code> cache </td>
+<td> common wait objects stop using the generic path </td>
+</tr>
+<tr>
+<td> <code>SLAB_NO_MERGE</code> on all four ntsync caches </td>
+<td> cache isolation remains true on the production kernel, not just in theory </td>
+</tr>
+</tbody>
+</table>
+
+
+<p>These are not user-visible features, but they matter to the same workloads the
+userspace cacheline work targets: lots of short waits, signals, and channel
+operations on PREEMPT_RT under real contention.</p>
+
+<hr />
+
+<h2 id="6-small-call-removal-on-the-wait-path">6. Small-call removal on the wait path</h2>
+
+<p>Some of the remaining hot-path cost was not algorithmic at all. It was helper
+overhead on paths that were already almost always empty or already local.</p>
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 960 320" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
+  <style>
+    .sw-bg { fill: #1a1b26; }
+    .sw-box { fill: #24283b; stroke: #7aa2f7; stroke-width: 1.7; rx: 8; }
+    .sw-green { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.7; rx: 8; }
+    .sw-yellow { fill: #2a2418; stroke: #e0af68; stroke-width: 1.7; rx: 8; }
+    .sw-title { fill: #7aa2f7; font-size: 14px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .sw-label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+    .sw-small { fill: #a9b1d6; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+    .sw-tag-g { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .sw-tag-y { fill: #e0af68; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .sw-line-b { stroke: #7aa2f7; stroke-width: 1.2; fill: none; }
+    .sw-line-g { stroke: #9ece6a; stroke-width: 1.2; fill: none; }
+  </style>
+
+  <rect x="0" y="0" width="960" height="320" class="sw-bg" rx="6"/>
+  <text x="480" y="26" text-anchor="middle" class="sw-title">Small helper overhead removed from the shipped wait path</text>
+
+  <rect x="60" y="82" width="250" height="86" class="sw-box" rx="6"/>
+  <text x="185" y="108" text-anchor="middle" class="sw-label">`ntdll_io_uring_flush_deferred()`</text>
+  <text x="185" y="130" text-anchor="middle" class="sw-small">current steady state has no deferred queue users</text>
+  <text x="185" y="146" text-anchor="middle" class="sw-small">inline check now folds away the empty fast path</text>
+
+  <rect x="355" y="82" width="250" height="86" class="sw-green" rx="6"/>
+  <text x="480" y="108" text-anchor="middle" class="sw-tag-g">wait-path result</text>
+  <text x="480" y="130" text-anchor="middle" class="sw-small">audio-path no-op helper cost removed</text>
+  <text x="480" y="146" text-anchor="middle" class="sw-small">measured at `0.82%` of audio-thread time before the carry</text>
+
+  <rect x="650" y="82" width="250" height="86" class="sw-box" rx="6"/>
+  <text x="775" y="108" text-anchor="middle" class="sw-label">`ntdll_io_uring_get_eventfd()`</text>
+  <text x="775" y="130" text-anchor="middle" class="sw-small">getter now reads the TLS ring eventfd inline</text>
+  <text x="775" y="146" text-anchor="middle" class="sw-small">measured helper self-time `0.15%` before the carry</text>
+
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="310" y1="126" x2="355" y2="126" class="sw-line-b"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="605" y1="126" x2="650" y2="126" class="sw-line-g"/>
+
+  <rect x="180" y="220" width="600" height="58" class="sw-yellow" rx="6"/>
+  <text x="480" y="244" text-anchor="middle" class="sw-tag-y">common theme</text>
+  <text x="480" y="262" text-anchor="middle" class="sw-small">once the real work is already local, tiny empty or one-value helpers</text>
+  <text x="480" y="278" text-anchor="middle" class="sw-small">become visible enough to inline away</text>
+</svg>
+</div>
+
+
+<p>These are small on their own. Together they keep the wait path from carrying
+old scaffold cost after the architectural reason for that scaffold has gone.</p>
+
+<hr />
+
+<h2 id="7-gui-and-flush-path-trims">7. GUI and flush-path trims</h2>
+
+<p>Two shipped GUI-side optimizations remain part of the current public baseline:</p>
+
+<table>
+<thead>
+<tr>
+<th> Optimization </th>
+<th style="text-align:right;"> Before </th>
+<th style="text-align:right;"> After </th>
+<th style="text-align:right;"> Delta </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> <code>x11drv_surface_flush</code> throttle </td>
+<td style="text-align:right;"> <code>8.23%</code> </td>
+<td style="text-align:right;"> <code>4.74%</code> </td>
+<td style="text-align:right;"> <code>-43%</code> </td>
+</tr>
+<tr>
+<td> <code>copy_rect_32</code> memmove </td>
+<td style="text-align:right;"> <code>4.38%</code> </td>
+<td style="text-align:right;"> <code>2.49%</code> </td>
+<td style="text-align:right;"> <code>-43%</code> </td>
+</tr>
+<tr>
+<td> <code>x11drv_surface_flush</code> AVX2 </td>
+<td style="text-align:right;"> <code>6.72%</code> </td>
+<td style="text-align:right;"> <code>2.39%</code> </td>
+<td style="text-align:right;"> <code>-4.33pp / -64%</code> </td>
+</tr>
+<tr>
+<td> total <code>winex11.so</code> after AVX2 </td>
+<td style="text-align:right;"> <code>6.76%</code> </td>
+<td style="text-align:right;"> <code>2.43%</code> </td>
+<td style="text-align:right;"> <code>-4.33pp</code> </td>
+</tr>
+</tbody>
+</table>
+
+
+<p>These are feature-adjacent because they live on the GUI path, but they are
+still optimizations rather than new surfaces. The relevant architecture is
+unchanged; the hot implementation is just cheaper.</p>
+
+<hr />
+
+<h2 id="8-current-measured-effect">8. Current measured effect</h2>
+
+<p>Taken together, the newest hot-path carries changed three important things:</p>
+
+<ul>
+<li>repeat answers now stay local more often because the relevant state is
+already published or cached</li>
+<li>thread-local Wine state is mostly read directly from the TEB instead of
+repeatedly crossing through libc TLS helpers</li>
+<li>high-frequency in-process sync entries no longer false-share refcount traffic
+across unrelated handles</li>
+<li>ntsync hot allocation classes and waits have cache-aware storage on both the
+userspace and kernel sides</li>
+<li>older dormant helper calls are gone from the steady-state wait path</li>
+</ul>
+
+
+<p>That is why these changes belong together even though they touch different
+files. The common result is lower wrapper cost around work that was already
+largely local.</p>
+
+<hr />
+
+<h2 id="9-related-docs">9. Related docs</h2>
+
+<ul>
+<li><a href="architecture.gen.html">Architecture Overview</a></li>
+<li><a href="msg-ring-architecture.gen.html">Message Ring Architecture</a></li>
+<li><a href="ntsync-userspace.gen.html">NTSync Userspace Sync</a></li>
+<li><a href="thread-and-process-shared-state.gen.html">Thread and Process Shared-State Bypass</a></li>
+<li><a href="io_uring-architecture.gen.html">io_uring I/O Architecture</a></li>
+<li><a href="memory-and-large-pages.gen.html">Memory, Sections, Large Pages, and Working-Set Support</a></li>
+<li><a href="current-state.gen.html">State of The Art</a></li>
+</ul>
+
+
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+  document.querySelectorAll("pre code").forEach(function (block) {
+    hljs.highlightElement(block);
+  });
+});
+</script>
+</body></html>

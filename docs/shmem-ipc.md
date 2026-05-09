@@ -327,7 +327,7 @@ When a boosted dispatcher (SCHED_FIFO:80) contends with a normal-priority thread
 
 ## 6. Appendix: Rejected FUTEX_LOCK_PI Redesign
 
-**Status: Implemented and tested 2026-04-15. REJECTED -- deadlocks on SMP.**
+Implemented and tested on 2026-04-15, then rejected after SMP deadlocks.
 
 ### Concept
 
