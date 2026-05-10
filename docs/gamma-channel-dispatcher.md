@@ -1038,8 +1038,9 @@ but Wine's own conformance tests do) see the same values.
 - `test-aggregate-wait`: **9/9 PASS**, including the channel-notify
   and channel-PI propagation sub-tests added for the aggregate-wait path, and
   the kitchen-sink path with **86,528 wakes / 0 timeouts / 0 errors**.
-- PE matrix: **24 PASS / 0 FAIL / 0 TIMEOUT** after adding
-  `dispatcher-burst` to the baseline + RT runner.
+- PE matrix: **32 PASS / 0 FAIL / 0 TIMEOUT** on the current archived
+  baseline + RT runner; `dispatcher-burst` remains the direct PE-side
+  dispatcher oracle inside that matrix.
 - `dispatcher-burst` matters because the rest of the PE matrix mostly
   goes through `inproc_wait` -> ntsync ioctls directly and does not hit
   the dispatcher hot path.

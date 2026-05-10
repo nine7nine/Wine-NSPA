@@ -44,7 +44,7 @@ surfaces, and RT-oriented memory and I/O work.
 |----------|-------------|
 | [RT Test Harness](https://nine7nine.github.io/Wine-NSPA/nspa-rt-test.gen.html) | Native ntsync tests, PE matrix, and targeted follow-on validators. |
 | [State of The Art](https://nine7nine.github.io/Wine-NSPA/current-state.gen.html) | Current defaults, validation totals, and measured results. |
-| [Test Suite Comparison](https://nine7nine.github.io/Wine-NSPA/nspa-test-comparison.gen.html) | Published matrix snapshots plus newer targeted-validation addenda. |
+| [Test Suite Comparison](https://nine7nine.github.io/Wine-NSPA/nspa-test-comparison.gen.html) | Validation baselines, methodology breaks, and archive lineage. |
 
 ### Historical / Superseded
 
@@ -58,8 +58,9 @@ surfaces, and RT-oriented memory and I/O work.
 
 ## Status
 
-The public full-suite boundary is still Layer 1 native ntsync `3 PASS / 0 FAIL`
-plus Layer 2 PE matrix `24 PASS / 0 FAIL / 0 TIMEOUT`. Newer work is
+The current archived full-suite boundary is Layer 1 native ntsync
+`3 PASS / 0 FAIL / 0 SKIP` plus Layer 2 PE matrix
+`32 PASS / 0 FAIL / 0 TIMEOUT` (`v9-validation-default`). Newer work is
 documented as targeted follow-on validation on top of that baseline.
 
 Current highlights:

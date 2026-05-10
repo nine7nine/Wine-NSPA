@@ -186,14 +186,15 @@ remains available.
 |---|---|---|---|---|
 | Native suite | `run-rt-suite.sh native` | 3 PASS / 0 FAIL | `test-event-set-pi`, `test-channel-recv-exclusive`, `test-aggregate-wait` | 0 |
 | Native aggregate | `test-aggregate-wait` | 9/9 PASS | kitchen-sink: 86,528 wakes / 0 timeouts / 0 errors | 0 |
-| PE matrix | `nspa_rt_test.exe baseline+rt` | 24 PASS / 0 FAIL / 0 TIMEOUT | baseline + RT | 0 |
+| PE matrix | `nspa_rt_test.exe baseline+rt` | 32 PASS / 0 FAIL / 0 TIMEOUT | 16 default tests x baseline + RT | 0 |
 | PE dispatcher A/B | `dispatcher-burst` | PASS in matrix | steady-state 100k iters; burst 8 × 1000 × 64 = 512k ops | 0 |
 | Busy-workload perf | Ableton 30s busy capture | PASS | `channel_dispatcher` 14.51% -> 0.70%; samples 38,588 -> 19,415 | 0 |
 
-**Layer 1 totals: 3 PASS / 0 FAIL. Layer 2 totals: 24 PASS / 0 FAIL /
-0 TIMEOUT. The full-suite public boundary is still those totals; the
-newer `1012-1015`, memory, and hot-path carries are documented as
-targeted follow-on validation on top of that base.**
+**Layer 1 totals: 3 PASS / 0 FAIL / 0 SKIP. Layer 2 totals: 32 PASS / 0 FAIL /
+0 TIMEOUT. The current archived full-suite boundary is
+`v9-validation-default` (`2026-05-03`); later memory and hot-path
+carries are documented as targeted follow-on validation on top of that
+base.**
 
 NTSync detail lives on two public pages:
 `ntsync-pi-driver.gen.html` for the kernel overlay and
@@ -339,26 +340,26 @@ own correctness proof and gate.
 
 ## 4. Validation and performance
 
-### 4.1 Full-suite baseline still in force
+### 4.1 Current archived full-suite boundary
 
 - current ntsync overlay against kernel `6.19.11-rt1-1-nspa`,
-  with the public full-suite boundary still anchored to the earlier
-  `3 PASS / 0 FAIL` native + `24 PASS / 0 FAIL / 0 TIMEOUT`
-  PE matrix totals.
-- Native suite: **3 PASS / 0 FAIL** (`test-event-set-pi`,
+  with the current archived full-suite boundary anchored to
+  `v9-validation-default` on `2026-05-03`.
+- Native suite: **3 PASS / 0 FAIL / 0 SKIP** (`test-event-set-pi`,
   `test-channel-recv-exclusive`, `test-aggregate-wait`).
 - `test-aggregate-wait`: **9/9 PASS**, including kitchen-sink
   `86,528 wakes / 0 timeouts / 0 errors`.
-- `nspa_rt_test` PE matrix: **24 PASS / 0 FAIL / 0 TIMEOUT** (baseline + RT).
+- `nspa_rt_test` PE matrix: **32 PASS / 0 FAIL / 0 TIMEOUT** (16 default tests x
+  baseline + RT).
 - `dispatcher-burst` remains the PE-side harness that exercises the gamma hot
   path directly.
 
-The 2026-05-02 through 2026-05-09 work did not publish a new full-suite
-version. What it added was targeted validation for the newly-landed scheduler,
-timer, event, socket, local-file, local-section, shared-state, msg-ring,
-ntsync-hardening, RT memory, and hot-path optimization surfaces.
+This boundary already includes the expanded default validation set
+(`condvar-pi`, `nt-timer`, `wm-timer`, `rpc-bypass`, `irot-bypass`).
+Later work adds targeted validation for newer scheduler, memory, message-path,
+and hot-path carries without redefining the archive again.
 
-### 4.2 Targeted 2026-05-02 through 2026-05-09 validation
+### 4.2 Targeted follow-on validation
 
 | Surface | Validation | Result |
 |---|---|---|
@@ -429,15 +430,16 @@ System-wide samples: `38,588 -> 19,415` per 30s.
 | zero-time thread wait | thread-handle poll loop `~11940 ns/poll` -> `~164 ns/poll` |
 | x86_64 TEB hot state | cumulative playback CPU cycles `257.8B -> 212.4B` across inline `NtCurrentTeb()` plus msg-ring TEB-cache carries |
 | x86_64 AVX2 string / Unicode loops | synthetic ASCII-path cuts range from `~4x` (`hash_strW`) to `~25x` (`utf8_mbstowcs`), while preserving scalar fallback for non-ASCII windows |
+| x86_64 inline + AVX2 bundle | full 30 s triplet diff: user-mode samples `97K -> 86K` (`-11.3%`), iTLB `229.7M -> 180.8M` (`-21.30%`), dTLB `51.5M -> 42.4M` (`-17.69%`), branch-misses `348.3M -> 308.4M` (`-11.45%`), `NtGetTickCount` `3,081,551 -> 0`, page-faults `130,349 -> 71,754` (`-44.95%`) |
 | local-file EOF path | direct handler-time saving `~8 ms / snapshot`, plus eligible `ftruncate()` no longer blocks the wineserver loop inline |
 | RT-keyed heap arena hugetlb backing | hugepage regions `3/6` -> `104`; `mmap` rate `33-61/s` -> `0.13/s`; `mprotect` rate `56-90/s` -> `0.03/s`; page-faults `753-869/s` -> `2.8/s` |
-| x86_64 AVX2 string / Unicode loops | ASCII-burst fast windows land in server name compare/hash and Unix-side UTF conversion helpers; non-ASCII and edge cases continue through the scalar path |
 
 ### 4.4 Residual caveats
 
-- The last published full PE matrix is still the 2026-04-30 `24 PASS / 0 FAIL /
-  0 TIMEOUT` run. The 2026-05-02 through 2026-05-09 features are covered by
-  targeted validation, not a new full-suite publish yet.
+- The current archived full PE matrix is `v9-validation-default`
+  (`2026-05-03`): `32 PASS / 0 FAIL / 0 TIMEOUT`. Later carries are
+  still documented through targeted validators unless another archive
+  explicitly supersedes that boundary.
 - Local events default-ON still exposes a known cosmetic log line in some
   Ableton runs: `wined3d_cs_destroy` "Closing present event failed". It is not
   currently associated with a functional failure or resource leak.
@@ -450,9 +452,9 @@ System-wide samples: `38,588 -> 19,415` per 30s.
 
 1. **Longer paint-cache soak** — different day / cold start plus a
    longer runtime window so the default-on path has a cleaner public record.
-2. **Full-suite rerun against the 2026-05-09 stack** — the last published
-   matrix is still v8 / 2026-04-30; the new scheduler / event / socket surfaces
-   deserve a fresh public matrix.
+2. **Next archived full-suite rerun against the current stack** — the current
+   archived baseline is `v9-validation-default` on `2026-05-03`; newer carries
+   should eventually be folded into a fresh archived boundary.
 3. **Longer local-event, local-section, shared-state, and socket soak** — targeted validations are clean;
    hours-scale default-on runtime is still worth publishing.
 4. **`wine_sechost_service` device-IRP poll** — still the next obvious

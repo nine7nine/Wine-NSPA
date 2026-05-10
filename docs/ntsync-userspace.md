@@ -642,9 +642,9 @@ ntsync tests and the Layer 2 PE matrix. The split is:
   races, aggregate-wait source ordering, and the hardening bugs from
   1007-1009 / 1012 / 1014a.
 
-Layer 2 published full-suite boundary remains
-`24 PASS / 0 FAIL / 0 TIMEOUT` on the PE matrix; Layer 1 native
-sanity is `3 PASS / 0 FAIL`. The cross-build production-kernel runs
+Layer 2 current archived full-suite boundary is
+`32 PASS / 0 FAIL / 0 TIMEOUT` on the PE matrix; Layer 1 native
+sanity is `3 PASS / 0 FAIL / 0 SKIP`. The cross-build production-kernel runs
 advanced from the earlier post-1009 baseline through aggregate-wait,
 burst drain, the later receive-snapshot and dedicated-cache hardening,
 and the current cache-isolated overlay -- with zero syscall errors and

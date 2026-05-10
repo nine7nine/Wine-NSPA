@@ -1,406 +1,197 @@
-# Wine-NSPA -- Full Suite Comparison Report
+# Wine-NSPA -- Validation Baselines and Comparison
 
-Baseline = `WINEDEBUG=-all` only |
-RT = `NSPA_RT_PRIO=80 NSPA_RT_POLICY=FF WINEPRELOADREMAPVDSO=force`
+This page tracks the archived full-suite lineage and the methodology
+boundaries that determine which totals are actually comparable.
 
-This doc tracks Wine-NSPA test-suite evolution from v3 through v8. The
-current published full-suite snapshot remains v8 / 2026-04-30
-(1003-1011 kernel stack, 24 PASS / 0 FAIL / 0 TIMEOUT PE matrix,
-`dispatcher-burst` added). The 2026-05-02 through 2026-05-09
-follow-ons below are validated by targeted harnesses and smoke runs
-rather than a new v9 full-suite publish. Earlier version sections are
-retained below as historical snapshots.
+## Table of Contents
 
-| Version | Date | Highlight |
-|---------|------|-----------|
-| v3 -> v4 | 2026-04-15 | NTSync PI v2 kernel fixes; io_uring socket bypass landed |
-| v4 -> v5 | 2026-04-15 | msvcrt SIMD + SRW spin + pi_cond requeue-PI |
-| v5 -> v6 | 2026-04-16/17 | (incremental tuning, stable matrix) |
-| **v6 -> v7** | **2026-04-28** | **Native ntsync stress suite added; ~370M ops zero KASAN; PE matrix 22/22 stable** |
-| **v7 -> v8** | **2026-04-30** | **1011 / TRY_RECV2 enabled, `dispatcher-burst` added, Layer 1 native suite 3 PASS / 0 FAIL, Layer 2 PE matrix 24 PASS / 0 FAIL / 0 TIMEOUT** |
+1. [Comparison rules](#1-comparison-rules)
+2. [Current archived boundary](#2-current-archived-boundary)
+3. [Methodology eras](#3-methodology-eras)
+4. [Version summary](#4-version-summary)
+5. [Reading historical numbers](#5-reading-historical-numbers)
 
 ---
 
-## Post-v8 follow-ons (2026-05-02 through 2026-05-09) -- targeted validators, not a new matrix version
+## 1. Comparison rules
 
-### Why this is not labeled v9
+The practical comparison rule is simple: compare like with like.
 
-The public project added meaningful new client-side work after v8:
-spawn-main + `ntdll_sched`, sched-hosted timer migrations, anonymous
-local events default-on, socket `RECVMSG` / `SENDMSG` default-on, wider
-local-file coverage, default-on local sections, thread/process shared-state
-readers, the `get_message` empty-poll cache, RT-keyed memory
-follow-ons, and the current ntsync overlay. Those changes were
-validated with targeted harnesses and real-workload smoke, but they have
-**not** yet been rolled into a new published full-suite matrix version.
-So the current matrix version remains v8.
+There are three distinct public methodology families in the Wine-NSPA test
+history:
 
-### Targeted 2026-05-02 through 2026-05-09 results
+1. **PE-only matrix era (`v3` through `v6`).**
+   One PE runner, no native Layer 1, and a smaller default subcommand set.
+2. **Early two-layer era (`v7` and `v8`).**
+   Native ntsync tests are added, but the PE default matrix is still smaller
+   than the current one.
+3. **Current default validation era (`v9`).**
+   Two-layer suite remains, but the default PE matrix expands to 16 validation
+   tests and moves perf-only probes out of the default set.
 
-| Area | Validation surface | Published result |
-|------|--------------------|------------------|
-| client scheduler + RT timer migrations | `run-rt-probe-validation.sh` | `10/10 PASS`; Ableton boot / library / project / playback PASS; net `-1` helper thread per process |
-| anonymous local events default-on | Ableton playback smoke vs earlier event baseline | system CPU `40-57%` -> `~35%` during playback (`~15-20%` reduction); thread count and wineserver CPU unchanged |
-| socket `RECVMSG` / `SENDMSG` default-on | `socket-io` deferred path + Ableton smoke | throughput `+6.5%`; p99 latency `-6.8%`; `0/2000` failures; Ableton clean at `63` threads with zero new errors vs earlier socket baseline |
-| local-file widening | workload comparison | `create_file` handler count `7,845` -> `5,658`; handler time `137 ms` -> `50 ms` |
-| local sections default-on | workload comparison | `nspa_create_mapping_from_unix_fd` count `2,664` -> `~800`; same-process map-after-file-close shape clean |
-| thread / process shared-state readers | targeted A/B harnesses | 7 thread classes and 6 process classes clean; `ThreadBasicInformation` intentionally remains on RPC |
-| zero-time process wait fast path | synthetic poll harness | ioctl path `~10000 ns/poll`; shared-state path `~144 ns/poll` |
-| zero-time thread wait fast path | synthetic poll harness | ioctl path `~11940 ns/poll`; shared-state path `~164 ns/poll` |
-| `get_message` empty-poll cache | Ableton 60s targeted capture | `get_message` calls `3,880` -> `866`; handler time `16.5 ms` -> `2.2 ms`; total handler time `46.8 ms` -> `36.9 ms` |
-| x86_64 TEB hot-state carries | 30 s playback counters | `NtCurrentTeb` calls `9,961,441 -> 566`; cumulative CPU cycles after the two TEB carries `257.8B -> 212.4B` |
-| `inproc_sync` cacheline isolation | 30 s playback counters | false-sharing removed from hot refcount traffic while cached-handle capacity stays `524288` |
-| current ntsync overlay | native channel / aggregate / stress reruns | receive snapshot fix, dedicated slab caches, the wait-queue cache, and the lockless `SEND_PI` scan validated on the current overlay |
-| RT-keyed memory follow-ons | targeted shell harnesses | `test-mlock-ws.sh 4/4 PASS`; `test-huge-auto.sh 3/3 PASS`; `test-heap-hugepage.sh 3/3 PASS`; `test-huge-decommit.sh` clean; `test-huge-rwx.sh` clean |
+That means:
 
-### Reading this with the rest of the docs
+- `v4`, `v5`, and `v6` compare cleanly with each other.
+- `v7` and `v8` compare cleanly with each other.
+- `v9` is the current archived boundary and should be compared to later runs
+  only if those runs keep the same default matrix shape.
+- Totals across these families are not directly comparable because the number
+  of layers and the number of default tests changed.
 
-Use this page for the current published matrix boundary. Use
-`current-state.gen.html` for the exact defaults and targeted
-2026-05-02 through 2026-05-09 validation numbers that landed after v8.
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 960 350" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .cm-bg { fill: #1a1b26; }
+    .cm-box { fill: #24283b; stroke: #7aa2f7; stroke-width: 1.7; rx: 8; }
+    .cm-green { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.7; rx: 8; }
+    .cm-purple { fill: #2a2137; stroke: #bb9af7; stroke-width: 1.7; rx: 8; }
+    .cm-yellow { fill: #2a2418; stroke: #e0af68; stroke-width: 1.7; rx: 8; }
+    .cm-title { fill: #7aa2f7; font-size: 14px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .cm-label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+    .cm-small { fill: #a9b1d6; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+    .cm-tag-g { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .cm-tag-p { fill: #bb9af7; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .cm-tag-y { fill: #e0af68; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .cm-line-g { stroke: #9ece6a; stroke-width: 1.2; fill: none; }
+    .cm-line-p { stroke: #bb9af7; stroke-width: 1.2; fill: none; }
+  </style>
+
+  <rect x="0" y="0" width="960" height="350" class="cm-bg"/>
+  <text x="480" y="26" text-anchor="middle" class="cm-title">Suite totals only compare within the same methodology family</text>
+
+  <rect x="70" y="96" width="250" height="108" class="cm-box"/>
+  <text x="195" y="120" text-anchor="middle" class="cm-label">PE-only matrix</text>
+  <text x="195" y="144" text-anchor="middle" class="cm-small">`v3` -> `v6`</text>
+  <text x="195" y="162" text-anchor="middle" class="cm-small">single-layer suite</text>
+  <text x="195" y="180" text-anchor="middle" class="cm-small">small default PE set</text>
+
+  <rect x="355" y="96" width="250" height="108" class="cm-purple"/>
+  <text x="480" y="120" text-anchor="middle" class="cm-tag-p">two-layer, early shape</text>
+  <text x="480" y="144" text-anchor="middle" class="cm-label">`v7` -> `v8`</text>
+  <text x="480" y="162" text-anchor="middle" class="cm-small">native Layer 1 added</text>
+  <text x="480" y="180" text-anchor="middle" class="cm-small">PE matrix still smaller than current</text>
+
+  <rect x="640" y="96" width="250" height="108" class="cm-green"/>
+  <text x="765" y="120" text-anchor="middle" class="cm-tag-g">current archived boundary</text>
+  <text x="765" y="144" text-anchor="middle" class="cm-label">`v9-validation-default`</text>
+  <text x="765" y="162" text-anchor="middle" class="cm-small">Layer 1 + 16-test default PE matrix</text>
+  <text x="765" y="180" text-anchor="middle" class="cm-small">perf-only probes moved out of default suite</text>
+
+  <line x1="320" y1="150" x2="355" y2="150" class="cm-line-p"/>
+  <line x1="605" y1="150" x2="640" y2="150" class="cm-line-g"/>
+
+  <rect x="250" y="250" width="460" height="56" class="cm-yellow"/>
+  <text x="480" y="274" text-anchor="middle" class="cm-tag-y">practical rule</text>
+  <text x="480" y="288" text-anchor="middle" class="cm-small">do not compare raw PASS totals across family boundaries</text>
+  <text x="480" y="302" text-anchor="middle" class="cm-small">without normalizing the suite shape first</text>
+</svg>
+</div>
 
 ---
 
-## v8 / 2026-04-30 -- 1011 enabled, dispatcher coverage added, 24/24 PE matrix
+## 2. Current archived boundary
 
-### Headline
+The current archived full-suite boundary is `v9-validation-default`
+(`2026-05-03`).
 
-A cleaner current two-layer surface:
+| Layer | Result | Notes |
+|---|---|---|
+| Layer 1 native suite | `3 PASS / 0 FAIL / 0 SKIP` | `test-event-set-pi`, `test-channel-recv-exclusive`, `test-aggregate-wait` |
+| Layer 2 PE matrix | `32 PASS / 0 FAIL / 0 TIMEOUT` | `16` default tests x `baseline` + `rt` |
 
-- **Layer 1 (native ntsync suite):** `3 PASS / 0 FAIL`
-  (`test-event-set-pi`, `test-channel-recv-exclusive`,
-  `test-aggregate-wait` 9/9 including kitchen-sink 86,528 wakes /
-  0 timeouts / 0 errors).
-- **Layer 2 (PE matrix):** `24 PASS / 0 FAIL / 0 TIMEOUT` after adding
-  `dispatcher-burst`.
-- **Dispatcher-specific gap closed:** `dispatcher-burst` finally covers
-  `channel_dispatcher` / `dispatch_channel_entry` / the `TRY_RECV2`
-  drain loop, which the rest of the PE matrix mostly does not touch.
+Default PE test set in `v9-validation-default`:
 
-### Layer 1 results
+- `rapidmutex`
+- `philosophers`
+- `fork-mutex`
+- `cs-contention`
+- `signal-recursion`
+- `large-pages`
+- `ntsync-d4`
+- `ntsync-d8`
+- `ntsync-d12`
+- `socket-io`
+- `condvar-pi`
+- `nt-timer`
+- `wm-timer`
+- `rpc-bypass`
+- `irot-bypass`
+- `dispatcher-burst`
 
-Kernel side under test: the then-current burst-drain-capable ntsync
-overlay (`TRY_RECV2` present, aggregate-wait already enabled).
+This is the current archived comparison baseline. Later subsystem carries that
+were validated only by targeted harnesses or workload A/Bs should not be
+described as new matrix versions.
 
-| Test | Result |
-|------|--------|
-| `test-event-set-pi` | PASS |
-| `test-channel-recv-exclusive` | PASS |
-| `test-aggregate-wait` | **9/9 PASS**: basic, timeout, PI propagation, 32-source stress, mixed obj+fd, cancel-via-signal, channel-notify, channel-PI propagation, kitchen-sink |
+---
 
-**Layer 1 totals: 3 PASS / 0 FAIL.**
+## 3. Methodology eras
 
-### Layer 2 PE matrix -- 24 PASS / 0 FAIL / 0 TIMEOUT
+### 3.1 `v3` through `v6`: PE-only matrix
 
-| Test | Baseline | RT | Notes |
-|------|----------|----|------|
-| rapidmutex | PASS | PASS | CS-PI fast path stable |
-| philosophers | PASS | PASS | transitive PI chain validated |
-| fork-mutex | PASS | PASS | 100/100 children spawned + reaped |
-| cs-contention | PASS | PASS | CS-PI fires correctly |
-| signal-recursion | PASS | PASS | recursive `virtual_mutex` path clean |
-| large-pages | PASS | PASS | 2MB + 1GB pages, `SEC_LARGE_PAGES`, LargePage flag set |
-| ntsync-d4 | PASS | PASS | mutex PI + chain + prio + WFMO |
-| ntsync-d8 | PASS | PASS | same, depth 8 |
-| ntsync-d12 | PASS | PASS | same, depth 12, 8 rapid threads |
-| socket-io | PASS* | PASS* | current build functionally green on the socket path |
-| condvar-pi | PASS | PASS | Win32 condvar PI bridge stable |
-| dispatcher-burst | PASS | PASS | gamma dispatcher A/B harness for `TRY_RECV2` + async `CreateFile` |
+This family uses a single PE runner and no native Layer 1. Its totals can be
+compared internally, but not directly against later two-layer totals.
 
-**24 PASS / 0 FAIL / 0 TIMEOUT** (12 tests x 2 modes).
+Typical characteristics:
 
-`*` = implicit verdict from exit code `0`; the test binary does not
-emit a PASS/FAIL line for `socket-io`.
+- one layer only
+- smaller PE test list
+- perf and validation probes were less cleanly separated
 
-### Dispatcher-specific validation
+### 3.2 `v7` and `v8`: two-layer suite introduced
 
-`dispatcher-burst` is the reason v8 matters. All other PE tests mostly
-route through `inproc_wait` -> ntsync ioctls directly and never load
-the gamma hot path hard enough to be a useful oracle for
-`channel_dispatcher` tuning.
+`v7` adds the native ntsync suite and therefore changes the meaning of the
+headline totals. `v8` keeps that same two-layer shape while adding
+`dispatcher-burst` to the PE matrix.
 
-| Metric | TRY_RECV2 on | TRY_RECV2 off | Delta |
-|---|---:|---:|---:|
-| burst ops/sec (wall) | 841,765 | 555,567 | +34% / 1.5x |
-| burst worst max ns | 23,014,325 | 31,843,082 | −28% |
-| steady avg ns | 35,202 | 33,405 | flat (no burst) |
+Typical characteristics:
 
-Steady-state stays flat because a one-RPC pump has nothing to drain.
-The win is concentrated in burst load, exactly where `TRY_RECV2`
-removes repeated `AGG_WAIT` round-trips.
+- Layer 1 native suite exists
+- Layer 2 PE matrix is still smaller than the current default set
+- dispatcher-specific PE coverage starts at `v8`
 
-### Comparison to 2026-04-26 (single-sample, noisy)
+### 3.3 `v9`: current default validation shape
 
-| Metric | 2026-04-26 | 2026-04-30 | Δ |
+`v9-validation-default` keeps the two-layer structure but changes the PE matrix
+shape again:
+
+- default PE matrix expands to 16 tests
+- `nt-timer`, `wm-timer`, `rpc-bypass`, and `irot-bypass` are part of the
+  default validation set
+- perf-only probes stay opt-in rather than inflating the default matrix
+
+This is the current methodology family the public docs should treat as the live
+comparison baseline.
+
+---
+
+## 4. Version summary
+
+| Version | Date | Methodology family | Headline boundary |
 |---|---|---|---|
-| rapidmutex RT max_wait | 44us | 38us | −14% |
-| rapidmutex RT elapsed | 1950ms | 1924ms | −1.3% |
-| ntsync-d12 PI chain depth-12 | 236ms | 237ms | ≈0 |
+| `v3` -> `v4` | `2026-04-15` | PE-only matrix | `20/20 PASS` PE matrix |
+| `v4` -> `v5` | `2026-04-15` | PE-only matrix | `20/20 PASS` PE matrix |
+| `v5` -> `v6` | `2026-04-16/17` | PE-only matrix | stable PE-only matrix; no suite-family change |
+| `v7` | `2026-04-28` | early two-layer | Layer 1 native suite added; Layer 2 `22/22 PASS` |
+| `v8` | `2026-04-30` | early two-layer | Layer 1 `3 PASS / 0 FAIL`; Layer 2 `24 PASS / 0 FAIL / 0 TIMEOUT` |
+| `v9-validation-default` | `2026-05-03` | current default validation shape | Layer 1 `3 PASS / 0 FAIL / 0 SKIP`; Layer 2 `32 PASS / 0 FAIL / 0 TIMEOUT` |
 
-Caveat: the PE matrix does **not** show the dispatcher win directly
-except through `dispatcher-burst`. That is why the dedicated gamma A/B
-harness was added in v8.
+### What changed at each boundary
 
-### v7 -> v8 changes
-
-| Area | Change | Impact |
-|------|--------|--------|
-| Kernel | 1011 `NTSYNC_IOC_CHANNEL_TRY_RECV2` | non-blocking channel dequeue for post-dispatch burst drain |
-| Userspace | burst-drain on the normal path | drains multiple entries per `AGG_WAIT` under burst load |
-| Userspace | dispatcher-owned async `CreateFile` on the normal path | removes the `open()` lock-drop CS from the audio xrun path |
-| Userspace | `NSPA_FLUSH_THROTTLE_MS=8` default-on | recovers ~5.4 percentage points of MainThread CPU under busy Ableton |
-| Test surface | `dispatcher-burst` added to Layer 2 | first PE-side gamma / dispatcher coverage |
+| Boundary | Practical change |
+|---|---|
+| `v6` -> `v7` | native ntsync Layer 1 enters the public suite |
+| `v7` -> `v8` | `dispatcher-burst` enters the default PE matrix |
+| `v8` -> `v9` | default PE matrix expands to 16 tests and the current validation shape stabilizes |
 
 ---
 
-## v7 / 2026-04-28 -- Native ntsync stress suite added (historical snapshot)
+## 5. Reading historical numbers
 
-### Headline
+- Use raw PASS totals only within the same methodology family.
+- Use micro-bench or latency deltas only when the harness shape is unchanged.
+- Treat targeted validators as subsystem evidence, not as replacement matrix totals.
+- If a newer run changes the default test set again, mint a new methodology
+  boundary rather than pretending the old totals still compare directly.
 
-A two-layer test surface:
-
-- **Layer 1 (new):** native `/dev/ntsync` ioctl stress tests at
-  `wine/nspa/tests/test-*.c`. Catches kernel bugs the Win32 surface
-  can't reach (channels, EVENT_SET_PI, raw sched, channel REPLY/cleanup
-  refcount).
-- **Layer 2 (unchanged scope):** `nspa_rt_test.exe` PE matrix --
-  baseline + RT pass for all 11 tests. Continues to pass 22/22 in that
-  historical snapshot.
-
-### Layer 1 results -- ~370M ops, zero KASAN, zero dmesg splats
-
-Kernel side under test: the then-current post-fix ntsync overlay. All four bugs
-caught during the 2026-04-26 -> 2026-04-28 KASAN-armed debug-kernel
-session are fixed. Cumulative ops since the audit session opened.
-
-| Test | Ops / config | Result |
-|------|--------------|--------|
-| `test-event-set-pi` | sanity (modified for ready-flag handshake) | PASS |
-| `test-event-set-pi-stress` | 8x8 EVENT_SET_PI hammer | PASS |
-| `test-channel-recv-exclusive` | symmetric cleanup; was the channel-recv hang repro | PASS |
-| `test-channel-stress` | SEND_PI + RECV + REPLY + register churn | PASS |
-| `test-mutex-pi-stress` | mutex contention + Tier B FIFO | PASS |
-| `test-mixed-load-stress` | 5-min mixed-load soak (events SET/RESET/PI/PULSE + mutex + sem + chan + wait_all + pulse), ~10M ops | PASS |
-| Cumulative session total | ~370M ops across all paths (debug kernel + prod kernel) | 0 KASAN, 0 dmesg, 0 syscall errors |
-
-Tests deliberately excluded from the active run via
-`SKIPPED_BY_DESIGN`:
-
-- `test-cross-boost` -- asserts 1007 cross-boost cleanup (rolled back)
-- `test-wait-rejects-channel` -- asserts 1007 channel-reject in
-  setup_wait (rolled back)
-
-These remain in-tree as documentation of what was tried and why it was
-reverted.
-
-### Layer 2 PE matrix -- 22/22 PASS
-
-| Test | Baseline | RT | Notes |
-|------|----------|----|------|
-| rapidmutex | PASS | PASS | CS-PI fast path + SIMD memcpy stable |
-| philosophers | PASS | PASS | Transitive PI chain validated |
-| fork-mutex | PASS | PASS | 100/100 children spawned + reaped |
-| cs-contention | PASS | PASS | CS-PI fires correctly |
-| signal-recursion | PASS | PASS | Recursive virtual_mutex path clean |
-| large-pages | PASS | PASS | 2MB + 1GB pages, `SEC_LARGE_PAGES`, LargePage flag set |
-| ntsync-d4 | 8/8 | 8/8 | Mutex PI + chain + prio + WFMO |
-| ntsync-d8 | 8/8 | 8/8 | Same, depth 8 |
-| ntsync-d12 | 8/8 | 8/8 | Same, depth 12, 8 rapid threads |
-| socket-io | PASS | PASS | io_uring socket bypass code path |
-| srw-bench | PASS | PASS | SRW spin phase + RT skip |
-
-**22/22 PASS** (11 tests x 2 modes). All PI, sync, ntsync, and
-io_uring subsystems healthy.
-
-### v6 -> v7 changes
-
-| Area | Change | Impact |
-|------|--------|--------|
-| Test surface | Layer 1 native ntsync stress suite added (6 tests + runner) | Catches kernel bugs Win32 layer can't reach |
-| ntsync module | Bug 1 (test cleanup), Bug 2 (channel exclusive recv: 1007-style narrow patch), Bug 3 (EVENT_SET_PI deferred boost: 1008), Bug 4 (channel_entry refcount UAF: 1009) all fixed | Production kernel solid: ~370M ops zero KASAN |
-| Wine ring code | Audit §4.1 retry-loop hardening | 7 sites + `NSPA_SHM_RETRY_GUARD`; subtests A+B PASS |
-| Runner | `wine/nspa/tests/run-rt-suite.sh` orchestrates Layer 1 + Layer 2 | Single command for full surface |
-| io_uring socket bypass | landed on the deferred socket path | PE socket-io test still PASSed against that build |
-
-### Numbers (PE matrix, 2026-04-28)
-
-PE matrix throughput / latency numbers are within run-to-run variance
-of v5/v6. The stable result is the 22/22 PASS itself plus the absence
-of regressions across the audit cycle. Verbose per-test deltas were
-useful in v3 -> v4 -> v5 when we were chasing PI v2 fixes; they're
-noise at this point, because the PI surface is stable.
-
----
-
-## v3 -> v4 (2026-04-15) -- NTSync PI v2 + io_uring socket bypass
-
-Original report. Kernel: 6.19.11-rt1-1-nspa, CONFIG_NTSYNC=m (PI v2
-patches, module loaded). Wine-NSPA 11.6, `nspa_rt_test.exe` v4 via
-`run_rt_tests.sh` (10 tests, baseline + RT).
-
-### NTSync PI v2 Kernel Fixes [3 BUGS FIXED]
-
-| # | Bug | Impact |
-|---|-----|--------|
-| 1 | Multi-object PI corruption: per-object orig_attr save/restore broke when a task held multiple boosted mutexes | Owner dropped to SCHED_OTHER while second mutex still had RT waiters |
-| 2 | wait_all had zero PI: `ntsync_wait_all` never called `ntsync_pi_recalc`, and recalc only scanned `any_waiters` | WaitForMultipleObjects(bWaitAll=TRUE) with mutexes got no PI boost |
-| 3 | Stale `normal_prio` comparison: after boost, `sched_setattr_nocheck` changed `normal_prio`; downward recalc failed | Boost dropped entirely when highest-prio waiter left but lower-prio waiters remained |
-
-### io_uring Socket I/O Bypass [NEW in v4]
-
-This was the first io_uring socket bypass pass in the public reports.
-
-| # | What | Impact |
-|---|------|--------|
-| 1 | ALERTED-state interception: intercept before `set_async_direct_result` | Async stays frozen on server (no epoll monitoring), CQE handler completes once |
-| 2 | E2 bitmap in `sock_get_poll_events` | Server skips epoll for client-monitored fds -- no protocol change |
-| 3 | ntsync `uring_fd` kernel extension | Threads blocked in ntsync waits wake on io_uring CQE arrival |
-
-### v4 Overall Verdict
-
-| Test | Baseline | RT | v3->v4 | Notes |
-|------|----------|-----|-------|-------|
-| rapidmutex | PASS | PASS | RT max wait 29->46us (noise) | 312K ops/s RT |
-| philosophers | PASS | PASS | **RT max wait 1620->601us (-63%)** | PI v2 fix validated |
-| fork-mutex | PASS | PASS | flat | 100/100 both modes |
-| cs-contention | PASS | PASS | flat | CS-PI fires correctly |
-| signal-recursion | PASS | PASS | flat | No sync primitives |
-| large-pages | PASS | PASS | identical | Deterministic |
-| ntsync-d4 | 8/8 | 8/8 | PI avg 238->388ms (CFS variance) | chain + prio correct |
-| ntsync-d8 | 8/8 | 8/8 | **PI avg 479->419ms (fixed)** | Was reversed in v3, corrected by this point |
-| ntsync-d12 | 8/8 | 8/8 | chain scales to 12 | prio wakeup correct |
-| socket-io A | PASS | PASS | **new: avg 95us** | immediate recv |
-| socket-io B | PASS | PASS | **new: avg 113us, 2000 async** | overlapped recv via io_uring |
-
-**20/20 PASS** (10 tests x 2 modes).
-
-### v3 -> v4 Key Improvements
-
-| Metric | v3 | v4 | Cause |
-|--------|----|----|-------|
-| Philosophers RT max wait | 1620 us | **601 us (-63%)** | PI v2: stale normal_prio fix eliminated thrashing |
-| ntsync d8 PI RT avg | 479 ms | **419 ms** | PI v2 fix (was reversed in v3) |
-| Philosophers elapsed (RT) | 265 ms | **189 ms (-29%)** | Less PI overhead |
-| socket-io overlapped avg | -- | **113 us** | NEW: io_uring overlapped socket bypass |
-| socket-io overlapped throughput | -- | **8837 msg/s** | NEW: +18% vs baseline |
-
-### Resolved in v4
-
-- Philosophers RT max wait 1620us -- root cause was buggy PI code
-  (stale `normal_prio`), not `sched_setattr_nocheck`. PI v2 fix:
-  1620 -> 601us.
-- ntsync module autoload -- promoted from "convenience" to CRITICAL.
-  Now autoloaded via `/etc/modules-load.d/ntsync.conf`.
-- Overlapped socket bypass -- 4 failed approaches (signal reentrancy,
-  deadlock, double completion, ALERTED/PENDING race). 5th approach
-  (ALERTED-state interception) works.
-
----
-
-## v4 -> v5 (2026-04-15) -- msvcrt SIMD + SRW spin + pi_cond requeue-PI
-
-### msvcrt SIMD Optimizations [NEW]
-
-| # | Change | Impact |
-|---|--------|--------|
-| 1 | AVX/SSE2 memcpy/memmove | Wider stores, lower overhead for buffer copies |
-| 2 | SSE2 memchr, strlen, memcmp | Faster string operations across all Wine code paths |
-| 3 | Runtime CPU dispatch | AVX path selected at init when CPUID confirms support |
-
-### Synchronization Improvements [3 CHANGES]
-
-| # | Change | Impact |
-|---|--------|--------|
-| 4 | `CoWaitForMultipleHandles` correctness rewrite | Removes 100-msg hack, correct COM message pumping |
-| 5 | SRW lock spin phase (256 iterations, skip for RT threads) | Reduces kernel transitions for short holds, RT threads skip spin to avoid priority inversion |
-| 6 | pi_cond requeue-PI upgrade (FUTEX_WAIT_REQUEUE_PI / FUTEX_CMP_REQUEUE_PI) | Closes PI gap in condition variable wakeup |
-
-### New Test Subcommands [2 NEW]
-
-| # | Change | Impact |
-|---|--------|--------|
-| 7a | SRW contention benchmark | Measures SRW lock throughput under load |
-| 7b | pi_cond requeue-PI benchmark (native Linux) | Validates requeue-PI kernel path |
-
-### v5 Overall Verdict
-
-| Test | Baseline | RT | v4->v5 Delta | Notes |
-|------|----------|-----|-------------|-------|
-| rapidmutex | PASS | PASS | **RT throughput 312K->327K (+4.7%)** | SIMD + SRW spin benefit |
-| philosophers | PASS | PASS | RT max wait 601->1301us (CFS variance) | PI still correct, run-to-run noise |
-| fork-mutex | PASS | PASS | **RT elapsed 1021->948ms (-7.1%)** | Faster process startup |
-| cs-contention | PASS | PASS | flat | CS-PI fires correctly |
-| signal-recursion | PASS | PASS | flat | No sync primitives |
-| large-pages | PASS | PASS | identical | Deterministic |
-| ntsync-d4 | 8/8 | 8/8 | **baseline PI avg 415->209ms (-50%)** | Dramatic improvement |
-| ntsync-d8 | 8/8 | 8/8 | **RT PI avg 419->201ms (-52%)** | CFS variance resolved |
-| ntsync-d12 | 8/8 | 8/8 | flat (CFS variance) | chain + prio correct |
-| socket-io A | PASS | PASS | flat | immediate recv stable |
-| socket-io B | PASS | PASS | flat | overlapped recv stable |
-
-**20/20 PASS**.
-
-### v4 -> v5 Key Improvements
-
-| Metric | v4 | v5 | Cause |
-|--------|----|----|-------|
-| rapidmutex RT throughput | 312K ops/s | **327K ops/s (+4.7%)** | SIMD memcpy/memmove in CS overhead |
-| ntsync d4 baseline PI avg | 415 ms | **209 ms (-50%)** | SRW spin phase + SIMD reduces CFS contention |
-| ntsync d8 RT PI avg | 419 ms (reversed) | **201 ms (-52%)** | CFS reversal resolved |
-| ntsync d4 rapid throughput | 232K ops/s | **259K ops/s (+11.6%)** | Lower lock transition overhead |
-| baseline socket-io B avg | 133.2 us | **104.5 us (-21%)** | SIMD memcpy in io_uring buffer path |
-| baseline socket-io B throughput | 7506 msg/s | **9568 msg/s (+27%)** | Same |
-| fork-mutex RT elapsed | 1021 ms | **948 ms (-7.1%)** | SIMD string ops in process startup |
-
----
-
-## v5 -> v6 (2026-04-16/17) -- incremental tuning
-
-Stable matrix; no new test subcommands. Tuning passes on the gamma
-channel scaffolding and the msg-ring redraw push ring
-landed in this window. PE matrix continued to pass 20/20 throughout.
-
----
-
-## Chain Depth Scaling Summary (PE matrix)
-
-PI contention avg wait (informational only -- highly sensitive to CFS
-load placement; PASS criteria stay on chain + prio + WFMO correctness,
-which are stable):
-
-| Depth | v4 RT avg | v5 RT avg | v7 status |
-|-------|-----------|-----------|-----------|
-| d4 (8 iters) | 387 ms | 270 ms | stable, within run-to-run |
-| d8 (3 iters) | 419 ms | 201 ms | stable, within run-to-run |
-| d12 (3 iters) | 282 ms | 418 ms | high variance with 3 samples |
-
-Rapid throughput (kernel mutex):
-
-| Depth | Threads | v4 RT | v5 RT | v7 status |
-|-------|---------|-------|-------|-----------|
-| d4 | 4 | 232K | 259K | stable |
-| d8 | 4 | 238K | 253K | stable |
-| d12 | 8 | 237K | 231K | stable |
-
-Priority wakeup order: correct in all configs across all versions.
-
----
-
-## Notes on Cross-Version Comparison
-
-- Benchmark numbers (latency, throughput) are run-to-run noisy and
-  also skew when `slub_debug` / KFENCE are on. The authoritative signal
-  across versions is **PASS/FAIL plus presence of KASAN splats** --
-  not specific microsecond or ops/sec deltas.
-- The 2026-04-26 -> 2026-04-28 audit cycle paid bills against the
-  ntsync surface and the wine ring-retry loop. Both surfaces are
-  stable as of v7. Later follow-ons moved additional message-pump,
-  shared-state query, and local-memory traffic out of wineserver; those newer
-  targeted results live on [current-state](current-state.gen.html) rather than
-  being folded back into this historical v8 snapshot.
-
----
-
-Generated: 2026-05-01 | Wine-NSPA RT test harness v8 historical snapshot
-(Layer 1 + Layer 2) -- the then-current burst-drain-capable overlay,
-3 PASS / 0 FAIL native, 24 PASS / 0 FAIL / 0 TIMEOUT PE matrix.
+For the current harness structure, default test list, and runner behavior, see
+[nspa-rt-test](nspa-rt-test.gen.html).

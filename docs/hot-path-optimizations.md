@@ -473,6 +473,161 @@ unchanged; the hot implementation is just cheaper.
 
 ## 9. Current measured effect
 
+The current optimization stack is measured with a three-part profiling pass on
+the same workload window:
+
+- system-wide `perf stat` hardware counters over 30 seconds
+- system-wide `perf record` DWARF callgraph over 30 seconds
+- `bpftrace` Nt* entry distribution over 30 seconds
+
+For the most recent x86_64 inline + AVX2 bundle, the comparison window is:
+
+| Capture | Baseline | After |
+|---|---|---|
+| workload | Ableton project + browse + plugin + steady playback | same workload shape |
+| baseline window | `2026-05-09 12:06` |  |
+| post-bundle window |  | `2026-05-10 18:00` |
+| bundle scope |  | inline current-thread/current-process/PEB/tick helpers plus AVX2 `memicmp_strW`, `hash_strW`, `utf8_wcstombs`, and `utf8_mbstowcs` |
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 960 410" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .me-bg { fill: #1a1b26; }
+    .me-box { fill: #24283b; stroke: #7aa2f7; stroke-width: 1.7; rx: 8; }
+    .me-green { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.7; rx: 8; }
+    .me-purple { fill: #2a2137; stroke: #bb9af7; stroke-width: 1.7; rx: 8; }
+    .me-yellow { fill: #2a2418; stroke: #e0af68; stroke-width: 1.7; rx: 8; }
+    .me-title { fill: #7aa2f7; font-size: 14px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .me-label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+    .me-small { fill: #a9b1d6; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+    .me-tag-g { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .me-tag-p { fill: #bb9af7; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .me-tag-y { fill: #e0af68; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .me-line-b { stroke: #7aa2f7; stroke-width: 1.2; fill: none; }
+    .me-line-g { stroke: #9ece6a; stroke-width: 1.2; fill: none; }
+    .me-line-p { stroke: #bb9af7; stroke-width: 1.2; fill: none; }
+  </style>
+
+  <rect x="0" y="0" width="960" height="410" class="me-bg"/>
+  <text x="480" y="26" text-anchor="middle" class="me-title">2026-05-10 inline + AVX2 bundle: why the carries matter together</text>
+
+  <rect x="40" y="70" width="255" height="116" class="me-box"/>
+  <text x="168" y="94" text-anchor="middle" class="me-label">bundle inputs</text>
+  <text x="168" y="118" text-anchor="middle" class="me-small">inline current-thread/current-process/PEB/tick helpers</text>
+  <text x="168" y="136" text-anchor="middle" class="me-small">inline `NtGetTickCount()` and TEB-relative helper collapse</text>
+  <text x="168" y="154" text-anchor="middle" class="me-small">AVX2 ASCII-window compare, hash, and UTF conversion loops</text>
+  <text x="168" y="172" text-anchor="middle" class="me-small">all on the already-local hot paths</text>
+
+  <rect x="352" y="70" width="255" height="116" class="me-purple"/>
+  <text x="480" y="94" text-anchor="middle" class="me-tag-p">locality effect</text>
+  <text x="480" y="118" text-anchor="middle" class="me-small">fewer helper frames and indirect branches</text>
+  <text x="480" y="136" text-anchor="middle" class="me-small">hot code and hot state stay in tighter cache windows</text>
+  <text x="480" y="154" text-anchor="middle" class="me-small">same contracts, less wrapper work around them</text>
+
+  <rect x="664" y="70" width="255" height="116" class="me-green"/>
+  <text x="792" y="94" text-anchor="middle" class="me-tag-g">measured result</text>
+  <text x="792" y="118" text-anchor="middle" class="me-small">user samples `97K -> 86K` (`-11.3%`)</text>
+  <text x="792" y="136" text-anchor="middle" class="me-small">iTLB `229.7M -> 180.8M` (`-21.3%`)</text>
+  <text x="792" y="154" text-anchor="middle" class="me-small">dTLB `51.5M -> 42.4M` (`-17.7%`)</text>
+  <text x="792" y="172" text-anchor="middle" class="me-small">branch-miss `348.3M -> 308.4M` (`-11.45%`)</text>
+
+  <line x1="295" y1="128" x2="352" y2="128" class="me-line-b"/>
+  <line x1="607" y1="128" x2="664" y2="128" class="me-line-g"/>
+
+  <rect x="110" y="246" width="740" height="104" class="me-yellow"/>
+  <text x="480" y="272" text-anchor="middle" class="me-tag-y">load-bearing read</text>
+  <text x="480" y="292" text-anchor="middle" class="me-small">this bundle is not "one fast function"</text>
+  <text x="480" y="306" text-anchor="middle" class="me-small">it is a compound locality win across the same call graph</text>
+  <text x="480" y="320" text-anchor="middle" class="me-small">the counter signature is tighter instruction-TLB use, tighter data-TLB use,</text>
+  <text x="480" y="334" text-anchor="middle" class="me-small">fewer branches, and lower user CPU</text>
+</svg>
+</div>
+
+### 9.1 Current triplet-diff result
+
+The newest bundle confirms the main point of this page: once the dominant work
+is already local, shaving helper layers and tightening hot loops compounds.
+
+| Counter | Baseline | Post-bundle | Delta |
+|---|---:|---:|---:|
+| cpu-cycles | `227.0B` | `223.1B` | `-1.73%` |
+| instructions | `273.3B` | `269.1B` | `-1.55%` |
+| iTLB-load-misses | `229.7M` | `180.8M` | `-21.30%` |
+| dTLB-load-misses | `51.5M` | `42.4M` | `-17.69%` |
+| dTLB-store-misses | `16.9M` | `14.8M` | `-12.49%` |
+| branch-misses | `348.3M` | `308.4M` | `-11.45%` |
+| cache-references | `3.87B` | `3.49B` | `-9.73%` |
+| cache-misses | `2.11B` | `1.99B` | `-5.80%` |
+| LLC-load-misses | `499.3M` | `491.7M` | `-1.52%` |
+| LLC-store-misses | `519.1M` | `550.0M` | `+5.97%` |
+| context-switches | `1,463K` | `1,417K` | `-3.19%` |
+| cpu-migrations | `144,103` | `133,448` | `-7.39%` |
+| page-faults | `130,349` | `71,754` | `-44.95%` |
+| IPC | `1.204` | `1.206` | `flat` |
+
+The key read is not any single micro-benchmark number. It is the compound
+signature:
+
+- iTLB `-21.30%`
+- dTLB `-17.69%`
+- branch-misses `-11.45%`
+- user-mode samples `-11.3%`
+
+That is what "same work in less of everything" looks like for this kind of
+bundle.
+
+### 9.2 Dispatcher-entry confirmation
+
+The Nt* distribution capture confirms that the helper inlining is visible at
+the entrypoint level, not only in synthetic loops.
+
+| Nt entry | Baseline | Post-bundle | Delta |
+|---|---:|---:|---:|
+| `NtGetTickCount` | `3,081,551` | `0 (absent)` | `-100%` |
+| `NtSetEvent` | `3,269,629` | `5,586,449` | `+70.9%` |
+| `NtQueryPerformanceCounter` | `3,075,360` | `5,392,023` | `+75.3%` |
+| `NtWaitForMultipleObjects` | `3,071,442` | `5,387,977` | `+75.4%` |
+| `NtResetEvent` | `175,029` | `174,835` | `flat` |
+| `NtWaitForSingleObject` | `170,050` | `170,172` | `flat` |
+| `NtQuerySystemTime` | `58,676` | `58,997` | `flat` |
+| `NtFlushInstructionCache` | `13,764` | `16,380` | `+19.0%` |
+| `NtCurrentTeb` fallback | `448` | `548` | `both ~negligible` |
+
+`NtGetTickCount` dropping from `3,081,551` to `0` is the clearest
+end-to-end confirmation in the set: the inline path is not theoretical, it has
+removed the dispatcher-visible entry entirely on this workload.
+
+The large rises on `NtSetEvent`, `NtQueryPerformanceCounter`, and
+`NtWaitForMultipleObjects` are most likely workload-phase differences between
+the two captures. If they do reflect real extra traffic, the fact that cycles
+and user-mode samples still fall means the per-entry cost is lower, not higher.
+
+### 9.3 Callgraph read
+
+The callgraph view turns the same result into a user-CPU number:
+
+- total user-mode samples: `97K -> 86K` (`-11.3%`)
+
+Post-bundle, the NSPA-local fast-path surface is easier to see directly in the
+resolved top symbols:
+
+- `inproc_wait`
+- `get_cached_inproc_sync`
+- `nspa_try_pop_own_ring_post`
+- `nspa_try_pop_own_timer_ring`
+- `nspa_try_pop_own_ring_send`
+- `nspa_get_own_bypass_shm`
+- `nspa_getmsg_cache_record_empty`
+- `nspa_getmsg_cache_lookup`
+
+That matters because the relative percentages on untouched shared symbols can
+be misleading once the denominator falls. Symbols such as libc bulk-copy
+helpers, `apply_alpha_bits_avx2`, or `entry_SYSCALL_64` may rise in share even
+when their absolute weight is flat, simply because the total user sample pool
+got smaller.
+
+### 9.4 Bundle interpretation
+
 Taken together, the newest hot-path carries changed three important things:
 
 - repeat answers stay local more often because the relevant state is

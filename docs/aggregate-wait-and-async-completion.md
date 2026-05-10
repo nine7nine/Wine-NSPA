@@ -376,7 +376,7 @@ loop is therefore simpler: one aggregate wait, one `RECV2`, zero or more
 | channel-PI propagation sub-test | PASS |
 | 1k mixed-concurrency stress | PASS |
 | 30k stress + full native ntsync suite | PASS, dmesg clean |
-| PE matrix | 24 PASS / 0 FAIL / 0 TIMEOUT, including `dispatcher-burst` |
+| PE matrix | 32 PASS / 0 FAIL / 0 TIMEOUT, including `dispatcher-burst` |
 | Ableton level 2/3 on the current path | PASS |
 | Aggregate-wait in normal production use | PASS |
 

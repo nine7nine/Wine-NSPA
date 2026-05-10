@@ -517,8 +517,8 @@ The `condvar-pi` test validates the requeue-PI path under contention: an RT wait
 
 ### Full Suite Results
 
-24 PASS / 0 FAIL / 0 TIMEOUT (12 tests x 2 modes in the current PE
-matrix), no regressions after the later `dispatcher-burst` addition.
+32 PASS / 0 FAIL / 0 TIMEOUT (16 default tests x 2 modes in the current
+archived PE matrix), no regressions on the current validation boundary.
 
 ---
 

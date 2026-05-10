@@ -1758,7 +1758,7 @@ After cross-build to the production kernel `6.19.11-rt1-1-nspa` (no debug instru
 | 1 stress             | mutex-pi 30s 8h+4mtx                 | PASS      | ~12M      | 0      |
 | 1 stress             | channel 30s 4x4                      | PASS      | ~52M      | 0      |
 | 1 stress             | mixed-load 300s 13 workers           | PASS      | ~145M     | 0      |
-| 2 PE matrix          | nspa_rt_test.exe baseline+rt         | 24 PASS / 0 FAIL / 0 TIMEOUT | n/a | 0 |
+| 2 PE matrix          | nspa_rt_test.exe baseline+rt         | 32 PASS / 0 FAIL / 0 TIMEOUT | n/a | 0 |
 
 **Cumulative on the production kernel: post-channel-entry baseline
 ~370 M ops, then aggregate-wait, then burst drain, then the receive
