@@ -411,7 +411,7 @@ return -1;   /* retry exhausted */
 
 <p>The walker is allocated on the dispatching thread&rsquo;s stack and the <code>nspa_hook_walker_current</code> pointer is <code>__thread</code> storage. Nested hook dispatches push/pop via the <code>prev</code> pointer field. Stack-local with a per-thread current-pointer is the right pattern: no allocation, no lock, no leak on early return &ndash; the walker disappears with the stack frame.</p>
 
-<p>Tier 1 and Tier 2 are both part of the shipped path.</p>
+<p>Tier 1 and Tier 2 are both part of the normal path.</p>
 
 <h3 id="when-tier-2-falls-back">When Tier 2 falls back</h3>
 
@@ -609,7 +609,7 @@ if (hook-&gt;module_size &amp;&amp; hook-&gt;module &amp;&amp; e-&gt;module_offs
 
 <h2 id="9-validation-history">9. Validation history</h2>
 
-<p>Tier 1 and Tier 2 were both shipped on 2026-04-25, with the diag-pile cleanup on 2026-04-26. The relevant commits and their effects:</p>
+<p>Tier 1 and Tier 2 both landed on 2026-04-25, with the diag-pile cleanup on 2026-04-26. The relevant implementation steps and their effects:</p>
 
 <table>
 <thead>
@@ -648,7 +648,7 @@ if (hook-&gt;module_size &amp;&amp; hook-&gt;module &amp;&amp; e-&gt;module_offs
 <tr>
 <td> 2026-04-26 </td>
 <td> diag pile removal </td>
-<td> Removed 13 atomic counters (<code>top_calls</code>, <code>skipped_no_hooks</code>, <code>server_dispatch</code>, <code>cat_*</code>, <code>tier1_shmem_inc/dec</code>, <code>tier1_finish_forced/skipped</code>, <code>tier2_*</code>) and the 5-second background dump thread. They were pre-ship instrumentation to decide <em>whether</em> to build the cache; once shipped, kept paying ~13 atomic adds per <code>call_message_hooks</code> invocation forever. Kept only the load-bearing counters: <code>nspa_hook_walk_counts[]</code> (server reads for Tier 1 refcount) and <code>nspa_hook_try_read_cache</code> itself. </td>
+<td> Removed 13 atomic counters (<code>top_calls</code>, <code>skipped_no_hooks</code>, <code>server_dispatch</code>, <code>cat_*</code>, <code>tier1_shmem_inc/dec</code>, <code>tier1_finish_forced/skipped</code>, <code>tier2_*</code>) and the 5-second background dump thread. They were pre-default instrumentation to decide <em>whether</em> to build the cache; once the cache became the normal path, they kept paying ~13 atomic adds per <code>call_message_hooks</code> invocation forever. Kept only the load-bearing counters: <code>nspa_hook_walk_counts[]</code> (server reads for Tier 1 refcount) and <code>nspa_hook_try_read_cache</code> itself. </td>
 </tr>
 </tbody>
 </table>
@@ -689,13 +689,13 @@ if (hook-&gt;module_size &amp;&amp; hook-&gt;module &amp;&amp; e-&gt;module_offs
 </table>
 
 
-<p>Zero misses across 26.7 k hits in a real-world DAW workload was the bar for flipping defaults. The diag pile was scrubbed once that bar was met because the counters had served their purpose; keeping them in shipped code would have paid forever for instrumentation that no longer informed any decision.</p>
+<p>Zero misses across 26.7 k hits in a real-world DAW workload was the bar for flipping defaults. The diag pile was scrubbed once that bar was met because the counters had served their purpose; keeping them in the active code path would have paid forever for instrumentation that no longer informed any decision.</p>
 
 <p>The other tested workloads (vsthost VST chains, Chromaphone instrument plugin, Ableton&rsquo;s drum-rack window with dozens of WM_PAINTs/sec) show the same pattern: Tier 1 short-circuits 99%+ of dispatches; Tier 2 serves the remaining 1% with zero RPCs.</p>
 
 <h2 id="10-optional-tier-3-future">10. Optional Tier 3 (future)</h2>
 
-<p>Two follow-on directions are queued, neither shipped.</p>
+<p>Two follow-on directions are queued, neither active today.</p>
 
 <p><strong>Chain-modification streaming.</strong> Currently a <code>set_hook</code> / <code>remove_hook</code> rebuilds the entire cache for the affected hook id. In the steady state &ndash; when chains are short and rebuilds are rare &ndash; this is fine. Under churn-heavy workloads (some accessibility shells install/remove WH_GETMESSAGE hooks dynamically), per-call rebuild may be wasteful; an incremental update (<code>entries[count++] = new_hook</code> for set_hook in the common append case, <code>memmove</code> for remove_hook) could halve the rebuild cost. The complication is that the seqlock writer protocol still needs to bump version on every change, and the client filter logic still has to re-run on the whole chain. So the win is bounded.</p>
 
@@ -798,8 +798,8 @@ if (hook-&gt;module_size &amp;&amp; hook-&gt;module &amp;&amp; e-&gt;module_offs
 </table>
 
 
-<p>There are no public hook-cache feature gates in the shipped path. The cache is
-now part of the normal client/server contract for eligible hook walks.</p>
+<p>There are no public hook-cache feature gates in the normal path. The cache is
+part of the normal client/server contract for eligible hook walks.</p>
 
 <script>
 document.addEventListener("DOMContentLoaded", function () {

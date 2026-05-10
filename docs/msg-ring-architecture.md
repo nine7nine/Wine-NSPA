@@ -2,7 +2,7 @@
 
 This page explains how the message rings replace same-process wineserver
 message traffic, how the redraw and paint follow-ons fit into the same
-substrate, and how the shipped `get_message` empty-poll cache trims the
+substrate, and how the `get_message` empty-poll cache trims the
 remaining message-pump RPCs.
 
 ---
@@ -239,7 +239,7 @@ slot reservation is a lock-free CAS in shared memory.
   to bound spin to 256 PAUSEs and fall back to RPC on exhaustion.
 - **Minimal hot-path gating.** Once a message-path feature is validated
   as the default behavior, the A/B gate is removed from the hot path.
-  The shipped ring, paint-cache, and empty-poll cache all follow that
+  The ring, paint-cache, and empty-poll cache all follow that
   rule.
 - **Minimal protocol surface.** Two server requests:
   `nspa_get_thread_queue` (peer lookup + memfd send) and
@@ -1450,9 +1450,8 @@ RPC path. Default-on; flag is for bisection only.
 
 ### 12.1 Status
 
-**Shipped.** The fast path is shipped at
-`dlls/win32u/dce.c:1648-1685`. The older rollout history is kept below
-only for traceability.
+The fast path lives at `dlls/win32u/dce.c:1648-1685`. The older rollout
+history is kept below only for traceability.
 
 ### 12.2 Rationale
 
@@ -1600,23 +1599,23 @@ the seqlock retry loop; on retry exhaustion, falls back to RPC.
 Hit/miss counters are gated behind `NSPA_PAINT_DIAG=1` because they ran
 unconditionally on every `get_update_flags` call across every Wine
 process — measurable cost on Ableton's polling UI thread (~3,227 calls
-per session even before paint-cache became part of the normal shipped
+per session even before paint-cache became part of the normal
 path, since the miss counter sat outside the fast-path check). The
-always-on counter cost is now gone.
+always-on counter cost is gone.
 
 ### 12.6 Historical note
 
 The fast path was temporarily reverted during its first rollout and
 later re-enabled after the MR1 / MR2 / MR4 hardening pass removed the
 message-path corruption that had been blamed on paint-cache. That
-history matters for traceability, but the current shipped behavior is
+history matters for traceability, but the current behavior is
 simple: paint-cache is part of the normal path.
 
 ---
 
 ## 13. `get_message` empty-poll cache
 
-The shipped message-ring work now includes a narrower `get_message`
+The message-ring work includes a narrower `get_message`
 optimization that does not attempt to bypass the full server-generated
 message surface. Instead it targets the common empty-poll case:
 
@@ -1681,7 +1680,7 @@ server-visible queue-state changes.
 </div>
 
 This is narrower than a full direct `get_message` bypass, but it still matters
-on the shipped workload:
+on the measured workload:
 
 | Metric | Before | After | Delta |
 | --- | ---: | ---: | ---: |
@@ -1842,20 +1841,20 @@ this footnote.
 | temporary revert | Rolled back while the hardening work was still incomplete |
 | hit/miss counters gated behind `NSPA_PAINT_DIAG=1` | Removed always-on counter cost |
 | (validation) | run-4 2026-04-28 with paint-cache on | PASS past historical 5-min lockup; F5 likely fixed by MR1/MR4 |
-| (current) | shipped state | paint-cache is part of the normal path |
+| (current) | current state | paint-cache is part of the normal path |
 
 ### 16.4 `get_message` empty-poll cache
 
 | Phase | Outcome |
 | --- | --- |
-| `get_message` empty-poll cache | same-filter empty polls now short-circuit locally via `queue_shm->nspa_change_seq` |
+| `get_message` empty-poll cache | same-filter empty polls short-circuit locally via `queue_shm->nspa_change_seq` |
 | gate removal | feature stays on the normal path; hot-path A/B branch removed |
 
 ### 16.5 MR1/MR2/MR4 audit fix-pack
 
 | Phase | Outcome |
 | --- | --- |
-| MR1 ABA + MR2 cross-process futex + MR4 POST wake-loss | Three bugs shipped, validated by run-3 + run-4 |
+| MR1 ABA + MR2 cross-process futex + MR4 POST wake-loss | Three bugs fixed, validated by run-3 + run-4 |
 
 ### 16.6 NSPA_SHM_RETRY_GUARD audit §4.1
 

@@ -24,14 +24,14 @@ surfaces, and RT-oriented memory and I/O work.
 | [Critical Section PI](https://nine7nine.github.io/Wine-NSPA/cs-pi.gen.html) | Priority inheritance for `CRITICAL_SECTION`. |
 | [Gamma Channel Dispatcher](https://nine7nine.github.io/Wine-NSPA/gamma-channel-dispatcher.gen.html) | Kernel-mediated wineserver IPC, aggregate-wait, and burst drain. |
 | [Hook Cache](https://nine7nine.github.io/Wine-NSPA/hook-cache.gen.html) | Tier 1 + Tier 2 Win32 hook-chain caching. |
-| [Hot-Path Optimizations](https://nine7nine.github.io/Wine-NSPA/hot-path-optimizations.gen.html) | Cross-cutting optimization choices and why they were made. |
+| [Hot-Path Optimizations](https://nine7nine.github.io/Wine-NSPA/hot-path-optimizations.gen.html) | TEB state, cache layout, SIMD string/Unicode loops, and other cost trims. |
 | [io_uring I/O Architecture](https://nine7nine.github.io/Wine-NSPA/io_uring-architecture.gen.html) | File, socket, and async `CreateFile` use of `io_uring`. |
 | [librtpi (PI mutex / condvar)](https://nine7nine.github.io/Wine-NSPA/librtpi.gen.html) | Wine’s internal PI mutex and condvar shim. |
 | [Local-File Bypass Architecture](https://nine7nine.github.io/Wine-NSPA/nspa-local-file-architecture.gen.html) | Local regular-file and explicit-directory handling. |
 | [Local Section Bypass](https://nine7nine.github.io/Wine-NSPA/local-section-architecture.gen.html) | Client-side unnamed file-backed sections on local-file handles. |
 | [Message Ring Architecture](https://nine7nine.github.io/Wine-NSPA/msg-ring-architecture.gen.html) | Message rings, redraw push, paint cache, and empty-poll caching. |
 | [Memory, Sections, Large Pages, and Working-Set Support](https://nine7nine.github.io/Wine-NSPA/memory-and-large-pages.gen.html) | Sections, large pages, working-set support, and shared-memory backing. |
-| [NT Local Stubs](https://nine7nine.github.io/Wine-NSPA/nt-local-stubs.gen.html) | The NT-local stub pattern and the shipped stub surfaces. |
+| [NT Local Stubs](https://nine7nine.github.io/Wine-NSPA/nt-local-stubs.gen.html) | The NT-local stub pattern and the active stub surfaces. |
 | [NTSync PI Kernel](https://nine7nine.github.io/Wine-NSPA/ntsync-pi-driver.gen.html) | Kernel-side ntsync overlay, PI, channels, and aggregate-wait. |
 | [NTSync Userspace Sync](https://nine7nine.github.io/Wine-NSPA/ntsync-userspace.gen.html) | Wine-side ntsync cache, wait/signal path, and zero-time waits. |
 | [Thread and Process Shared-State Bypass](https://nine7nine.github.io/Wine-NSPA/thread-and-process-shared-state.gen.html) | Published thread/process snapshots and zero-time waits. |
@@ -43,7 +43,7 @@ surfaces, and RT-oriented memory and I/O work.
 | Document | Description |
 |----------|-------------|
 | [RT Test Harness](https://nine7nine.github.io/Wine-NSPA/nspa-rt-test.gen.html) | Native ntsync tests, PE matrix, and targeted follow-on validators. |
-| [State of The Art](https://nine7nine.github.io/Wine-NSPA/current-state.gen.html) | Current shipped defaults, validation totals, and measured results. |
+| [State of The Art](https://nine7nine.github.io/Wine-NSPA/current-state.gen.html) | Current defaults, validation totals, and measured results. |
 | [Test Suite Comparison](https://nine7nine.github.io/Wine-NSPA/nspa-test-comparison.gen.html) | Published matrix snapshots plus newer targeted-validation addenda. |
 
 ### Historical / Superseded
@@ -59,20 +59,21 @@ surfaces, and RT-oriented memory and I/O work.
 ## Status
 
 The public full-suite boundary is still Layer 1 native ntsync `3 PASS / 0 FAIL`
-plus Layer 2 PE matrix `24 PASS / 0 FAIL / 0 TIMEOUT`. Newer shipped work is
+plus Layer 2 PE matrix `24 PASS / 0 FAIL / 0 TIMEOUT`. Newer work is
 documented as targeted follow-on validation on top of that baseline.
 
-Current shipped highlights:
+Current highlights:
 
 - client scheduler hosts, local events, local timers, and socket `io_uring`
   send/recv are on the normal path
 - widened local-file coverage and local sections keep more file and mapping
   work client-side
-- thread/process shared-state readers now also power zero-time process and
+- thread/process shared-state readers also power zero-time process and
   thread waits
-- msg-ring, empty-poll caching, x86_64 TEB hot state, and cacheline-shaped
-  userspace sync further reduce hot-path overhead
-- RT memory follow-ons now include `mlockall()`, automatic hugetlb promotion,
+- msg-ring, empty-poll caching, x86_64 TEB hot state, cacheline-shaped
+  userspace sync, and AVX2 string/Unicode loops further reduce hot-path
+  overhead
+- RT memory follow-ons include `mlockall()`, automatic hugetlb promotion,
   heap hugepage backing, and the safety/fallback fixes around them
 
 ---

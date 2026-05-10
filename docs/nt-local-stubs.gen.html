@@ -108,8 +108,8 @@
 <div class="page-nav"><a href="index.html">Docs Home</a></div>
 <h1 id="wine-nspa--nt-local-stubs">Wine-NSPA &ndash; NT-local stubs</h1>
 
-<p>This page documents the NT-local stub pattern and the shipped stub
-surfaces built on it.</p>
+<p>This page documents the NT-local stub pattern and the active stub surfaces
+built on it.</p>
 
 <h2 id="table-of-contents">Table of Contents</h2>
 
@@ -120,7 +120,7 @@ surfaces built on it.</p>
 <li><a href="#4-cross-process-state-arbitration">Cross-process state arbitration</a></li>
 <li><a href="#5-lazy-server-handle-promotion">Lazy server-handle promotion</a></li>
 <li><a href="#6-lock-discipline-shared-by-every-stub">Lock discipline shared by every stub</a></li>
-<li><a href="#7-currently-shipped-stubs">Currently shipped stubs</a>
+<li><a href="#7-current-stubs">Current stubs</a>
 
 <ol>
 <li><a href="#71-nspa_local_file--local-file-handles-and-local-sections"><code>nspa_local_file</code> + local sections</a></li>
@@ -158,8 +158,7 @@ arbitration is required. Each stub picks an NT surface, owns its own
 data structures (a private handle range, a per-process table, a shmem
 region, a dispatcher thread), and short-circuits the server when it can.</p>
 
-<p>The pattern is already shipping. As of 2026-05-09 there are four live
-NT-local stub surfaces in tree:</p>
+<p>As of 2026-05-09 there are four live NT-local stub surfaces in tree:</p>
 
 <table>
 <thead>
@@ -264,7 +263,7 @@ NT-local stub surfaces in tree:</p>
   <text x="626" y="122" text-anchor="middle" class="ns-grn">ineligible or unsupported</text>
 
   <rect x="40" y="286" width="410" height="78" class="ns-box" rx="6"/>
-  <text x="245" y="309" text-anchor="middle" class="ns-label">Shipped surfaces</text>
+  <text x="245" y="309" text-anchor="middle" class="ns-label">Current surfaces</text>
   <text x="245" y="324" text-anchor="middle" class="ns-sm">nspa_local_file + local sections: client-private file and section handles</text>
   <text x="245" y="338" text-anchor="middle" class="ns-sm">local event: anonymous NtCreateEvent client-range handles</text>
   <text x="245" y="352" text-anchor="middle" class="ns-sm">local timers + local WM_TIMER: sched-hosted dispatch inside the process</text>
@@ -451,7 +450,7 @@ it belongs.</p>
 <p><strong>Rule of thumb:</strong> if the arbitration data is <code>&lt;= 256 KB</code>, idempotent
 under retry, and read-mostly, push it through shmem (option a). If
 it&rsquo;s bigger, mutable, or tied to NT object naming, refuse the bypass
-(option b). The local-file and local-section path is the main shipped
+(option b). The local-file and local-section path is the main
 example of option (a); the timer stubs both use (b). Future stubs such
 as named pipes or richer directory/query surfaces will likely require
 option (a) for their refcount tables.</p>
@@ -552,7 +551,7 @@ afterwards.</p>
 
 <p>Notice that the <code>nspa_local_timer</code> stub takes a different design:
 rather than returning a private timer handle and lazily promoting, it
-keeps the timer&rsquo;s backing event on the shipped anonymous local-event
+keeps the timer&rsquo;s backing event on the anonymous local-event
 path when the call stays inside the local envelope. The bypass is still
 in the <em>expiry path</em> (zero-RTT <code>NtSetEvent</code> instead of a server
 timer-fire), not in the <em>creation path</em>. Same goal &ndash; avoid RPCs on the
@@ -568,7 +567,7 @@ unrelated code. This is not optional &ndash; it is the property that lets
 the stubs be safe to call from RT-priority client threads and from
 audio-callback contexts.</p>
 
-<p>The discipline is strict and shared by every shipped stub:</p>
+<p>The discipline is strict and shared by every stub:</p>
 
 <ol>
 <li><strong>Lock taken briefly.</strong> Acquire <code>pi_mutex_t</code>, mutate in-memory
@@ -622,13 +621,13 @@ in-flight entry (<code>t-&gt;refcount++</code> before drop, <code>--t-&gt;refcou
 re-acquire) so a concurrent close can&rsquo;t free the entry mid-fire.</p>
 
 <p>This pattern &ndash; &ldquo;drop lock, do the dangerous thing, re-acquire&rdquo; &ndash;
-shows up in every shipped stub. The rule is simple: the lock protects
+shows up in every stub. The rule is simple: the lock protects
 in-memory state only. Once the path needs a syscall, RPC, or callback,
 the lock must already be gone.</p>
 
 <hr />
 
-<h2 id="7-currently-shipped-stubs">7. Currently shipped stubs</h2>
+<h2 id="7-current-stubs">7. Current stubs</h2>
 
 <h3 id="71-nspa_local_file--local-file-handles-and-local-sections">7.1 <code>nspa_local_file</code> &ndash; local file handles and local sections</h3>
 
@@ -670,7 +669,7 @@ right after path resolution.</p>
 <p><strong>Eligibility predicate:</strong> bounded regular-file and explicit-directory opens:
 no loader-owned image path, no root-directory or custom security-descriptor
 shape, no open-by-id, no delete-on-close, and only the dispositions and access
-masks the local table knows how to preserve correctly. The shipped envelope is
+masks the local table knows how to preserve correctly. The current envelope is
 materially broader than the first public draft: it includes common write-class
 opens, explicit <code>FILE_DIRECTORY_FILE</code> cases, selected metadata updates, common
 flush paths, and local <code>FileEndOfFileInformation</code>.</p>
@@ -688,7 +687,7 @@ a single <code>pi_mutex_t nspa_lf_opens_mutex</code>. Each entry caches:
 - the original NT path string for <code>GetFinalPathNameByHandle</code>
 - the lazy-promoted server handle (0 until first promote)</p>
 
-<p><strong>Local sections on top:</strong> eligible unnamed file-backed sections now get a
+<p><strong>Local sections on top:</strong> eligible unnamed file-backed sections get a
 second client-private handle range of their own. The section duplicates the
 backing unix fd at creation time, publishes <code>FILE_MAPPING_*</code> bits back into the
 same local-file sharing aggregate, and can then map, query, unmap, and close
@@ -763,7 +762,7 @@ the thing that keeps named-pipe / RPC listener waits, SCM-via-pipe startup, and
 wined3d-style present-completion events working once anonymous events flip to
 client-range by default.</p>
 
-<p><strong>Async parity detail:</strong> the shipped implementation also mirrors the server&rsquo;s
+<p><strong>Async parity detail:</strong> the implementation also mirrors the server&rsquo;s
 normal queue-time <code>reset_event</code> discipline before async operations are armed.
 That fix landed during the same session after validation exposed stale
 <code>io_status</code> behaviour on the client-range path.</p>
@@ -772,7 +771,7 @@ That fix landed during the same session after validation exposed stale
 events still fall through to the server because their semantics live in the NT
 object namespace.</p>
 
-<p><strong>Architectural consequence:</strong> this is now the base that anonymous local timers
+<p><strong>Architectural consequence:</strong> this is the base that anonymous local timers
 build on. The timer stub no longer needs a temporary helper to create a
 server-visible backing event up front; it can call <code>NtCreateEvent</code> directly and
 inherit the same client-range fast path.</p>
@@ -820,7 +819,7 @@ the reset fix, with zero <code>err:service</code>, <code>err:rpc</code>, or <cod
 
   <rect x="150" y="214" width="640" height="76" class="le-note" rx="6"/>
   <text x="470" y="246" text-anchor="middle" class="le-y">Why this matters</text>
-  <text x="470" y="264" text-anchor="middle" class="le-s">client-range events now compose with server-managed async paths</text>
+  <text x="470" y="264" text-anchor="middle" class="le-s">client-range events compose with server-managed async paths</text>
   <text x="470" y="278" text-anchor="middle" class="le-s">instead of being limited to purely local waits</text>
 </svg>
 </div>
@@ -893,12 +892,12 @@ the reset fix, with zero <code>err:service</code>, <code>err:rpc</code>, or <cod
 <p><strong>Design twist:</strong> unlike the local-file bypass, the timer stub does
 <em>not</em> return a private timer handle. The object still presents itself as
 an event-backed timer handle to the rest of Wine. What changed on
-2026-05-02 is that the anonymous backing event now comes from the same
+2026-05-02 is that the anonymous backing event comes from the same
 client-range <code>NtCreateEvent</code> fast path described in §7.2, rather than
 from a dedicated temporary helper.</p>
 
 <p>The bypass is still in the <em>firing</em> path. On expiry the timer code issues
-<code>NtSetEvent</code> against the backing event handle. Because that handle is now
+<code>NtSetEvent</code> against the backing event handle. Because that handle is
 client-range by default, expiry stays entirely on the local fast path unless
 the event later crosses into a server-managed async surface.</p>
 
@@ -1037,7 +1036,7 @@ issue any wineserver RPC.</p>
 
 <p><strong>2026-04-30 follow-up:</strong> the eligibility predicate was tightened so
 <code>TIMERPROC</code> and cross-thread
-<code>SetTimer</code> cases now refuse the stub and defer to the server. That is
+<code>SetTimer</code> cases refuse the stub and defer to the server. That is
 the correct NT-local-stub shape: keep the cheap owner-thread path local,
 and route anything with ambiguous ownership or callback semantics back
 to the authoritative server path.</p>
@@ -1049,7 +1048,7 @@ to the authoritative server path.</p>
 <p>Not every client-side carry in Wine-NSPA is an NT-local stub, and not every
 case within a stubbed surface stays local.</p>
 
-<p><strong>Named or cross-process boundaries stay server-owned.</strong> The shipped
+<p><strong>Named or cross-process boundaries stay server-owned.</strong> The
 local-section path is intentionally limited to eligible unnamed file-backed
 sections in one process. Named sections, cross-process duplication, and image
 mapping semantics still cross back into wineserver because that is where the
@@ -1061,7 +1060,7 @@ authoritative naming and handle-coordination rules live.</p>
 it through per-queue shared memory rather than a private NT handle range. That
 surface is documented separately on <a href="msg-ring-architecture.gen.html">msg-ring-architecture</a>.</p>
 
-<p><strong>Timer callbacks keep an honest server boundary.</strong> The shipped
+<p><strong>Timer callbacks keep an honest server boundary.</strong> The
 <code>local_wm_timer</code> path refuses <code>TIMERPROC</code> and cross-thread <code>SetTimer</code> cases,
 and the anonymous local-timer path still leaves completion-port variants on the
 server path. The rule stays the same across every stub: if the local envelope
@@ -1087,7 +1086,7 @@ classes.</p>
 split described on the wineserver-decomposition page gets a smaller and cleaner
 problem because the NT entry points for files, local sections, anonymous
 events, and eligible timers already try the client-local path first. The more
-traffic those shipped stubs absorb, the less residual work remains under the
+traffic those stubs absorb, the less residual work remains under the
 server&rsquo;s global lock.</p>
 
 <hr />
@@ -1152,11 +1151,11 @@ server&rsquo;s global lock.</p>
 </tr>
 <tr>
 <td> <code>wineserver-decomposition.gen.html</code> </td>
-<td> Residual wineserver problem after the shipped stub set </td>
+<td> Residual wineserver problem after the current stub set </td>
 </tr>
 <tr>
 <td> <code>client-scheduler-architecture.gen.html</code> </td>
-<td> Shared sched host that now runs eligible local timer work </td>
+<td> Shared sched host that runs eligible local timer work </td>
 </tr>
 <tr>
 <td> <code>msg-ring-architecture.gen.html</code> </td>

@@ -108,8 +108,8 @@
 <div class="page-nav"><a href="index.html">Docs Home</a></div>
 <h1 id="wine-nspa--gamma-channel-dispatcher">Wine-NSPA &ndash; Gamma Channel Dispatcher</h1>
 
-<p>This page documents the shipped gamma request path and the
-aggregate-wait dispatcher loop that completes it.</p>
+<p>This page documents the gamma request path and the aggregate-wait
+dispatcher loop that completes it.</p>
 
 <h2 id="table-of-contents">Table of Contents</h2>
 
@@ -142,13 +142,13 @@ cached-CAS / futex-wake hybrid that briefly extended it) with a single
 NTSync <code>NTSYNC_TYPE_CHANNEL</code> object.</p>
 
 <p>Every Wine client process has exactly one channel fd, opened by the
-wineserver during process attach and shipped to the client via
+wineserver during process attach and passed to the client via
 <code>SCM_RIGHTS</code> in the <code>init_first_thread</code> reply. Client threads issue
 <code>NTSYNC_IOC_CHANNEL_SEND_PI</code> to atomically enqueue a request, boost the
 dispatcher pthread to the sender&rsquo;s priority, and block for reply, all
 in one syscall.</p>
 
-<p>The wineserver now runs one <strong>dispatcher context</strong> per client process,
+<p>The wineserver runs one <strong>dispatcher context</strong> per client process,
 not just one bare receive loop. That context owns:</p>
 
 <ul>
@@ -167,7 +167,7 @@ wake the originator and drain its PI boost. On current kernels the
 dispatcher then issues <code>NTSYNC_IOC_CHANNEL_TRY_RECV2</code> in a tight loop
 to drain any additional ready entries from the same wake.</p>
 
-<p>The key win over the legacy designs: priority inheritance is now
+<p>The key win over the legacy designs: priority inheritance is
 <strong>kernel-atomic</strong>. There is no userspace TID-read-vs-<code>sched_setscheduler</code>
 race window, no <code>pthread_setschedparam</code> call against a thread that may
 have already exited, and no userspace bookkeeping of &ldquo;who is currently
@@ -229,7 +229,7 @@ dispatcher loop is the architecture in production today.</p>
 <p>The channel fd is created in process attach, the dispatcher context is
 allocated alongside it, the detached pthread is spawned with explicit RT
 scheduler attrs when <code>NSPA_SRV_RT_PRIO &gt; 0</code>, and the channel fd is
-shipped to the client over <code>SCM_RIGHTS</code> alongside the existing
+passed to the client over <code>SCM_RIGHTS</code> alongside the existing
 per-thread <code>request_shm</code> fds in the <code>init_first_thread</code> reply. The
 client stashes it in <code>nspa_request_channel_fd</code> and from then on uses it
 for every <code>server_call_unlocked</code> whose request fits in the per-thread
@@ -589,7 +589,7 @@ returning to <code>AGG_WAIT</code>.</p>
   <text x="560" y="350" text-anchor="middle" class="gd-l">complete B.reply_done</text>
   <text x="560" y="364" text-anchor="middle" class="gd-l">drain B's PI contribution</text>
   <text x="560" y="378" text-anchor="middle" class="gd-acc">re-boost from queue head: 80</text>
-  <text x="560" y="392" text-anchor="middle" class="gd-m">(A is now head)</text>
+  <text x="560" y="392" text-anchor="middle" class="gd-m">(A becomes head)</text>
 
   <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="480" y1="358" x2="380" y2="402" stroke="#bb9af7" stroke-width="1.5"/>
   <text x="430" y="382" class="gd-pur" text-anchor="middle">B wakes</text>
@@ -863,8 +863,8 @@ gamma is cheaper than v1.5.</p>
 <h2 id="6-dispatcher-state-machine">6. Dispatcher State Machine</h2>
 
 <p>The dispatcher pthread is still born detached with explicit
-<code>SCHED_FIFO</code> attrs when <code>NSPA_SRV_RT_PRIO &gt; 0</code>, and the shipped runtime
-loop is now the aggregate-wait shape:</p>
+<code>SCHED_FIFO</code> attrs when <code>NSPA_SRV_RT_PRIO &gt; 0</code>, and the runtime
+loop is the aggregate-wait shape:</p>
 
 <ol>
 <li>block in <code>NTSYNC_IOC_AGGREGATE_WAIT</code> over channel, uring eventfd, and shutdown eventfd</li>
@@ -939,7 +939,7 @@ dispatcher&rsquo;s process and has a live <code>request_shm</code> mapping.</li>
 channel fd alone is not a reliable wake source once the kernel holds
 its own reference during aggregate-wait registration, so the
 dispatcher also waits on <code>shutdown_efd</code>.</li>
-<li><strong>Kernel baseline is fixed.</strong> The shipped dispatcher now requires
+<li><strong>Kernel baseline is fixed.</strong> The dispatcher requires
 aggregate-wait plus <code>RECV2</code> / <code>TRY_RECV2</code>; there is no longer a
 runtime compatibility ladder inside this loop.</li>
 </ul>
@@ -1077,7 +1077,7 @@ dispatcher per process: a slow <code>openat</code> blocks <strong>the entire
 process&rsquo;s request queue</strong>.</p>
 
 <p>In a DAW, the audio thread issuing a <code>NtQueryPerformanceCounter</code> or
-a futex syscall lookup is now stuck behind the GUI thread&rsquo;s
+a futex syscall lookup is stuck behind the GUI thread&rsquo;s
 multi-millisecond <code>LoadLibrary</code> chain. That is a reliable xrun on
 drum-track-load-while-playing.</p>
 
@@ -1166,9 +1166,9 @@ preserved across the lock-drop window:</p>
 <p>The restore order is the inverse: re-lock, restore <code>current</code>,
 restore <code>current-&gt;error</code>, drop refs.</p>
 
-<h3 id="84-current-shipped-boundary">8.4 Current shipped boundary</h3>
+<h3 id="84-current-boundary">8.4 Current boundary</h3>
 
-<p>The open-path lock-drop is part of the shipped dispatcher environment.
+<p>The open-path lock-drop is part of the dispatcher environment.
 The first validation scare on this path turned out to be the old ntsync
 <code>kfree</code>-under-raw-spinlock bug, not the lock-drop itself. The path was
 revalidated after the kernel fix on the drum-track-load-while-playing
@@ -1225,7 +1225,7 @@ it is worth the kernel-side complexity.</p>
 
 <p>T1 and T2 ship behaviour-neutral (the kernel stamps tokens and the
 wineserver registers them, but nobody reads the token). T3 is the
-current shipped consumer shape: the dispatcher consumes the token
+current consumer shape: the dispatcher consumes the token
 directly and skips the legacy <code>get_thread_from_id</code> lookup.</p>
 
 <h3 id="93-lifetime-safety">9.3 Lifetime safety</h3>
@@ -1334,7 +1334,7 @@ the kitchen-sink path with <strong>86,528 wakes / 0 timeouts / 0 errors</strong>
 goes through <code>inproc_wait</code> -> ntsync ioctls directly and does not hit
 the dispatcher hot path.</li>
 <li>Ableton Live 12 Lite with aggregate-wait, <code>TRY_RECV2</code>, and async
-<code>CreateFile</code> all on the shipped path: clean
+<code>CreateFile</code> all on the active path: clean
 cold-start, plugin scan, drum-track-load-while-playing, and clean
 shutdown.</li>
 </ul>
@@ -1463,12 +1463,12 @@ entries per <code>AGG_WAIT</code> wake instead of paying N round-trips.</p>
 
 <h3 id="113-production-validation-shape">11.3 Production validation shape</h3>
 
-<p>For the current shipped path:</p>
+<p>For the current path:</p>
 
 <ul>
 <li><code>NSPA_RT_POLICY=FF</code></li>
 <li>aggregate-wait, thread-token consumption, <code>TRY_RECV2</code>, and async
-<code>CreateFile</code> all on the normal shipped path</li>
+<code>CreateFile</code> all on the normal path</li>
 </ul>
 
 
@@ -1610,14 +1610,14 @@ shared with other potential consumers and the fix is unconditional.</p>
 <p>After the ~370M-ops ntsync validation proved the kernel sound, the
 lockup investigation moved to wine-NSPA userspace. That audit covered
 both wineserver-side findings and the MR1/MR2/MR4 msg-ring bugs; gamma
-itself was scored clean. The shipped msg-ring fixes are all in
+itself was scored clean. The msg-ring fixes are all in
 <code>dlls/win32u/nspa/msg_ring.c</code> and orthogonal to gamma.</p>
 
 <h3 id="136-audit-discipline">13.6 Audit discipline</h3>
 
-<p>Ntsync patches 1007-1011 originally shipped several &ldquo;audit findings&rdquo;
+<p>Ntsync patches 1007-1011 originally bundled several &ldquo;audit findings&rdquo;
 without ever tracing the original <code>EVENT_SET_PI</code> slab UAF; they were
-rolled back, reduced to the genuinely-needed fixes, and re-shipped.
+rolled back, reduced to the genuinely-needed fixes, and landed again.
 The lesson: KASAN / trace first, audit second. Gamma&rsquo;s design is small
 enough that this discipline applies to its own future evolution as
 well.</p>
@@ -1650,7 +1650,7 @@ well.</p>
 <tr>
 <td> <code>wine/server/nspa/shmem_channel.c</code> </td>
 <td> 60-139 </td>
-<td> UAPI header compat for the shipped ntsync surface </td>
+<td> UAPI header compat for the active ntsync surface </td>
 </tr>
 <tr>
 <td> <code>wine/server/nspa/shmem_channel.c</code> </td>

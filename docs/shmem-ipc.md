@@ -1,7 +1,7 @@
 # Wine-NSPA -- Shmem IPC Architecture (LEGACY -- superseded by gamma channel dispatcher)
 
 Historical reference for the older per-thread shmem dispatcher, superseded by
-the shipped [Gamma Channel Dispatcher](gamma-channel-dispatcher.gen.html).
+the current [Gamma Channel Dispatcher](gamma-channel-dispatcher.gen.html).
 
 ## Table of Contents
 

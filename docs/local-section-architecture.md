@@ -1,12 +1,12 @@
 # Wine-NSPA -- Local Section Bypass
 
-This page documents the shipped client-side section path built on top of
-local-file handles.
+This page documents the client-side section path built on top of local-file
+handles.
 
 ## Table of Contents
 
 1. [Overview](#1-overview)
-2. [What is shipped](#2-what-is-shipped)
+2. [Coverage](#2-coverage)
 3. [Eligibility and fallback](#3-eligibility-and-fallback)
 4. [Handle range and section table](#4-handle-range-and-section-table)
 5. [Section lifecycle](#5-section-lifecycle)
@@ -21,7 +21,7 @@ local-file handles.
 ## 1. Overview
 
 Wine-NSPA no longer has to mint a wineserver section object for every eligible
-`CreateFileMapping` on a local-file handle. The client process can now keep a
+`CreateFileMapping` on a local-file handle. The client process can keep a
 bounded section table of its own, duplicate the unix fd at section-creation
 time, and service the common same-process view lifecycle without a server
 round-trip.
@@ -47,9 +47,9 @@ server path.
 
 ---
 
-## 2. What is shipped
+## 2. Coverage
 
-| Surface | Shipped behavior |
+| Surface | Current behavior |
 |---|---|
 | `NtCreateSection` | Eligible file-backed mappings on local-file handles can mint a client-side section handle instead of calling wineserver. |
 | `NtMapViewOfSection` / `NtMapViewOfSectionEx` | Same-process maps on local section handles install the view directly in the client process. |
@@ -59,7 +59,7 @@ server path.
 | `NtDuplicateObject` | Same-process duplicate of a local section promotes once to a server section, caches that server handle, and then lets the duplicate proceed. |
 | File/section coherence | Mapping bits are published into the local-file aggregate so later share checks and `FileEndOfFileInformation` handling still see active mappings. |
 
-This path is now the shipped default for eligible unnamed file-backed sections.
+This path is the default for eligible unnamed file-backed sections.
 
 ---
 
@@ -254,7 +254,7 @@ the duplicate proceed through the normal server machinery.
 
 When the duplicate crosses a process boundary, the client-side section handle
 stops being a valid abstraction. The server does not have access to the remote
-process's private section table, so the current shipped behavior is to fall
+process's private section table, so the current behavior is to fall
 through cleanly rather than invent cross-process state. That produces the right
 failure instead of a confusing partially-working handle.
 
@@ -302,7 +302,7 @@ failure instead of a confusing partially-working handle.
   <rect x="700" y="136" width="220" height="86" class="dup-stop"/>
   <text x="810" y="160" text-anchor="middle" class="dup-red">fall back cleanly</text>
   <text x="810" y="178" text-anchor="middle" class="dup-label">remote process cannot see the private section table</text>
-  <text x="810" y="194" text-anchor="middle" class="dup-small">current shipped boundary is honest failure, not partial emulation</text>
+  <text x="810" y="194" text-anchor="middle" class="dup-small">current boundary is honest failure, not partial emulation</text>
 </svg>
 </div>
 
@@ -342,7 +342,7 @@ instead of inventing a second source of truth.
 
 ## 8. Validation and observed effect
 
-The shipped local section path was validated on the real workload that exposed
+The local section path was validated on the real workload that exposed
 the old cost: repeated file mapping and view traffic during app startup and UI
 initialization.
 

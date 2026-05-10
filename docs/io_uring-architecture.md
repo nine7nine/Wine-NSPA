@@ -1,7 +1,6 @@
 # Wine-NSPA -- io_uring I/O Architecture
 
-This page documents Wine-NSPA's shipped `io_uring` surface for file and
-socket I/O.
+This page documents Wine-NSPA's `io_uring` surface for file and socket I/O.
 
 ## Table of Contents
 
@@ -19,8 +18,8 @@ socket I/O.
 
 ## 1. Overview
 
-The `io_uring` story is now broader than the original file-I/O landing.
-Three pieces are shipped in production:
+The `io_uring` surface is broader than the original file-I/O landing.
+Current coverage includes:
 
 - sync poll replacement plus async file read/write on the PE side
 - dispatcher-owned async `CreateFile` on the per-process server ring
@@ -35,23 +34,23 @@ The important boundary correction from 2026-05-02 is that `io_uring` does
 server-managed surfaces and compose with the local-event fix instead of
 replacing it.
 
-### Shipped surface summary
+### Surface summary
 
 | Surface | Status | Default | Notes |
 |-------|--------|---------|-------|
-| Sync poll + async file I/O | **Shipped** | On | `NtReadFile` / `NtWriteFile` async bypass + sync poll replacement; pool allocator (TLS, 32 ops); CQE drain at `server_select` / `server_wait` |
-| Dispatcher-owned async `CreateFile` | **Shipped** | On | routes `CreateFile` through the per-process ring and removes the `open()` lock-drop CS from the audio xrun path |
-| Socket recv | **Shipped** | On | `NSPA_URING_RECV=1`; `recv_socket` submits `IORING_OP_RECVMSG` on the deferred path |
-| Socket send | **Shipped** | On | `NSPA_URING_SEND=1`; `send_socket` submits `IORING_OP_SENDMSG` on the deferred path |
+| Sync poll + async file I/O | **Active** | On | `NtReadFile` / `NtWriteFile` async bypass + sync poll replacement; pool allocator (TLS, 32 ops); CQE drain at `server_select` / `server_wait` |
+| Dispatcher-owned async `CreateFile` | **Active** | On | routes `CreateFile` through the per-process ring and removes the `open()` lock-drop CS from the audio xrun path |
+| Socket recv | **Active** | On | `NSPA_URING_RECV=1`; `recv_socket` submits `IORING_OP_RECVMSG` on the deferred path |
+| Socket send | **Active** | On | `NSPA_URING_SEND=1`; `send_socket` submits `IORING_OP_SENDMSG` on the deferred path |
 | `NtFlushBuffersFile` FSYNC | **Dropped** | -- | disk path is already synchronous `fsync()`; no meaningful `io_uring` win |
 | anonymous pipes / inotify | **Dropped** | -- | both blocked by existing server-managed infrastructure shape |
 
 ### Boundary changes since the first public draft
 
-- The original sync poll replacement and async file I/O work now read
-  as one shipped file-I/O slice.
+- The original sync poll replacement and async file I/O work read
+  as one file-I/O slice.
 - Socket work is no longer theoretical follow-on work. The data path is
-  shipped on the PE side via `RECVMSG` / `SENDMSG`.
+  active on the PE side via `RECVMSG` / `SENDMSG`.
 - Pipes and named events did **not** become `io_uring` work. Their remaining
   completion story is handled by other server-managed mechanisms.
 
@@ -61,7 +60,7 @@ replacing it.
 
 This document is the `io_uring` design and implementation reference for
 Wine-NSPA. It covers the integration boundary, per-thread ring model,
-the shipped file / socket paths, and the surfaces that remain outside the
+the file / socket paths, and the surfaces that remain outside the
 `io_uring` boundary. For project-wide context, see the architecture overview.
 
 This design addresses two bottlenecks:
@@ -353,7 +352,7 @@ fallback for an edge case that rarely occurs in practice.
 
 **Shipped, default-on.**
 
-The socket path now uses true socket SQEs on the deferred async path:
+The socket path uses true socket SQEs on the deferred async path:
 
 - `NSPA_URING_RECV=1` routes recv completion through `IORING_OP_RECVMSG`
 - `NSPA_URING_SEND=1` routes send completion through `IORING_OP_SENDMSG`
@@ -426,7 +425,7 @@ The 2026-05-02 default-on flip was backed by:
 - `socket-io` deferred path: `-6.8%` p99 latency
 - `socket-io`: `0/2000` failures
 - Ableton boot, library scan, and playback: clean with `63` threads and zero
-  new errors versus the earlier shipped socket baseline
+  new errors versus the earlier socket baseline
 
 ### Why this stays server-correct
 
@@ -455,7 +454,7 @@ Not every async surface is an `io_uring` candidate.
 
 The 2026-05-02 correction is that these are no longer "next `io_uring`
 candidates" in the same sense that sockets used to be. Named-pipe and named-event
-completion now compose with the **local-event** server-registration path, not
+completion compose with the **local-event** server-registration path, not
 with `io_uring`.
 
 ---
@@ -474,7 +473,7 @@ with `io_uring`.
 |------|--------------|---------|
 | `dlls/ntdll/unix/unix_private.h` | +30 | io_uring function declarations, bitmap helpers |
 | `dlls/ntdll/unix/file.c` | ~30 | sync poll + async read/write bypass |
-| `dlls/ntdll/unix/socket.c` | ~120 | shipped socket path: ALERTED interception, RECVMSG / SENDMSG CQE handlers, bitmap set/clear |
+| `dlls/ntdll/unix/socket.c` | ~120 | socket path: ALERTED interception, RECVMSG / SENDMSG CQE handlers, bitmap set/clear |
 | `dlls/ntdll/unix/sync.c` | ~40 | ntsync uring_fd retry loop, deferred completion flush |
 | `dlls/ntdll/unix/server.c` | +2 | Completion drain at server_select/server_wait |
 | `dlls/ntdll/unix/thread.c` | +1 | Ring cleanup at thread exit |

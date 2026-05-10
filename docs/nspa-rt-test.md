@@ -2,7 +2,7 @@
 
 This page documents the public Wine-NSPA validation harness: the native ntsync
 suite, the PE-side matrix, and the targeted follow-on validators that cover the
-newest shipped scheduler, event, socket, local-file, local-section, and
+current scheduler, event, socket, local-file, local-section, and
 dispatcher work.
 
 ## Table of Contents
@@ -44,12 +44,12 @@ exercises `inproc_wait` -> ntsync ioctls directly and does **not** hit
 loop. `dispatcher-burst` is the first PE-side workload in the published
 matrix that covers that path.
 
-The 2026-05-02 through 2026-05-09 shipped follow-ons did **not** introduce a new
+The 2026-05-02 through 2026-05-09 follow-ons did **not** introduce a new
 full matrix version. They were validated with targeted harnesses instead:
 
 - `run-rt-probe-validation.sh` covers the sched-hosted `local_timer` and
   `local_wm_timer` migrations and passed `10/10`
-- the existing `socket-io` PE subcommand now exercises the shipped
+- the existing `socket-io` PE subcommand exercises the
   `IORING_OP_RECVMSG` / `IORING_OP_SENDMSG` path and measured `+6.5%`
   deferred-path throughput, `-6.8%` p99 latency, `0/2000` failures
 - local-file and local-section follow-ons are validated today through the
@@ -89,12 +89,12 @@ The PE binary runs in two modes:
   for the `wine-sched-rt` migration of `local_timer` and
   `local_wm_timer`
 - **socket deferred path:** `socket-io` continues to pass in baseline + RT
-  while now exercising the shipped `RECVMSG` / `SENDMSG` SQE path
+  while exercising the `RECVMSG` / `SENDMSG` SQE path
 - **thread / process shared-state path:** targeted A/B harnesses for the
   7 thread classes, 6 process classes, and zero-time process/thread waits stayed clean;
   `ThreadBasicInformation` remains intentionally on the RPC path
 - **msg-ring and hot-path follow-ons:** real-workload counters cover the
-  shipped `get_message` empty-poll cache, x86_64 inline `NtCurrentTeb()`,
+  `get_message` empty-poll cache, x86_64 inline `NtCurrentTeb()`,
   TEB-backed msg-ring caches, and cacheline-shaped `inproc_sync` entries
 - **local-file / local-section workload path:** same-process map-after-file-close
   is clean; local-file and section carries reduce file and mapping traffic
@@ -417,7 +417,7 @@ signal delivery.
 page touch round-trip -> `K32QueryWorkingSetEx` `LargePage` check ->
 `VirtualFree` -> verify `HugePages_Free` restored.
 
-The same harness also validates the shipped section-backed path:
+The same harness also validates the section-backed path:
 `CreateFileMapping(SEC_LARGE_PAGES)` plus the privilege-negative case,
 and it exercises the 1 GiB huge-page request shape when the host is
 configured for it.
@@ -443,13 +443,13 @@ PASS criteria: all 5 sub-tests plus 5a-5d PASS.
 ### 3.9 `socket-io` -- Async TCP Loopback Latency
 
 TCP loopback pair, per-message recv latency via overlapped WSARecv. The sender
-side of the same harness also exercises the shipped `SENDMSG` path.
+side of the same harness also exercises the `SENDMSG` path.
 
 - **Immediate case:** sender sends *before* receiver calls WSARecv.
   Exercises `try_recv` fast path.
 - **Deferred case:** receiver calls WSARecv *before* sender sends.
   Forces the async wait path: WSARecv returns `WSA_IO_PENDING`. On the
-  current shipped build this exercises the true socket-SQE path:
+  current build this exercises the true socket-SQE path:
   `IORING_OP_RECVMSG` on recv, `IORING_OP_SENDMSG` on send, plus the
   existing CQE drain at Wine wait boundaries.
 
@@ -483,7 +483,7 @@ to cover the gamma dispatcher hot path:
 The verdict is failure-count only; latency is observational. That
 keeps the test deterministic enough to live in the default matrix while
 still giving a reproducible A/B for the dispatcher burst-drain path. The
-subcommand is now part of the default PE matrix, and later dispatcher
+subcommand is part of the default PE matrix, and later dispatcher
 hot-path tuning continues to use this same
 subcommand as their PE-side oracle.
 
@@ -524,7 +524,7 @@ kernel-level invariants the Win32 surface can't reach. Located at
 ### SKIPPED_BY_DESIGN list
 
 `run-rt-suite.sh` excludes two tests from the active run because they
-assert behaviour that was rolled back (the 1007-1011 patch series shipped
+assert behaviour that was rolled back (the 1007-1011 patch series landed
 as "audit findings" without a confirmed bug):
 
 - `test-cross-boost` -- asserts 1007 cross-boost cleanup
@@ -566,7 +566,7 @@ Cumulative public result for 2026-04-30:
 
 ### Layer 2 PE Matrix
 
-The PE matrix (`nspa_rt_test.exe` baseline + RT) now passes
+The PE matrix (`nspa_rt_test.exe` baseline + RT) passes
 24 PASS / 0 FAIL / 0 TIMEOUT (12 tests x 2 modes) on the current
 build. The new row is `dispatcher-burst`, which is the first PE-side
 matrix test that actually covers the dispatcher hot path.
@@ -592,7 +592,7 @@ matrix.
 
 ### Targeted Validator: `run-rt-probe-validation.sh`
 
-The 2026-05-02 sched-hosted timer migrations shipped without minting a new
+The 2026-05-02 sched-hosted timer migrations landed without minting a new
 PE subcommand. Instead they use a small dedicated validator script that:
 
 - registers RT-class timer work on `wine-sched-rt`
@@ -853,7 +853,7 @@ on next invocation if the source is newer than the binary.
 | Requirement | Check | Purpose |
 |-------------|-------|---------|
 | `ntsync` module loaded | `sudo modprobe ntsync` | Required for ntsync sub-tests + Layer 1 |
-| current ntsync overlay loaded | current shipped kernel/userspace pair | Current dispatcher and native-suite path |
+| current ntsync overlay loaded | current kernel/userspace pair | Current dispatcher and native-suite path |
 | Hugepages reserved | `/proc/meminfo` HugePages_Total > 0 | Required for `large-pages` test |
 | RT-capable kernel | `uname -r` shows `-rt` | Required for SCHED_FIFO promotion |
 | CAP_SYS_NICE or root | `ulimit -r` | Required for RT scheduling |

@@ -108,9 +108,9 @@
 <div class="page-nav"><a href="index.html">Docs Home</a></div>
 <h1 id="wine-nspa--hot-path-optimizations">Wine-NSPA &ndash; Hot-Path Optimizations</h1>
 
-<p>This page documents the shipped implementation-level optimizations that reduce
-Wine-side overhead without changing feature boundaries or public API shape, and
-the design choices behind them.</p>
+<p>This page documents implementation-level optimizations that reduce Wine-side
+overhead without changing feature boundaries or public API shape, and the
+design choices behind them.</p>
 
 <h2 id="table-of-contents">Table of Contents</h2>
 
@@ -121,9 +121,10 @@ the design choices behind them.</p>
 <li><a href="#4-teb-relative-hot-state">TEB-relative hot state</a></li>
 <li><a href="#5-cache-and-slab-layout">Cache and slab layout</a></li>
 <li><a href="#6-small-call-removal-on-the-wait-path">Small-call removal on the wait path</a></li>
-<li><a href="#7-gui-and-flush-path-trims">GUI and flush-path trims</a></li>
-<li><a href="#8-current-measured-effect">Current measured effect</a></li>
-<li><a href="#9-related-docs">Related docs</a></li>
+<li><a href="#7-string-and-unicode-vectorization">String and Unicode vectorization</a></li>
+<li><a href="#8-gui-and-flush-path-trims">GUI and flush-path trims</a></li>
+<li><a href="#9-current-measured-effect">Current measured effect</a></li>
+<li><a href="#10-related-docs">Related docs</a></li>
 </ol>
 
 
@@ -131,8 +132,8 @@ the design choices behind them.</p>
 
 <h2 id="1-overview">1. Overview</h2>
 
-<p>Wine-NSPA now carries several classes of shipped optimizations that are not new
-bypass surfaces by themselves. They make existing fast paths cheaper: more
+<p>Wine-NSPA carries several classes of optimizations that are not new bypass
+surfaces by themselves. They make existing fast paths cheaper: more
 local answers from already-published state, fewer libc TLS lookups, fewer
 cross-DSO helper calls, better cacheline and slab layout, and less pointless
 work on already-empty or already-local paths.</p>
@@ -156,7 +157,7 @@ x86_64 TEB / GS-base setup specifically.</p>
 <thead>
 <tr>
 <th> Class </th>
-<th> Current shipped use </th>
+<th> Current use </th>
 <th> Why this choice fits </th>
 </tr>
 </thead>
@@ -168,7 +169,7 @@ x86_64 TEB / GS-base setup specifically.</p>
 </tr>
 <tr>
 <td> TEB-relative state access </td>
-<td> unix-side <code>NtCurrentTeb</code> is inline on Linux x86_64, <code>get_thread_data()</code> reads through a TEB backpointer, and win32u msg-ring per-thread caches read through <code>TEB-&gt;Win32ClientInfo</code> </td>
+<td> unix-side <code>NtCurrentTeb</code> is inline on Linux x86_64, <code>get_thread_data()</code> reads through a TEB backpointer, common thread/process/PEB helpers read from the TEB, and win32u msg-ring per-thread caches read through <code>TEB-&gt;Win32ClientInfo</code> </td>
 <td> repeated thread-local helper calls were pure wrapper cost, so direct TEB reads preserve ownership while removing libc / PLT overhead </td>
 </tr>
 <tr>
@@ -182,9 +183,14 @@ x86_64 TEB / GS-base setup specifically.</p>
 <td> request bursts are real, so the right optimization is to amortize wake cost rather than only shave single-request overhead </td>
 </tr>
 <tr>
-<td> Dormant-call removal </td>
-<td> <code>ntdll_io_uring_flush_deferred()</code> now folds to an inline empty check when no deferred completions exist, and the ring eventfd getter is inline </td>
+<td> Small helper removal </td>
+<td> <code>ntdll_io_uring_flush_deferred()</code> folds to an inline empty check when no deferred completions exist, the ring eventfd getter is inline, and <code>NtGetTickCount()</code> folds to one KUSER_SHARED_DATA load </td>
 <td> once a helper becomes “usually empty” or “just return one TLS value,” the abstraction cost outweighs the abstraction value on the hot path </td>
+</tr>
+<tr>
+<td> SIMD ASCII-burst loops </td>
+<td> <code>memicmp_strW</code>, <code>hash_strW</code>, <code>utf8_wcstombs</code>, and <code>utf8_mbstowcs</code> use x86_64 AVX2 fast paths for all-ASCII windows while keeping scalar fallback for mixed or non-ASCII windows </td>
+<td> filenames, registry names, and object names are often ASCII-dominant, so vectorizing the common window harvests real cost without changing the Unicode contract </td>
 </tr>
 <tr>
 <td> GUI / memory-copy tightening </td>
@@ -312,7 +318,7 @@ reading thread-local Wine state from the TEB and adjacent per-thread structs.</p
   <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="610" y1="128" x2="680" y2="128" class="tp-line-p"/>
 
   <rect x="150" y="238" width="660" height="86" class="tp-yellow" rx="6"/>
-  <text x="480" y="264" text-anchor="middle" class="tp-tag-y">measured effect on the shipped playback path</text>
+  <text x="480" y="264" text-anchor="middle" class="tp-tag-y">measured effect on the playback path</text>
   <text x="480" y="286" text-anchor="middle" class="tp-small">`NtCurrentTeb` function calls: `9,961,441 -> 566` per 30 s</text>
   <text x="480" y="302" text-anchor="middle" class="tp-small">cumulative cycles after both carries: `257.8B -> 212.4B` (`-17.6%`)</text>
  </svg>
@@ -321,7 +327,7 @@ reading thread-local Wine state from the TEB and adjacent per-thread structs.</p
 
 <h3 id="41-inline-ntcurrentteb-on-x86_64">4.1 Inline <code>NtCurrentTeb()</code> on x86_64</h3>
 
-<p>On Linux x86_64, Wine-NSPA now keeps <code>GS_BASE = teb</code> from thread startup, so
+<p>On Linux x86_64, Wine-NSPA keeps <code>GS_BASE = teb</code> from thread startup, so
 most Unix-side callers can inline <code>NtCurrentTeb()</code> instead of paying a
 cross-DSO <code>pthread_getspecific()</code> call chain. This is intentionally narrower
 than upstream Wine&rsquo;s portability envelope: it trades portability for a cheaper
@@ -386,7 +392,7 @@ load-bearing on its target platform.</p>
 
 <h3 id="42-msg-ring-per-thread-caches-via-the-teb">4.2 Msg-ring per-thread caches via the TEB</h3>
 
-<p>The msg-ring hot path now reads both of its per-thread caches from
+<p>The msg-ring hot path reads both of its per-thread caches from
 <code>struct user_thread_info</code> inside <code>TEB-&gt;Win32ClientInfo</code>:</p>
 
 <ul>
@@ -452,13 +458,56 @@ move the hot lookup into the TEB.”</p>
 </table>
 
 
+<h3 id="43-inline-processthreadpebtick-helpers-on-x86_64">4.3 Inline process/thread/PEB/tick helpers on x86_64</h3>
+
+<p>The same x86_64 TEB foundation also shrinks a second layer of helper cost on
+the Unix side.</p>
+
+<table>
+<thead>
+<tr>
+<th> Helper family </th>
+<th> Current path </th>
+<th> Source </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> <code>PsGetCurrentProcessId()</code> / <code>PsGetCurrentThreadId()</code> </td>
+<td> inline TEB-relative read via <code>unix_private.h</code> </td>
+<td> <code>ClientId</code> and thread-local unix state are already published in the TEB path </td>
+</tr>
+<tr>
+<td> <code>RtlGetCurrentPeb()</code> </td>
+<td> inline TEB-relative read on the Unix side </td>
+<td> avoids a separate out-of-line helper for a fixed per-thread pointer </td>
+</tr>
+<tr>
+<td> <code>GetCurrentProcessId()</code> / <code>GetCurrentThreadId()</code> in <code>WINE_UNIX_LIB</code> </td>
+<td> macro parity with the PE-side <code>ClientId</code> read </td>
+<td> removes an extra unix-thread-data load from hot ntsync and server-call sites </td>
+</tr>
+<tr>
+<td> <code>NtGetTickCount()</code> </td>
+<td> one <code>KUSER_SHARED_DATA::TickCount.LowPart</code> load </td>
+<td> avoids a PLT thunk and function frame on a call site measured at <code>~3.08M</code> calls / 30 s </td>
+</tr>
+</tbody>
+</table>
+
+
+<p>These carries are small individually, but they all fit the same rule: once the
+TEB and <code>KUSER_SHARED_DATA</code> are already the authoritative source, the hot Unix
+path should read them directly instead of wrapping the same answer in another
+function call.</p>
+
 <hr />
 
 <h2 id="5-cache-and-slab-layout">5. Cache and slab layout</h2>
 
 <p>The current <code>inproc_sync</code> cache is optimized for concurrent hot waits and
 signals, not just for compact storage. The same optimization class also shows
-up in the kernel overlay: the hot ntsync allocation classes now live in
+up in the kernel overlay: the hot ntsync allocation classes live in
 dedicated caches, and the production kernel keeps those caches isolated.</p>
 
 <div class="diagram-container">
@@ -527,7 +576,7 @@ kernel overlay:</p>
 <thead>
 <tr>
 <th> Kernel-side optimization </th>
-<th> Shipped effect </th>
+<th> Effect </th>
 </tr>
 </thead>
 <tbody>
@@ -579,12 +628,12 @@ overhead on paths that were already almost always empty or already local.</p>
   </style>
 
   <rect x="0" y="0" width="960" height="320" class="sw-bg" rx="6"/>
-  <text x="480" y="26" text-anchor="middle" class="sw-title">Small helper overhead removed from the shipped wait path</text>
+  <text x="480" y="26" text-anchor="middle" class="sw-title">Small helper overhead removed from the steady-state wait path</text>
 
   <rect x="60" y="82" width="250" height="86" class="sw-box" rx="6"/>
   <text x="185" y="108" text-anchor="middle" class="sw-label">`ntdll_io_uring_flush_deferred()`</text>
   <text x="185" y="130" text-anchor="middle" class="sw-small">current steady state has no deferred queue users</text>
-  <text x="185" y="146" text-anchor="middle" class="sw-small">inline check now folds away the empty fast path</text>
+  <text x="185" y="146" text-anchor="middle" class="sw-small">inline check folds away the empty fast path</text>
 
   <rect x="355" y="82" width="250" height="86" class="sw-green" rx="6"/>
   <text x="480" y="108" text-anchor="middle" class="sw-tag-g">wait-path result</text>
@@ -593,7 +642,7 @@ overhead on paths that were already almost always empty or already local.</p>
 
   <rect x="650" y="82" width="250" height="86" class="sw-box" rx="6"/>
   <text x="775" y="108" text-anchor="middle" class="sw-label">`ntdll_io_uring_get_eventfd()`</text>
-  <text x="775" y="130" text-anchor="middle" class="sw-small">getter now reads the TLS ring eventfd inline</text>
+  <text x="775" y="130" text-anchor="middle" class="sw-small">getter reads the TLS ring eventfd inline</text>
   <text x="775" y="146" text-anchor="middle" class="sw-small">measured helper self-time `0.15%` before the carry</text>
 
   <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="310" y1="126" x2="355" y2="126" class="sw-line-b"/>
@@ -612,9 +661,198 @@ old scaffold cost after the architectural reason for that scaffold has gone.</p>
 
 <hr />
 
-<h2 id="7-gui-and-flush-path-trims">7. GUI and flush-path trims</h2>
+<h2 id="7-string-and-unicode-vectorization">7. String and Unicode vectorization</h2>
 
-<p>Two shipped GUI-side optimizations remain part of the current public baseline:</p>
+<p>The current x86_64 AVX2 carries also trim a different class of hot loop:
+short, repeated string and Unicode helpers that sit on the path-resolution,
+registry, object-name, and locale-conversion surfaces. These are not new
+features. They are implementation-level reductions in per-call cost on paths
+that are already semantically local.</p>
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 960 420" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
+  <style>
+    .sv-bg { fill: #1a1b26; }
+    .sv-box { fill: #24283b; stroke: #7aa2f7; stroke-width: 1.7; rx: 8; }
+    .sv-green { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.7; rx: 8; }
+    .sv-purple { fill: #2a2137; stroke: #bb9af7; stroke-width: 1.7; rx: 8; }
+    .sv-yellow { fill: #2a2418; stroke: #e0af68; stroke-width: 1.7; rx: 8; }
+    .sv-title { fill: #7aa2f7; font-size: 14px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .sv-label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+    .sv-small { fill: #a9b1d6; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+    .sv-tag-g { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .sv-tag-p { fill: #bb9af7; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .sv-tag-y { fill: #e0af68; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .sv-line-b { stroke: #7aa2f7; stroke-width: 1.2; fill: none; }
+    .sv-line-g { stroke: #9ece6a; stroke-width: 1.2; fill: none; }
+    .sv-line-p { stroke: #bb9af7; stroke-width: 1.2; fill: none; }
+  </style>
+
+  <rect x="0" y="0" width="960" height="420" class="sv-bg" rx="6"/>
+  <text x="480" y="26" text-anchor="middle" class="sv-title">x86_64 AVX2 fast paths keep ASCII bursts vectorized and edge cases scalar</text>
+
+  <rect x="70" y="74" width="360" height="128" class="sv-box" rx="6"/>
+  <text x="250" y="98" text-anchor="middle" class="sv-label">server/unicode hot loops</text>
+  <text x="250" y="122" text-anchor="middle" class="sv-small">`memicmp_strW`: 16-WCHAR ASCII compare + fold window</text>
+  <text x="250" y="142" text-anchor="middle" class="sv-small">`hash_strW`: 8-WCHAR weighted Horner window</text>
+  <text x="250" y="166" text-anchor="middle" class="sv-small">common call sites: object names, registry traversal, handle lookup</text>
+  <text x="250" y="186" text-anchor="middle" class="sv-small">non-ASCII windows fall back to scalar `to_lower()` logic</text>
+
+  <rect x="530" y="74" width="360" height="128" class="sv-purple" rx="6"/>
+  <text x="710" y="98" text-anchor="middle" class="sv-tag-p">ntdll locale helpers</text>
+  <text x="710" y="122" text-anchor="middle" class="sv-label">`utf8_wcstombs`: 16 WCHAR -> 16 byte ASCII burst</text>
+  <text x="710" y="142" text-anchor="middle" class="sv-label">`utf8_mbstowcs`: 16 byte -> 16 WCHAR ASCII burst</text>
+  <text x="710" y="166" text-anchor="middle" class="sv-small">common call sites: NT path conversion, registry names, section names</text>
+  <text x="710" y="186" text-anchor="middle" class="sv-small">multi-byte UTF-8 and surrogate cases stay on the scalar path</text>
+
+  <rect x="130" y="254" width="260" height="84" class="sv-green" rx="6"/>
+  <text x="260" y="278" text-anchor="middle" class="sv-tag-g">common fast-path rule</text>
+  <text x="260" y="300" text-anchor="middle" class="sv-small">if the window is all ASCII and large enough,</text>
+  <text x="260" y="318" text-anchor="middle" class="sv-small">vectorize the whole block and advance</text>
+
+  <rect x="570" y="254" width="260" height="84" class="sv-yellow" rx="6"/>
+  <text x="700" y="278" text-anchor="middle" class="sv-tag-y">contract rule</text>
+  <text x="700" y="300" text-anchor="middle" class="sv-small">mixed/non-ASCII windows do not reinterpret semantics</text>
+  <text x="700" y="318" text-anchor="middle" class="sv-small">they reuse the existing scalar path unchanged</text>
+
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="250" y1="202" x2="260" y2="254" class="sv-line-b"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="710" y1="202" x2="700" y2="254" class="sv-line-p"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="390" y1="296" x2="570" y2="296" class="sv-line-g"/>
+</svg>
+</div>
+
+
+<h3 id="71-server-unicode-compare-and-hash">7.1 Server Unicode compare and hash</h3>
+
+<p>The wineserver name path now has two x86_64 AVX2 ASCII-window carries in
+<code>server/unicode.c</code>:</p>
+
+<table>
+<thead>
+<tr>
+<th> Helper </th>
+<th> AVX2 fast window </th>
+<th> Scalar reuse </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> <code>memicmp_strW</code> </td>
+<td> 16 <code>WCHAR</code>s at a time, ASCII-only window, SIMD case-fold and compare </td>
+<td> short strings and any non-ASCII window reuse the scalar <code>to_lower()</code> compare </td>
+</tr>
+<tr>
+<td> <code>hash_strW</code> </td>
+<td> 8 <code>WCHAR</code>s at a time, ASCII-only window, weighted Horner unroll with vector multiply </td>
+<td> short strings and any non-ASCII window reuse the scalar Horner loop </td>
+</tr>
+</tbody>
+</table>
+
+
+<p>These helpers are hot because object-name and registry paths repeatedly compare
+and hash short Unicode names. The vectorization is deliberately narrower than
+&ldquo;SIMD all Unicode&rdquo;: it only harvests the ASCII-dominant windows and preserves
+the older scalar path for the rest.</p>
+
+<p>Synthetic ASCII-path measurements recorded with the carry:</p>
+
+<table>
+<thead>
+<tr>
+<th> Helper </th>
+<th style="text-align:right;"> Before </th>
+<th style="text-align:right;"> After </th>
+<th style="text-align:right;"> Delta </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> <code>memicmp_strW</code> (50 <code>WCHAR</code> ASCII) </td>
+<td style="text-align:right;"> <code>~250 cycles</code> </td>
+<td style="text-align:right;"> <code>~12 cycles</code> </td>
+<td style="text-align:right;"> <code>~20x</code> </td>
+</tr>
+<tr>
+<td> <code>hash_strW</code> (50 <code>WCHAR</code> ASCII) </td>
+<td style="text-align:right;"> <code>~150 cycles</code> </td>
+<td style="text-align:right;"> <code>~38 cycles</code> </td>
+<td style="text-align:right;"> <code>~4x</code> </td>
+</tr>
+</tbody>
+</table>
+
+
+<h3 id="72-locale-conversion-helpers">7.2 Locale conversion helpers</h3>
+
+<p>The Unix-side locale helpers in <code>dlls/ntdll/locale_private.h</code> now have matching
+x86_64 AVX2 ASCII-burst paths:</p>
+
+<table>
+<thead>
+<tr>
+<th> Helper </th>
+<th> AVX2 fast window </th>
+<th> Scalar reuse </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> <code>utf8_wcstombs</code> </td>
+<td> 16 <code>WCHAR</code>s detected as ASCII, packed to 16 bytes and stored in one burst </td>
+<td> short buffers, non-ASCII <code>WCHAR</code>s, and surrogate pairs remain scalar </td>
+</tr>
+<tr>
+<td> <code>utf8_mbstowcs</code> </td>
+<td> 16 source bytes detected as ASCII, zero-extended to 16 <code>WCHAR</code>s and stored in one burst </td>
+<td> short buffers, multi-byte UTF-8, and invalid UTF-8 remain scalar </td>
+</tr>
+</tbody>
+</table>
+
+
+<p>These conversions sit on every PE-to-Unix and Unix-to-PE path/name boundary.
+That makes them worth optimizing even though they are small helpers in
+isolation: the same directory, registry, and section-name traffic that hits the
+shared-state and local-file work also keeps crossing these conversion helpers.</p>
+
+<p>Synthetic ASCII-path measurements recorded with the carries:</p>
+
+<table>
+<thead>
+<tr>
+<th> Helper </th>
+<th style="text-align:right;"> Before </th>
+<th style="text-align:right;"> After </th>
+<th style="text-align:right;"> Delta </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> <code>utf8_wcstombs</code> (200-byte ASCII path) </td>
+<td style="text-align:right;"> <code>~500 cycles</code> </td>
+<td style="text-align:right;"> <code>~25 cycles</code> </td>
+<td style="text-align:right;"> <code>~20x</code> </td>
+</tr>
+<tr>
+<td> <code>utf8_mbstowcs</code> (200-byte ASCII path) </td>
+<td style="text-align:right;"> <code>~1000 cycles</code> </td>
+<td style="text-align:right;"> <code>~40 cycles</code> </td>
+<td style="text-align:right;"> <code>~25x</code> </td>
+</tr>
+</tbody>
+</table>
+
+
+<p>The architectural point is the same as the TEB carries: once the remaining hot
+path is dominated by wrapper work on an already-local operation, a narrow
+platform-specific implementation can be the right trade.</p>
+
+<hr />
+
+<h2 id="8-gui-and-flush-path-trims">8. GUI and flush-path trims</h2>
+
+<p>Two GUI-side optimizations remain part of the current baseline:</p>
 
 <table>
 <thead>
@@ -660,12 +898,12 @@ unchanged; the hot implementation is just cheaper.</p>
 
 <hr />
 
-<h2 id="8-current-measured-effect">8. Current measured effect</h2>
+<h2 id="9-current-measured-effect">9. Current measured effect</h2>
 
 <p>Taken together, the newest hot-path carries changed three important things:</p>
 
 <ul>
-<li>repeat answers now stay local more often because the relevant state is
+<li>repeat answers stay local more often because the relevant state is
 already published or cached</li>
 <li>thread-local Wine state is mostly read directly from the TEB instead of
 repeatedly crossing through libc TLS helpers</li>
@@ -674,6 +912,10 @@ across unrelated handles</li>
 <li>ntsync hot allocation classes and waits have cache-aware storage on both the
 userspace and kernel sides</li>
 <li>older dormant helper calls are gone from the steady-state wait path</li>
+<li>common current-thread, current-process, PEB, and tick-count helpers collapse
+to direct TEB or <code>KUSER_SHARED_DATA</code> reads on Linux x86_64</li>
+<li>ASCII-dominant name and locale loops vectorize whole windows on x86_64 AVX2
+while keeping the scalar Unicode edge handling intact</li>
 </ul>
 
 
@@ -683,7 +925,7 @@ largely local.</p>
 
 <hr />
 
-<h2 id="9-related-docs">9. Related docs</h2>
+<h2 id="10-related-docs">10. Related docs</h2>
 
 <ul>
 <li><a href="architecture.gen.html">Architecture Overview</a></li>

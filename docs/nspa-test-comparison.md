@@ -6,7 +6,7 @@ RT = `NSPA_RT_PRIO=80 NSPA_RT_POLICY=FF WINEPRELOADREMAPVDSO=force`
 This doc tracks Wine-NSPA test-suite evolution from v3 through v8. The
 current published full-suite snapshot remains v8 / 2026-04-30
 (1003-1011 kernel stack, 24 PASS / 0 FAIL / 0 TIMEOUT PE matrix,
-`dispatcher-burst` added). The shipped 2026-05-02 through 2026-05-09
+`dispatcher-burst` added). The 2026-05-02 through 2026-05-09
 follow-ons below are validated by targeted harnesses and smoke runs
 rather than a new v9 full-suite publish. Earlier version sections are
 retained below as historical snapshots.
@@ -17,15 +17,15 @@ retained below as historical snapshots.
 | v4 -> v5 | 2026-04-15 | msvcrt SIMD + SRW spin + pi_cond requeue-PI |
 | v5 -> v6 | 2026-04-16/17 | (incremental tuning, stable matrix) |
 | **v6 -> v7** | **2026-04-28** | **Native ntsync stress suite added; ~370M ops zero KASAN; PE matrix 22/22 stable** |
-| **v7 -> v8** | **2026-04-30** | **1011 / TRY_RECV2 shipped, `dispatcher-burst` added, Layer 1 native suite 3 PASS / 0 FAIL, Layer 2 PE matrix 24 PASS / 0 FAIL / 0 TIMEOUT** |
+| **v7 -> v8** | **2026-04-30** | **1011 / TRY_RECV2 enabled, `dispatcher-burst` added, Layer 1 native suite 3 PASS / 0 FAIL, Layer 2 PE matrix 24 PASS / 0 FAIL / 0 TIMEOUT** |
 
 ---
 
-## Post-v8 shipped follow-ons (2026-05-02 through 2026-05-09) -- targeted validators, not a new matrix version
+## Post-v8 follow-ons (2026-05-02 through 2026-05-09) -- targeted validators, not a new matrix version
 
 ### Why this is not labeled v9
 
-The public project has shipped meaningful new client-side work since v8:
+The public project added meaningful new client-side work after v8:
 spawn-main + `ntdll_sched`, sched-hosted timer migrations, anonymous
 local events default-on, socket `RECVMSG` / `SENDMSG` default-on, wider
 local-file coverage, default-on local sections, thread/process shared-state
@@ -40,8 +40,8 @@ So the current matrix version remains v8.
 | Area | Validation surface | Published result |
 |------|--------------------|------------------|
 | client scheduler + RT timer migrations | `run-rt-probe-validation.sh` | `10/10 PASS`; Ableton boot / library / project / playback PASS; net `-1` helper thread per process |
-| anonymous local events default-on | Ableton playback smoke vs earlier shipped event baseline | system CPU `40-57%` -> `~35%` during playback (`~15-20%` reduction); thread count and wineserver CPU unchanged |
-| socket `RECVMSG` / `SENDMSG` default-on | `socket-io` deferred path + Ableton smoke | throughput `+6.5%`; p99 latency `-6.8%`; `0/2000` failures; Ableton clean at `63` threads with zero new errors vs earlier shipped socket baseline |
+| anonymous local events default-on | Ableton playback smoke vs earlier event baseline | system CPU `40-57%` -> `~35%` during playback (`~15-20%` reduction); thread count and wineserver CPU unchanged |
+| socket `RECVMSG` / `SENDMSG` default-on | `socket-io` deferred path + Ableton smoke | throughput `+6.5%`; p99 latency `-6.8%`; `0/2000` failures; Ableton clean at `63` threads with zero new errors vs earlier socket baseline |
 | local-file widening | workload comparison | `create_file` handler count `7,845` -> `5,658`; handler time `137 ms` -> `50 ms` |
 | local sections default-on | workload comparison | `nspa_create_mapping_from_unix_fd` count `2,664` -> `~800`; same-process map-after-file-close shape clean |
 | thread / process shared-state readers | targeted A/B harnesses | 7 thread classes and 6 process classes clean; `ThreadBasicInformation` intentionally remains on RPC |
@@ -50,18 +50,18 @@ So the current matrix version remains v8.
 | `get_message` empty-poll cache | Ableton 60s targeted capture | `get_message` calls `3,880` -> `866`; handler time `16.5 ms` -> `2.2 ms`; total handler time `46.8 ms` -> `36.9 ms` |
 | x86_64 TEB hot-state carries | 30 s playback counters | `NtCurrentTeb` calls `9,961,441 -> 566`; cumulative CPU cycles after the two TEB carries `257.8B -> 212.4B` |
 | `inproc_sync` cacheline isolation | 30 s playback counters | false-sharing removed from hot refcount traffic while cached-handle capacity stays `524288` |
-| current ntsync overlay | native channel / aggregate / stress reruns | receive snapshot fix, dedicated slab caches, the wait-queue cache, and the lockless `SEND_PI` scan validated on the current shipped overlay |
+| current ntsync overlay | native channel / aggregate / stress reruns | receive snapshot fix, dedicated slab caches, the wait-queue cache, and the lockless `SEND_PI` scan validated on the current overlay |
 | RT-keyed memory follow-ons | targeted shell harnesses | `test-mlock-ws.sh 4/4 PASS`; `test-huge-auto.sh 3/3 PASS`; `test-heap-hugepage.sh 3/3 PASS`; `test-huge-decommit.sh` clean; `test-huge-rwx.sh` clean |
 
 ### Reading this with the rest of the docs
 
 Use this page for the current published matrix boundary. Use
-`current-state.gen.html` for the exact shipped defaults and targeted
+`current-state.gen.html` for the exact defaults and targeted
 2026-05-02 through 2026-05-09 validation numbers that landed after v8.
 
 ---
 
-## v8 / 2026-04-30 -- 1011 shipped, dispatcher coverage added, 24/24 PE matrix
+## v8 / 2026-04-30 -- 1011 enabled, dispatcher coverage added, 24/24 PE matrix
 
 ### Headline
 
@@ -80,7 +80,7 @@ A cleaner current two-layer surface:
 ### Layer 1 results
 
 Kernel side under test: the then-current burst-drain-capable ntsync
-overlay (`TRY_RECV2` present, aggregate-wait already shipped).
+overlay (`TRY_RECV2` present, aggregate-wait already enabled).
 
 | Test | Result |
 |------|--------|
@@ -131,7 +131,7 @@ removes repeated `AGG_WAIT` round-trips.
 
 ### Comparison to 2026-04-26 (single-sample, noisy)
 
-| Metric | 2026-04-26 | 2026-04-30 (now) | Δ |
+| Metric | 2026-04-26 | 2026-04-30 | Δ |
 |---|---|---|---|
 | rapidmutex RT max_wait | 44us | 38us | −14% |
 | rapidmutex RT elapsed | 1950ms | 1924ms | −1.3% |
@@ -145,9 +145,9 @@ harness was added in v8.
 
 | Area | Change | Impact |
 |------|--------|--------|
-| Kernel | 1011 `NTSYNC_IOC_CHANNEL_TRY_RECV2` shipped | non-blocking channel dequeue for post-dispatch burst drain |
-| Userspace | burst-drain shipped on the normal path | drains multiple entries per `AGG_WAIT` under burst load |
-| Userspace | dispatcher-owned async `CreateFile` shipped on the normal path | removes the `open()` lock-drop CS from the audio xrun path |
+| Kernel | 1011 `NTSYNC_IOC_CHANNEL_TRY_RECV2` | non-blocking channel dequeue for post-dispatch burst drain |
+| Userspace | burst-drain on the normal path | drains multiple entries per `AGG_WAIT` under burst load |
+| Userspace | dispatcher-owned async `CreateFile` on the normal path | removes the `open()` lock-drop CS from the audio xrun path |
 | Userspace | `NSPA_FLUSH_THROTTLE_MS=8` default-on | recovers ~5.4 percentage points of MainThread CPU under busy Ableton |
 | Test surface | `dispatcher-burst` added to Layer 2 | first PE-side gamma / dispatcher coverage |
 
@@ -218,7 +218,7 @@ io_uring subsystems healthy.
 |------|--------|--------|
 | Test surface | Layer 1 native ntsync stress suite added (6 tests + runner) | Catches kernel bugs Win32 layer can't reach |
 | ntsync module | Bug 1 (test cleanup), Bug 2 (channel exclusive recv: 1007-style narrow patch), Bug 3 (EVENT_SET_PI deferred boost: 1008), Bug 4 (channel_entry refcount UAF: 1009) all fixed | Production kernel solid: ~370M ops zero KASAN |
-| Wine ring code | Audit §4.1 retry-loop hardening shipped | 7 sites + `NSPA_SHM_RETRY_GUARD`; subtests A+B PASS |
+| Wine ring code | Audit §4.1 retry-loop hardening | 7 sites + `NSPA_SHM_RETRY_GUARD`; subtests A+B PASS |
 | Runner | `wine/nspa/tests/run-rt-suite.sh` orchestrates Layer 1 + Layer 2 | Single command for full surface |
 | io_uring socket bypass | landed on the deferred socket path | PE socket-io test still PASSed against that build |
 
@@ -228,7 +228,7 @@ PE matrix throughput / latency numbers are within run-to-run variance
 of v5/v6. The stable result is the 22/22 PASS itself plus the absence
 of regressions across the audit cycle. Verbose per-test deltas were
 useful in v3 -> v4 -> v5 when we were chasing PI v2 fixes; they're
-noise now that the PI surface is stable.
+noise at this point, because the PI surface is stable.
 
 ---
 
@@ -248,7 +248,7 @@ patches, module loaded). Wine-NSPA 11.6, `nspa_rt_test.exe` v4 via
 
 ### io_uring Socket I/O Bypass [NEW in v4]
 
-This was the first shipped io_uring socket bypass pass in the public reports.
+This was the first io_uring socket bypass pass in the public reports.
 
 | # | What | Impact |
 |---|------|--------|
@@ -267,7 +267,7 @@ This was the first shipped io_uring socket bypass pass in the public reports.
 | signal-recursion | PASS | PASS | flat | No sync primitives |
 | large-pages | PASS | PASS | identical | Deterministic |
 | ntsync-d4 | 8/8 | 8/8 | PI avg 238->388ms (CFS variance) | chain + prio correct |
-| ntsync-d8 | 8/8 | 8/8 | **PI avg 479->419ms (fixed)** | Was reversed in v3, now correct direction |
+| ntsync-d8 | 8/8 | 8/8 | **PI avg 479->419ms (fixed)** | Was reversed in v3, corrected by this point |
 | ntsync-d12 | 8/8 | 8/8 | chain scales to 12 | prio wakeup correct |
 | socket-io A | PASS | PASS | **new: avg 95us** | immediate recv |
 | socket-io B | PASS | PASS | **new: avg 113us, 2000 async** | overlapped recv via io_uring |
@@ -394,7 +394,7 @@ Priority wakeup order: correct in all configs across all versions.
   not specific microsecond or ops/sec deltas.
 - The 2026-04-26 -> 2026-04-28 audit cycle paid bills against the
   ntsync surface and the wine ring-retry loop. Both surfaces are
-  stable as of v7. Later shipped follow-ons moved additional message-pump,
+  stable as of v7. Later follow-ons moved additional message-pump,
   shared-state query, and local-memory traffic out of wineserver; those newer
   targeted results live on [current-state](current-state.gen.html) rather than
   being folded back into this historical v8 snapshot.

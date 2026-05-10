@@ -1,13 +1,13 @@
 # Wine-NSPA -- Memory, Sections, Large Pages, and Working-Set Support
 
-This page documents Wine-NSPA's shipped memory surface: local sections,
-large-page mappings, RT-keyed page locking and hugetlb, working-set support,
-and shared-memory backing choices.
+This page documents Wine-NSPA's memory surface: local sections, large-page
+mappings, RT-keyed page locking and hugetlb, working-set support, and
+shared-memory backing choices.
 
 ## Table of Contents
 
 1. [Overview](#1-overview)
-2. [What is shipped](#2-what-is-shipped)
+2. [Coverage](#2-coverage)
 3. [Client-side sections](#3-client-side-sections)
 4. [Large-page allocation and mapping](#4-large-page-allocation-and-mapping)
 5. [Working-set reporting and quota semantics](#5-working-set-reporting-and-quota-semantics)
@@ -20,10 +20,10 @@ and shared-memory backing choices.
 
 ## 1. Overview
 
-Wine-NSPA has a real memory subsystem story now. It is not just large-page
-syscall support and it is not just `memfd` everywhere.
+Wine-NSPA's memory work is not just large-page syscall support and it is not
+just `memfd` everywhere.
 
-Five distinct pieces are shipped:
+Five distinct pieces are active:
 
 - client-side file-backed sections built on top of local-file handles
 - large-page support for anonymous and section-backed mappings
@@ -43,9 +43,9 @@ mechanism.
 
 ---
 
-## 2. What is shipped
+## 2. Coverage
 
-| Surface | Shipped behavior |
+| Surface | Current behavior |
 |---|---|
 | `GetLargePageMinimum()` | Returns the real smallest huge-page size published into `KUSER_SHARED_DATA`, or `0` when the host has no usable hugepage pool. |
 | `VirtualAlloc(MEM_LARGE_PAGES)` | Accepted and mapped through the unix VM path, with large-page alignment and large-page view tagging preserved for reporting. |
@@ -54,9 +54,9 @@ mechanism.
 | RT-keyed `mlockall()` | When `NSPA_RT_PRIO` is set, process startup issues `mlockall(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT)` so touched pages stay locked without pretending Wine has a full working-set manager. |
 | RT-keyed automatic hugetlb promotion | When `NSPA_RT_PRIO` is set, eligible anonymous `RESERVE|COMMIT` allocations auto-promote onto the existing large-page mapping path, including `PAGE_EXECUTE_READWRITE` JIT-style arenas. |
 | RT-keyed heap arena hugetlb backing | When `NSPA_RT_PRIO` is set, eligible growable heap arenas round up and full-commit onto huge pages, eliminating most heap-driven `mmap` / `mprotect` / page-fault traffic from the hot path. |
-| hugetlb pool pressure handling | auto-promotion now stops when free hugepages drop below a 10% watermark, and auto-promoted allocations fall back to regular pages instead of failing when the pool is exhausted |
+| hugetlb pool pressure handling | auto-promotion stops when free hugepages drop below a 10% watermark, and auto-promoted allocations fall back to regular pages instead of failing when the pool is exhausted |
 | partial-op demote | sub-hugepage `MEM_DECOMMIT`, partial `MEM_RELEASE`, or partial `VirtualProtect` on an auto-promoted view first demote the view back to regular pages so NT semantics stay correct |
-| `MEM_RESET` under `mlockall()` | `MEM_RESET` now uses `munlock + MADV_DONTNEED`, so pages can really leave RAM before their next touch |
+| `MEM_RESET` under `mlockall()` | `MEM_RESET` uses `munlock + MADV_DONTNEED`, so pages can really leave RAM before their next touch |
 | local file-backed sections | Eligible unnamed file-backed sections on local-file handles can stay client-side for create / map / unmap / query / close, with same-process duplicate promoted only when the call crosses a real server-handle boundary. |
 | `QueryWorkingSetEx()` | Current-process reporting is live, including `LargePage` flag reporting. Preferred path is `PAGEMAP_SCAN`; fallback is `/proc/self/pagemap`. |
 | `Get/SetProcessWorkingSetSize(Ex)` | Working-set quota values are accepted, stored, and returned through `ProcessQuotaLimits`. This is bookkeeping, not a working-set trimmer. |
@@ -70,7 +70,7 @@ mechanism.
 The new client-side section path sits between local-file handles and the
 traditional wineserver mapping-object path.
 
-Eligible unnamed file-backed sections on local-file handles can now:
+Eligible unnamed file-backed sections on local-file handles can:
 
 - allocate a client-private section handle
 - duplicate the backing unix fd at section creation time
@@ -94,7 +94,7 @@ For the full lifecycle and ownership rules, see
 
 ## 4. Large-page allocation and mapping
 
-Large-page support now has three shipped allocation shapes: explicit Windows
+Large-page support has three allocation shapes: explicit Windows
 large-page APIs, RT-keyed anonymous-memory promotion, and heap-arena backing
 that rides on that same anonymous path. Section-backed mappings remain the one
 large-page shape that still crosses wineserver once for backing creation.
@@ -179,7 +179,7 @@ from allocation to reporting.
 
 ### 4.1 Automatic hugetlb promotion safety rules
 
-Transparent promotion is shipped as an optimization, not as a new Windows API.
+Transparent promotion is an optimization, not a new Windows API.
 That means the fast path also needs a clear "stay honest" rule set:
 
 - if the free hugetlb pool drops below 10%, stop auto-promoting and leave the
@@ -259,7 +259,7 @@ Working-set support is deliberately split into two levels:
 - **quota bookkeeping**: `GetProcessWorkingSetSize(Ex)` and
   `SetProcessWorkingSetSize(Ex)` store and return Windows-visible quota values
 
-What is **not** shipped is a Linux-side working-set trimmer that enforces those
+What is **not** part of this surface is a Linux-side working-set trimmer that enforces those
 quota values by reclaiming or emptying the process working set.
 
 <div class="diagram-container">
@@ -393,7 +393,7 @@ performance goals are different.
 
 ## 7. Validation and observed effect
 
-The public `large-pages` PE harness now covers more than one call shape:
+The public `large-pages` PE harness covers more than one call shape:
 
 - `VirtualAlloc(MEM_LARGE_PAGES)`
 - `QueryWorkingSetEx()` `LargePage` reporting on the resulting view
@@ -401,9 +401,9 @@ The public `large-pages` PE harness now covers more than one call shape:
 - privilege-negative `SEC_LARGE_PAGES` behavior
 - 1 GiB huge-page request shape when the host is configured for it
 
-That means the public test surface now validates both the allocation path and
+That means the public test surface validates both the allocation path and
 the Windows-visible reporting path. Local sections are currently validated
-through the shipped workload path rather than a dedicated PE harness:
+through the workload path rather than a dedicated PE harness:
 `CreateFile -> CreateFileMapping -> CloseHandle(file) -> MapViewOfFile` is
 clean on the local path and materially reduces mapping RPC traffic.
 
@@ -415,12 +415,12 @@ targeted shell harnesses:
 - `mlockall()` under `NSPA_RT_PRIO` cut perf page faults from `561/s` to
   `451/s`, cut bpf page faults from `869/s` to `629/s`, and tightened max
   futex wait from `94us` to `49us`, with `VmLck` around `300848kB`.
-- automatic hugetlb promotion stayed conservative and is now keyed only
+- automatic hugetlb promotion stayed conservative and is keyed only
   off `NSPA_RT_PRIO`; the cleanup pass ended with `test-huge-auto.sh` `3/3 PASS`.
-- the demote / fallback / reclaim follow-ons are now also on the shipped path:
+- the demote / fallback / reclaim follow-ons are also on the active path:
   `test-huge-decommit.sh` validates zero-on-recommit after partial decommit,
   `test-huge-rwx.sh` validates RWX JIT-style promotion, and pool-pressure cases
-  now fall back instead of failing an ordinary allocation
+  fall back instead of failing an ordinary allocation
 - heap arena hugetlb backing increased hugepage regions from `3` or `6` to
   `104`, reduced dTLB miss / insn to `0.071%`, reduced `mmap` rate from
   `33-61/s` to `0.13/s`, reduced `mprotect` rate from `56-90/s` to `0.03/s`,

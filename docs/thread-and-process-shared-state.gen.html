@@ -108,15 +108,15 @@
 <div class="page-nav"><a href="index.html">Docs Home</a></div>
 <h1 id="wine-nspa--thread-and-process-shared-state-bypass">Wine-NSPA &ndash; Thread and Process Shared-State Bypass</h1>
 
-<p>This page documents the shipped shared-state bypass for read-mostly thread and
-process queries, plus the zero-time process and thread wait fast paths built on
-the same published snapshots.</p>
+<p>This page documents the shared-state bypass for read-mostly thread and process
+queries, plus the zero-time process and thread wait fast paths built on the
+same published snapshots.</p>
 
 <h2 id="table-of-contents">Table of Contents</h2>
 
 <ol>
 <li><a href="#1-overview">Overview</a></li>
-<li><a href="#2-what-is-shipped">What is shipped</a></li>
+<li><a href="#2-coverage">Coverage</a></li>
 <li><a href="#3-architecture">Architecture</a></li>
 <li><a href="#4-thread-query-coverage">Thread query coverage</a></li>
 <li><a href="#5-process-query-coverage-and-zero-time-waits">Process query coverage and zero-time waits</a></li>
@@ -130,25 +130,25 @@ the same published snapshots.</p>
 <h2 id="1-overview">1. Overview</h2>
 
 <p>Wine already had an upstream shared-object publication mechanism for queue,
-window, class, input, and desktop state. Wine-NSPA now extends that same
+window, class, input, and desktop state. Wine-NSPA extends that same
 seqlock-published shape to thread and process state, so a set of
 <code>NtQueryInformationThread()</code> and <code>NtQueryInformationProcess()</code> classes can be
 answered from shared memory instead of a wineserver RPC.</p>
 
-<p>The same published state now also powers zero-time <code>WaitForSingleObject()</code>
+<p>The same published state also powers zero-time <code>WaitForSingleObject()</code>
 polls for process and thread handles. For those single-handle, non-alertable,
 timeout-0 waits, ntdll can answer from the shared snapshot instead of paying an
 ntsync wait ioctl.</p>
 
 <hr />
 
-<h2 id="2-what-is-shipped">2. What is shipped</h2>
+<h2 id="2-coverage">2. Coverage</h2>
 
 <table>
 <thead>
 <tr>
 <th> Surface </th>
-<th> Shipped behavior </th>
+<th> Current behavior </th>
 </tr>
 </thead>
 <tbody>
@@ -184,7 +184,7 @@ ntsync wait ioctl.</p>
 </table>
 
 
-<p>The shipped query coverage is:</p>
+<p>The current query coverage is:</p>
 
 <ul>
 <li>Thread: <code>ThreadAffinityMask</code>, <code>ThreadQuerySetWin32StartAddress</code>,
@@ -291,7 +291,7 @@ semantics.</p>
 
 <h2 id="4-thread-query-coverage">4. Thread query coverage</h2>
 
-<p>The thread snapshot carries the fields needed by the shipped read-mostly thread
+<p>The thread snapshot carries the fields needed by the current read-mostly thread
 classes:</p>
 
 <ul>
@@ -320,7 +320,7 @@ classes:</p>
   </style>
 
   <rect x="0" y="0" width="960" height="330" class="th-bg" rx="6"/>
-  <text x="480" y="26" text-anchor="middle" class="th-title">Thread query coverage: shipped snapshot classes vs. retained RPC classes</text>
+  <text x="480" y="26" text-anchor="middle" class="th-title">Thread query coverage: snapshot classes vs. retained RPC classes</text>
 
   <rect x="40" y="70" width="420" height="210" class="th-green" rx="6"/>
   <text x="250" y="96" text-anchor="middle" class="th-tag-g">served from `thread_shm`</text>
@@ -352,13 +352,13 @@ queries and leave the odd or transformed replies on the authoritative path.</p>
 
 <h2 id="5-process-query-coverage-and-zero-time-waits">5. Process query coverage and zero-time waits</h2>
 
-<p>The process snapshot carries enough state to answer the six shipped
+<p>The process snapshot carries enough state to answer the six current
 <code>NtQueryInformationProcess()</code> classes and to answer one additional hot liveness
 question: &ldquo;has this process already exited?&rdquo;</p>
 
 <p>That second use matters because Wine&rsquo;s in-process sync path already resolves a
 process handle to an ntsync-backed wait object. For <code>WaitForSingleObject(proc,
-0)</code>, ntdll can now short-circuit before the wait ioctl:</p>
+0)</code>, ntdll can short-circuit before the wait ioctl:</p>
 
 <ul>
 <li>if <code>process_shm.exit_code</code> still says the process is alive, return
@@ -368,7 +368,7 @@ process handle to an ntsync-backed wait object. For <code>WaitForSingleObject(pr
 
 
 <p>This is both faster and slightly more correct for Wine&rsquo;s own layering, because
-it removes the small gap between the already-shipped process info snapshot and
+it removes the small gap between the process info snapshot and
 the separate wait path.</p>
 
 <div class="diagram-container">
@@ -430,13 +430,13 @@ the separate wait path.</p>
 </ul>
 
 
-<p>The fixed-shape, read-mostly part of that surface is now local. Process image
+<p>The fixed-shape, read-mostly part of that surface is local. Process image
 name queries, debug-object queries, variable-length payloads, and other server
 authority cases still use the original RPC path.</p>
 
 <h3 id="51-zero-time-thread-wait">5.1 Zero-time thread wait</h3>
 
-<p>Thread handles now get the same zero-time short-circuit shape, but the
+<p>Thread handles get the same zero-time short-circuit shape, but the
 predicate is different. A thread exit code starts life at <code>0</code>, which is a
 valid user exit code, so the thread fast path cannot use <code>exit_code != 0</code> as a
 liveness test. It instead reads <code>THREAD_SHM_FLAG_TERMINATED</code> from the

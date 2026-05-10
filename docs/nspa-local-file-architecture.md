@@ -35,7 +35,7 @@ traffic on top of that. For an app like Ableton Live 12 Lite that does roughly
 files, theme resources, Live Library indexes -- those round-trips dominate
 startup profile and show up as real latency on the main thread.
 
-The shipped path is broader than the earlier public draft. It now covers:
+The current path is broader than the earlier public draft. It covers:
 
 - regular-file opens with read-class and common write-class access
 - explicit directory opens on the local dir-mint path
@@ -48,7 +48,7 @@ per-process table that owns the unix fd, and exposes the unix fd to every Wine
 I/O path via a thin fast-path check inside `server_get_unix_fd`. When a later
 API genuinely needs server-owned file state, the bypass lazily promotes the
 local handle to a server-recognized handle on demand. Eligible file-backed
-sections are now the main exception: they can stay local too, and are covered
+sections are the main exception: they can stay local too, and are covered
 in detail on [Local Section Bypass](local-section-architecture.gen.html).
 
 The feature is invisible to Win32 applications: same `CreateFile` semantics,
@@ -86,7 +86,7 @@ Other candidate workloads with similar profiles: plugin scanners (hundreds of VS
 - **Lazy promotion.** On first API that genuinely needs a server-visible file handle, the bypass does a single `nspa_create_file_from_unix_fd` RPC that hands the unix fd to the server and gets back a real server handle. Subsequent calls on the same local handle reuse the cached promoted handle. Eligible file-backed sections are no longer part of that automatic promote set; they can stay local on their own section table.
 - **RT-safe fast path.** Once the table + inode shmem are warm, the bypass open path is `stat()` + linked-list-walk-under-lock + `open()` + list insert -- no syscall other than the two that are inherent to the work. No lazy-init remains on the hot path.
 - **Transparent fallback.** Every disqualifier returns `STATUS_NOT_SUPPORTED` and the caller falls through to the normal `server_create_file` path. Anything the bypass doesn't handle is handled by vanilla Wine unchanged.
-- **Tight correctness envelope.** The shipped envelope is broader than the first public draft but still bounded: local regular-file and explicit-directory opens, synchronous opens, bounded create / overwrite dispositions, common metadata updates, bounded flush / EOF changes, and local file-backed sections. Anything outside that envelope still goes to the server.
+- **Tight correctness envelope.** The current envelope is broader than the first public draft but still bounded: local regular-file and explicit-directory opens, synchronous opens, bounded create / overwrite dispositions, common metadata updates, bounded flush / EOF changes, and local file-backed sections. Anything outside that envelope still goes to the server.
 
 ---
 
@@ -354,7 +354,7 @@ HANDLE nspa_promote_if_local( HANDLE h );
 // Returns `h` unchanged if promotion failed (caller falls back to server path).
 ```
 
-This is the shipped lazy-promotion path. The alternative -- eagerly promoting at mint time -- was rejected because most file opens in Ableton's workload never touch a server-requiring API; they read, maybe query a position, and close. Eager promotion would cost an RPC per open; lazy promotion costs an RPC per *distinct file that escapes the read-only happy path*.
+This is the lazy-promotion path. The alternative -- eagerly promoting at mint time -- was rejected because most file opens in Ableton's workload never touch a server-requiring API; they read, maybe query a position, and close. Eager promotion would cost an RPC per open; lazy promotion costs an RPC per *distinct file that escapes the read-only happy path*.
 
 <div class="diagram-container">
 <svg width="100%" viewBox="0 0 940 430" xmlns="http://www.w3.org/2000/svg">
@@ -399,7 +399,7 @@ This is the shipped lazy-promotion path. The alternative -- eagerly promoting at
   <text x="195" y="320" text-anchor="middle" class="lp-small">no server-visible object required</text>
 
   <rect x="345" y="208" width="250" height="140" class="lp-slow"/>
-  <text x="470" y="234" text-anchor="middle" class="lp-red">promote now</text>
+  <text x="470" y="234" text-anchor="middle" class="lp-red">promote</text>
   <text x="470" y="260" text-anchor="middle" class="lp-label">server-only follow-on / same-process duplicate</text>
   <text x="470" y="278" text-anchor="middle" class="lp-small">NtQueryObject / server-side info classes</text>
   <text x="470" y="302" text-anchor="middle" class="lp-label">CreateProcess inheritance</text>
@@ -428,14 +428,14 @@ The promote RPC forwards `ObjectAttributes->Attributes` (typically `OBJ_CASE_INS
 
 ### 7.2 2026-04-30 sync-parity fixes
 
-Three small follow-ups closed correctness gaps in the shipped local-file
+Three small follow-ons closed correctness gaps in the local-file
 path without changing the architecture:
 
-- directory-bypass promotion now populates `fd->nt_name`, which fixed the `start.exe` NULL-Name crash
-- directory bypass now rejects `FILE_NON_DIRECTORY_FILE` instead of accepting a shape the server would reject
-- the shared-inode `check_sharing` path now arbitrates `FILE_MAPPING_WRITE`, matching `server/fd.c::check_sharing`
+- directory-bypass promotion populates `fd->nt_name`, which fixed the `start.exe` NULL-Name crash
+- directory bypass rejects `FILE_NON_DIRECTORY_FILE` instead of accepting a shape the server would reject
+- the shared-inode `check_sharing` path arbitrates `FILE_MAPPING_WRITE`, matching `server/fd.c::check_sharing`
 
-These are exactly the right kind of follow-up for a shipped stub:
+These are exactly the right kind of follow-on for this stub:
 preserve the fast path, preserve the fallback discipline, and close any
 remaining sync-parity gaps at the boundary.
 
@@ -524,7 +524,7 @@ remaining sync-parity gaps at the boundary.
 
 ## 9. Eligibility Criteria
 
-The file bypass now covers a bounded but materially broader subset than the
+The file bypass covers a bounded but materially broader subset than the
 earlier public draft.
 
 Accepted shapes today:
@@ -663,10 +663,10 @@ NSPA_TRACE_ENABLED_FN(LF_TRACE_SRV)
 
 ## 13. Results & Profiler Numbers
 
-### 13.1 Later shipped follow-ons
+### 13.1 Later follow-ons
 
 The original public numbers on this page captured the first local-file bring-up.
-The shipped feature set is broader now, and the later follow-ons moved more
+The current feature set is broader, and the later follow-ons moved more
 traffic off wineserver:
 
 | Follow-on | Observed effect |

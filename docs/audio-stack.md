@@ -28,7 +28,7 @@ The Wine-NSPA audio stack provides deterministic low-latency WASAPI and ASIO tra
 The audio stack consists of three components that work together:
 
 1. **winejack.drv** is a Wine audio driver that exposes a JACK backend to Wine's WASAPI surface and to WinMM MIDI. It replaces the role that `winealsa.drv` and `winepulse.drv` play in upstream Wine. One driver, two transports: WASAPI audio over JACK audio ports, and WinMM MIDI over JACK MIDI ports.
-2. **nspaASIO** is a vendored ASIO driver shipped as `dlls/nspaasio`. It implements the COM `IASIO` interface that DAWs probe for, and routes the ASIO callback model into a path that ends at `winejack.drv` and JACK. It does not ship its own JACK client; it delegates to winejack so that ASIO and WASAPI applications share a single transport.
+2. **nspaASIO** is a vendored ASIO driver in `dlls/nspaasio`. It implements the COM `IASIO` interface that DAWs probe for, and routes the ASIO callback model into a path that ends at `winejack.drv` and JACK. It does not own its own JACK client; it delegates to winejack so that ASIO and WASAPI applications share a single transport.
 3. **The direct callback path** closes the loop on latency. Instead of bouncing audio data through an intermediate ring buffer, it dispatches the ASIO `bufferSwitch` callback directly inside the JACK process callback, with a small futex-based handshake to wake the application's process thread. The data written by the host comes out the same JACK period it went in.
 
 This document describes how those pieces fit together, what each one is responsible for, and which design decisions were forced by the constraint of running on a PREEMPT_RT kernel under JACK.
@@ -468,7 +468,7 @@ The two ringbuffers are the synchronisation surface between the WinMM threads an
 
 ### Bugs and fixes (the MIDI audit)
 
-A six-issue audit of `jackmidi.c` produced the following fixes. Each shipped as a separate commit.
+A six-issue audit of `jackmidi.c` produced the following fixes. Each landed as a separate commit.
 
 **Input timestamp jitter.** The original code stamped MIDI input events with `get_time_msec()` *at dequeue time* -- that is, when the WinMM thread drained the ringbuffer, not when JACK saw the event. JACK provides a per-event frame offset (`ev.time`) within the period, but the dequeue-time approach ignored it entirely. The result was that multiple events in the same period got the same timestamp and the next-period boundary added up to one full JACK period of jitter on every event. For DAWs that record MIDI -- a keyboard playing into a piano roll -- that jitter is audible as smeared timing.
 
@@ -484,7 +484,7 @@ The fix is to compute the timestamp at *enqueue* time, in the JACK callback, as 
 
 **`DRVM_EXIT` was a no-op.** The driver's exit handler did nothing, so when an application exited without properly closing its MIDI ports, the JACK MIDI ports leaked. The fix walks the destination and source arrays and closes anything that's still open.
 
-The MIDI audit deliberately kept its commits separate from the audio-side work in `jack.c`. MIDI bugs and audio bugs have different reproduction paths, different test surfaces, and different blast radii, and shipping them in one commit makes bisection harder when one of the changes regresses.
+The MIDI audit deliberately kept its commits separate from the audio-side work in `jack.c`. MIDI bugs and audio bugs have different reproduction paths, different test surfaces, and different blast radii, and landing them in one commit makes bisection harder when one of the changes regresses.
 
 ### MIDI process callback shape
 
@@ -807,7 +807,7 @@ This is intentional and follows JACK's graph model. Wineasio has the same behavi
 
 ## 11. Deferred work
 
-These are real gaps that aren't shipped yet, in priority order.
+These are real gaps that are not part of the current tree yet, in priority order.
 
 **Loopback capture.** `get_loopback_capture_device` is stubbed. JACK can do loopback via port routing, but the Wine driver doesn't expose it as a WASAPI loopback endpoint. OBS, Discord, Audacity loopback recording, and similar use cases need this. Tracking but not yet on the audio stack roadmap.
 
@@ -869,4 +869,4 @@ The kernel side -- the PI mutex behavior, the futex round-trip latency under PRE
 
 - `cs-pi.gen.html` -- the PI mutex used by `winejack.drv`'s process-callback `trylock`
 - `architecture.gen.html` -- system-level overview
-- `current-state.gen.html` -- shipping status across Wine-NSPA components
+- `current-state.gen.html` -- current status across Wine-NSPA components

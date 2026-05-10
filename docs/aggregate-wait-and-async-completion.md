@@ -1,7 +1,7 @@
 # Wine-NSPA -- Aggregate-Wait and Async Completion
 
-This page documents Wine-NSPA's shipped aggregate-wait kernel primitive
-and the dispatcher-owned same-thread async-completion path built on it.
+This page documents Wine-NSPA's aggregate-wait kernel primitive and the
+dispatcher-owned same-thread async-completion path built on it.
 
 ---
 
@@ -36,7 +36,7 @@ site. That proved the basic mechanism but broke the more important invariant: th
 that received the request was no longer the thread that completed and replied to it.
 
 The aggregate-wait kernel extension and the accompanying dispatcher restructure fix that.
-The dispatcher now owns all three parts of the async path:
+The dispatcher owns all three parts of the async path:
 
 1. receive request from the channel
 2. submit deferred work to its per-process `io_uring`
@@ -44,7 +44,7 @@ The dispatcher now owns all three parts of the async path:
 
 The same RT thread handles the full lifecycle.
 
-### What shipped
+### Coverage
 
 | Layer | Landed change | Why it matters |
 |---|---|---|
@@ -112,7 +112,7 @@ The rejected shape was:
 
   <text x="490" y="172" text-anchor="middle" class="y">ownership jump after SQE submit</text>
   <line x1="380" y1="221" x2="600" y2="221" class="line-y"/>
-  <text x="490" y="238" text-anchor="middle" class="s">completion timing now depends on the main-thread wake path</text>
+  <text x="490" y="238" text-anchor="middle" class="s">completion timing depends on the main-thread wake path</text>
 
   <line x1="730" y1="274" x2="730" y2="322" class="line-r"/>
   <rect x="170" y="322" width="640" height="72" class="note"/>
@@ -227,7 +227,7 @@ struct ntsync_aggregate_wait_args {
   the actual entry.
 - **Object-source PI remains visible.** The dispatcher blocked inside aggregate-wait
   must still be discoverable by the existing channel and event PI paths.
-- **Current userspace requires the full dispatcher wait surface.** The shipped
+- **Current userspace requires the full dispatcher wait surface.** The
   dispatcher assumes `AGGREGATE_WAIT`, `CHANNEL_RECV2`, and `CHANNEL_TRY_RECV2`.
   The older sticky fallback ladder was retired once that kernel surface became
   the project baseline.
@@ -262,7 +262,7 @@ Key properties:
 
 ### 4.2 Aggregate-wait dispatcher loop
 
-The dispatcher now waits on three sources:
+The dispatcher waits on three sources:
 
 1. **channel object**: request available
 2. **uring eventfd**: completion available
@@ -325,7 +325,7 @@ The dispatcher now waits on three sources:
 
 ### 4.3 Dispatcher behavior
 
-The loop is now:
+The loop is:
 
 1. build the aggregate source table from `{channel, uring eventfd if active, shutdown eventfd}`
 2. call `NTSYNC_IOC_AGGREGATE_WAIT`
@@ -349,7 +349,7 @@ The current dispatcher runtime assumes the full post-1011 wait surface:
 - `NTSYNC_IOC_CHANNEL_RECV2`
 - `NTSYNC_IOC_CHANNEL_TRY_RECV2`
 
-That requirement is now deliberate. The older sticky fallback ladder was
+That requirement is deliberate. The older sticky fallback ladder was
 useful while aggregate-wait and thread-token receive were landing, but it was
 retired once those ioctls became the project baseline. The current production
 loop is therefore simpler: one aggregate wait, one `RECV2`, zero or more
@@ -364,7 +364,7 @@ loop is therefore simpler: one aggregate wait, one `RECV2`, zero or more
 | Item | Value |
 |---|---|
 | Kernel side | Wine-NSPA ntsync overlay with aggregate-wait and burst drain support |
-| Wine userspace state | Dispatcher-owned ring and aggregate-wait loop are shipped; async `CreateFile` and burst drain both build on the same base |
+| Wine userspace state | Dispatcher-owned ring and aggregate-wait loop; async `CreateFile` and burst drain both build on the same base |
 | Current wait shape | `AGGREGATE_WAIT` over channel + uring eventfd + shutdown eventfd |
 | Current follow-ons on top of this base | dispatcher-owned async `CreateFile`; post-reply `TRY_RECV2` burst drain |
 
@@ -377,13 +377,13 @@ loop is therefore simpler: one aggregate wait, one `RECV2`, zero or more
 | 1k mixed-concurrency stress | PASS |
 | 30k stress + full native ntsync suite | PASS, dmesg clean |
 | PE matrix | 24 PASS / 0 FAIL / 0 TIMEOUT, including `dispatcher-burst` |
-| Ableton level 2/3 on the shipped path | PASS |
+| Ableton level 2/3 on the current path | PASS |
 | Aggregate-wait in normal production use | PASS |
 
 The follow-up kernel fixes matter here. The first 1010 cut exposed exactly
 the kind of PI edge that the dispatcher cannot tolerate: an aggregate-waiting dispatcher
 must still be visible to SEND_PI wake/boost logic and must not be woken before the new
-boost state is established. The current shipped overlay includes those corrections.
+boost state is established. The current overlay includes those corrections.
 
 ---
 
@@ -392,7 +392,7 @@ boost state is established. The current shipped overlay includes those correctio
 The public decomposition plan still has queued work in front of it, but the aggregate-wait
 story is no longer purely hypothetical.
 
-**Already shipped:**
+**Implemented:**
 
 - kernel aggregate-wait primitive
 - gamma dispatcher consumer

@@ -256,7 +256,7 @@ After Tier 2 fills the walker, the dispatch loop in `call_message_hooks` (lines 
 
 The walker is allocated on the dispatching thread's stack and the `nspa_hook_walker_current` pointer is `__thread` storage. Nested hook dispatches push/pop via the `prev` pointer field. Stack-local with a per-thread current-pointer is the right pattern: no allocation, no lock, no leak on early return -- the walker disappears with the stack frame.
 
-Tier 1 and Tier 2 are both part of the shipped path.
+Tier 1 and Tier 2 are both part of the normal path.
 
 ### When Tier 2 falls back
 
@@ -392,7 +392,7 @@ This mirrors vanilla Wine's existing semantics: there is always a window between
 
 ## 9. Validation history
 
-Tier 1 and Tier 2 were both shipped on 2026-04-25, with the diag-pile cleanup on 2026-04-26. The relevant commits and their effects:
+Tier 1 and Tier 2 both landed on 2026-04-25, with the diag-pile cleanup on 2026-04-26. The relevant implementation steps and their effects:
 
 | Date | Commit (logical) | Change |
 |------|------------------|--------|
@@ -401,7 +401,7 @@ Tier 1 and Tier 2 were both shipped on 2026-04-25, with the diag-pile cleanup on
 | 2026-04-25 | T2.1 | Server-side `nspa_hook_cache_rebuild` + invocation from `set_hook` / `remove_hook` handlers |
 | 2026-04-25 | T2.2 / T2.3 | Client-side `nspa_hook_try_read_cache` reader |
 | 2026-04-25 | call_hook routing fix | `info->tid = 0` for cache-served entries (in-thread dispatch only); avoids accidentally taking the LL-hook cross-thread branch |
-| 2026-04-26 | diag pile removal | Removed 13 atomic counters (`top_calls`, `skipped_no_hooks`, `server_dispatch`, `cat_*`, `tier1_shmem_inc/dec`, `tier1_finish_forced/skipped`, `tier2_*`) and the 5-second background dump thread. They were pre-ship instrumentation to decide *whether* to build the cache; once shipped, kept paying ~13 atomic adds per `call_message_hooks` invocation forever. Kept only the load-bearing counters: `nspa_hook_walk_counts[]` (server reads for Tier 1 refcount) and `nspa_hook_try_read_cache` itself. |
+| 2026-04-26 | diag pile removal | Removed 13 atomic counters (`top_calls`, `skipped_no_hooks`, `server_dispatch`, `cat_*`, `tier1_shmem_inc/dec`, `tier1_finish_forced/skipped`, `tier2_*`) and the 5-second background dump thread. They were pre-default instrumentation to decide *whether* to build the cache; once the cache became the normal path, they kept paying ~13 atomic adds per `call_message_hooks` invocation forever. Kept only the load-bearing counters: `nspa_hook_walk_counts[]` (server reads for Tier 1 refcount) and `nspa_hook_try_read_cache` itself. |
 
 The validation that motivated default-on was a 165-second Ableton Live session with a moderately complex set:
 
@@ -412,13 +412,13 @@ The validation that motivated default-on was a 165-second Ableton Live session w
 | `server_dispatch` count for hook RPCs | 0 | Fully eliminated for the duration of the session |
 | `is_hooked` short-circuits (count==0) | unmeasured (counter removed) | Vast majority of calls; per-thread frequency ranges 100s-1000s/sec |
 
-Zero misses across 26.7 k hits in a real-world DAW workload was the bar for flipping defaults. The diag pile was scrubbed once that bar was met because the counters had served their purpose; keeping them in shipped code would have paid forever for instrumentation that no longer informed any decision.
+Zero misses across 26.7 k hits in a real-world DAW workload was the bar for flipping defaults. The diag pile was scrubbed once that bar was met because the counters had served their purpose; keeping them in the active code path would have paid forever for instrumentation that no longer informed any decision.
 
 The other tested workloads (vsthost VST chains, Chromaphone instrument plugin, Ableton's drum-rack window with dozens of WM_PAINTs/sec) show the same pattern: Tier 1 short-circuits 99%+ of dispatches; Tier 2 serves the remaining 1% with zero RPCs.
 
 ## 10. Optional Tier 3 (future)
 
-Two follow-on directions are queued, neither shipped.
+Two follow-on directions are queued, neither active today.
 
 **Chain-modification streaming.** Currently a `set_hook` / `remove_hook` rebuilds the entire cache for the affected hook id. In the steady state -- when chains are short and rebuilds are rare -- this is fine. Under churn-heavy workloads (some accessibility shells install/remove WH_GETMESSAGE hooks dynamically), per-call rebuild may be wasteful; an incremental update (`entries[count++] = new_hook` for set_hook in the common append case, `memmove` for remove_hook) could halve the rebuild cost. The complication is that the seqlock writer protocol still needs to bump version on every change, and the client filter logic still has to re-run on the whole chain. So the win is bounded.
 
@@ -447,5 +447,5 @@ Neither is on the near-term roadmap; current measured Tier 1 + Tier 2 hit rate m
 | Bypass shm field layout (chains + pool) | `wine/server/protocol.def` | 1206-1214 |
 | Tier 1 / Tier 2 capacity macros | `wine/server/protocol.def` | 1142-1143 |
 
-There are no public hook-cache feature gates in the shipped path. The cache is
-now part of the normal client/server contract for eligible hook walks.
+There are no public hook-cache feature gates in the normal path. The cache is
+part of the normal client/server contract for eligible hook walks.

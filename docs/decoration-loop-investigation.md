@@ -230,5 +230,5 @@ The working tree has these NSPA changes vs upstream:
 1. `_NET_FRAME_EXTENTS` infrastructure (atom, PropertyNotify, pGetFrameExtents callback) -- in place, working
 2. `get_mwm_decorations`: always requests decorations for managed windows based on style (stable, no chicken-and-egg)
 3. `get_visible_rect`: upstream behavior restored (EqualRect + NtUserAdjustWindowRect)
-4. Diagnostic ERR traces (NSPA_DBG, NSPA_CFG) -- should be removed before shipping
+4. Diagnostic ERR traces (NSPA_DBG, NSPA_CFG) -- should be removed before default-on use
 5. WS_EX_LAYERED MWM exclusion removed (from earlier session, still correct)

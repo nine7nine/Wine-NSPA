@@ -32,14 +32,14 @@ NTSync is a Linux kernel driver (`drivers/misc/ntsync.c`, `/dev/ntsync`) that im
 
 For Wine-NSPA, upstream ntsync is necessary but insufficient. The upstream driver uses FIFO waiter queues, has no priority inheritance, and uses `spinlock_t` for the per-object lock -- which becomes a sleeping `rt_mutex` on PREEMPT_RT. None of those characteristics is acceptable for an RT audio workload where the audio callback must wait deterministically on Wine's primitives without inheriting unbounded inversion latency.
 
-Wine-NSPA now carries a shipped kernel overlay that extends upstream
+Wine-NSPA carries a kernel overlay that extends upstream
 `ntsync.c` in three broad layers:
 
 - the PI baseline for mutex, semaphore, and event waits
 - the channel and aggregate-wait primitives that back the gamma dispatcher
 - the later hardening and hot-path cleanup work needed for production use
 
-The current shipped overlay on kernel `6.19.11-rt1-1-nspa` includes the
+The current overlay on kernel `6.19.11-rt1-1-nspa` includes the
 dedicated wait-queue cache plus `SLAB_NO_MERGE` across all four ntsync
 caches (see Section 14). The feature-by-feature
 detail below keeps the patch numbers for traceability, but the public
@@ -77,7 +77,7 @@ The patch numbering (`1003-` through `1015-`) is local to NSPA. It bears no rela
 | 1012  | Channel recv field-snapshot UAF fix   | Snapshot popped-entry fields under `obj_lock` before unlock, closes RECV/RECV2 vs sender-cleanup slab UAF | ~15 |
 | 1013  | Dedicated kmem_caches                 | `ntsync_event_pi` / `ntsync_channel_entry` / `ntsync_pi_owner` -> own `kmem_cache`s with `SLAB_HWCACHE_ALIGN` | ~120 |
 | 1014  | SEND_PI lockless target scan          | `list_empty_careful` fast-path skips `wq->lock` round-trip on empty waiter queues             | ~10     |
-| 1014a | kmem_cache_free NULL guard            | Site-2089 `pending_pi.new_ep` free now NULL-guarded; closes `cache_from_obj` deref under `SLAB_FREELIST_HARDENED` | ~3 |
+| 1014a | kmem_cache_free NULL guard            | Site-2089 `pending_pi.new_ep` free is NULL-guarded; closes `cache_from_obj` deref under `SLAB_FREELIST_HARDENED` | ~3 |
 | 1015  | Wait-queue dedicated cache            | `struct ntsync_q` -> own `kmem_cache` (≤16 entries + kmalloc fallback); `SLAB_NO_MERGE` retro-correction across all 4 ntsync caches | ~120 |
 
 Patches 1003-1006, 1010, 1011, 1013, and 1015 are feature/infrastructure work; 1007-1009, 1012, 1014, and 1014a
@@ -490,7 +490,7 @@ The cleanup path covers the case where the sender was interrupted (signal). The 
 7. If `e->prio`, auto-boost `current` to `(e->policy, e->prio)` for the handler duration via `apply_event_pi_boost(dev, current, ...)`. Boost releases at next RECV's drain, or at REPLY's drain.
 8. Copy `(entry_id, payload_off, reply_off, sender_tid, prio[, thread_token])` to user space.
 
-In the shipped post-1011 dispatcher path, userspace follows the first
+In the post-1011 dispatcher path, userspace follows the first
 successful `RECV2` with `TRY_RECV2` after each reply until the channel
 returns empty.
 
@@ -656,7 +656,7 @@ Only observable difference: `ntsync_pi_owner` cleanup deferred by tens of nanose
 
 ### Why this fix mattered for everything that came after
 
-1006 is a prerequisite for honest stress-testing of the channel path. Without it, every register/deregister churn in a stress test was rolling SLUB freelist dice. With it, KASAN under PREEMPT_RT became a useful tool: any splat is now a real bug, not slab dust. That is what made 1009 (the channel_entry refcount UAF) catchable.
+1006 is a prerequisite for honest stress-testing of the channel path. Without it, every register/deregister churn in a stress test was rolling SLUB freelist dice. With it, KASAN under PREEMPT_RT became a useful tool: any splat is a real bug, not slab dust. That is what made 1009 (the channel_entry refcount UAF) catchable.
 
 ### Open RT/safety items deferred from 1006
 
@@ -951,7 +951,7 @@ Patch 1010 adds the heterogeneous wait primitive that the rest of the
 NSPA stack had been designing around: `NTSYNC_IOC_AGGREGATE_WAIT`.
 
 The immediate consumer is the post-1010 gamma dispatcher. Instead of
-blocking in direct `CHANNEL_RECV2` forever, the dispatcher can now wait
+blocking in direct `CHANNEL_RECV2` forever, the dispatcher can wait
 on:
 
 - the gamma channel object
@@ -1002,7 +1002,7 @@ in one syscall, while still keeping channel PI visible.
 
   <rect x="140" y="254" width="660" height="62" class="ag-note"/>
   <text x="470" y="278" text-anchor="middle" class="ag-t">Load-bearing follow-up in production</text>
-  <text x="470" y="296" text-anchor="middle" class="ag-s">the installed shipped build also carries SEND_PI any-waiters fallback</text>
+  <text x="470" y="296" text-anchor="middle" class="ag-s">the installed build also carries SEND_PI any-waiters fallback</text>
   <text x="470" y="310" text-anchor="middle" class="ag-s">and 1011 then layers TRY_RECV2 burst drain on top of this wait surface</text>
 </svg>
 </div>
@@ -1049,8 +1049,8 @@ validated with a dedicated native aggregate-wait suite:
 - channel notify-only behavior
 - channel-PI propagation while blocked in aggregate-wait
 
-The first shipped result was the post-1009 base plus aggregate-wait and
-its PI-ordering follow-ups. The next shipped overlay added burst drain
+The first result was the post-1009 base plus aggregate-wait and
+its PI-ordering follow-ups. The next overlay added burst drain
 on top, and the current overlay keeps both surfaces while adding the
 later hardening and cache-isolation work.
 
@@ -1398,7 +1398,7 @@ A four-dimension audit covering the entire post-1014 file:
   <line x1="765" y1="168" x2="620" y2="208" class="pc-line-v"/>
 
   <rect x="40" y="296" width="860" height="48" class="pc-box"/>
-  <text x="470" y="320" text-anchor="middle" class="pc-t">post-1014a shipped build with dedicated caches and lockless SEND_PI scan</text>
+  <text x="470" y="320" text-anchor="middle" class="pc-t">post-1014a build with dedicated caches and lockless SEND_PI scan</text>
   <text x="470" y="334" text-anchor="middle" class="pc-s">KASAN-clean over ~14M ops; running on prod kernel `6.19.11-rt1-1-nspa` since 2026-05-04</text>
 </svg>
 </div>
@@ -1533,7 +1533,7 @@ ntsync_wait_q        -> :0000704    # merged (1015 alone)
 **All four** ntsync caches had been merged by SLUB into generic
 kmalloc-N classes. The 1013 architectural promise of "isolation from
 `kmalloc-128`" had not been holding on the **prod** kernel since 1013
-shipped. It held on the **debug** kernel because
+landed. It held on the **debug** kernel because
 `SLAB_FREELIST_HARDENED` makes caches incompatible for merging --
 different debug-vs-prod config. Section 12's drum-load slabinfo
 absorption table was therefore debug-kernel evidence; on prod, those
@@ -1551,7 +1551,7 @@ ntsync_wait_q_cache        = kmem_cache_create("ntsync_wait_q",        ..., SLAB
 ```
 
 After the fix, `/sys/kernel/slab/ntsync_*/` are all real directories;
-no symlinks, no merging. The 1013 isolation promise now actually holds
+no symlinks, no merging. The 1013 isolation promise holds
 on prod.
 
 ### Workload absorption (Ableton, prod kernel, 30s windows at 1Hz)
@@ -1580,7 +1580,7 @@ evidence-gathering.
 1015 has no dependency on 1012 / 1013 / 1014; the patches remain
 separately revertable. The `SLAB_NO_MERGE` retro-correction is bundled
 because both edits live in the same `kmem_cache_create` chain --
-shipping it as a separate `1013a` would have meant two patch
+landing it as a separate `1013a` would have meant two patch
 applications for one logical change.
 
 <div class="diagram-container">
@@ -1650,7 +1650,7 @@ applications for one logical change.
   <text x="782" y="282" text-anchor="middle" class="wq-s">704B slot · ≤16-entry q + fallback</text>
   <text x="782" y="300" text-anchor="middle" class="wq-s">SLAB_HWCACHE_ALIGN | SLAB_NO_MERGE</text>
 
-  <text x="470" y="338" text-anchor="middle" class="wq-t">current shipped build: post-1015 with `SLAB_NO_MERGE` on all four ntsync caches</text>
+  <text x="470" y="338" text-anchor="middle" class="wq-t">current build: post-1015 with `SLAB_NO_MERGE` on all four ntsync caches</text>
 </svg>
 </div>
 
@@ -1658,7 +1658,7 @@ applications for one logical change.
 
 ## 15. Validation
 
-### Shipped overlay progression
+### Overlay progression
 
 | Stage | What landed | Notes |
 |-------|-------------|-------|
@@ -1669,7 +1669,7 @@ applications for one logical change.
 | Snapshot + cache hardening | 1012 + 1013 + 1014 + 1014a | receive snapshot fix, dedicated caches, lockless SEND_PI fast path, and the free-site NULL guard |
 | Wait-queue cache isolation | 1015 | dedicated wait-queue cache plus `SLAB_NO_MERGE` across all four ntsync caches |
 
-The current shipped module at `/lib/modules/6.19.11-rt1-1-nspa/kernel/drivers/misc/ntsync.ko` carries the full shipped overlay above.
+The current module at `/lib/modules/6.19.11-rt1-1-nspa/kernel/drivers/misc/ntsync.ko` carries the full overlay above.
 
 ### Stress validation (debug kernel, KASAN-on)
 
@@ -1716,7 +1716,7 @@ kernel/userspace pair rather than only in isolation:
 - dmesg clean after 30k stress + native suite
 
 This matters because 1010 is load-bearing only when the userspace
-dispatcher is actually blocked inside it. The shipped build result
+dispatcher is actually blocked inside it. The build result
 therefore includes both the syscall itself and the post-1010 wake/boost
 ordering fixes.
 
@@ -1762,7 +1762,7 @@ After cross-build to the production kernel `6.19.11-rt1-1-nspa` (no debug instru
 
 **Cumulative on the production kernel: post-channel-entry baseline
 ~370 M ops, then aggregate-wait, then burst drain, then the receive
-snapshot and dedicated-cache hardening carries, and now the wait-queue
+snapshot and dedicated-cache hardening carries, and the wait-queue
 cache plus full cache isolation; 0 syscall errors, 0 dmesg splats,
 refcnt=0 post-soak.**
 
@@ -1840,7 +1840,7 @@ Patches in the **mechanically verifiable** category enforce a rule that has an o
 
 - **1006** (RT alloc-hoist) enforces "no sleeping alloc/free under `raw_spinlock_t` on PREEMPT_RT". `CONFIG_DEBUG_ATOMIC_SLEEP` will splat on a violation. Mechanical.
 - **1009** (channel_entry refcount) closes a UAF that KASAN catches by construction. The fix is a textbook refcount discipline. Mechanical.
-- **1008** (EVENT_SET_PI deferred boost) closes a measurable flake (4% miss rate on a deterministic test). The fix removes a code path with a known race; the test now passes 100%. Mechanical (the test is the oracle).
+- **1008** (EVENT_SET_PI deferred boost) closes a measurable flake (4% miss rate on a deterministic test). The fix removes a code path with a known race; the test passes 100%. Mechanical (the test is the oracle).
 - **1007** (channel exclusive recv) closes a deterministic-hang test that was stale-coded around the buggy behaviour. The fix is a 3-LOC swap to a kernel primitive (`wait_event_interruptible_exclusive`) whose semantics are documented and obvious. Mechanical.
 - **1012** (channel recv field-snapshot) closes a KASAN-caught cross-thread slab UAF. Snapshotting under the existing lock is a textbook fix; KASAN is the oracle. Mechanical.
 - **1014a** (`kmem_cache_free` NULL guard) closes a `cache_from_obj` deref at site 2089 surfaced by `SLAB_FREELIST_HARDENED`. The kernel source disagrees with the diff comment; `mm/slub.c` is the oracle. Mechanical.
@@ -1855,19 +1855,19 @@ Patches in the **code-review hypothesis** category encode a reviewer's argument 
 
 ### The rolled-back Codex 1007-1011 series
 
-On 2026-04-26 there was an unfound EVENT_SET_PI slab UAF (`___slab_alloc+0x316` GP-fault, `ntsync_obj_ioctl+0x44e`). KASAN was queued but not yet run. Codex's review surfaced three "other issues" (cross-snapshot PI, non-exclusive RECV, channel-accept-in-`setup_wait`), and patches 1007-1011 (5 patches in 6 hours, including a 34KB rewrite) shipped under the rationale that "(1) ∧ (2) explains the hang."
+On 2026-04-26 there was an unfound EVENT_SET_PI slab UAF (`___slab_alloc+0x316` GP-fault, `ntsync_obj_ioctl+0x44e`). KASAN was queued but not yet run. Codex's review surfaced three "other issues" (cross-snapshot PI, non-exclusive RECV, channel-accept-in-`setup_wait`), and patches 1007-1011 (5 patches in 6 hours, including a 34KB rewrite) landed under the rationale that "(1) ∧ (2) explains the hang."
 
 That rationale was theory, not a measured trace. The actual unfound slab UAF was 1006 -- a `kfree` under `raw_spinlock_t` in `channel_register/deregister_thread`. None of 1007-1011's hypotheses were correct about the original symptom. Worse, the 1007-1011 series introduced a new UAF (the CHANNEL_REPLY UAF that 1009 ultimately fixed) that only existed because channels had been added at all.
 
 All of 1007-1011 were rolled back. The proper sequence was then:
 
 1. **First**, KASAN-clean the alloc/free sites under raw_spinlock_t (the actual bug). That became patch 1006.
-2. **Then**, with KASAN now usable as an oracle, run the stress tests. Each splat or hang is now a real bug, not slab dust.
+2. **Then**, with KASAN usable as an oracle, run the stress tests. Each splat or hang is a real bug, not slab dust.
 3. **One bug per patch**, surgical, with the test that found it as the validation gate. 1007 / 1008 / 1009 each fix exactly one KASAN- or test-confirmed bug.
 
 ### Operating principle
 
-When chasing an unidentified bug, narrow on the actual symptom (trace / KASAN / ftrace / repro) -- do not pile speculative fixes from adjacent code review under the cover of "while I was in there, I noticed...". Even when the audit is internally well-reasoned, the issues it surfaces are almost certainly unrelated to the observed symptom -- and shipping them piles new failure modes on top of the original one.
+When chasing an unidentified bug, narrow on the actual symptom (trace / KASAN / ftrace / repro) -- do not pile speculative fixes from adjacent code review under the cover of "while I was in there, I noticed...". Even when the audit is internally well-reasoned, the issues it surfaces are almost certainly unrelated to the observed symptom -- and landing them piles new failure modes on top of the original one.
 
 Independent CRIT findings can still be filed as separate tickets/patches, but they should not ship until the original symptom is understood. At minimum: do not ship them on the same day, on top of an unfound bug, in the same module.
 

@@ -108,8 +108,8 @@
 <div class="page-nav"><a href="index.html">Docs Home</a></div>
 <h1 id="wine-nspa--client-scheduler-architecture">Wine-NSPA &ndash; Client Scheduler Architecture</h1>
 
-<p>This page documents the shipped client-side scheduler hosts and the
-current consumers routed through them.</p>
+<p>This page documents the client-side scheduler hosts and the current consumers
+routed through them.</p>
 
 <h2 id="table-of-contents">Table of Contents</h2>
 
@@ -117,7 +117,7 @@ current consumers routed through them.</p>
 <li><a href="#1-overview">Overview</a></li>
 <li><a href="#2-thread-model">Thread model</a></li>
 <li><a href="#3-api-surface">API surface</a></li>
-<li><a href="#4-shipped-consumers">Shipped consumers</a></li>
+<li><a href="#4-current-consumers">Current consumers</a></li>
 <li><a href="#5-validation-and-current-controls">Validation and current controls</a></li>
 <li><a href="#6-relationship-to-the-rest-of-wine-nspa">Relationship to the rest of Wine-NSPA</a></li>
 <li><a href="#7-references">References</a></li>
@@ -134,7 +134,7 @@ bootstrap thread parks in <code>sched_run()</code> and becomes a per-process sch
 host, while the app main thread is created separately and continues through
 normal Win32 startup.</p>
 
-<p>On top of that split, Wine-NSPA now ships a client-side scheduler substrate:</p>
+<p>On top of that split, Wine-NSPA uses a client-side scheduler substrate:</p>
 
 <ul>
 <li>one always-present default-class sched thread, named <code>wine-sched</code></li>
@@ -212,7 +212,7 @@ threads per subsystem.</p>
 
 <h2 id="2-thread-model">2. Thread model</h2>
 
-<p>The shipped thread model has two classes.</p>
+<p>The thread model has two classes.</p>
 
 <table>
 <thead>
@@ -335,7 +335,7 @@ deadlock by waiting for work it must dispatch itself</li>
 
 <h2 id="3-api-surface">3. API surface</h2>
 
-<p>The shipped API surface is:</p>
+<p>The API surface is:</p>
 
 <pre><code class="language-c code-block">
 NTSTATUS ntdll_sched_register_poll( int fd, int events,
@@ -373,7 +373,7 @@ run inline to avoid deadlock</li>
 
 <hr />
 
-<h2 id="4-shipped-consumers">4. Shipped consumers</h2>
+<h2 id="4-current-consumers">4. Current consumers</h2>
 
 <h3 id="41-async-close-queue-on-wine-sched">4.1 Async close queue on <code>wine-sched</code></h3>
 
@@ -382,7 +382,7 @@ fully-shareable local-file handles, <code>NtClose</code> no longer pays unix <co
 server <code>close_handle</code> latency inline on the caller thread. Instead it pushes a
 bounded queue entry to the default sched thread.</p>
 
-<p>The shipped rules are conservative:</p>
+<p>The rules are conservative:</p>
 
 <ul>
 <li>queue capacity: 64</li>
@@ -398,7 +398,7 @@ at the same point as before.</p>
 
 <h3 id="42-local_timer-and-local_wm_timer-on-wine-sched-rt">4.2 <code>local_timer</code> and <code>local_wm_timer</code> on <code>wine-sched-rt</code></h3>
 
-<p>The next shipped consumers are the timer dispatchers that used to own separate
+<p>The next consumers are the timer dispatchers that used to own separate
 RT helper threads:</p>
 
 <ul>
@@ -407,7 +407,7 @@ RT helper threads:</p>
 </ul>
 
 
-<p>When RT is available, both now route onto the shared RT sched instance instead
+<p>When RT is available, both route onto the shared RT sched instance instead
 of running dedicated <code>pthread</code> loops. The priority class is unchanged from the
 legacy design: <code>SCHED_FIFO</code> at <code>NSPA_RT_PRIO - 1</code>. The win is consolidation and
 shared infrastructure, not a different scheduling policy.</p>
@@ -419,7 +419,7 @@ shared <code>wine-sched-rt</code> host.</p>
 <h3 id="43-observability-sampler-on-the-default-class">4.3 Observability sampler on the default class</h3>
 
 <p><code>NSPA_SCHED_OBS_INTERVAL_MS</code> enables a periodic sampler hosted on the default
-class. It is not a production fast path, but it is shipped and useful because
+class. It is not a production fast path, but it is active and useful because
 it exercises the timer and cancel paths continuously with a real in-tree
 consumer.</p>
 
@@ -455,7 +455,7 @@ stats such as:</p>
   </style>
 
   <rect x="0" y="0" width="960" height="430" class="cc-bg" rx="6"/>
-  <text x="480" y="28" text-anchor="middle" class="cc-h">Current shipped consumer map</text>
+  <text x="480" y="28" text-anchor="middle" class="cc-h">Current consumer map</text>
 
   <rect x="70" y="90" width="230" height="72" class="cc-src" rx="6"/>
   <text x="185" y="118" text-anchor="middle" class="cc-t">local-file close path</text>
@@ -496,10 +496,10 @@ stats such as:</p>
 
 <h2 id="5-validation-and-current-controls">5. Validation and current controls</h2>
 
-<p>The public status here is based on targeted validation of the shipped
+<p>The public status here is based on targeted validation of the current
 consumers, not on a new full-suite publish.</p>
 
-<p>The shipped scheduler consumers no longer expose per-feature opt-out gates in
+<p>The scheduler consumers no longer expose per-feature opt-out gates in
 the public surface. Async close routing, <code>local_timer</code>, and <code>local_wm_timer</code>
 all run on the normal path when their own eligibility checks pass and RT is
 available. The one remaining public control here is the optional sampler:</p>
@@ -545,14 +545,14 @@ pre-migration layout</li>
 <ul>
 <li><strong>Gamma channel dispatcher:</strong> still wineserver-side and still the server RPC
 path for requests that need wineserver authority</li>
-<li><strong>NT-local stubs:</strong> the sched threads now host some of those client-local
+<li><strong>NT-local stubs:</strong> the sched threads host some of those client-local
 dispatchers, especially timers</li>
 <li><strong>io_uring:</strong> separate client-side async I/O substrate; not routed through
 <code>ntdll_sched</code></li>
 </ul>
 
 
-<p>The main decomposition consequence is that the client side now has a cleaner
+<p>The main decomposition consequence is that the client side has a cleaner
 place to host helper loops. That shrinks the number of ad-hoc per-subsystem
 threads and moves more timing-sensitive work out of the wineserver process
 without changing wineserver ownership of cross-process semantics.</p>

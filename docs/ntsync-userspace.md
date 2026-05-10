@@ -38,7 +38,7 @@ Steady state for a supported sync object on Wine-NSPA is:
 round-trip. The first wait or signal on a handle resolves the handle to
 an fd; subsequent operations hit the local cache.
 
-That steady state now has two important fast-path refinements above it:
+That steady state has two important fast-path refinements above it:
 
 - single-handle zero-time waits on process handles can answer from
   `process_shm`
@@ -180,7 +180,7 @@ comes from on the first reference.
 
   <rect x="560" y="104" width="340" height="60" class="cli"/>
   <text x="730" y="128" text-anchor="middle" class="t">anonymous NtCreateMutex / NtCreateSemaphore / NtCreateEvent</text>
-  <text x="730" y="146" text-anchor="middle" class="s">anonymous events now use this client-created path by default</text>
+  <text x="730" y="146" text-anchor="middle" class="s">anonymous events use this client-created path by default</text>
 
   <line x1="730" y1="164" x2="730" y2="192" class="line-g"/>
 
@@ -251,7 +251,7 @@ The cache is laid out as an array of blocks; block 0 is statically
 allocated, later blocks are `mmap`ed as handles climb. Each entry
 carries a refcount and a `closed` bit.
 
-The current shipped layout is deliberately cacheline-shaped:
+The current layout is deliberately cacheline-shaped:
 
 - each entry is padded to 64 bytes so refcount `LOCK` traffic on one handle
   does not false-share with unrelated handles
@@ -294,7 +294,7 @@ kernel create ioctl itself:
 and stores the returned fd directly in the same `inproc_sync` cache
 that the server-owned path uses.
 
-The shipped rules are:
+The rules are:
 
 - anonymous mutexes: client-created
 - anonymous semaphores: client-created
@@ -345,7 +345,7 @@ handle to an fd with `get_inproc_sync()`, collects an optional alert
 fd, adds the optional `io_uring` eventfd, and then calls
 `linux_wait_objs()`.
 
-Two special cases now sit above that common helper:
+Two special cases sit above that common helper:
 
 - `WaitForSingleObject(process, 0)` can answer from `process_shm.exit_code`
   before any ntsync wait path runs
@@ -446,7 +446,7 @@ The `inproc_sync` cache itself is also part of the current userspace sync
 story. Hot waits and signals increment entry refcounts constantly, so false
 sharing across unrelated handles showed up as distributed coherence cost.
 
-The shipped layout now uses one cacheline per entry and keeps the original
+The layout uses one cacheline per entry and keeps the original
 `524288`-handle capacity by widening each cache block instead of shrinking the
 cache.
 
@@ -596,7 +596,7 @@ The dispatcher loop calls:
     /* dispatch using args.thread_token */
     ioctl(channel_fd, NTSYNC_IOC_CHANNEL_REPLY, &args.entry_id);
 
-On the current shipped kernel/userspace pair, the dispatcher uses
+On the current kernel/userspace pair, the dispatcher uses
 `RECV2` for dequeue, follows each reply with `TRY_RECV2` until the
 channel returns empty, and uses `NTSYNC_IOC_AGGREGATE_WAIT` to block on
 the channel + uring eventfd + shutdown eventfd in one syscall.

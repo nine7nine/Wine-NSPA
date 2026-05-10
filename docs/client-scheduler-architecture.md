@@ -1,14 +1,14 @@
 # Wine-NSPA -- Client Scheduler Architecture
 
-This page documents the shipped client-side scheduler hosts and the
-current consumers routed through them.
+This page documents the client-side scheduler hosts and the current consumers
+routed through them.
 
 ## Table of Contents
 
 1. [Overview](#1-overview)
 2. [Thread model](#2-thread-model)
 3. [API surface](#3-api-surface)
-4. [Shipped consumers](#4-shipped-consumers)
+4. [Current consumers](#4-current-consumers)
 5. [Validation and current controls](#5-validation-and-current-controls)
 6. [Relationship to the rest of Wine-NSPA](#6-relationship-to-the-rest-of-wine-nspa)
 7. [References](#7-references)
@@ -23,7 +23,7 @@ bootstrap thread parks in `sched_run()` and becomes a per-process scheduler
 host, while the app main thread is created separately and continues through
 normal Win32 startup.
 
-On top of that split, Wine-NSPA now ships a client-side scheduler substrate:
+On top of that split, Wine-NSPA uses a client-side scheduler substrate:
 
 - one always-present default-class sched thread, named `wine-sched`
 - one lazy RT-class sched thread, named `wine-sched-rt`, created only when an
@@ -97,7 +97,7 @@ threads per subsystem.
 
 ## 2. Thread model
 
-The shipped thread model has two classes.
+The thread model has two classes.
 
 | Class | Thread name | Spawn policy | Scheduler policy | Purpose |
 |---|---|---|---|---|
@@ -189,7 +189,7 @@ The scheduler implementation itself uses:
 
 ## 3. API surface
 
-The shipped API surface is:
+The API surface is:
 
 ```c
 NTSTATUS ntdll_sched_register_poll( int fd, int events,
@@ -223,7 +223,7 @@ The important semantics:
 
 ---
 
-## 4. Shipped consumers
+## 4. Current consumers
 
 ### 4.1 Async close queue on `wine-sched`
 
@@ -232,7 +232,7 @@ fully-shareable local-file handles, `NtClose` no longer pays unix `close()` and
 server `close_handle` latency inline on the caller thread. Instead it pushes a
 bounded queue entry to the default sched thread.
 
-The shipped rules are conservative:
+The rules are conservative:
 
 - queue capacity: 64
 - eligibility: `FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE` only
@@ -245,13 +245,13 @@ at the same point as before.
 
 ### 4.2 `local_timer` and `local_wm_timer` on `wine-sched-rt`
 
-The next shipped consumers are the timer dispatchers that used to own separate
+The next consumers are the timer dispatchers that used to own separate
 RT helper threads:
 
 - `nspa_local_timer`
 - `nspa_local_wm_timer`
 
-When RT is available, both now route onto the shared RT sched instance instead
+When RT is available, both route onto the shared RT sched instance instead
 of running dedicated `pthread` loops. The priority class is unchanged from the
 legacy design: `SCHED_FIFO` at `NSPA_RT_PRIO - 1`. The win is consolidation and
 shared infrastructure, not a different scheduling policy.
@@ -263,7 +263,7 @@ shared `wine-sched-rt` host.
 ### 4.3 Observability sampler on the default class
 
 `NSPA_SCHED_OBS_INTERVAL_MS` enables a periodic sampler hosted on the default
-class. It is not a production fast path, but it is shipped and useful because
+class. It is not a production fast path, but it is active and useful because
 it exercises the timer and cancel paths continuously with a real in-tree
 consumer.
 
@@ -296,7 +296,7 @@ This sampler remains default OFF.
   </style>
 
   <rect x="0" y="0" width="960" height="430" class="cc-bg"/>
-  <text x="480" y="28" text-anchor="middle" class="cc-h">Current shipped consumer map</text>
+  <text x="480" y="28" text-anchor="middle" class="cc-h">Current consumer map</text>
 
   <rect x="70" y="90" width="230" height="72" class="cc-src"/>
   <text x="185" y="118" text-anchor="middle" class="cc-t">local-file close path</text>
@@ -336,10 +336,10 @@ This sampler remains default OFF.
 
 ## 5. Validation and current controls
 
-The public status here is based on targeted validation of the shipped
+The public status here is based on targeted validation of the current
 consumers, not on a new full-suite publish.
 
-The shipped scheduler consumers no longer expose per-feature opt-out gates in
+The scheduler consumers no longer expose per-feature opt-out gates in
 the public surface. Async close routing, `local_timer`, and `local_wm_timer`
 all run on the normal path when their own eligibility checks pass and RT is
 available. The one remaining public control here is the optional sampler:
@@ -367,12 +367,12 @@ This page is client-side infrastructure. It composes with, but does not replace:
 
 - **Gamma channel dispatcher:** still wineserver-side and still the server RPC
   path for requests that need wineserver authority
-- **NT-local stubs:** the sched threads now host some of those client-local
+- **NT-local stubs:** the sched threads host some of those client-local
   dispatchers, especially timers
 - **io_uring:** separate client-side async I/O substrate; not routed through
   `ntdll_sched`
 
-The main decomposition consequence is that the client side now has a cleaner
+The main decomposition consequence is that the client side has a cleaner
 place to host helper loops. That shrinks the number of ad-hoc per-subsystem
 threads and moves more timing-sensitive work out of the wineserver process
 without changing wineserver ownership of cross-process semantics.
