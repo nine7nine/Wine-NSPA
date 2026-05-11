@@ -553,6 +553,11 @@ The important disqualifiers are still the same kind of boundary checks:
 automatic disqualifiers when the surrounding open shape is otherwise within the
 local envelope.
 
+When the open carries `FILE_SEQUENTIAL_ONLY` or `FILE_RANDOM_ACCESS`, the local
+path also applies the matching `posix_fadvise()` hint directly on the bypassed
+fd. That keeps the bypass path aligned with the server-side open finalization
+logic instead of silently dropping an advisory access-pattern hint.
+
 ---
 
 ## 10. NT API Coverage Matrix

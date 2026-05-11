@@ -174,8 +174,13 @@ x86_64 TEB / GS-base setup specifically.</p>
 </tr>
 <tr>
 <td> Cacheline and slab layout </td>
-<td> <code>struct inproc_sync</code> entries are padded to one cacheline each, ntsync hot structs use dedicated caches, and the production kernel keeps those caches isolated with <code>SLAB_NO_MERGE</code> </td>
+<td> <code>struct inproc_sync</code> entries are padded to one cacheline each, LFH <code>struct bin</code> is cacheline-shaped, ntsync hot structs use dedicated caches, and the production kernel keeps those caches isolated with <code>SLAB_NO_MERGE</code> </td>
 <td> the work was already concurrent and hot, so layout and allocator shaping reduce coherence and slab noise without changing behavior </td>
+</tr>
+<tr>
+<td> Heap grow/shrink hysteresis </td>
+<td> non-hugetlb heap commit and tail-decommit paths widen from <code>64 KiB</code> to <code>1 MiB</code> under the RT-keyed huge-arenas gate </td>
+<td> these syscalls run under <code>heap-&gt;cs</code>, so amortizing them trims lock-held VM work without changing the Windows heap contract </td>
 </tr>
 <tr>
 <td> Batching and burst drain </td>
@@ -606,6 +611,85 @@ operations on PREEMPT_RT under real contention.</p>
 
 <hr />
 
+<h3 id="53-lfh-cachelines-and-heap-commitdecommit-shaping">5.3 LFH cachelines and heap commit/decommit shaping</h3>
+
+<p>The same layout-first rule also applies to Wine&rsquo;s internal heap machinery.</p>
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 960 360" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
+  <style>
+    .hh-bg { fill: #1a1b26; }
+    .hh-box { fill: #24283b; stroke: #7aa2f7; stroke-width: 1.7; rx: 8; }
+    .hh-green { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.7; rx: 8; }
+    .hh-yellow { fill: #2a2418; stroke: #e0af68; stroke-width: 1.7; rx: 8; }
+    .hh-title { fill: #7aa2f7; font-size: 14px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .hh-label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+    .hh-small { fill: #a9b1d6; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+    .hh-tag-g { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .hh-tag-y { fill: #e0af68; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .hh-line-b { stroke: #7aa2f7; stroke-width: 1.2; fill: none; }
+    .hh-line-g { stroke: #9ece6a; stroke-width: 1.2; fill: none; }
+  </style>
+
+  <rect x="0" y="0" width="960" height="360" class="hh-bg" rx="6"/>
+  <text x="480" y="26" text-anchor="middle" class="hh-title">Heap-path shaping: less false sharing, fewer VM syscalls under `heap->cs`</text>
+
+  <rect x="70" y="82" width="250" height="94" class="hh-box" rx="6"/>
+  <text x="195" y="108" text-anchor="middle" class="hh-label">LFH bin counters</text>
+  <text x="195" y="130" text-anchor="middle" class="hh-small">`count_alloc`, `count_freed`, `enabled`, and group counters</text>
+  <text x="195" y="148" text-anchor="middle" class="hh-small">adjacent bins used to false-share atomic updates</text>
+
+  <rect x="355" y="82" width="250" height="94" class="hh-green" rx="6"/>
+  <text x="480" y="108" text-anchor="middle" class="hh-tag-g">cacheline-shaped bins</text>
+  <text x="480" y="130" text-anchor="middle" class="hh-small">`struct bin` is `DECLSPEC_ALIGN(64)` and `sizeof % 64 == 0`</text>
+  <text x="480" y="148" text-anchor="middle" class="hh-small">different size classes stop cross-invalidating one another</text>
+
+  <rect x="640" y="82" width="250" height="94" class="hh-yellow" rx="6"/>
+  <text x="765" y="108" text-anchor="middle" class="hh-tag-y">VM syscall amortization</text>
+  <text x="765" y="130" text-anchor="middle" class="hh-small">under the RT huge-arenas gate, commit/decommit hysteresis widens</text>
+  <text x="765" y="148" text-anchor="middle" class="hh-small">from `64 KiB` to `1 MiB` on non-hugetlb subheaps</text>
+
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="320" y1="128" x2="355" y2="128" class="hh-line-b"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="605" y1="128" x2="640" y2="128" class="hh-line-g"/>
+
+  <rect x="160" y="230" width="640" height="76" class="hh-box" rx="6"/>
+  <text x="480" y="256" text-anchor="middle" class="hh-label">common result</text>
+  <text x="480" y="276" text-anchor="middle" class="hh-small">less coherence traffic on concurrent LFH metadata and fewer</text>
+  <text x="480" y="290" text-anchor="middle" class="hh-small">`MEM_COMMIT` / `MEM_DECOMMIT` syscalls while the heap lock is held</text>
+</svg>
+</div>
+
+
+<p>Two carries landed together here:</p>
+
+<table>
+<thead>
+<tr>
+<th> Carry </th>
+<th> Current behavior </th>
+<th> Why it matters </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> LFH bin cacheline padding </td>
+<td> <code>struct bin</code> is <code>DECLSPEC_ALIGN(64)</code> so adjacent LFH size classes stop false-sharing atomic counters </td>
+<td> the heap hot path has the same &ldquo;small counters, many threads&rdquo; shape as <code>inproc_sync</code>, so cacheline isolation helps for the same reason </td>
+</tr>
+<tr>
+<td> Commit/decommit hysteresis </td>
+<td> under the RT-keyed huge-arenas gate, non-hugetlb subheaps widen commit and tail-decommit hysteresis from <code>64 KiB</code> to <code>1 MiB</code> </td>
+<td> <code>NtAllocateVirtualMemory(MEM_COMMIT)</code> and <code>NtFreeVirtualMemory(MEM_DECOMMIT)</code> run under <code>heap-&gt;cs</code>; a larger grain amortizes those syscalls across more alloc/free traffic </td>
+</tr>
+</tbody>
+</table>
+
+
+<p>This does not change the Windows heap contract. It changes the internal grain
+at which Wine amortizes VM work on paths that were already legal to over-keep.</p>
+
+<hr />
+
 <h2 id="6-small-call-removal-on-the-wait-path">6. Small-call removal on the wait path</h2>
 
 <p>Some of the remaining hot-path cost was not algorithmic at all. It was helper
@@ -812,9 +896,11 @@ x86_64 AVX2 ASCII-burst paths:</p>
 
 
 <p>These conversions sit on every PE-to-Unix and Unix-to-PE path/name boundary.
-That makes them worth optimizing even though they are small helpers in
-isolation: the same directory, registry, and section-name traffic that hits the
-shared-state and local-file work also keeps crossing these conversion helpers.</p>
+The hot AVX2 carry is intentionally Unix-side only: <code>dlls/ntdll/unix/env.c</code>
+keeps the vectorized path, while PE-side <code>dlls/ntdll/locale.c</code> remains scalar
+because the PE build cannot use the runtime <code>__builtin_cpu_supports("avx2")</code>
+probe without dragging in an unresolved <code>__cpu_model</code> dependency. That still
+matches the hot path shape: the expensive callers are on the Unix side.</p>
 
 <p>Synthetic ASCII-path measurements recorded with the carries:</p>
 
@@ -939,7 +1025,7 @@ the same workload window:</p>
 <tr>
 <td> bundle scope </td>
 <td>  </td>
-<td> inline current-thread/current-process/PEB/tick helpers plus AVX2 <code>memicmp_strW</code>, <code>hash_strW</code>, <code>utf8_wcstombs</code>, and <code>utf8_mbstowcs</code> </td>
+<td> inline current-thread/current-process/PEB/tick helpers plus AVX2 <code>memicmp_strW</code>, <code>hash_strW</code>, and Unix-side <code>utf8_wcstombs</code> / <code>utf8_mbstowcs</code> </td>
 </tr>
 </tbody>
 </table>

@@ -177,8 +177,10 @@ remains available.
 | x86_64 inline current-thread/current-process/PEB/tick helpers | `PsGetCurrent*Id()`, `RtlGetCurrentPeb()`, `WINE_UNIX_LIB` `GetCurrent*Id()`, and `NtGetTickCount()` collapse to direct TEB or `KUSER_SHARED_DATA` reads on the Unix side |
 | msg-ring TEB-backed per-thread caches | 30 s playback counters: CPU cycles `220.9B -> 212.4B`, `pthread_getspecific` self time `0.46% -> 0.09%`, `nspa_get_own_bypass_shm` `0.26% -> 0.20%` |
 | `inproc_sync` cacheline isolation + capacity restore | each entry occupies one cacheline, removing cross-handle false sharing on hot refcount `LOCK` ops while keeping total cacheable handle capacity at `524288` |
+| LFH bin cacheline padding | `struct bin` is cacheline-shaped so concurrent LFH counters on adjacent size classes stop false-sharing |
+| Heap commit/decommit hysteresis | under the RT huge-arenas gate, non-hugetlb subheaps widen commit and tail-decommit hysteresis from `64 KiB` to `1 MiB`, amortizing VM syscalls under `heap->cs` |
 | `io_uring` helper inlining | `ntdll_io_uring_flush_deferred()` empty-path cost (`0.82%` audio-thread time) and `ntdll_io_uring_get_eventfd()` helper cost (`0.15%`) are removed from the steady-state wait path |
-| x86_64 AVX2 string / Unicode loops | `server/unicode.c::{memicmp_strW,hash_strW}` and `dlls/ntdll/locale_private.h::{utf8_wcstombs,utf8_mbstowcs}` vectorize ASCII windows while preserving scalar fallback for mixed or non-ASCII windows |
+| x86_64 AVX2 string / Unicode loops | `server/unicode.c::{memicmp_strW,hash_strW}` and Unix-side `dlls/ntdll/locale_private.h::{utf8_wcstombs,utf8_mbstowcs}` vectorize ASCII windows while preserving scalar fallback for mixed or non-ASCII windows; PE-side locale stays scalar by design |
 
 ### 2.11 Validation baseline
 
@@ -431,6 +433,7 @@ System-wide samples: `38,588 -> 19,415` per 30s.
 | x86_64 TEB hot state | cumulative playback CPU cycles `257.8B -> 212.4B` across inline `NtCurrentTeb()` plus msg-ring TEB-cache carries |
 | x86_64 AVX2 string / Unicode loops | synthetic ASCII-path cuts range from `~4x` (`hash_strW`) to `~25x` (`utf8_mbstowcs`), while preserving scalar fallback for non-ASCII windows |
 | x86_64 inline + AVX2 bundle | full 30 s triplet diff: user-mode samples `97K -> 86K` (`-11.3%`), iTLB `229.7M -> 180.8M` (`-21.30%`), dTLB `51.5M -> 42.4M` (`-17.69%`), branch-misses `348.3M -> 308.4M` (`-11.45%`), `NtGetTickCount` `3,081,551 -> 0`, page-faults `130,349 -> 71,754` (`-44.95%`) |
+| LFH + heap-shaping follow-ons | LFH bins are cacheline-shaped; non-hugetlb subheaps widen commit/decommit hysteresis to `1 MiB` under the RT huge-arenas gate, cutting lock-held VM churn on allocator-heavy paths |
 | local-file EOF path | direct handler-time saving `~8 ms / snapshot`, plus eligible `ftruncate()` no longer blocks the wineserver loop inline |
 | RT-keyed heap arena hugetlb backing | hugepage regions `3/6` -> `104`; `mmap` rate `33-61/s` -> `0.13/s`; `mprotect` rate `56-90/s` -> `0.03/s`; page-faults `753-869/s` -> `2.8/s` |
 
@@ -491,6 +494,7 @@ System-wide samples: `38,588 -> 19,415` per 30s.
 | 2026-05-09 | x86_64 TEB hot-state carries | inline `NtCurrentTeb()` and msg-ring TEB-backed per-thread caches remove repeated thread-local helper overhead |
 | 2026-05-09 | `inproc_sync` cache layout follow-ons | cacheline isolation lands on the userspace sync cache and the original `524288`-handle capacity is restored |
 | 2026-05-10 | x86_64 AVX2 string / Unicode carries | server name compare/hash and Unix-side UTF conversion helpers vectorize ASCII windows while reusing the scalar path for mixed or non-ASCII windows |
+| 2026-05-10 | LFH and local-file optimization follow-ons | LFH bins gain cacheline isolation, non-hugetlb heap hysteresis widens under the RT huge-arenas gate, and local-file bypass opens retain sequential/random `posix_fadvise` hints |
 
 ---
 

@@ -46,7 +46,8 @@ x86_64 TEB / GS-base setup specifically.
 |---|---|---|
 | Locality and published-state caching | hook Tier 1+2, paint cache, `get_message` empty-poll cache, thread/process shared-state readers, and zero-time wait polls answer locally once state is already published | these paths already had an authoritative shared state block, so the win is to reuse it instead of inventing another transport |
 | TEB-relative state access | unix-side `NtCurrentTeb` is inline on Linux x86_64, `get_thread_data()` reads through a TEB backpointer, common thread/process/PEB helpers read from the TEB, and win32u msg-ring per-thread caches read through `TEB->Win32ClientInfo` | repeated thread-local helper calls were pure wrapper cost, so direct TEB reads preserve ownership while removing libc / PLT overhead |
-| Cacheline and slab layout | `struct inproc_sync` entries are padded to one cacheline each, ntsync hot structs use dedicated caches, and the production kernel keeps those caches isolated with `SLAB_NO_MERGE` | the work was already concurrent and hot, so layout and allocator shaping reduce coherence and slab noise without changing behavior |
+| Cacheline and slab layout | `struct inproc_sync` entries are padded to one cacheline each, LFH `struct bin` is cacheline-shaped, ntsync hot structs use dedicated caches, and the production kernel keeps those caches isolated with `SLAB_NO_MERGE` | the work was already concurrent and hot, so layout and allocator shaping reduce coherence and slab noise without changing behavior |
+| Heap grow/shrink hysteresis | non-hugetlb heap commit and tail-decommit paths widen from `64 KiB` to `1 MiB` under the RT-keyed huge-arenas gate | these syscalls run under `heap->cs`, so amortizing them trims lock-held VM work without changing the Windows heap contract |
 | Batching and burst drain | gamma `TRY_RECV2` drains bursts after one aggregate-wait wake instead of paying one kernel round-trip per entry | request bursts are real, so the right optimization is to amortize wake cost rather than only shave single-request overhead |
 | Small helper removal | `ntdll_io_uring_flush_deferred()` folds to an inline empty check when no deferred completions exist, the ring eventfd getter is inline, and `NtGetTickCount()` folds to one KUSER_SHARED_DATA load | once a helper becomes “usually empty” or “just return one TLS value,” the abstraction cost outweighs the abstraction value on the hot path |
 | SIMD ASCII-burst loops | `memicmp_strW`, `hash_strW`, `utf8_wcstombs`, and `utf8_mbstowcs` use x86_64 AVX2 fast paths for all-ASCII windows while keeping scalar fallback for mixed or non-ASCII windows | filenames, registry names, and object names are often ASCII-dominant, so vectorizing the common window harvests real cost without changing the Unicode contract |
@@ -290,6 +291,66 @@ operations on PREEMPT_RT under real contention.
 
 ---
 
+### 5.3 LFH cachelines and heap commit/decommit shaping
+
+The same layout-first rule also applies to Wine's internal heap machinery.
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 960 360" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .hh-bg { fill: #1a1b26; }
+    .hh-box { fill: #24283b; stroke: #7aa2f7; stroke-width: 1.7; rx: 8; }
+    .hh-green { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.7; rx: 8; }
+    .hh-yellow { fill: #2a2418; stroke: #e0af68; stroke-width: 1.7; rx: 8; }
+    .hh-title { fill: #7aa2f7; font-size: 14px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .hh-label { fill: #c0caf5; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+    .hh-small { fill: #a9b1d6; font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+    .hh-tag-g { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .hh-tag-y { fill: #e0af68; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
+    .hh-line-b { stroke: #7aa2f7; stroke-width: 1.2; fill: none; }
+    .hh-line-g { stroke: #9ece6a; stroke-width: 1.2; fill: none; }
+  </style>
+
+  <rect x="0" y="0" width="960" height="360" class="hh-bg"/>
+  <text x="480" y="26" text-anchor="middle" class="hh-title">Heap-path shaping: less false sharing, fewer VM syscalls under `heap->cs`</text>
+
+  <rect x="70" y="82" width="250" height="94" class="hh-box"/>
+  <text x="195" y="108" text-anchor="middle" class="hh-label">LFH bin counters</text>
+  <text x="195" y="130" text-anchor="middle" class="hh-small">`count_alloc`, `count_freed`, `enabled`, and group counters</text>
+  <text x="195" y="148" text-anchor="middle" class="hh-small">adjacent bins used to false-share atomic updates</text>
+
+  <rect x="355" y="82" width="250" height="94" class="hh-green"/>
+  <text x="480" y="108" text-anchor="middle" class="hh-tag-g">cacheline-shaped bins</text>
+  <text x="480" y="130" text-anchor="middle" class="hh-small">`struct bin` is `DECLSPEC_ALIGN(64)` and `sizeof % 64 == 0`</text>
+  <text x="480" y="148" text-anchor="middle" class="hh-small">different size classes stop cross-invalidating one another</text>
+
+  <rect x="640" y="82" width="250" height="94" class="hh-yellow"/>
+  <text x="765" y="108" text-anchor="middle" class="hh-tag-y">VM syscall amortization</text>
+  <text x="765" y="130" text-anchor="middle" class="hh-small">under the RT huge-arenas gate, commit/decommit hysteresis widens</text>
+  <text x="765" y="148" text-anchor="middle" class="hh-small">from `64 KiB` to `1 MiB` on non-hugetlb subheaps</text>
+
+  <line x1="320" y1="128" x2="355" y2="128" class="hh-line-b"/>
+  <line x1="605" y1="128" x2="640" y2="128" class="hh-line-g"/>
+
+  <rect x="160" y="230" width="640" height="76" class="hh-box"/>
+  <text x="480" y="256" text-anchor="middle" class="hh-label">common result</text>
+  <text x="480" y="276" text-anchor="middle" class="hh-small">less coherence traffic on concurrent LFH metadata and fewer</text>
+  <text x="480" y="290" text-anchor="middle" class="hh-small">`MEM_COMMIT` / `MEM_DECOMMIT` syscalls while the heap lock is held</text>
+</svg>
+</div>
+
+Two carries landed together here:
+
+| Carry | Current behavior | Why it matters |
+|---|---|---|
+| LFH bin cacheline padding | `struct bin` is `DECLSPEC_ALIGN(64)` so adjacent LFH size classes stop false-sharing atomic counters | the heap hot path has the same "small counters, many threads" shape as `inproc_sync`, so cacheline isolation helps for the same reason |
+| Commit/decommit hysteresis | under the RT-keyed huge-arenas gate, non-hugetlb subheaps widen commit and tail-decommit hysteresis from `64 KiB` to `1 MiB` | `NtAllocateVirtualMemory(MEM_COMMIT)` and `NtFreeVirtualMemory(MEM_DECOMMIT)` run under `heap->cs`; a larger grain amortizes those syscalls across more alloc/free traffic |
+
+This does not change the Windows heap contract. It changes the internal grain
+at which Wine amortizes VM work on paths that were already legal to over-keep.
+
+---
+
 ## 6. Small-call removal on the wait path
 
 Some of the remaining hot-path cost was not algorithmic at all. It was helper
@@ -437,9 +498,11 @@ x86_64 AVX2 ASCII-burst paths:
 | `utf8_mbstowcs` | 16 source bytes detected as ASCII, zero-extended to 16 `WCHAR`s and stored in one burst | short buffers, multi-byte UTF-8, and invalid UTF-8 remain scalar |
 
 These conversions sit on every PE-to-Unix and Unix-to-PE path/name boundary.
-That makes them worth optimizing even though they are small helpers in
-isolation: the same directory, registry, and section-name traffic that hits the
-shared-state and local-file work also keeps crossing these conversion helpers.
+The hot AVX2 carry is intentionally Unix-side only: `dlls/ntdll/unix/env.c`
+keeps the vectorized path, while PE-side `dlls/ntdll/locale.c` remains scalar
+because the PE build cannot use the runtime `__builtin_cpu_supports("avx2")`
+probe without dragging in an unresolved `__cpu_model` dependency. That still
+matches the hot path shape: the expensive callers are on the Unix side.
 
 Synthetic ASCII-path measurements recorded with the carries:
 
@@ -487,7 +550,7 @@ For the most recent x86_64 inline + AVX2 bundle, the comparison window is:
 | workload | Ableton project + browse + plugin + steady playback | same workload shape |
 | baseline window | `2026-05-09 12:06` |  |
 | post-bundle window |  | `2026-05-10 18:00` |
-| bundle scope |  | inline current-thread/current-process/PEB/tick helpers plus AVX2 `memicmp_strW`, `hash_strW`, `utf8_wcstombs`, and `utf8_mbstowcs` |
+| bundle scope |  | inline current-thread/current-process/PEB/tick helpers plus AVX2 `memicmp_strW`, `hash_strW`, and Unix-side `utf8_wcstombs` / `utf8_mbstowcs` |
 
 <div class="diagram-container">
 <svg width="100%" viewBox="0 0 960 410" xmlns="http://www.w3.org/2000/svg">
