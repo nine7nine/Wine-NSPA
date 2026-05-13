@@ -11,13 +11,14 @@ lives on [NTSync PI Kernel](ntsync-pi-driver.gen.html).
 2. [Two userspace consumer shapes](#2-two-userspace-consumer-shapes)
 3. [Server-owned sync handles](#3-server-owned-sync-handles)
 4. [Client-created anonymous sync handles](#4-client-created-anonymous-sync-handles)
-5. [Wait and signal execution](#5-wait-and-signal-execution)
-6. [`linux_wait_objs`](#6-linux_wait_objs)
-7. [`linux_set_event_obj_pi`](#7-linux_set_event_obj_pi)
-8. [Channel ioctl wrappers](#8-channel-ioctl-wrappers)
-9. [`alloc_client_handle`](#9-alloc_client_handle)
-10. [PE-side wait coverage](#10-pe-side-wait-coverage)
-11. [References](#11-references)
+5. [Client-side `DuplicateHandle` on client-range sync handles](#5-client-side-duplicatehandle-on-client-range-sync-handles)
+6. [Wait and signal execution](#6-wait-and-signal-execution)
+7. [`linux_wait_objs`](#7-linux_wait_objs)
+8. [`linux_set_event_obj_pi`](#8-linux_set_event_obj_pi)
+9. [Channel ioctl wrappers](#9-channel-ioctl-wrappers)
+10. [`alloc_client_handle`](#10-alloc_client_handle)
+11. [PE-side wait coverage](#11-pe-side-wait-coverage)
+12. [References](#12-references)
 
 ---
 
@@ -338,7 +339,43 @@ the handle's existing async completion machinery.
 
 ---
 
-## 5. Wait and signal execution
+## 5. Client-side `DuplicateHandle` on client-range sync handles
+
+Client-created anonymous sync handles no longer have to fail ordinary
+same-process `NtDuplicateObject()` just because wineserver never minted the
+source handle.
+
+For anonymous mutexes, semaphores, and events created on the client-range path,
+same-process, non-inheritable duplicate is handled entirely in ntdll:
+
+1. look up the source entry in the `inproc_sync` cache
+2. `dup()` the cached ntsync fd
+3. allocate a new client-range handle slot
+4. cache the new `(handle, fd, type, access)` entry
+
+That keeps both handles as independent client-range handles routing to the same
+kernel object, with no wineserver round-trip.
+
+Two object-specific follow-ons mirror the create paths:
+
+- duplicated anonymous events are registered with wineserver too, so
+  wineserver-managed async completion can still signal the duplicate
+- duplicated anonymous mutexes are added to the client mutex-abandon list, so
+  thread-exit abandonment still works for the duplicate handle as well
+
+Cross-process duplicates and inheritable duplicates still require a
+server-visible handle and therefore still fall through to the ordinary
+wineserver path.
+
+| Duplicate shape | Current behavior |
+|---|---|
+| same-process, non-inheritable duplicate of client-range mutex/semaphore/event | handled fully client-side |
+| cross-process duplicate | still requires a server-visible handle |
+| inheritable duplicate (`OBJ_INHERIT`) | still requires a server-visible handle |
+
+---
+
+## 6. Wait and signal execution
 
 The steady-state wait helper is `inproc_wait()`. It resolves each
 handle to an fd with `get_inproc_sync()`, collects an optional alert
@@ -376,7 +413,7 @@ calls `linux_set_event_obj_pi()` (which issues
 the userspace half of the kernel's deferred-boost behaviour from
 patch 1008.
 
-### 5.1 Zero-time process and thread waits
+### 6.1 Zero-time process and thread waits
 
 The current zero-time wait fast paths are a small but important extension of
 the in-process sync model. By the time a process or thread handle has resolved
@@ -440,7 +477,7 @@ thread exit code begins at `0`, which is a valid user result.
 </svg>
 </div>
 
-### 5.2 Current cache layout on the hot path
+### 6.2 Current cache layout on the hot path
 
 The `inproc_sync` cache itself is also part of the current userspace sync
 story. Hot waits and signals increment entry refcounts constantly, so false
@@ -518,7 +555,7 @@ cache.
 
 ---
 
-## 6. `linux_wait_objs`
+## 7. `linux_wait_objs`
 
 The wait wrapper is largely unchanged from upstream. NSPA's only
 addition is the `uring_fd` parameter (passed via the repurposed `pad`
@@ -552,7 +589,7 @@ Wine-side change was needed for those carries.
 
 ---
 
-## 7. `linux_set_event_obj_pi`
+## 8. `linux_set_event_obj_pi`
 
 The cross-thread priority-intent setter is a thin ioctl wrapper:
 
@@ -583,7 +620,7 @@ its way out.
 
 ---
 
-## 8. Channel ioctl wrappers
+## 9. Channel ioctl wrappers
 
 The wineserver dispatcher uses the channel ioctls directly via
 `ioctl()` calls; there is no portable `linux_channel_*` helper at the
@@ -607,7 +644,7 @@ kernel until reply.
 
 ---
 
-## 9. `alloc_client_handle`
+## 10. `alloc_client_handle`
 
 Client-side ntsync object creation uses
 `InterlockedDecrement(&client_handle_next)` to allocate client-range
@@ -625,7 +662,7 @@ Currently enabled for anonymous mutexes, semaphores, and events.
 
 ---
 
-## 10. PE-side wait coverage
+## 11. PE-side wait coverage
 
 The userspace ntsync surface is exercised by both Layer 1 native
 ntsync tests and the Layer 2 PE matrix. The split is:
@@ -652,7 +689,7 @@ zero dmesg splats at every step.
 
 ---
 
-## 11. References
+## 12. References
 
 ### Wine source
 

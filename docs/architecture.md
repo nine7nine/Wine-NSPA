@@ -488,6 +488,13 @@ The mapping is governed by these env vars:
 
 `THREAD_PRIORITY_TIME_CRITICAL` is special-cased at the client side: even if a process didn't first call `SetPriorityClass(REALTIME)`, a `SetThreadPriority(thread, TIME_CRITICAL)` call is treated as a ceiling promotion. This covers the common audio pattern where apps set TIME_CRITICAL without first lifting the process class -- a Win32-API quirk that NSPA accommodates leniently for the ceiling band only.
 
+App-facing RT promotions intentionally do **not** set Linux's sticky
+`SCHED_RESET_ON_FORK` flag. Wine threads are created with
+`pthread_create` / `clone3(CLONE_THREAD)`, not `fork(2)`, so the flag does not
+protect the threading model NSPA actually uses. Omitting it keeps later
+application-side demotion calls such as `SetThreadPriority(NORMAL)` symmetric
+instead of tripping the kernel's `-EPERM` rule for clearing the sticky flag.
+
 **Detail: see [current-state](current-state.gen.html) for the live mapping; per-path PI mechanism in [cs-pi](cs-pi.gen.html), [NTSync PI Kernel](ntsync-pi-driver.gen.html), and [NTSync Userspace Sync](ntsync-userspace.gen.html).**
 
 ---

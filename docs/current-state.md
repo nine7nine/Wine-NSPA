@@ -177,6 +177,7 @@ remains available.
 | x86_64 inline current-thread/current-process/PEB/tick helpers | `PsGetCurrent*Id()`, `RtlGetCurrentPeb()`, `WINE_UNIX_LIB` `GetCurrent*Id()`, and `NtGetTickCount()` collapse to direct TEB or `KUSER_SHARED_DATA` reads on the Unix side |
 | msg-ring TEB-backed per-thread caches | 30 s playback counters: CPU cycles `220.9B -> 212.4B`, `pthread_getspecific` self time `0.46% -> 0.09%`, `nspa_get_own_bypass_shm` `0.26% -> 0.20%` |
 | `inproc_sync` cacheline isolation + capacity restore | each entry occupies one cacheline, removing cross-handle false sharing on hot refcount `LOCK` ops while keeping total cacheable handle capacity at `524288` |
+| client-range sync `DuplicateHandle` | same-process, non-inheritable duplicate of anonymous mutex/semaphore/event now duplicates the ntsync fd client-side instead of failing on an invisible wineserver handle |
 | LFH bin cacheline padding | `struct bin` is cacheline-shaped so concurrent LFH counters on adjacent size classes stop false-sharing |
 | Heap commit/decommit hysteresis | under the RT huge-arenas gate, non-hugetlb subheaps widen commit and tail-decommit hysteresis from `64 KiB` to `1 MiB`, amortizing VM syscalls under `heap->cs` |
 | `io_uring` helper inlining | `ntdll_io_uring_flush_deferred()` empty-path cost (`0.82%` audio-thread time) and `ntdll_io_uring_get_eventfd()` helper cost (`0.15%`) are removed from the steady-state wait path |
@@ -242,7 +243,7 @@ own correctness proof and gate.
 | **librtpi vendoring** | Active | n/a | Header-only `rtpi.h` forwarder into the vendored library copy. |
 | **NT-local file and sections** (`nspa_local_file` + local sections) | Active | ON | `NtCreateFile` bypass for bounded regular-file and explicit-directory opens, selected downstream metadata / flush / EOF paths, and client-side unnamed file-backed sections on top of local-file handles. |
 | **Client scheduler** (`wine-sched` / `wine-sched-rt`) | Active | ON | spawn-main + `ntdll_sched` substrate; default-class host plus lazy RT-class host, used by the close queue and eligible timer consumers without a separate public A/B gate. |
-| **NT-local event** | Active | ON | anonymous `NtCreateEvent` routes to client-range handles by default, with server-side fd registration so async completion still signals correctly across wineserver-managed paths. |
+| **NT-local event** | Active | ON | anonymous `NtCreateEvent` routes to client-range handles by default, with server-side fd registration for async completion and client-side same-process duplicate support on that handle range. |
 | **NT-local timer** (`nspa_local_timer`) | Active | ON | anonymous NT timers use client-range backing events by default and, when RT is available, dispatch on the shared `wine-sched-rt` host. |
 | **NT-local WM timer** (`nspa_local_wm_timer`) | Active | ON | `SetTimer` userspace path; `TIMERPROC` + cross-thread cases defer to the server, while eligible local dispatch shares the RT sched host instead of owning its own helper thread. |
 | **Async local-file close queue** | Active | ON with sched enabled | eligible fully-shareable local-file closes defer unix `close()` + server `close_handle` onto `wine-sched`, removing close-path latency from the caller thread. |
@@ -495,6 +496,7 @@ System-wide samples: `38,588 -> 19,415` per 30s.
 | 2026-05-09 | `inproc_sync` cache layout follow-ons | cacheline isolation lands on the userspace sync cache and the original `524288`-handle capacity is restored |
 | 2026-05-10 | x86_64 AVX2 string / Unicode carries | server name compare/hash and Unix-side UTF conversion helpers vectorize ASCII windows while reusing the scalar path for mixed or non-ASCII windows |
 | 2026-05-10 | LFH and local-file optimization follow-ons | LFH bins gain cacheline isolation, non-hugetlb heap hysteresis widens under the RT huge-arenas gate, and local-file bypass opens retain sequential/random `posix_fadvise` hints |
+| 2026-05-12 | client-range sync duplicate + RT demote fix | same-process duplicate of client-created sync handles stays local, and app-thread RT promotions no longer set sticky `SCHED_RESET_ON_FORK` on the app-facing promotion path |
 
 ---
 

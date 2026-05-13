@@ -158,7 +158,7 @@ arbitration is required. Each stub picks an NT surface, owns its own
 data structures (a private handle range, a per-process table, a shmem
 region, a dispatcher thread), and short-circuits the server when it can.</p>
 
-<p>As of 2026-05-09 there are four live NT-local stub surfaces in tree:</p>
+<p>As of 2026-05-12 there are four live NT-local stub surfaces in tree:</p>
 
 <table>
 <thead>
@@ -176,7 +176,7 @@ region, a dispatcher thread), and short-circuits the server when it can.</p>
 </tr>
 <tr>
 <td> local event fast path </td>
-<td> anonymous <code>NtCreateEvent</code> with server-aware async-completion signaling </td>
+<td> anonymous <code>NtCreateEvent</code> with server-aware async-completion signaling and same-process duplicate support on the client-range path </td>
 <td> <code>dlls/ntdll/unix/sync.c</code> + <code>server/nspa/inproc_event_table.c</code> </td>
 </tr>
 <tr>
@@ -501,8 +501,9 @@ handle. Compare to the no-bypass case where the <em>entire</em> lifetime is
 RPCs.</p>
 
 <p>The same lazy-mint pattern shows up elsewhere. NTSync direct-sync
-mints client-range NTSync handles that bypass wineserver, then
-promotes to a server handle on first cross-process duplication.
+mints client-range NTSync handles that bypass wineserver. Same-process,
+non-inheritable duplicate stays client-side; cross-process or
+inheritable duplicate still needs a server-visible handle.
 Section objects that back local-file handles get promoted via
 <code>nspa_create_mapping_from_unix_fd</code> (the same shape as the file
 promotion). Each promotion path is a small RPC that wineserver still
@@ -532,8 +533,8 @@ afterwards.</p>
 </tr>
 <tr>
 <td> NTSync direct-sync </td>
-<td> client-range handle promote on dup </td>
-<td> existing wineserver <code>dup_handle</code> </td>
+<td> same-process non-inheritable duplicate stays client-side; cross-process / inheritable duplicate still needs the server path </td>
+<td> client-side <code>dup()</code> + cache entry, otherwise existing wineserver <code>dup_handle</code> </td>
 </tr>
 <tr>
 <td> <code>nspa_local_timer</code> </td>

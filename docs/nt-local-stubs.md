@@ -43,12 +43,12 @@ arbitration is required. Each stub picks an NT surface, owns its own
 data structures (a private handle range, a per-process table, a shmem
 region, a dispatcher thread), and short-circuits the server when it can.
 
-As of 2026-05-09 there are four live NT-local stub surfaces in tree:
+As of 2026-05-12 there are four live NT-local stub surfaces in tree:
 
 | Stub | NT surface | Lives in |
 |---|---|---|
 | `nspa_local_file` | bounded `NtCreateFile` for regular files and explicit directories, plus downstream file ops and local file-backed sections | `dlls/ntdll/unix/nspa/local_file.c` |
-| local event fast path | anonymous `NtCreateEvent` with server-aware async-completion signaling | `dlls/ntdll/unix/sync.c` + `server/nspa/inproc_event_table.c` |
+| local event fast path | anonymous `NtCreateEvent` with server-aware async-completion signaling and same-process duplicate support on the client-range path | `dlls/ntdll/unix/sync.c` + `server/nspa/inproc_event_table.c` |
 | `nspa_local_timer` | `NtCreateTimer` / `NtSetTimer` / `NtCancelTimer` / `NtQueryTimer` (anonymous) | `dlls/ntdll/unix/nspa/local_timer.c` |
 | `nspa_local_wm_timer` | `NtUserSetTimer` / `NtUserSetSystemTimer` / `NtUserKillTimer` / `WM_TIMER` posting | `dlls/win32u/nspa/local_wm_timer.c` |
 
@@ -346,8 +346,9 @@ handle. Compare to the no-bypass case where the *entire* lifetime is
 RPCs.
 
 The same lazy-mint pattern shows up elsewhere. NTSync direct-sync
-mints client-range NTSync handles that bypass wineserver, then
-promotes to a server handle on first cross-process duplication.
+mints client-range NTSync handles that bypass wineserver. Same-process,
+non-inheritable duplicate stays client-side; cross-process or
+inheritable duplicate still needs a server-visible handle.
 Section objects that back local-file handles get promoted via
 `nspa_create_mapping_from_unix_fd` (the same shape as the file
 promotion). Each promotion path is a small RPC that wineserver still
@@ -360,7 +361,7 @@ References:
 |---|---|---|
 | `nspa_local_file` | `nspa_local_file_get_or_promote_server_handle` (`dlls/ntdll/unix/nspa/local_file.c:1414`) | `nspa_create_file_from_unix_fd` |
 | `nspa_local_file` (sections) | `NtCreateSection` intercept | `nspa_create_mapping_from_unix_fd` |
-| NTSync direct-sync | client-range handle promote on dup | existing wineserver `dup_handle` |
+| NTSync direct-sync | same-process non-inheritable duplicate stays client-side; cross-process / inheritable duplicate still needs the server path | client-side `dup()` + cache entry, otherwise existing wineserver `dup_handle` |
 | `nspa_local_timer` | (none -- anonymous backing event is client-created on the local-event path) | none on the eligible path |
 | `nspa_local_wm_timer` | (none -- pure shmem dispatch) | n/a |
 
