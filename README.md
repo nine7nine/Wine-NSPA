@@ -37,6 +37,7 @@ surfaces, and RT-oriented memory and I/O work.
 | [Thread and Process Shared-State Bypass](https://nine7nine.github.io/Wine-NSPA/thread-and-process-shared-state.gen.html) | Published thread/process snapshots and zero-time waits. |
 | [Win32 Condvar PI (Requeue-PI)](https://nine7nine.github.io/Wine-NSPA/condvar-pi-requeue.gen.html) | Priority inheritance for Win32 condition variables. |
 | [Wineserver Decomposition](https://nine7nine.github.io/Wine-NSPA/wineserver-decomposition.gen.html) | Residual wineserver scope and decomposition path. |
+| [Yabridge-NSPA](https://nine7nine.github.io/Wine-NSPA/yabridge-nspa.gen.html) | Linux VST bridge fork aligned to Wine-NSPA RT and PI rules. |
 
 ### Test Results & Validation
 

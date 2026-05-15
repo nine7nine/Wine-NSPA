@@ -1,0 +1,645 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Wine-NSPA -- Yabridge-NSPA</title>
+<style>
+  :root {
+    --bg: #1a1b26; --fg: #c0caf5; --accent: #7aa2f7;
+    --green: #9ece6a; --red: #f7768e; --yellow: #e0af68;
+    --surface: #24283b; --border: #3b4261; --muted: #8c92b3;
+    --purple: #bb9af7; --orange: #ff9e64; --cyan: #7dcfff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+    background: var(--bg); color: var(--fg);
+    max-width: 1100px; margin: 0 auto; padding: 2rem 1.5rem;
+    line-height: 1.7;
+  }
+  .page-nav {
+    display: flex;
+    justify-content: flex-end;
+    margin-bottom: 0.5rem;
+  }
+  .page-nav a {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.35rem 0.7rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: rgba(36, 40, 59, 0.9);
+    color: var(--accent);
+    font-size: 0.78rem;
+    line-height: 1;
+  }
+  .page-nav a:hover {
+    background: var(--surface);
+    color: var(--cyan);
+    text-decoration: none;
+  }
+  h1 { color: var(--accent); font-size: 1.5rem; margin: 1.5rem 0 0.5rem; }
+  h2 { color: var(--accent); font-size: 1.2rem; margin: 2rem 0 0.75rem;
+       border-bottom: 1px solid var(--border); padding-bottom: 0.3rem; }
+  h3 { color: var(--yellow); font-size: 1rem; margin: 1.25rem 0 0.5rem; }
+  h4 { color: var(--cyan); font-size: 0.95rem; margin: 1rem 0 0.4rem; }
+  p, li { font-size: 0.85rem; margin-bottom: 0.5rem; }
+  ul, ol { padding-left: 1.5rem; margin-bottom: 0.75rem; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  table {
+    width: 100%; border-collapse: collapse;
+    margin: 0.75rem 0 1rem; font-size: 0.8rem;
+  }
+  th, td {
+    padding: 0.4rem 0.75rem; text-align: left;
+    border: 1px solid var(--border);
+  }
+  th { background: var(--surface); color: var(--accent); font-weight: 600; }
+  td { background: var(--bg); }
+  code {
+    background: var(--surface); padding: 0.15rem 0.4rem;
+    border-radius: 3px; font-size: 0.82rem; color: var(--cyan);
+  }
+  pre {
+    background: var(--surface); padding: 1rem 1.1rem; border-radius: 8px;
+    overflow-x: auto; margin: 0.75rem 0 1rem;
+    border: 1px solid var(--border);
+  }
+  pre code {
+    display: block; background: transparent; padding: 0;
+    font-size: 0.8rem; color: inherit;
+  }
+  pre code.hljs,
+  code.hljs {
+    background: transparent;
+    padding: 0;
+  }
+  blockquote {
+    background: var(--surface); border-left: 3px solid var(--accent);
+    padding: 0.75rem 1rem; margin: 1rem 0; border-radius: 0 4px 4px 0;
+    font-size: 0.82rem;
+  }
+  blockquote strong { color: var(--yellow); }
+  hr { border: none; border-top: 1px solid var(--border); margin: 2rem 0; }
+  strong { color: var(--fg); }
+  em { color: var(--muted); font-style: italic; }
+  .diagram-container {
+    display: flex; justify-content: center;
+    margin: 1.25rem auto 1.5rem; padding: 0.75rem;
+    background: rgba(36, 40, 59, 0.55);
+    border: 1px solid var(--border); border-radius: 10px;
+    overflow-x: auto;
+  }
+  .diagram-container svg {
+    display: block;
+    width: 100% !important;
+    max-width: 100%;
+    height: auto !important;
+    margin: 0 auto;
+    flex: 0 0 auto;
+  }
+</style>
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/tokyo-night-dark.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
+</head><body>
+<div class="page-nav"><a href="index.html">Docs Home</a></div>
+<h1 id="wine-nspa--yabridge-nspa">Wine-NSPA &ndash; Yabridge-NSPA</h1>
+
+<p>This page documents the yabridge fork aligned to Wine-NSPA&rsquo;s RT scheduling,
+priority-inheritance, and userspace-sync model.</p>
+
+<h2 id="table-of-contents">Table of Contents</h2>
+
+<ol>
+<li><a href="#1-overview">Overview</a></li>
+<li><a href="#2-why-a-separate-fork-exists">Why a separate fork exists</a></li>
+<li><a href="#3-process-shape">Process shape</a></li>
+<li><a href="#4-rt-ownership-and-priority-mapping">RT ownership and priority mapping</a></li>
+<li><a href="#5-per-callback-transport">Per-callback transport</a></li>
+<li><a href="#6-current-format-coverage">Current format coverage</a></li>
+<li><a href="#7-startup-and-lifecycle-hardening">Startup and lifecycle hardening</a></li>
+<li><a href="#8-relationship-to-wine-nspa">Relationship to Wine-NSPA</a></li>
+<li><a href="#9-references">References</a></li>
+</ol>
+
+
+<hr />
+
+<h2 id="1-overview">1. Overview</h2>
+
+<p>Yabridge-NSPA is a yabridge fork for native Linux DAWs hosting Windows VST2,
+VST3, and CLAP plugins through Wine-NSPA. It keeps yabridge&rsquo;s basic split
+between a native Linux plugin library and a Winelib <code>yabridge-host</code>, but it
+changes the hot path to match Wine-NSPA&rsquo;s RT rules instead of treating Wine as
+generic userspace.</p>
+
+<p>The load-bearing changes are:</p>
+
+<ul>
+<li>Wine-side thread promotion goes through Win32 priority APIs so Wine-NSPA&rsquo;s
+RT-band mapping applies.</li>
+<li>Cross-process audio rendezvous uses <code>pi_mutex_t</code> + <code>pi_cond_t</code> instead of a
+socket-only callback path.</li>
+<li>Fixed-layout metadata travels through the shared L2 region directly instead
+of being fully serialized every block.</li>
+<li>Startup, teardown, and crash handling are tightened around DAW exit,
+wineserver cold start, and stale shared-memory artifacts.</li>
+</ul>
+
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 960 430" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
+  <style>
+    .yb-bg { fill: #1a1b26; }
+    .yb-layer { fill: #1f2535; stroke: #3b4261; stroke-width: 1.2; }
+    .yb-daw { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
+    .yb-host { fill: #2a1f35; stroke: #bb9af7; stroke-width: 1.8; rx: 8; }
+    .yb-shm { fill: #2a2418; stroke: #e0af68; stroke-width: 1.8; rx: 8; }
+    .yb-kern { fill: #1a2235; stroke: #7aa2f7; stroke-width: 1.8; rx: 8; }
+    .yb-box { fill: #24283b; stroke: #3b4261; stroke-width: 1.2; rx: 8; }
+    .yb-title { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
+    .yb-head-g { fill: #9ece6a; font: bold 12px 'JetBrains Mono', monospace; }
+    .yb-head-p { fill: #bb9af7; font: bold 12px 'JetBrains Mono', monospace; }
+    .yb-head-y { fill: #e0af68; font: bold 12px 'JetBrains Mono', monospace; }
+    .yb-head-b { fill: #7aa2f7; font: bold 12px 'JetBrains Mono', monospace; }
+    .yb-text { fill: #c0caf5; font: 11px 'JetBrains Mono', monospace; }
+    .yb-small { fill: #a9b1d6; font: 9px 'JetBrains Mono', monospace; }
+    .yb-line-g { stroke: #9ece6a; stroke-width: 1.15; fill: none; }
+    .yb-line-p { stroke: #bb9af7; stroke-width: 1.15; fill: none; }
+    .yb-line-y { stroke: #e0af68; stroke-width: 1.15; fill: none; }
+    .yb-line-b { stroke: #7aa2f7; stroke-width: 1.15; fill: none; }
+  </style>
+
+  <rect x="0" y="0" width="960" height="430" class="yb-bg" rx="6"/>
+  <text x="480" y="28" text-anchor="middle" class="yb-title">Yabridge-NSPA process shape</text>
+
+  <rect x="40" y="60" width="300" height="230" class="yb-daw" rx="6"/>
+  <text x="60" y="86" class="yb-head-g">DAW process (native Linux)</text>
+  <text x="60" y="102" class="yb-small">plugin-lib side loaded into Carla / Ardour / Element / similar hosts</text>
+
+  <rect x="68" y="122" width="244" height="58" class="yb-box" rx="6"/>
+  <text x="190" y="146" text-anchor="middle" class="yb-text">plugin-lib bridge</text>
+  <text x="190" y="162" text-anchor="middle" class="yb-small">VST2 / VST3 / CLAP entry points, host callbacks, control sockets</text>
+
+  <rect x="68" y="198" width="244" height="58" class="yb-box" rx="6"/>
+  <text x="190" y="222" text-anchor="middle" class="yb-text">DAW audio thread</text>
+  <text x="190" y="238" text-anchor="middle" class="yb-small">calls `process()` / `processReplacing()` and blocks on the L2 rendezvous</text>
+
+  <rect x="370" y="112" width="220" height="126" class="yb-shm" rx="6"/>
+  <text x="480" y="138" text-anchor="middle" class="yb-head-y">AudioControlShm</text>
+  <text x="480" y="158" text-anchor="middle" class="yb-small">per-instance or per-bridge shared region</text>
+  <text x="480" y="176" text-anchor="middle" class="yb-small">request lock + cond</text>
+  <text x="480" y="192" text-anchor="middle" class="yb-small">reply lock + cond</text>
+  <text x="480" y="208" text-anchor="middle" class="yb-small">fixed-layout metadata + bounded fallback to bitsery/socket</text>
+
+  <rect x="620" y="60" width="300" height="230" class="yb-host" rx="6"/>
+  <text x="640" y="86" class="yb-head-p">wine-host process (Winelib under Wine-NSPA)</text>
+  <text x="640" y="102" class="yb-small">`yabridge-host.exe` + Windows plugin DLL/module</text>
+
+  <rect x="648" y="122" width="244" height="58" class="yb-box" rx="6"/>
+  <text x="770" y="146" text-anchor="middle" class="yb-text">audio worker / dispatch loop</text>
+  <text x="770" y="162" text-anchor="middle" class="yb-small">TIME_CRITICAL via Win32 APIs, same-thread plugin callback execution</text>
+
+  <rect x="648" y="198" width="244" height="58" class="yb-box" rx="6"/>
+  <text x="770" y="222" text-anchor="middle" class="yb-text">Windows plugin module</text>
+  <text x="770" y="238" text-anchor="middle" class="yb-small">VST2 / VST3 / CLAP implementation and any plugin-spawned workers</text>
+
+  <rect x="120" y="330" width="720" height="62" class="yb-kern" rx="6"/>
+  <text x="480" y="356" text-anchor="middle" class="yb-head-b">Wine-NSPA substrate used by the bridge</text>
+  <text x="480" y="372" text-anchor="middle" class="yb-small">vendored `rtpi.h`, Win32 priority mapping, wineserver warm-start</text>
+  <text x="480" y="386" text-anchor="middle" class="yb-small">pidfd teardown, and Wine-side sync fixes</text>
+
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="312" y1="227" x2="370" y2="175" class="yb-line-g"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="590" y1="175" x2="648" y2="151" class="yb-line-y"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="190" y1="290" x2="190" y2="330" class="yb-line-g"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="770" y1="290" x2="770" y2="330" class="yb-line-p"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="480" y1="238" x2="480" y2="330" class="yb-line-y"/>
+</svg>
+</div>
+
+
+<p>The fork does not replace yabridge&rsquo;s overall model. It changes which primitive
+owns the timing-critical boundary between the DAW and the Wine-host process.</p>
+
+<hr />
+
+<h2 id="2-why-a-separate-fork-exists">2. Why a separate fork exists</h2>
+
+<p>Upstream yabridge targets stock Wine plus generic Linux scheduling and IPC.
+Wine-NSPA changes the assumptions under that bridge:</p>
+
+<ul>
+<li>thread priority wants to flow through <code>SetPriorityClass()</code> and
+<code>SetThreadPriority()</code>, not direct <code>sched_setscheduler()</code> calls</li>
+<li>cross-process callback waits want priority inheritance, not a socket-only
+round-trip</li>
+<li>the shared sync ABI must match Wine-NSPA&rsquo;s <code>rtpi.h</code> layout on both the native
+and Winelib sides</li>
+<li>plugin startup and teardown now happen in a process that already has RT-aware
+wineserver, userspace sync, and tighter scheduling behavior</li>
+</ul>
+
+
+<table>
+<thead>
+<tr>
+<th> Concern </th>
+<th> Generic yabridge shape </th>
+<th> Yabridge-NSPA shape </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> Audio-thread promotion </td>
+<td> direct Linux scheduler calls </td>
+<td> Win32 priority APIs so Wine-NSPA&rsquo;s mapping and process-class rules apply </td>
+</tr>
+<tr>
+<td> Cross-process callback wait </td>
+<td> unix socket send/recv and ordinary wakeup </td>
+<td> <code>pi_mutex</code> + <code>pi_cond</code> rendezvous with cross-process PI </td>
+</tr>
+<tr>
+<td> Shared sync ABI </td>
+<td> external or system-provided primitive choice </td>
+<td> vendored Wine-NSPA <code>rtpi.h</code> so both halves use one <code>pi_mutex_t</code> / <code>pi_cond_t</code> layout </td>
+</tr>
+<tr>
+<td> Audio metadata path </td>
+<td> serialized request/reply payload every block </td>
+<td> fixed-layout direct fields for the hot metadata, with bounded fallback </td>
+</tr>
+<tr>
+<td> Host startup and teardown </td>
+<td> generic Wine spawn + polling watchdog </td>
+<td> wineserver pre-warm, pidfd exit detection, PID-tagged cleanup </td>
+</tr>
+</tbody>
+</table>
+
+
+<p>This is why the fork is code, not just packaging or environment defaults.
+Wine-NSPA-specific rules live on both sides of the bridge.</p>
+
+<hr />
+
+<h2 id="3-process-shape">3. Process shape</h2>
+
+<p>Yabridge-NSPA still has the same two major halves:</p>
+
+<ul>
+<li>a native Linux plugin library loaded directly into the DAW</li>
+<li>a <code>yabridge-host</code> Winelib process that loads the Windows plugin module</li>
+</ul>
+
+
+<p>The important change is what happens on the callback boundary.</p>
+
+<ul>
+<li>Control, editor, and recursive host/plugin traffic still use the established
+socket transport.</li>
+<li>The timing-critical audio callback path uses a dedicated shared region backed
+by <code>AudioControlShm</code>.</li>
+<li>The shared region is created on the native side and attached on the
+<code>yabridge-host</code> side.</li>
+<li>VST2 uses one dedicated audio rendezvous path for the bridge.</li>
+<li>VST3 and CLAP use per-instance rendezvous regions for their process callback.</li>
+</ul>
+
+
+<p>That keeps the hard RT path narrow without rewriting the rest of yabridge&rsquo;s
+control-plane logic.</p>
+
+<hr />
+
+<h2 id="4-rt-ownership-and-priority-mapping">4. RT ownership and priority mapping</h2>
+
+<p>The fork removes the old assumption that yabridge should decide Linux FIFO
+priorities itself.</p>
+
+<p>Instead:</p>
+
+<ul>
+<li><code>yabridge-host</code> sets <code>REALTIME_PRIORITY_CLASS</code> at process scope</li>
+<li>wine-host worker threads and dispatch loops use
+<code>SetThreadPriority(THREAD_PRIORITY_TIME_CRITICAL)</code></li>
+<li>scoped module-load and plugin-init brackets use
+<code>ScopedTimeCriticalBoost</code> so plugin-spawned workers inherit the intended RT
+entitlement</li>
+<li>demotion restores the previous Win32 thread priority instead of forcing the
+caller back to <code>SCHED_OTHER</code></li>
+</ul>
+
+
+<p>That has two practical effects:</p>
+
+<ol>
+<li>Wine-NSPA, not yabridge, owns the mapping from Win32 priority bands to
+Linux scheduler state.</li>
+<li>Plugin worker threads created during <code>LoadLibrary</code>, static initialization,
+or plugin initialization inherit an RT-capable parent at the point where the
+kernel checks entitlement.</li>
+</ol>
+
+
+<p>The fork also removes two older mechanisms that became redundant once the
+kernel-side PI handoff was in place:</p>
+
+<table>
+<thead>
+<tr>
+<th> Removed assumption </th>
+<th> Replacement </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> direct <code>sched_setscheduler(..., 5)</code> promotion in wine-host </td>
+<td> <code>SetThreadPriority()</code> routed through Wine-NSPA </td>
+</tr>
+<tr>
+<td> 10-second userspace priority resync and per-request <code>new_realtime_priority</code> fields </td>
+<td> per-callback PI handoff through the shared rendezvous </td>
+</tr>
+</tbody>
+</table>
+
+
+<p>The point is to let the DAW thread&rsquo;s effective priority reach the Wine-host
+worker during the callback, not to mirror scheduler state in userspace on a
+timer.</p>
+
+<hr />
+
+<h2 id="5-per-callback-transport">5. Per-callback transport</h2>
+
+<p>The hot path uses a dedicated <code>AudioControlShm</code> rendezvous region with one
+request lock/cond pair and one reply lock/cond pair.</p>
+
+<p>The key invariant is that the cross-process lock is <strong>not</strong> held across the
+plugin&rsquo;s callback body.</p>
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 960 420" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
+  <style>
+    .tr-bg { fill: #1a1b26; }
+    .tr-box { fill: #24283b; stroke: #3b4261; stroke-width: 1.2; rx: 8; }
+    .tr-daw { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
+    .tr-host { fill: #2a1f35; stroke: #bb9af7; stroke-width: 1.8; rx: 8; }
+    .tr-shm { fill: #2a2418; stroke: #e0af68; stroke-width: 1.8; rx: 8; }
+    .tr-note { fill: #1a2235; stroke: #7aa2f7; stroke-width: 1.6; rx: 8; }
+    .tr-title { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
+    .tr-head-g { fill: #9ece6a; font: bold 11px 'JetBrains Mono', monospace; }
+    .tr-head-p { fill: #bb9af7; font: bold 11px 'JetBrains Mono', monospace; }
+    .tr-head-y { fill: #e0af68; font: bold 11px 'JetBrains Mono', monospace; }
+    .tr-head-b { fill: #7aa2f7; font: bold 11px 'JetBrains Mono', monospace; }
+    .tr-text { fill: #c0caf5; font: 10px 'JetBrains Mono', monospace; }
+    .tr-small { fill: #a9b1d6; font: 9px 'JetBrains Mono', monospace; }
+    .tr-line-g { stroke: #9ece6a; stroke-width: 1.15; fill: none; }
+    .tr-line-p { stroke: #bb9af7; stroke-width: 1.15; fill: none; }
+    .tr-line-y { stroke: #e0af68; stroke-width: 1.15; fill: none; }
+  </style>
+
+  <rect x="0" y="0" width="960" height="420" class="tr-bg" rx="6"/>
+  <text x="480" y="28" text-anchor="middle" class="tr-title">Audio callback rendezvous</text>
+
+  <rect x="40" y="92" width="240" height="86" class="tr-daw" rx="6"/>
+  <text x="160" y="118" text-anchor="middle" class="tr-head-g">DAW audio thread</text>
+  <text x="160" y="140" text-anchor="middle" class="tr-small">populate request metadata</text>
+  <text x="160" y="156" text-anchor="middle" class="tr-small">signal request cond, then wait on reply cond</text>
+
+  <rect x="360" y="66" width="240" height="138" class="tr-shm" rx="6"/>
+  <text x="480" y="92" text-anchor="middle" class="tr-head-y">AudioControlShm</text>
+  <text x="480" y="116" text-anchor="middle" class="tr-small">request lock + cond</text>
+  <text x="480" y="132" text-anchor="middle" class="tr-small">fixed-layout metadata or bounded fallback payload</text>
+  <text x="480" y="148" text-anchor="middle" class="tr-small">reply lock + cond</text>
+  <text x="480" y="176" text-anchor="middle" class="tr-text">same callback ownership, cross-process PI handoff</text>
+
+  <rect x="680" y="92" width="240" height="86" class="tr-host" rx="6"/>
+  <text x="800" y="118" text-anchor="middle" class="tr-head-p">wine-host audio worker</text>
+  <text x="800" y="140" text-anchor="middle" class="tr-small">wake, copy request, release request lock</text>
+  <text x="800" y="156" text-anchor="middle" class="tr-small">run plugin callback, then publish reply</text>
+
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="280" y1="135" x2="360" y2="135" class="tr-line-g"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="600" y1="135" x2="680" y2="135" class="tr-line-y"/>
+
+  <rect x="250" y="242" width="460" height="78" class="tr-note" rx="6"/>
+  <text x="480" y="268" text-anchor="middle" class="tr-head-b">Load-bearing invariant</text>
+  <text x="480" y="286" text-anchor="middle" class="tr-small">plugin `process()` / `processReplacing()` runs with no cross-process mutex held</text>
+  <text x="480" y="302" text-anchor="middle" class="tr-small">locks only cover state transition, memcpy, and cond signaling</text>
+
+  <rect x="110" y="340" width="740" height="46" class="tr-box" rx="6"/>
+  <text x="480" y="366" text-anchor="middle" class="tr-text" style="font-size:8px; letter-spacing:-0.15px">request side: direct metadata when fixed-shape, fallback when oversized or variable-shape</text>
+</svg>
+</div>
+
+
+<p>This transport does two different jobs:</p>
+
+<ol>
+<li><strong>Wait/ownership</strong>: the DAW thread and Wine-host worker hand off one audio
+callback with cross-process priority inheritance.</li>
+<li><strong>Payload carriage</strong>: fixed-layout hot metadata can stay in the shared
+region directly, while oversized or variable cases still have a bounded
+fallback.</li>
+</ol>
+
+
+<p>The direct-layout work is what made the remaining serialization cost small
+enough to stop dominating the bridge:</p>
+
+<ul>
+<li>request-side process context / time info / transport structs live in fixed
+fields</li>
+<li>hot event and parameter surfaces have fixed-layout ring or array forms</li>
+<li>response-side output events and output parameter changes also use the shared
+envelope</li>
+</ul>
+
+
+<p>On a representative ACE VST3 capture with the direct envelope enabled, the
+remaining bitsery encode/decode surface dropped to roughly <code>0.10%</code> of
+<code>yabridge-host</code> CPU, while <code>pi_mutex_lock</code> itself sat at roughly <code>0.01%</code>.</p>
+
+<hr />
+
+<h2 id="6-current-format-coverage">6. Current format coverage</h2>
+
+<p>The fork uses one design, but not every plugin API needs the exact same
+attachment points.</p>
+
+<table>
+<thead>
+<tr>
+<th> Format </th>
+<th> Hot callback path </th>
+<th> What stays on the older control path </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> VST2 </td>
+<td> dedicated L2 audio rendezvous for <code>processReplacing()</code> / audio processing, plus a PI mutex on the next-buffer MIDI queue </td>
+<td> dispatcher/control socket traffic and non-audio host callbacks </td>
+</tr>
+<tr>
+<td> VST3 </td>
+<td> per-instance L2 rendezvous for <code>IAudioProcessor::process()</code> </td>
+<td> object construction, editor/control traffic, and other infrequent interfaces </td>
+</tr>
+<tr>
+<td> CLAP </td>
+<td> per-instance L2 rendezvous for <code>clap_plugin-&gt;process()</code> </td>
+<td> params/state/control surfaces outside the process callback </td>
+</tr>
+</tbody>
+</table>
+
+
+<p>Fixed-layout metadata coverage also differs slightly by format:</p>
+
+<table>
+<thead>
+<tr>
+<th> Format </th>
+<th> Direct metadata carried in the shared envelope </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> VST2 </td>
+<td> <code>VstTimeInfo</code> and the bounded reply path </td>
+</tr>
+<tr>
+<td> VST3 </td>
+<td> <code>ProcessContext</code>, fixed-shape event ring, bounded parameter queues, response-side output events and parameter queues </td>
+</tr>
+<tr>
+<td> CLAP </td>
+<td> <code>clap_event_transport_t</code>, fixed-shape event ring, and response-side output events </td>
+</tr>
+</tbody>
+</table>
+
+
+<p>The envelope path is the normal path. The explicit runtime gate that used to
+enable or disable the NSPA L2 transport was removed; the bridge uses the fast
+path by default and falls back only when a particular callback shape does not
+fit the bounded region.</p>
+
+<hr />
+
+<h2 id="7-startup-and-lifecycle-hardening">7. Startup and lifecycle hardening</h2>
+
+<p>The yabridge fork also tightens the non-steady-state edges that matter in real
+plugin-hosting sessions.</p>
+
+<table>
+<thead>
+<tr>
+<th> Area </th>
+<th> Final behavior </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> Module path exposure </td>
+<td> module loads use DOS-path conversion so plugin-side <code>GetModuleFileNameW()</code> sees a parseable Windows path instead of a raw <code>\\\\?\\unix\\...</code> host path </td>
+</tr>
+<tr>
+<td> Plugin load entitlement </td>
+<td> <code>LoadLibrary</code> and selected plugin-init calls are bracketed with a scoped TIME_CRITICAL boost so worker threads spawned during <code>DllMain</code> or init inherit the intended RT entitlement </td>
+</tr>
+<tr>
+<td> Cold wineserver startup </td>
+<td> the host side pre-warms wineserver before launching <code>yabridge-host</code>, avoiding a class of cold-spawn failures in hosts that hit the first Wine launch of the session </td>
+</tr>
+<tr>
+<td> Host startup failure </td>
+<td> startup failure no longer aborts the native DAW; the bridge closes sockets and returns an error instead of taking the whole host down </td>
+</tr>
+<tr>
+<td> DAW exit detection </td>
+<td> pidfd-based watchdog wakes on parent exit instead of relying only on a coarse polling timer </td>
+</tr>
+<tr>
+<td> Stale artifacts </td>
+<td> endpoint names carry a PID sentinel, and plugin-lib initialization performs one-shot orphan cleanup in <code>${XDG_RUNTIME_DIR}</code> and <code>/dev/shm</code> </td>
+</tr>
+</tbody>
+</table>
+
+
+<p>These are not separate features from the audio transport. They are what make
+the transport survivable in long DAW sessions, repeated scans, and crash or
+SIGKILL scenarios.</p>
+
+<hr />
+
+<h2 id="8-relationship-to-wine-nspa">8. Relationship to Wine-NSPA</h2>
+
+<p>Yabridge-NSPA is not part of the Wine tree, but it is intentionally coupled to
+Wine-NSPA in a few load-bearing places.</p>
+
+<ul>
+<li>It vendors Wine-NSPA&rsquo;s <code>rtpi.h</code> because both halves of the bridge must agree
+on one <code>pi_mutex_t</code> / <code>pi_cond_t</code> layout. Mixing generic system librtpi with
+Wine-NSPA&rsquo;s header-only implementation is not a safe ABI choice.</li>
+<li>It routes thread promotion through Win32 APIs because Wine-NSPA already owns
+the mapping from Win32 priority classes/bands to Linux scheduler state.</li>
+<li>It benefits from Wine-NSPA-side sync and startup fixes, but it does not
+re-implement those rules locally.</li>
+<li>It is adjacent to the <a href="audio-stack.gen.html">Audio Stack</a>, not a replacement
+for it. <code>nspaASIO</code> and <code>winejack.drv</code> solve Wine-native Windows audio APIs;
+Yabridge-NSPA solves the Linux-DAW-to-Windows-plugin bridge.</li>
+</ul>
+
+
+<p>The practical view is simple: Wine-NSPA makes the Wine side RT-correct, and
+Yabridge-NSPA carries those rules across the native/Linux-to-Wine plugin
+boundary.</p>
+
+<hr />
+
+<h2 id="9-references">9. References</h2>
+
+<h3 id="source">Source</h3>
+
+<ul>
+<li><code>yabridge/src/common/rtpi.h</code> &ndash; vendored Wine-NSPA <code>rtpi.h</code></li>
+<li><code>yabridge/src/common/pi_sync.h</code> &ndash; C++ RAII wrappers for <code>pi_mutex_t</code> / <code>pi_cond_t</code></li>
+<li><code>yabridge/src/common/audio-control-shm.{h,cpp}</code> &ndash; shared L2 rendezvous region and direct-struct envelope</li>
+<li><code>yabridge/src/wine-host/nspa_rt.h</code> &ndash; Win32 priority helpers and scoped RT load bracket</li>
+<li><code>yabridge/src/wine-host/host.cpp</code> &ndash; <code>REALTIME_PRIORITY_CLASS</code> process setup</li>
+<li><code>yabridge/src/wine-host/utils.{h,cpp}</code> &ndash; pidfd watchdog registration and DOS-path conversion helpers</li>
+<li><code>yabridge/src/plugin/orphan-cleanup.{h,cpp}</code> &ndash; PID-tagged endpoint cleanup</li>
+<li><code>yabridge/src/plugin/bridges/vst2*</code> &ndash; VST2 bridge-side L2 use</li>
+<li><code>yabridge/src/plugin/bridges/vst3*</code> &ndash; VST3 bridge-side L2 use</li>
+<li><code>yabridge/src/plugin/bridges/clap*</code> &ndash; CLAP bridge-side L2 use</li>
+<li><code>yabridge/src/wine-host/bridges/vst2*</code> &ndash; VST2 Wine-host audio worker and callback path</li>
+<li><code>yabridge/src/wine-host/bridges/vst3*</code> &ndash; VST3 Wine-host process callback path</li>
+<li><code>yabridge/src/wine-host/bridges/clap*</code> &ndash; CLAP Wine-host process callback path</li>
+</ul>
+
+
+<h3 id="related-wine-nspa-docs">Related Wine-NSPA docs</h3>
+
+<ul>
+<li><code>audio-stack.gen.html</code> &ndash; Wine-native JACK / WASAPI / ASIO path</li>
+<li><code>librtpi.gen.html</code> &ndash; the PI mutex / condvar API Yabridge-NSPA vendors</li>
+<li><code>ntsync-userspace.gen.html</code> &ndash; Wine-side wait/signal and userspace sync model</li>
+<li><code>architecture.gen.html</code> &ndash; system-level view of the larger Wine-NSPA stack</li>
+</ul>
+
+
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+  document.querySelectorAll("pre code").forEach(function (block) {
+    hljs.highlightElement(block);
+  });
+});
+</script>
+</body></html>
