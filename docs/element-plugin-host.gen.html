@@ -1,0 +1,616 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Wine-NSPA -- Element-NSPA</title>
+<style>
+  :root {
+    --bg: #1a1b26; --fg: #c0caf5; --accent: #7aa2f7;
+    --green: #9ece6a; --red: #f7768e; --yellow: #e0af68;
+    --surface: #24283b; --border: #3b4261; --muted: #8c92b3;
+    --purple: #bb9af7; --orange: #ff9e64; --cyan: #7dcfff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+    background: var(--bg); color: var(--fg);
+    max-width: 1100px; margin: 0 auto; padding: 2rem 1.5rem;
+    line-height: 1.7;
+  }
+  .page-nav {
+    display: flex;
+    justify-content: flex-end;
+    margin-bottom: 0.5rem;
+  }
+  .page-nav a {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.35rem 0.7rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: rgba(36, 40, 59, 0.9);
+    color: var(--accent);
+    font-size: 0.78rem;
+    line-height: 1;
+  }
+  .page-nav a:hover {
+    background: var(--surface);
+    color: var(--cyan);
+    text-decoration: none;
+  }
+  h1 { color: var(--accent); font-size: 1.5rem; margin: 1.5rem 0 0.5rem; }
+  h2 { color: var(--accent); font-size: 1.2rem; margin: 2rem 0 0.75rem;
+       border-bottom: 1px solid var(--border); padding-bottom: 0.3rem; }
+  h3 { color: var(--yellow); font-size: 1rem; margin: 1.25rem 0 0.5rem; }
+  h4 { color: var(--cyan); font-size: 0.95rem; margin: 1rem 0 0.4rem; }
+  p, li { font-size: 0.85rem; margin-bottom: 0.5rem; }
+  ul, ol { padding-left: 1.5rem; margin-bottom: 0.75rem; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  table {
+    width: 100%; border-collapse: collapse;
+    margin: 0.75rem 0 1rem; font-size: 0.8rem;
+  }
+  th, td {
+    padding: 0.4rem 0.75rem; text-align: left;
+    border: 1px solid var(--border);
+  }
+  th { background: var(--surface); color: var(--accent); font-weight: 600; }
+  td { background: var(--bg); }
+  code {
+    background: var(--surface); padding: 0.15rem 0.4rem;
+    border-radius: 3px; font-size: 0.82rem; color: var(--cyan);
+  }
+  pre {
+    background: var(--surface); padding: 1rem 1.1rem; border-radius: 8px;
+    overflow-x: auto; margin: 0.75rem 0 1rem;
+    border: 1px solid var(--border);
+  }
+  pre code {
+    display: block; background: transparent; padding: 0;
+    font-size: 0.8rem; color: inherit;
+  }
+  pre code.hljs,
+  code.hljs {
+    background: transparent;
+    padding: 0;
+  }
+  blockquote {
+    background: var(--surface); border-left: 3px solid var(--accent);
+    padding: 0.75rem 1rem; margin: 1rem 0; border-radius: 0 4px 4px 0;
+    font-size: 0.82rem;
+  }
+  blockquote strong { color: var(--yellow); }
+  hr { border: none; border-top: 1px solid var(--border); margin: 2rem 0; }
+  strong { color: var(--fg); }
+  em { color: var(--muted); font-style: italic; }
+  .diagram-container {
+    display: flex; justify-content: center;
+    margin: 1.25rem auto 1.5rem; padding: 0.75rem;
+    background: rgba(36, 40, 59, 0.55);
+    border: 1px solid var(--border); border-radius: 10px;
+    overflow-x: auto;
+  }
+  .diagram-container svg {
+    display: block;
+    width: 100% !important;
+    max-width: 100%;
+    height: auto !important;
+    margin: 0 auto;
+    flex: 0 0 auto;
+  }
+</style>
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/tokyo-night-dark.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
+</head><body>
+<div class="page-nav"><a href="index.html">Docs Home</a></div>
+<h1 id="wine-nspa--element-nspa">Wine-NSPA &ndash; Element-NSPA</h1>
+
+<p>This page documents the Element-NSPA port that hosts Windows plugins through
+JUCE-NSPA and Wine-NSPA.</p>
+
+<h2 id="table-of-contents">Table of Contents</h2>
+
+<ol>
+<li><a href="#1-overview">Overview</a></li>
+<li><a href="#2-why-a-separate-port-exists">Why a separate port exists</a></li>
+<li><a href="#3-host-bootstrap">Host bootstrap</a></li>
+<li><a href="#4-plugin-formats-and-search-paths">Plugin formats and search paths</a></li>
+<li><a href="#5-editor-and-ui-behavior">Editor and UI behavior</a></li>
+<li><a href="#6-integration-with-wine-nspa-and-juce-nspa">Integration with Wine-NSPA and JUCE-NSPA</a></li>
+<li><a href="#7-intentional-boundaries">Intentional boundaries</a></li>
+<li><a href="#8-references">References</a></li>
+</ol>
+
+
+<hr />
+
+<h2 id="1-overview">1. Overview</h2>
+
+<p>Element-NSPA is an application port that runs Element as a Linux winelib
+binary while hosting Windows VST2 and VST3 plugins through Wine.</p>
+
+<p>The port sits on top of JUCE-NSPA&rsquo;s framework changes, then adds the
+application-level work Element needs:</p>
+
+<ul>
+<li>winelib host bootstrap before any plugin static initialization</li>
+<li>plugin-format selection and scanning rules that match a Windows-plugin host</li>
+<li>Wine-prefix path discovery so a fresh host finds Windows plugins</li>
+<li>editor-window behavior that matches the embedded Win32 GUI path</li>
+</ul>
+
+
+<p>The result is not a generic Linux Element build. It is a Linux-hosted,
+Wine-backed Windows plugin host.</p>
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 960 430" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
+  <style>
+    .el-bg { fill: #1a1b26; }
+    .el-box { fill: #24283b; stroke: #3b4261; stroke-width: 1.4; rx: 8; }
+    .el-app { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
+    .el-host { fill: #1a2235; stroke: #7aa2f7; stroke-width: 1.8; rx: 8; }
+    .el-plug { fill: #2a2137; stroke: #bb9af7; stroke-width: 1.8; rx: 8; }
+    .el-note { fill: #2a2418; stroke: #e0af68; stroke-width: 1.6; rx: 8; }
+    .el-title { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
+    .el-head-g { fill: #9ece6a; font: bold 11px 'JetBrains Mono', monospace; }
+    .el-head-b { fill: #7aa2f7; font: bold 11px 'JetBrains Mono', monospace; }
+    .el-head-p { fill: #bb9af7; font: bold 11px 'JetBrains Mono', monospace; }
+    .el-head-y { fill: #e0af68; font: bold 11px 'JetBrains Mono', monospace; }
+    .el-text { fill: #c0caf5; font: 10px 'JetBrains Mono', monospace; }
+    .el-small { fill: #a9b1d6; font: 9px 'JetBrains Mono', monospace; }
+    .el-line-g { stroke: #9ece6a; stroke-width: 1.3; fill: none; }
+    .el-line-b { stroke: #7aa2f7; stroke-width: 1.3; fill: none; }
+    .el-line-p { stroke: #bb9af7; stroke-width: 1.3; fill: none; }
+  </style>
+
+  <rect x="0" y="0" width="960" height="430" class="el-bg" rx="6"/>
+  <text x="480" y="28" text-anchor="middle" class="el-title">Element winelib host layout</text>
+
+  <rect x="45" y="86" width="230" height="118" class="el-app" rx="6"/>
+  <text x="160" y="112" text-anchor="middle" class="el-head-g">Element app shell</text>
+  <text x="160" y="136" text-anchor="middle" class="el-small">graph, transport, plugin manager UI</text>
+  <text x="160" y="152" text-anchor="middle" class="el-small">native Linux process, JUCE event loop</text>
+  <text x="160" y="168" text-anchor="middle" class="el-small">scan path editing and editor windows</text>
+
+  <rect x="335" y="70" width="290" height="150" class="el-host" rx="6"/>
+  <text x="480" y="96" text-anchor="middle" class="el-head-b">winelib host runtime</text>
+  <text x="480" y="120" text-anchor="middle" class="el-small">`SetPriorityClass()` + `OleInitialize()` before plugin load</text>
+  <text x="480" y="136" text-anchor="middle" class="el-small">JUCE-NSPA VST2 / VST3 loading and Win32 dispatch</text>
+  <text x="480" y="152" text-anchor="middle" class="el-small">Wine-NSPA X11 embed path for plugin editors</text>
+  <text x="480" y="168" text-anchor="middle" class="el-small">Wine-prefix VST path discovery</text>
+
+  <rect x="685" y="86" width="230" height="118" class="el-plug" rx="6"/>
+  <text x="800" y="112" text-anchor="middle" class="el-head-p">Windows plugins</text>
+  <text x="800" y="136" text-anchor="middle" class="el-small">VST2 `.dll` and VST3 PE modules</text>
+  <text x="800" y="152" text-anchor="middle" class="el-small">editor HWNDs embedded into Linux UI</text>
+  <text x="800" y="168" text-anchor="middle" class="el-small">loaded in-process through Wine</text>
+
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="275" y1="145" x2="335" y2="145" class="el-line-g"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="625" y1="145" x2="685" y2="145" class="el-line-b"/>
+
+  <rect x="170" y="286" width="620" height="82" class="el-note" rx="6"/>
+  <text x="480" y="314" text-anchor="middle" class="el-head-y">Application-level port</text>
+  <text x="480" y="334" text-anchor="middle" class="el-small">JUCE-NSPA provides the framework substrate, but Element still needs</text>
+  <text x="480" y="350" text-anchor="middle" class="el-small">its own scan policy, UI behavior, and runtime bootstrap as an application host</text>
+</svg>
+</div>
+
+
+<hr />
+
+<h2 id="2-why-a-separate-port-exists">2. Why a separate port exists</h2>
+
+<p>Upstream Element is not built around a Linux winelib host for Windows plugins.
+The port exists because the application has to make decisions that are more
+specific than the JUCE framework layer:</p>
+
+<ul>
+<li>which plugin formats belong in this winelib process</li>
+<li>how scan paths should be derived from <code>WINEPREFIX</code></li>
+<li>how the host should bootstrap COM and Win32 priority state before plugin load</li>
+<li>how the editor window and plugin-manager UI should behave once the plugin is
+a Wine-hosted Win32 surface instead of a native Linux plugin view</li>
+</ul>
+
+
+<p>That is why this is an application port, not just &ldquo;JUCE-NSPA plus a build
+file.&rdquo;</p>
+
+<table>
+<thead>
+<tr>
+<th> Concern </th>
+<th> Generic Element assumption </th>
+<th> Element-NSPA shape </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> Target plugin surface </td>
+<td> native Linux formats plus platform-native host formats </td>
+<td> Windows VST2 and VST3 through winelib + Wine </td>
+</tr>
+<tr>
+<td> Default scan paths </td>
+<td> native host defaults </td>
+<td> Wine-prefix VST/VST3 directories are part of the default scan surface </td>
+</tr>
+<tr>
+<td> Runtime bootstrap </td>
+<td> native app bootstrap </td>
+<td> OLE and Win32 process-class state prepared before plugin init </td>
+</tr>
+<tr>
+<td> Editor hosting </td>
+<td> native plugin editor assumptions </td>
+<td> embedded Wine HWND-backed editor windows inside the Linux UI </td>
+</tr>
+</tbody>
+</table>
+
+
+<hr />
+
+<h2 id="3-host-bootstrap">3. Host bootstrap</h2>
+
+<p>Element performs winelib host initialization before plugin code gets a chance
+to run static constructors.</p>
+
+<p>The current bootstrap does two things at namespace scope:</p>
+
+<ul>
+<li><code>SetPriorityClass(GetCurrentProcess(), REALTIME_PRIORITY_CLASS)</code></li>
+<li><code>OleInitialize(nullptr)</code></li>
+</ul>
+
+
+<p>The order matters. Process-class promotion happens first so any helper threads
+spawned during COM or plugin initialization inherit the intended Win32 priority
+class.</p>
+
+<p>This mirrors the host-side bootstrap needed by other Wine-NSPA Winelib hosts:
+plugin code should see a valid OLE environment and the correct process-class
+state before its own initialization tree starts.</p>
+
+<hr />
+
+<h2 id="4-plugin-formats-and-search-paths">4. Plugin formats and search paths</h2>
+
+<p>The Element port narrows its plugin surface to the Windows formats that make
+sense inside a winelib host.</p>
+
+<table>
+<thead>
+<tr>
+<th> Area </th>
+<th> Current behavior </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> VST3 </td>
+<td> enabled </td>
+</tr>
+<tr>
+<td> VST2 </td>
+<td> enabled, using the system Steinberg VST2 SDK 2.4 </td>
+</tr>
+<tr>
+<td> LV2 </td>
+<td> not registered under <code>__WINE__</code> </td>
+</tr>
+<tr>
+<td> LADSPA </td>
+<td> not registered under <code>__WINE__</code> </td>
+</tr>
+</tbody>
+</table>
+
+
+<p>The LV2 and LADSPA exclusions are deliberate. They are Linux-native plugin
+formats, and loading them inside the same winelib process would bring in
+unrelated native plugin trees and their copies of framework globals. For this
+host, that is the wrong process boundary.</p>
+
+<h3 id="31-wine-prefix-path-discovery">3.1 Wine-prefix path discovery</h3>
+
+<p>Element also augments default search paths with Windows-plugin directories
+inside <code>WINEPREFIX</code>.</p>
+
+<p>Current additions are:</p>
+
+<ul>
+<li><code>drive_c/Program Files/Common Files/VST2</code></li>
+<li><code>drive_c/Program Files/Steinberg/VstPlugins</code></li>
+<li><code>drive_c/Program Files/Common Files/VST</code></li>
+<li><code>drive_c/Program Files/Common Files/VST3</code></li>
+</ul>
+
+
+<p>The 32-bit <code>Program Files (x86)</code> paths are intentionally not added. This host
+is x86_64 winelib, so 32-bit plugin DLLs are not loadable here and would only
+pollute scan results with permanently broken entries.</p>
+
+<h3 id="32-plugin-path-ui">3.2 Plugin-path UI</h3>
+
+<p>The plugin-path editor is also adjusted for the winelib host model:</p>
+
+<ul>
+<li>VST and VST3 path editing stays visible in the UI</li>
+<li>the modal path editor runs asynchronously instead of blocking the event loop</li>
+<li>fresh installs pick up the Wine-prefix defaults even before the user edits
+scan paths manually</li>
+</ul>
+
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 960 420" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
+  <style>
+    .sp-bg { fill: #1a1b26; }
+    .sp-box { fill: #24283b; stroke: #3b4261; stroke-width: 1.4; rx: 8; }
+    .sp-g { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
+    .sp-b { fill: #1a2235; stroke: #7aa2f7; stroke-width: 1.8; rx: 8; }
+    .sp-p { fill: #2a2137; stroke: #bb9af7; stroke-width: 1.8; rx: 8; }
+    .sp-r { fill: #2a1a1a; stroke: #f7768e; stroke-width: 1.8; rx: 8; }
+    .sp-title { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
+    .sp-head-g { fill: #9ece6a; font: bold 11px 'JetBrains Mono', monospace; }
+    .sp-head-b { fill: #7aa2f7; font: bold 11px 'JetBrains Mono', monospace; }
+    .sp-head-p { fill: #bb9af7; font: bold 11px 'JetBrains Mono', monospace; }
+    .sp-head-r { fill: #f7768e; font: bold 11px 'JetBrains Mono', monospace; }
+    .sp-text { fill: #c0caf5; font: 10px 'JetBrains Mono', monospace; }
+    .sp-small { fill: #a9b1d6; font: 9px 'JetBrains Mono', monospace; }
+    .sp-line-g { stroke: #9ece6a; stroke-width: 1.3; fill: none; }
+    .sp-line-b { stroke: #7aa2f7; stroke-width: 1.3; fill: none; }
+    .sp-line-p { stroke: #bb9af7; stroke-width: 1.3; fill: none; }
+  </style>
+
+  <rect x="0" y="0" width="960" height="420" class="sp-bg" rx="6"/>
+  <text x="480" y="28" text-anchor="middle" class="sp-title">Scan surface under the winelib Element host</text>
+
+  <rect x="70" y="96" width="220" height="100" class="sp-g" rx="6"/>
+  <text x="180" y="122" text-anchor="middle" class="sp-head-g">default path builder</text>
+  <text x="180" y="144" text-anchor="middle" class="sp-small">JUCE defaults + `WINEPREFIX` augmentation</text>
+  <text x="180" y="160" text-anchor="middle" class="sp-small">VST and VST3 stay discoverable on a fresh install</text>
+
+  <rect x="370" y="78" width="220" height="136" class="sp-b" rx="6"/>
+  <text x="480" y="104" text-anchor="middle" class="sp-head-b">enabled formats</text>
+  <text x="480" y="128" text-anchor="middle" class="sp-small">VST</text>
+  <text x="480" y="144" text-anchor="middle" class="sp-small">VST3</text>
+  <text x="480" y="160" text-anchor="middle" class="sp-small">scan UI remains visible for both</text>
+  <text x="480" y="176" text-anchor="middle" class="sp-small">path editor keeps the event loop alive</text>
+
+  <rect x="670" y="96" width="220" height="100" class="sp-p" rx="6"/>
+  <text x="780" y="122" text-anchor="middle" class="sp-head-p">plugin load target</text>
+  <text x="780" y="144" text-anchor="middle" class="sp-small">64-bit Windows plugin modules only</text>
+  <text x="780" y="160" text-anchor="middle" class="sp-small">no `(x86)` auto-seed in this host</text>
+
+  <rect x="300" y="276" width="360" height="74" class="sp-r" rx="6"/>
+  <text x="480" y="304" text-anchor="middle" class="sp-head-r">intentionally excluded</text>
+  <text x="480" y="324" text-anchor="middle" class="sp-small">LV2 and LADSPA stay out of the winelib process</text>
+
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="290" y1="146" x2="370" y2="146" class="sp-line-g"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="590" y1="146" x2="670" y2="146" class="sp-line-b"/>
+</svg>
+</div>
+
+
+<hr />
+
+<h2 id="5-editor-and-ui-behavior">5. Editor and UI behavior</h2>
+
+<p>The editor path follows JUCE-NSPA&rsquo;s embedded Win32 GUI model, so plugin editor
+windows are still real Wine HWND-backed windows inside a Linux UI tree.</p>
+
+<p>Element adds two application-level adjustments on top of that:</p>
+
+<ul>
+<li>the PluginWindow toolbar is disabled in the current port so the plugin editor
+fills the full content area instead of leaving a dead gap</li>
+<li>editor window behavior is aligned to the host&rsquo;s embedded-child layout rather
+than the older internal toolbar reservation assumptions</li>
+</ul>
+
+
+<p>This keeps the application UI aligned to the Winelib plugin host shape instead
+of preserving native-Linux assumptions that no longer fit.</p>
+
+<p>The port also carries one winelib-specific runtime fix in the Lua side:
+<code>setjmp</code> use is written in a form that bypasses glibc&rsquo;s macro rewrite and keeps
+the runtime on glibc&rsquo;s <code>setjmp()</code> implementation instead of resolving into
+Wine&rsquo;s MSVCRT <code>_setjmp</code> path.</p>
+
+<h3 id="51-application-level-adjustments">5.1 Application-level adjustments</h3>
+
+<p>The application port carries a small set of Element-specific choices above the
+JUCE-NSPA framework layer.</p>
+
+<table>
+<thead>
+<tr>
+<th> Area </th>
+<th> Current behavior </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> Plugin-window chrome </td>
+<td> toolbar path is disabled so the embedded editor fills the full content area </td>
+</tr>
+<tr>
+<td> Path editing UI </td>
+<td> plugin path editor uses an async modal flow so file choosers still open under the winelib host </td>
+</tr>
+<tr>
+<td> Format list in the UI </td>
+<td> VST and VST3 stay exposed; LV2/LADSPA do not become active scan targets in this process </td>
+</tr>
+<tr>
+<td> Lua runtime </td>
+<td> <code>setjmp</code> macro bypass keeps the runtime on glibc&rsquo;s <code>setjmp()</code> path </td>
+</tr>
+</tbody>
+</table>
+
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 960 390" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
+  <style>
+    .ap-bg { fill: #1a1b26; }
+    .ap-box { fill: #24283b; stroke: #3b4261; stroke-width: 1.4; rx: 8; }
+    .ap-app { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
+    .ap-host { fill: #1a2235; stroke: #7aa2f7; stroke-width: 1.8; rx: 8; }
+    .ap-ui { fill: #2a2137; stroke: #bb9af7; stroke-width: 1.8; rx: 8; }
+    .ap-note { fill: #2a2418; stroke: #e0af68; stroke-width: 1.6; rx: 8; }
+    .ap-title { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
+    .ap-head-g { fill: #9ece6a; font: bold 11px 'JetBrains Mono', monospace; }
+    .ap-head-b { fill: #7aa2f7; font: bold 11px 'JetBrains Mono', monospace; }
+    .ap-head-p { fill: #bb9af7; font: bold 11px 'JetBrains Mono', monospace; }
+    .ap-head-y { fill: #e0af68; font: bold 11px 'JetBrains Mono', monospace; }
+    .ap-small { fill: #a9b1d6; font: 9px 'JetBrains Mono', monospace; }
+    .ap-line-g { stroke: #9ece6a; stroke-width: 1.3; fill: none; }
+    .ap-line-b { stroke: #7aa2f7; stroke-width: 1.3; fill: none; }
+  </style>
+
+  <rect x="0" y="0" width="960" height="390" class="ap-bg" rx="6"/>
+  <text x="480" y="28" text-anchor="middle" class="ap-title">Element-NSPA application policy on top of JUCE-NSPA</text>
+
+  <rect x="65" y="94" width="240" height="104" class="ap-app" rx="6"/>
+  <text x="185" y="120" text-anchor="middle" class="ap-head-g">Element application layer</text>
+  <text x="185" y="144" text-anchor="middle" class="ap-small">plugin manager, node graph, editor windows</text>
+  <text x="185" y="160" text-anchor="middle" class="ap-small">application-level scan and UI decisions</text>
+
+  <rect x="360" y="80" width="240" height="132" class="ap-host" rx="6"/>
+  <text x="480" y="106" text-anchor="middle" class="ap-head-b">host policy</text>
+  <text x="480" y="130" text-anchor="middle" class="ap-small">Wine-prefix path augmentation</text>
+  <text x="480" y="146" text-anchor="middle" class="ap-small">LV2/LADSPA exclusion in this process</text>
+  <text x="480" y="162" text-anchor="middle" class="ap-small">OLE + process-class bootstrap before plugin init</text>
+  <text x="480" y="178" text-anchor="middle" class="ap-small">winelib-safe path editor and runtime fixes</text>
+
+  <rect x="655" y="94" width="240" height="104" class="ap-ui" rx="6"/>
+  <text x="775" y="120" text-anchor="middle" class="ap-head-p">visible result</text>
+  <text x="775" y="144" text-anchor="middle" class="ap-small">Windows plugins scan and open normally</text>
+  <text x="775" y="160" text-anchor="middle" class="ap-small">embedded editors fit the host UI without extra chrome</text>
+
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="305" y1="146" x2="360" y2="146" class="ap-line-g"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="600" y1="146" x2="655" y2="146" class="ap-line-b"/>
+
+  <rect x="180" y="272" width="600" height="68" class="ap-note" rx="6"/>
+  <text x="480" y="300" text-anchor="middle" class="ap-head-y">Scope</text>
+  <text x="480" y="318" text-anchor="middle" class="ap-small">these are application decisions above the JUCE-NSPA framework layer,</text>
+  <text x="480" y="334" text-anchor="middle" class="ap-small">not generic framework behavior</text>
+</svg>
+</div>
+
+
+<hr />
+
+<h2 id="6-integration-with-wine-nspa-and-juce-nspa">6. Integration with Wine-NSPA and JUCE-NSPA</h2>
+
+<p>Element-NSPA sits on top of both framework and runtime layers.</p>
+
+<table>
+<thead>
+<tr>
+<th> Layer </th>
+<th> Use in Element-NSPA </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> JUCE-NSPA </td>
+<td> Winelib build support, VST2/VST3 Windows-plugin loading, Win32 dispatch, and editor embedding substrate </td>
+</tr>
+<tr>
+<td> Wine-NSPA X11 embed protocol </td>
+<td> embeds plugin editor HWNDs under Linux host windows </td>
+</tr>
+<tr>
+<td> Wine-NSPA Win32 runtime </td>
+<td> supplies the window/message model and Wine-side plugin module loading path </td>
+</tr>
+<tr>
+<td> Wine-NSPA-oriented PI layer </td>
+<td> inherited where JUCE-NSPA&rsquo;s dispatcher and sync wrappers use vendored <code>rtpi.h</code> </td>
+</tr>
+</tbody>
+</table>
+
+
+<p>The practical advantages of the ported shape are therefore technical:</p>
+
+<ul>
+<li>plugin scan and load rules match the actual Windows-plugin target set</li>
+<li>the host does not need a second wrapper layer just to display plugin editors</li>
+<li>application code can treat Windows VST2 and VST3 hosting as part of the
+normal Element runtime instead of a sidecar process boundary</li>
+</ul>
+
+
+<p>The port still depends on the lower layers for the hard parts. Element itself
+adds the application policy, bootstrap order, and UI behavior on top.</p>
+
+<hr />
+
+<h2 id="7-intentional-boundaries">7. Intentional boundaries</h2>
+
+<p>The current Element port is intentionally narrow.</p>
+
+<table>
+<thead>
+<tr>
+<th> Boundary </th>
+<th> Current behavior </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> Host architecture </td>
+<td> Linux-only x86_64 winelib host </td>
+</tr>
+<tr>
+<td> Supported Windows plugin formats </td>
+<td> VST2 and VST3 </td>
+</tr>
+<tr>
+<td> Linux-native plugin formats in this process </td>
+<td> excluded </td>
+</tr>
+<tr>
+<td> Scan path policy </td>
+<td> 64-bit Windows-plugin directories only </td>
+</tr>
+</tbody>
+</table>
+
+
+<p>This page is therefore about a specific application port shape, not a claim
+that every Element feature or every native-Linux plugin surface should live in
+the same process as the winelib Windows-plugin host.</p>
+
+<hr />
+
+<h2 id="8-references">8. References</h2>
+
+<ul>
+<li><code>src/main.cc</code></li>
+<li><code>src/utils.cpp</code></li>
+<li><code>src/pluginmanager.cpp</code></li>
+<li><code>src/ui/pluginmanagercomponent.cpp</code></li>
+<li><code>src/ui/pluginwindow.cpp</code></li>
+<li><a href="juce-nspa.gen.html">JUCE-NSPA</a></li>
+<li><a href="nspa-x11-embed-protocol.gen.html">NSPA X11 Embed Protocol</a></li>
+</ul>
+
+
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+  document.querySelectorAll("pre code").forEach(function (block) {
+    hljs.highlightElement(block);
+  });
+});
+</script>
+</body></html>

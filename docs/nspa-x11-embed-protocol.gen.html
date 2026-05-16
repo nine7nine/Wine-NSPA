@@ -1,0 +1,514 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Wine-NSPA -- NSPA X11 Embed Protocol</title>
+<style>
+  :root {
+    --bg: #1a1b26; --fg: #c0caf5; --accent: #7aa2f7;
+    --green: #9ece6a; --red: #f7768e; --yellow: #e0af68;
+    --surface: #24283b; --border: #3b4261; --muted: #8c92b3;
+    --purple: #bb9af7; --orange: #ff9e64; --cyan: #7dcfff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+    background: var(--bg); color: var(--fg);
+    max-width: 1100px; margin: 0 auto; padding: 2rem 1.5rem;
+    line-height: 1.7;
+  }
+  .page-nav {
+    display: flex;
+    justify-content: flex-end;
+    margin-bottom: 0.5rem;
+  }
+  .page-nav a {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.35rem 0.7rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: rgba(36, 40, 59, 0.9);
+    color: var(--accent);
+    font-size: 0.78rem;
+    line-height: 1;
+  }
+  .page-nav a:hover {
+    background: var(--surface);
+    color: var(--cyan);
+    text-decoration: none;
+  }
+  h1 { color: var(--accent); font-size: 1.5rem; margin: 1.5rem 0 0.5rem; }
+  h2 { color: var(--accent); font-size: 1.2rem; margin: 2rem 0 0.75rem;
+       border-bottom: 1px solid var(--border); padding-bottom: 0.3rem; }
+  h3 { color: var(--yellow); font-size: 1rem; margin: 1.25rem 0 0.5rem; }
+  h4 { color: var(--cyan); font-size: 0.95rem; margin: 1rem 0 0.4rem; }
+  p, li { font-size: 0.85rem; margin-bottom: 0.5rem; }
+  ul, ol { padding-left: 1.5rem; margin-bottom: 0.75rem; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  table {
+    width: 100%; border-collapse: collapse;
+    margin: 0.75rem 0 1rem; font-size: 0.8rem;
+  }
+  th, td {
+    padding: 0.4rem 0.75rem; text-align: left;
+    border: 1px solid var(--border);
+  }
+  th { background: var(--surface); color: var(--accent); font-weight: 600; }
+  td { background: var(--bg); }
+  code {
+    background: var(--surface); padding: 0.15rem 0.4rem;
+    border-radius: 3px; font-size: 0.82rem; color: var(--cyan);
+  }
+  pre {
+    background: var(--surface); padding: 1rem 1.1rem; border-radius: 8px;
+    overflow-x: auto; margin: 0.75rem 0 1rem;
+    border: 1px solid var(--border);
+  }
+  pre code {
+    display: block; background: transparent; padding: 0;
+    font-size: 0.8rem; color: inherit;
+  }
+  pre code.hljs,
+  code.hljs {
+    background: transparent;
+    padding: 0;
+  }
+  blockquote {
+    background: var(--surface); border-left: 3px solid var(--accent);
+    padding: 0.75rem 1rem; margin: 1rem 0; border-radius: 0 4px 4px 0;
+    font-size: 0.82rem;
+  }
+  blockquote strong { color: var(--yellow); }
+  hr { border: none; border-top: 1px solid var(--border); margin: 2rem 0; }
+  strong { color: var(--fg); }
+  em { color: var(--muted); font-style: italic; }
+  .diagram-container {
+    display: flex; justify-content: center;
+    margin: 1.25rem auto 1.5rem; padding: 0.75rem;
+    background: rgba(36, 40, 59, 0.55);
+    border: 1px solid var(--border); border-radius: 10px;
+    overflow-x: auto;
+  }
+  .diagram-container svg {
+    display: block;
+    width: 100% !important;
+    max-width: 100%;
+    height: auto !important;
+    margin: 0 auto;
+    flex: 0 0 auto;
+  }
+</style>
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/tokyo-night-dark.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
+</head><body>
+<div class="page-nav"><a href="index.html">Docs Home</a></div>
+<h1 id="wine-nspa--nspa-x11-embed-protocol">Wine-NSPA &ndash; NSPA X11 Embed Protocol</h1>
+
+<p>This page documents Wine-NSPA&rsquo;s X11 embed protocol for winelib hosts that need
+to place a Wine HWND-backed X11 child under a foreign Linux parent window.</p>
+
+<h2 id="table-of-contents">Table of Contents</h2>
+
+<ol>
+<li><a href="#1-overview">Overview</a></li>
+<li><a href="#2-public-contract">Public contract</a></li>
+<li><a href="#3-embed-lifecycle">Embed lifecycle</a></li>
+<li><a href="#4-geometry-and-resize-ownership">Geometry and resize ownership</a></li>
+<li><a href="#5-input-and-drag-correctness">Input and drag correctness</a></li>
+<li><a href="#6-current-consumers">Current consumers</a></li>
+<li><a href="#7-references">References</a></li>
+</ol>
+
+
+<hr />
+
+<h2 id="1-overview">1. Overview</h2>
+
+<p>The embed protocol gives a winelib host one supported way to reparent a Wine
+window into a foreign X11 parent without reimplementing Wine&rsquo;s embedded-window
+bookkeeping itself.</p>
+
+<p>The problem it solves is not just <code>XReparentWindow()</code>. A working host also
+needs Wine to:</p>
+
+<ul>
+<li>flip the window into embedded mode</li>
+<li>register the foreign parent for host-window tracking</li>
+<li>preserve the correct parent-relative origin at the moment embedded mode locks</li>
+<li>avoid emitting the wrong X11 move/size requests after the handoff</li>
+<li>keep Win32 hit-testing and cursor math coherent while the host moves or
+resizes the embedded surface</li>
+</ul>
+
+
+<p>Wine-NSPA exposes that as a small driver-private message contract instead of
+making each host rebuild the old wrapper-window and synthetic event machinery.</p>
+
+<hr />
+
+<h2 id="2-public-contract">2. Public contract</h2>
+
+<p>The supported interface lives in <code>include/wine/nspa_x11_embed.h</code>.</p>
+
+<table>
+<thead>
+<tr>
+<th> Symbol </th>
+<th> Meaning </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> <code>WM_X11DRV_NSPA_EMBED_WINDOW</code> </td>
+<td> request atomic embed under an external X11 parent </td>
+</tr>
+<tr>
+<td> <code>WM_X11DRV_NSPA_EMBED_DONE</code> </td>
+<td> async completion message posted after reparent + map + state settle </td>
+</tr>
+</tbody>
+</table>
+
+
+<h3 id="21-wm_x11drv_nspa_embed_window">2.1 <code>WM_X11DRV_NSPA_EMBED_WINDOW</code></h3>
+
+<p>Send the message to the top-level Wine HWND that owns the X11 child.</p>
+
+<table>
+<thead>
+<tr>
+<th> Field </th>
+<th> Meaning </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> <code>wParam</code> </td>
+<td> X11 <code>Window</code> id of the foreign parent </td>
+</tr>
+<tr>
+<td> <code>lParam</code> </td>
+<td> <code>MAKELPARAM(peerX, peerY)</code> using parent-relative coordinates </td>
+</tr>
+</tbody>
+</table>
+
+
+<p><code>peerX</code> and <code>peerY</code> are load-bearing. Wine locks embedded-mode position state
+when the window flips into embedded mode, so the initial reparent has to use
+the host&rsquo;s intended parent-relative origin.</p>
+
+<h3 id="22-wm_x11drv_nspa_embed_done">2.2 <code>WM_X11DRV_NSPA_EMBED_DONE</code></h3>
+
+<p>Wine posts <code>WM_X11DRV_NSPA_EMBED_DONE</code> back to the same HWND after:</p>
+
+<ul>
+<li><code>XReparentWindow()</code></li>
+<li><code>XMapWindow()</code></li>
+<li>the WM state cycle has settled</li>
+</ul>
+
+
+<p>The message is asynchronous. It lands on the HWND&rsquo;s message queue and is
+observed when the host&rsquo;s Win32 message pump runs.</p>
+
+<h3 id="23-consumer-responsibilities">2.3 Consumer responsibilities</h3>
+
+<p>The protocol does not make the host passive. After the embed handoff:</p>
+
+<ul>
+<li>the host owns X11 parentage</li>
+<li>the host owns X11 sizing with <code>XMoveResizeWindow()</code> or equivalent</li>
+<li>the host still uses <code>SetWindowPos()</code> so Wine&rsquo;s Win32-side rects track the
+correct absolute screen location</li>
+</ul>
+
+
+<p>That split is deliberate: Wine keeps Win32 state authoritative, while the host
+keeps the X11 embed tree authoritative.</p>
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 960 420" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
+  <style>
+    .ep-bg { fill: #1a1b26; }
+    .ep-box { fill: #24283b; stroke: #3b4261; stroke-width: 1.4; rx: 8; }
+    .ep-host { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
+    .ep-msg { fill: #2a2418; stroke: #e0af68; stroke-width: 1.8; rx: 8; }
+    .ep-w32 { fill: #1a2235; stroke: #7aa2f7; stroke-width: 1.8; rx: 8; }
+    .ep-x11 { fill: #2a2137; stroke: #bb9af7; stroke-width: 1.8; rx: 8; }
+    .ep-note { fill: #1f2435; stroke: #6b7398; stroke-width: 1.2; rx: 8; }
+    .ep-title { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
+    .ep-head-g { fill: #9ece6a; font: bold 11px 'JetBrains Mono', monospace; }
+    .ep-head-y { fill: #e0af68; font: bold 11px 'JetBrains Mono', monospace; }
+    .ep-head-b { fill: #7aa2f7; font: bold 11px 'JetBrains Mono', monospace; }
+    .ep-head-p { fill: #bb9af7; font: bold 11px 'JetBrains Mono', monospace; }
+    .ep-text { fill: #c0caf5; font: 10px 'JetBrains Mono', monospace; }
+    .ep-small { fill: #a9b1d6; font: 9px 'JetBrains Mono', monospace; }
+    .ep-line-g { stroke: #9ece6a; stroke-width: 1.3; fill: none; }
+    .ep-line-y { stroke: #e0af68; stroke-width: 1.3; fill: none; }
+    .ep-line-b { stroke: #7aa2f7; stroke-width: 1.3; fill: none; }
+    .ep-line-p { stroke: #bb9af7; stroke-width: 1.3; fill: none; }
+  </style>
+
+  <rect x="0" y="0" width="960" height="420" class="ep-bg" rx="6"/>
+  <text x="480" y="28" text-anchor="middle" class="ep-title">NSPA X11 embed handshake</text>
+
+  <rect x="40" y="88" width="200" height="110" class="ep-host" rx="6"/>
+  <text x="140" y="114" text-anchor="middle" class="ep-head-g">winelib host</text>
+  <text x="140" y="136" text-anchor="middle" class="ep-small">owns foreign X11 parent</text>
+  <text x="140" y="152" text-anchor="middle" class="ep-small">computes `peerX`, `peerY`</text>
+  <text x="140" y="168" text-anchor="middle" class="ep-small">calls `SendMessageW()`</text>
+
+  <rect x="290" y="88" width="180" height="110" class="ep-msg" rx="6"/>
+  <text x="380" y="114" text-anchor="middle" class="ep-head-y">embed request</text>
+  <text x="380" y="136" text-anchor="middle" class="ep-small">`WM_X11DRV_NSPA_EMBED_WINDOW`</text>
+  <text x="380" y="152" text-anchor="middle" class="ep-small">`wParam = parent X11 Window`</text>
+  <text x="380" y="168" text-anchor="middle" class="ep-small">`lParam = MAKELPARAM(peerX, peerY)`</text>
+
+  <rect x="520" y="88" width="180" height="110" class="ep-w32" rx="6"/>
+  <text x="610" y="114" text-anchor="middle" class="ep-head-b">win32u routing</text>
+  <text x="610" y="136" text-anchor="middle" class="ep-small">driver-private message range</text>
+  <text x="610" y="152" text-anchor="middle" class="ep-small">message reaches `winex11.drv`</text>
+  <text x="610" y="168" text-anchor="middle" class="ep-small">from PE or winelib caller</text>
+
+  <rect x="750" y="88" width="170" height="110" class="ep-x11" rx="6"/>
+  <text x="835" y="114" text-anchor="middle" class="ep-head-p">`winex11.drv`</text>
+  <text x="835" y="136" text-anchor="middle" class="ep-small">reparent + mark embedded</text>
+  <text x="835" y="152" text-anchor="middle" class="ep-small">map child X11 window</text>
+  <text x="835" y="168" text-anchor="middle" class="ep-small">post `EMBED_DONE`</text>
+
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="240" y1="143" x2="290" y2="143" class="ep-line-g"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="470" y1="143" x2="520" y2="143" class="ep-line-y"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="700" y1="143" x2="750" y2="143" class="ep-line-b"/>
+
+  <rect x="160" y="260" width="640" height="96" class="ep-note" rx="6"/>
+  <text x="480" y="288" text-anchor="middle" class="ep-head-b">Stable result</text>
+  <text x="480" y="308" text-anchor="middle" class="ep-small">Wine's Win32-side rects keep tracking the child HWND</text>
+  <text x="480" y="324" text-anchor="middle" class="ep-small">the host owns the foreign X11 parent and future X11 sizing</text>
+  <text x="480" y="340" text-anchor="middle" class="ep-small">the embed handshake ends with `WM_X11DRV_NSPA_EMBED_DONE` instead of a timing guess</text>
+
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="835" y1="198" x2="835" y2="228" class="ep-line-p"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="835" y1="228" x2="480" y2="228" class="ep-line-p"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="480" y1="228" x2="480" y2="260" class="ep-line-p"/>
+</svg>
+</div>
+
+
+<hr />
+
+<h2 id="3-embed-lifecycle">3. Embed lifecycle</h2>
+
+<p>The runtime sequence is:</p>
+
+<ol>
+<li>the host creates a real top-level Wine HWND</li>
+<li>the host resolves the backing X11 child and the foreign X11 parent</li>
+<li>the host sends <code>WM_X11DRV_NSPA_EMBED_WINDOW</code></li>
+<li><code>winex11.drv</code> reparents the child at the supplied parent-relative origin</li>
+<li>Wine flips the window to embedded mode and records the foreign parent</li>
+<li>Wine maps the X11 child and posts <code>WM_X11DRV_NSPA_EMBED_DONE</code></li>
+</ol>
+
+
+<p>Two details matter:</p>
+
+<ul>
+<li>the reparent happens before embedded-mode position locking</li>
+<li>the embed path is idempotent with respect to parent changes, so the same HWND
+can be re-embedded under a new parent when the host changes peer structure</li>
+</ul>
+
+
+<p>This is why the protocol replaces a pile of host-local X11 bookkeeping instead
+of just hiding one <code>XReparentWindow()</code> call.</p>
+
+<hr />
+
+<h2 id="4-geometry-and-resize-ownership">4. Geometry and resize ownership</h2>
+
+<p>After the embed handoff, geometry ownership is intentionally split.</p>
+
+<table>
+<thead>
+<tr>
+<th> Path </th>
+<th> Owner </th>
+<th> Why </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> parent-relative X11 position and size </td>
+<td> host </td>
+<td> the host owns the foreign parent window tree </td>
+</tr>
+<tr>
+<td> Win32 <code>RECT</code> state, hit-testing, and message dispatch </td>
+<td> Wine </td>
+<td> the plugin still runs as a Win32 window </td>
+</tr>
+</tbody>
+</table>
+
+
+<p>In practice that means:</p>
+
+<ul>
+<li>the host calls <code>SetWindowPos()</code> when the embedded child moves in screen space</li>
+<li>the host also calls <code>XMoveResizeWindow()</code> or <code>xcb_configure_window()</code> on the
+embedded X11 child when the parent-relative X11 geometry changes</li>
+<li>Wine suppresses its own X11 position and size emission for
+<code>nspa_embedded</code> windows so the embedder stays authoritative at the X11 layer</li>
+</ul>
+
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 960 390" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
+  <style>
+    .go-bg { fill: #1a1b26; }
+    .go-box { fill: #24283b; stroke: #3b4261; stroke-width: 1.4; rx: 8; }
+    .go-host { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
+    .go-w32 { fill: #1a2235; stroke: #7aa2f7; stroke-width: 1.8; rx: 8; }
+    .go-x11 { fill: #2a2137; stroke: #bb9af7; stroke-width: 1.8; rx: 8; }
+    .go-note { fill: #2a2418; stroke: #e0af68; stroke-width: 1.6; rx: 8; }
+    .go-title { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
+    .go-head-g { fill: #9ece6a; font: bold 11px 'JetBrains Mono', monospace; }
+    .go-head-b { fill: #7aa2f7; font: bold 11px 'JetBrains Mono', monospace; }
+    .go-head-p { fill: #bb9af7; font: bold 11px 'JetBrains Mono', monospace; }
+    .go-head-y { fill: #e0af68; font: bold 11px 'JetBrains Mono', monospace; }
+    .go-text { fill: #c0caf5; font: 10px 'JetBrains Mono', monospace; }
+    .go-small { fill: #a9b1d6; font: 9px 'JetBrains Mono', monospace; }
+    .go-line-g { stroke: #9ece6a; stroke-width: 1.3; fill: none; }
+    .go-line-b { stroke: #7aa2f7; stroke-width: 1.3; fill: none; }
+    .go-line-p { stroke: #bb9af7; stroke-width: 1.3; fill: none; }
+  </style>
+
+  <rect x="0" y="0" width="960" height="390" class="go-bg" rx="6"/>
+  <text x="480" y="28" text-anchor="middle" class="go-title">Geometry split after embedding</text>
+
+  <rect x="60" y="90" width="250" height="104" class="go-host" rx="6"/>
+  <text x="185" y="116" text-anchor="middle" class="go-head-g">host layout</text>
+  <text x="185" y="138" text-anchor="middle" class="go-small">peer-relative area changes</text>
+  <text x="185" y="154" text-anchor="middle" class="go-small">toolbar offsets, parent moves, resize callbacks</text>
+  <text x="185" y="170" text-anchor="middle" class="go-small">host decides X11 child geometry</text>
+
+  <rect x="355" y="90" width="250" height="104" class="go-w32" rx="6"/>
+  <text x="480" y="116" text-anchor="middle" class="go-head-b">Win32 side</text>
+  <text x="480" y="138" text-anchor="middle" class="go-small">`SetWindowPos()` updates Wine rects</text>
+  <text x="480" y="154" text-anchor="middle" class="go-small">mouse hit-testing and plugin window messages stay correct</text>
+  <text x="480" y="170" text-anchor="middle" class="go-small">no host-local synthetic message translation needed</text>
+
+  <rect x="650" y="90" width="250" height="104" class="go-x11" rx="6"/>
+  <text x="775" y="116" text-anchor="middle" class="go-head-p">X11 side</text>
+  <text x="775" y="138" text-anchor="middle" class="go-small">host calls `XMoveResizeWindow()`</text>
+  <text x="775" y="154" text-anchor="middle" class="go-small">Wine suppresses its own X11 move/size emission</text>
+  <text x="775" y="170" text-anchor="middle" class="go-small">foreign parent remains authoritative</text>
+
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="310" y1="143" x2="355" y2="143" class="go-line-g"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="605" y1="143" x2="650" y2="143" class="go-line-b"/>
+
+  <rect x="145" y="248" width="670" height="74" class="go-note" rx="6"/>
+  <text x="480" y="276" text-anchor="middle" class="go-head-y">Why the split exists</text>
+  <text x="480" y="296" text-anchor="middle" class="go-small">Wine owns Win32 semantics, but the host owns the foreign X11 parent tree</text>
+  <text x="480" y="312" text-anchor="middle" class="go-small">keeping both layers authoritative in their own domain</text>
+  <text x="480" y="328" text-anchor="middle" class="go-small">avoids duplicate move logic and stale geometry</text>
+</svg>
+</div>
+
+
+<hr />
+
+<h2 id="5-input-and-drag-correctness">5. Input and drag correctness</h2>
+
+<p>Two follow-on pieces keep embedded editors usable under host motion and plugin
+cursor save/restore behavior.</p>
+
+<h3 id="51-host-drag-rect-propagation">5.1 Host-drag rect propagation</h3>
+
+<p>When the host moves the embedded child at the X11 layer, Wine also updates the
+Win32-side rect state for the embedded HWND. That keeps:</p>
+
+<ul>
+<li>USER32 hit-testing</li>
+<li>screen-to-client coordinate translation</li>
+<li>plugin code that queries window position</li>
+</ul>
+
+
+<p>in sync with the host&rsquo;s actual X11 layout.</p>
+
+<h3 id="52-button-state-freeze-and-cursor-jump-suppression">5.2 Button-state freeze and cursor-jump suppression</h3>
+
+<p>During click-drag-release sequences, plugins may save screen coordinates on
+mouse-down and call <code>SetCursorPos()</code> on release. Mid-drag rect churn can make
+that restore point wrong.</p>
+
+<p>Wine-NSPA therefore:</p>
+
+<ul>
+<li>freezes host-drag rect updates while mouse buttons are held on an embedded
+child</li>
+<li>suppresses the cursor-warp-on-release mismatch that showed up on embedded
+VST editors</li>
+</ul>
+
+
+<p>The result is not a generic mouse optimization. It is targeted correctness for
+embedded Win32 editors living inside foreign X11 hosts.</p>
+
+<hr />
+
+<h2 id="6-current-consumers">6. Current consumers</h2>
+
+<p>The protocol is currently used by Wine-NSPA winelib hosts that embed Win32
+plugin editors into native Linux UI trees.</p>
+
+<table>
+<thead>
+<tr>
+<th> Consumer </th>
+<th> Use </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> JUCE-NSPA </td>
+<td> <code>WineHWNDEmbedComponent</code> creates a real Wine HWND and embeds it under a JUCE peer&rsquo;s X11 window </td>
+</tr>
+<tr>
+<td> Element-NSPA </td>
+<td> inherits the JUCE-NSPA embed path for VST2 and VST3 editors </td>
+</tr>
+</tbody>
+</table>
+
+
+<p>The protocol stays intentionally small. It is a Wine-side primitive for hosts
+that already manage a foreign X11 parent, not a full host toolkit.</p>
+
+<hr />
+
+<h2 id="7-references">7. References</h2>
+
+<ul>
+<li><code>include/wine/nspa_x11_embed.h</code></li>
+<li><code>dlls/win32u/message.c</code></li>
+<li><code>dlls/winex11.drv/window.c</code></li>
+<li><code>dlls/winex11.drv/mouse.c</code></li>
+<li><a href="juce-nspa.gen.html">JUCE-NSPA</a></li>
+<li><a href="element-plugin-host.gen.html">Element-NSPA</a></li>
+</ul>
+
+
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+  document.querySelectorAll("pre code").forEach(function (block) {
+    hljs.highlightElement(block);
+  });
+});
+</script>
+</body></html>

@@ -8,12 +8,13 @@ priority-inheritance, and userspace-sync model.
 1. [Overview](#1-overview)
 2. [Why a separate fork exists](#2-why-a-separate-fork-exists)
 3. [Process shape](#3-process-shape)
-4. [RT ownership and priority mapping](#4-rt-ownership-and-priority-mapping)
-5. [Per-callback transport](#5-per-callback-transport)
-6. [Current format coverage](#6-current-format-coverage)
-7. [Startup and lifecycle hardening](#7-startup-and-lifecycle-hardening)
-8. [Relationship to Wine-NSPA](#8-relationship-to-wine-nspa)
-9. [References](#9-references)
+4. [Editor embedding](#4-editor-embedding)
+5. [RT ownership and priority mapping](#5-rt-ownership-and-priority-mapping)
+6. [Per-callback transport](#6-per-callback-transport)
+7. [Current format coverage](#7-current-format-coverage)
+8. [Startup and lifecycle hardening](#8-startup-and-lifecycle-hardening)
+9. [Relationship to Wine-NSPA](#9-relationship-to-wine-nspa)
+10. [References](#10-references)
 
 ---
 
@@ -33,6 +34,8 @@ The load-bearing changes are:
   socket-only callback path.
 - Fixed-layout metadata travels through the shared L2 region directly instead
   of being fully serialized every block.
+- Editor embedding uses Wine-NSPA's atomic X11 embed primitive instead of the
+  older wrapper `SubstructureRedirect` path.
 - Startup, teardown, and crash handling are tightened around DAW exit,
   wineserver cold start, and stale shared-memory artifacts.
 
@@ -161,7 +164,91 @@ control-plane logic.
 
 ---
 
-## 4. RT ownership and priority mapping
+## 4. Editor embedding
+
+Yabridge-NSPA still keeps a wrapper X11 window as the immediate foreign parent
+for the plugin editor, but the Wine window handoff beneath that wrapper changed
+substantially.
+
+The current path is:
+
+1. reparent the wrapper window under the host's X11 parent
+2. send `WM_X11DRV_NSPA_EMBED_WINDOW` to the Wine editor HWND
+3. let Wine perform the reparent + embedded-state flip internally
+4. resize both the wrapper and the embedded Wine X11 child from the host side
+
+The older `SubstructureRedirect` handler path and related synthetic X11
+translation logic are gone from the normal embed flow.
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 960 390" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .ye-bg { fill: #1a1b26; }
+    .ye-box { fill: #24283b; stroke: #3b4261; stroke-width: 1.4; rx: 8; }
+    .ye-host { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
+    .ye-wrap { fill: #2a2418; stroke: #e0af68; stroke-width: 1.8; rx: 8; }
+    .ye-wine { fill: #1a2235; stroke: #7aa2f7; stroke-width: 1.8; rx: 8; }
+    .ye-note { fill: #2a2137; stroke: #bb9af7; stroke-width: 1.6; rx: 8; }
+    .ye-title { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
+    .ye-head-g { fill: #9ece6a; font: bold 11px 'JetBrains Mono', monospace; }
+    .ye-head-y { fill: #e0af68; font: bold 11px 'JetBrains Mono', monospace; }
+    .ye-head-b { fill: #7aa2f7; font: bold 11px 'JetBrains Mono', monospace; }
+    .ye-head-p { fill: #bb9af7; font: bold 11px 'JetBrains Mono', monospace; }
+    .ye-small { fill: #a9b1d6; font: 9px 'JetBrains Mono', monospace; }
+    .ye-line-g { stroke: #9ece6a; stroke-width: 1.3; fill: none; }
+    .ye-line-y { stroke: #e0af68; stroke-width: 1.3; fill: none; }
+    .ye-line-b { stroke: #7aa2f7; stroke-width: 1.3; fill: none; }
+  </style>
+
+  <rect x="0" y="0" width="960" height="390" class="ye-bg"/>
+  <text x="480" y="28" text-anchor="middle" class="ye-title">Yabridge editor embed path</text>
+
+  <rect x="55" y="94" width="220" height="96" class="ye-host"/>
+  <text x="165" y="120" text-anchor="middle" class="ye-head-g">host X11 parent</text>
+  <text x="165" y="142" text-anchor="middle" class="ye-small">DAW-owned editor parent</text>
+  <text x="165" y="158" text-anchor="middle" class="ye-small">wrapper is reparented here first</text>
+
+  <rect x="370" y="94" width="220" height="96" class="ye-wrap"/>
+  <text x="480" y="120" text-anchor="middle" class="ye-head-y">wrapper window</text>
+  <text x="480" y="142" text-anchor="middle" class="ye-small">keeps host-side focus and size ownership</text>
+  <text x="480" y="158" text-anchor="middle" class="ye-small">foreign parent passed to the Wine embed message</text>
+
+  <rect x="685" y="94" width="220" height="96" class="ye-wine"/>
+  <text x="795" y="120" text-anchor="middle" class="ye-head-b">Wine editor HWND / X11 child</text>
+  <text x="795" y="142" text-anchor="middle" class="ye-small">embedded by `WM_X11DRV_NSPA_EMBED_WINDOW`</text>
+  <text x="795" y="158" text-anchor="middle" class="ye-small">Wine tracks embedded mode internally</text>
+
+  <line x1="275" y1="142" x2="370" y2="142" class="ye-line-g"/>
+  <line x1="590" y1="142" x2="685" y2="142" class="ye-line-y"/>
+
+  <rect x="210" y="252" width="540" height="72" class="ye-note"/>
+  <text x="480" y="280" text-anchor="middle" class="ye-head-p">What changed</text>
+  <text x="480" y="300" text-anchor="middle" class="ye-small">the wrapper still exists as the immediate foreign parent,</text>
+  <text x="480" y="316" text-anchor="middle" class="ye-small">but the old SubstructureRedirect path is replaced</text>
+  <text x="480" y="332" text-anchor="middle" class="ye-small">by one Wine-side atomic embed primitive</text>
+</svg>
+</div>
+
+The practical effect is that yabridge no longer needs to recreate Wine's own
+embedded-window side effects in userspace just to host a plugin editor.
+
+### 4.1 What stayed and what changed
+
+| Editor-path concern | Current behavior |
+|---|---|
+| Wrapper window | still present as the immediate foreign parent for focus, size, and host-window ownership |
+| Wine child handoff | done through `WM_X11DRV_NSPA_EMBED_WINDOW` instead of a userspace reparent-and-fixup sequence |
+| Host-drag propagation | Wine updates embedded WND rect state from host motion |
+| Old `SubstructureRedirect` path | removed from the normal embed flow |
+
+The wrapper window still exists because yabridge still needs a host-local X11
+surface it owns directly. What changed is the boundary beneath that wrapper:
+the Wine window embed now goes through one Wine-side primitive instead of a
+host-local recreation of Wine's embedded-mode side effects.
+
+---
+
+## 5. RT ownership and priority mapping
 
 The fork removes the old assumption that yabridge should decide Linux FIFO
 priorities itself.
@@ -199,7 +286,7 @@ timer.
 
 ---
 
-## 5. Per-callback transport
+## 6. Per-callback transport
 
 The hot path uses a dedicated `AudioControlShm` rendezvous region with one
 request lock/cond pair and one reply lock/cond pair.
@@ -284,7 +371,7 @@ remaining bitsery encode/decode surface dropped to roughly `0.10%` of
 
 ---
 
-## 6. Current format coverage
+## 7. Current format coverage
 
 The fork uses one design, but not every plugin API needs the exact same
 attachment points.
@@ -308,9 +395,55 @@ enable or disable the NSPA L2 transport was removed; the bridge uses the fast
 path by default and falls back only when a particular callback shape does not
 fit the bounded region.
 
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 960 390" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .fc-bg { fill: #1a1b26; }
+    .fc-box { fill: #24283b; stroke: #3b4261; stroke-width: 1.4; rx: 8; }
+    .fc-v2 { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
+    .fc-v3 { fill: #1a2235; stroke: #7aa2f7; stroke-width: 1.8; rx: 8; }
+    .fc-cl { fill: #2a2137; stroke: #bb9af7; stroke-width: 1.8; rx: 8; }
+    .fc-note { fill: #2a2418; stroke: #e0af68; stroke-width: 1.6; rx: 8; }
+    .fc-title { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
+    .fc-head-g { fill: #9ece6a; font: bold 11px 'JetBrains Mono', monospace; }
+    .fc-head-b { fill: #7aa2f7; font: bold 11px 'JetBrains Mono', monospace; }
+    .fc-head-p { fill: #bb9af7; font: bold 11px 'JetBrains Mono', monospace; }
+    .fc-head-y { fill: #e0af68; font: bold 11px 'JetBrains Mono', monospace; }
+    .fc-small { fill: #a9b1d6; font: 9px 'JetBrains Mono', monospace; }
+  </style>
+
+  <rect x="0" y="0" width="960" height="390" class="fc-bg"/>
+  <text x="480" y="28" text-anchor="middle" class="fc-title">Format-specific shared-envelope coverage</text>
+
+  <rect x="60" y="92" width="250" height="120" class="fc-v2"/>
+  <text x="185" y="118" text-anchor="middle" class="fc-head-g">VST2</text>
+  <text x="185" y="142" text-anchor="middle" class="fc-small">dedicated audio rendezvous</text>
+  <text x="185" y="158" text-anchor="middle" class="fc-small">direct `VstTimeInfo` request fields</text>
+  <text x="185" y="174" text-anchor="middle" class="fc-small">bounded reply path</text>
+
+  <rect x="355" y="78" width="250" height="148" class="fc-v3"/>
+  <text x="480" y="104" text-anchor="middle" class="fc-head-b">VST3</text>
+  <text x="480" y="128" text-anchor="middle" class="fc-small">per-instance process rendezvous</text>
+  <text x="480" y="144" text-anchor="middle" class="fc-small">`ProcessContext`</text>
+  <text x="480" y="160" text-anchor="middle" class="fc-small">fixed event ring + bounded param queues</text>
+  <text x="480" y="176" text-anchor="middle" class="fc-small">response-side output events and param queues</text>
+
+  <rect x="650" y="92" width="250" height="120" class="fc-cl"/>
+  <text x="775" y="118" text-anchor="middle" class="fc-head-p">CLAP</text>
+  <text x="775" y="142" text-anchor="middle" class="fc-small">per-instance process rendezvous</text>
+  <text x="775" y="158" text-anchor="middle" class="fc-small">`clap_event_transport_t`</text>
+  <text x="775" y="174" text-anchor="middle" class="fc-small">event ring + response-side out-events</text>
+
+  <rect x="180" y="274" width="600" height="64" class="fc-note"/>
+  <text x="480" y="302" text-anchor="middle" class="fc-head-y">Shared rule</text>
+  <text x="480" y="320" text-anchor="middle" class="fc-small">fixed-layout hot metadata stays in the shared region;</text>
+  <text x="480" y="336" text-anchor="middle" class="fc-small">oversized or irregular shapes still fall back safely</text>
+</svg>
+</div>
+
 ---
 
-## 7. Startup and lifecycle hardening
+## 8. Startup and lifecycle hardening
 
 The yabridge fork also tightens the non-steady-state edges that matter in real
 plugin-hosting sessions.
@@ -330,7 +463,7 @@ SIGKILL scenarios.
 
 ---
 
-## 8. Relationship to Wine-NSPA
+## 9. Relationship to Wine-NSPA
 
 Yabridge-NSPA is not part of the Wine tree, but it is intentionally coupled to
 Wine-NSPA in a few load-bearing places.
@@ -352,7 +485,7 @@ boundary.
 
 ---
 
-## 9. References
+## 10. References
 
 ### Source
 
@@ -361,6 +494,7 @@ boundary.
 - `yabridge/src/common/audio-control-shm.{h,cpp}` -- shared L2 rendezvous region and direct-struct envelope
 - `yabridge/src/wine-host/nspa_rt.h` -- Win32 priority helpers and scoped RT load bracket
 - `yabridge/src/wine-host/host.cpp` -- `REALTIME_PRIORITY_CLASS` process setup
+- `yabridge/src/wine-host/editor.{h,cpp}` -- wrapper-window ownership plus Wine-NSPA atomic embed handoff
 - `yabridge/src/wine-host/utils.{h,cpp}` -- pidfd watchdog registration and DOS-path conversion helpers
 - `yabridge/src/plugin/orphan-cleanup.{h,cpp}` -- PID-tagged endpoint cleanup
 - `yabridge/src/plugin/bridges/vst2*` -- VST2 bridge-side L2 use
@@ -375,4 +509,5 @@ boundary.
 - `audio-stack.gen.html` -- Wine-native JACK / WASAPI / ASIO path
 - `librtpi.gen.html` -- the PI mutex / condvar API Yabridge-NSPA vendors
 - `ntsync-userspace.gen.html` -- Wine-side wait/signal and userspace sync model
+- `nspa-x11-embed-protocol.gen.html` -- atomic embed primitive used by the Wine-host editor path
 - `architecture.gen.html` -- system-level view of the larger Wine-NSPA stack
