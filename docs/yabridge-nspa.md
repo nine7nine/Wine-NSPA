@@ -34,26 +34,28 @@ The load-bearing changes are:
   socket-only callback path.
 - Fixed-layout metadata travels through the shared L2 region directly instead
   of being fully serialized every block.
-- Editor embedding uses Wine-NSPA's atomic X11 embed primitive instead of the
-  older wrapper `SubstructureRedirect` path.
+- Editor embedding uses Wine-NSPA's atomic X11 embed primitive while keeping a
+  wrapper window as the immediate host-owned X11 surface.
 - Startup, teardown, and crash handling are tightened around DAW exit,
   wineserver cold start, and stale shared-memory artifacts.
 
 <div class="diagram-container">
-<svg width="100%" viewBox="0 0 960 430" xmlns="http://www.w3.org/2000/svg">
+<svg width="100%" viewBox="0 0 980 560" xmlns="http://www.w3.org/2000/svg">
   <style>
     .yb-bg { fill: #1a1b26; }
-    .yb-layer { fill: #1f2535; stroke: #3b4261; stroke-width: 1.2; }
+    .yb-layer { fill: #1f2535; stroke: #3b4261; stroke-width: 1.2; rx: 10; }
     .yb-daw { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
     .yb-host { fill: #2a1f35; stroke: #bb9af7; stroke-width: 1.8; rx: 8; }
     .yb-shm { fill: #2a2418; stroke: #e0af68; stroke-width: 1.8; rx: 8; }
     .yb-kern { fill: #1a2235; stroke: #7aa2f7; stroke-width: 1.8; rx: 8; }
+    .yb-note { fill: #2a1a1a; stroke: #f7768e; stroke-width: 1.6; rx: 8; }
     .yb-box { fill: #24283b; stroke: #3b4261; stroke-width: 1.2; rx: 8; }
     .yb-title { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
     .yb-head-g { fill: #9ece6a; font: bold 12px 'JetBrains Mono', monospace; }
     .yb-head-p { fill: #bb9af7; font: bold 12px 'JetBrains Mono', monospace; }
     .yb-head-y { fill: #e0af68; font: bold 12px 'JetBrains Mono', monospace; }
     .yb-head-b { fill: #7aa2f7; font: bold 12px 'JetBrains Mono', monospace; }
+    .yb-head-r { fill: #f7768e; font: bold 12px 'JetBrains Mono', monospace; }
     .yb-text { fill: #c0caf5; font: 11px 'JetBrains Mono', monospace; }
     .yb-small { fill: #a9b1d6; font: 9px 'JetBrains Mono', monospace; }
     .yb-line-g { stroke: #9ece6a; stroke-width: 1.4; fill: none; }
@@ -62,50 +64,55 @@ The load-bearing changes are:
     .yb-line-b { stroke: #7aa2f7; stroke-width: 1.4; fill: none; }
   </style>
 
-  <rect x="0" y="0" width="960" height="430" class="yb-bg"/>
-  <text x="480" y="28" text-anchor="middle" class="yb-title">Yabridge-NSPA process shape</text>
+  <rect x="0" y="0" width="980" height="560" class="yb-bg"/>
+  <text x="490" y="26" text-anchor="middle" class="yb-title">Yabridge-NSPA: native/Linux control plane + PI audio rendezvous + Wine-owned RT mapping</text>
 
-  <rect x="40" y="60" width="300" height="230" class="yb-daw"/>
-  <text x="60" y="86" class="yb-head-g">DAW process (native Linux)</text>
-  <text x="60" y="102" class="yb-small">plugin-lib side loaded into Carla / Ardour / Element / similar hosts</text>
+  <rect x="24" y="52" width="932" height="470" class="yb-layer"/>
+  <text x="42" y="72" class="yb-small">same bridge model as yabridge, but with a different hot-path contract</text>
 
-  <rect x="68" y="122" width="244" height="58" class="yb-box"/>
-  <text x="190" y="146" text-anchor="middle" class="yb-text">plugin-lib bridge</text>
-  <text x="190" y="162" text-anchor="middle" class="yb-small">VST2 / VST3 / CLAP entry points, host callbacks, control sockets</text>
+  <rect x="44" y="94" width="266" height="196" class="yb-daw"/>
+  <text x="177" y="118" text-anchor="middle" class="yb-head-g">DAW process / plugin-lib side</text>
+  <text x="177" y="140" text-anchor="middle" class="yb-small">native Linux plugin library loaded by the DAW</text>
+  <text x="177" y="156" text-anchor="middle" class="yb-small">control/editor traffic still uses the established socket path</text>
+  <text x="177" y="172" text-anchor="middle" class="yb-small">audio callback publishes one request per block into shared memory</text>
+  <text x="177" y="188" text-anchor="middle" class="yb-small">DAW thread then sleeps on the reply cond with cross-process PI</text>
+  <text x="177" y="214" text-anchor="middle" class="yb-text">native half owns the DAW-facing plugin ABI</text>
 
-  <rect x="68" y="198" width="244" height="58" class="yb-box"/>
-  <text x="190" y="222" text-anchor="middle" class="yb-text">DAW audio thread</text>
-  <text x="190" y="238" text-anchor="middle" class="yb-small">calls `process()` / `processReplacing()` and blocks on the L2 rendezvous</text>
+  <rect x="356" y="82" width="268" height="220" class="yb-shm"/>
+  <text x="490" y="106" text-anchor="middle" class="yb-head-y">`AudioControlShm`</text>
+  <text x="490" y="130" text-anchor="middle" class="yb-small">creator = plugin-lib, peer = wine-host</text>
+  <text x="490" y="146" text-anchor="middle" class="yb-small">request lock + cond, reply lock + cond</text>
+  <text x="490" y="162" text-anchor="middle" class="yb-small">no cross-process mutex spans plugin `process()`</text>
+  <text x="490" y="178" text-anchor="middle" class="yb-small">direct envelope is default when layout version matches</text>
+  <text x="490" y="194" text-anchor="middle" class="yb-small">fixed-shape metadata stays in shared memory</text>
+  <text x="490" y="210" text-anchor="middle" class="yb-small">oversized or irregular shapes fall back safely</text>
+  <text x="490" y="236" text-anchor="middle" class="yb-text">audio hot path is narrow on purpose</text>
 
-  <rect x="370" y="112" width="220" height="126" class="yb-shm"/>
-  <text x="480" y="138" text-anchor="middle" class="yb-head-y">AudioControlShm</text>
-  <text x="480" y="158" text-anchor="middle" class="yb-small">per-instance or per-bridge shared region</text>
-  <text x="480" y="176" text-anchor="middle" class="yb-small">request lock + cond</text>
-  <text x="480" y="192" text-anchor="middle" class="yb-small">reply lock + cond</text>
-  <text x="480" y="208" text-anchor="middle" class="yb-small">fixed-layout metadata + bounded fallback to bitsery/socket</text>
+  <rect x="670" y="94" width="266" height="196" class="yb-host"/>
+  <text x="803" y="118" text-anchor="middle" class="yb-head-p">wine-host / plugin side</text>
+  <text x="803" y="140" text-anchor="middle" class="yb-small">`yabridge-host.exe` + Windows plugin module</text>
+  <text x="803" y="156" text-anchor="middle" class="yb-small">audio workers call `set_thread_time_critical()`</text>
+  <text x="803" y="172" text-anchor="middle" class="yb-small">dispatch/control loops call `set_thread_realtime_idle()`</text>
+  <text x="803" y="188" text-anchor="middle" class="yb-small">plugin init / `LoadLibrary` brackets use `ScopedRealtimeIdleBoost`</text>
+  <text x="803" y="214" text-anchor="middle" class="yb-text">Wine owns the Win32 -> Linux RT mapping</text>
 
-  <rect x="620" y="60" width="300" height="230" class="yb-host"/>
-  <text x="640" y="86" class="yb-head-p">wine-host process (Winelib under Wine-NSPA)</text>
-  <text x="640" y="102" class="yb-small">`yabridge-host.exe` + Windows plugin DLL/module</text>
+  <rect x="108" y="346" width="744" height="84" class="yb-kern"/>
+  <text x="480" y="372" text-anchor="middle" class="yb-head-b">Wine-NSPA substrate used by the bridge</text>
+  <text x="480" y="390" text-anchor="middle" class="yb-small">vendored `rtpi.h`, Win32 priority mapping, atomic X11 embed, wineserver pre-warm,</text>
+  <text x="480" y="408" text-anchor="middle" class="yb-small">pidfd teardown, and Wine-side sync correctness fixes</text>
+  <text x="480" y="426" text-anchor="middle" class="yb-small">the bridge reuses those rules instead of reproducing them locally</text>
 
-  <rect x="648" y="122" width="244" height="58" class="yb-box"/>
-  <text x="770" y="146" text-anchor="middle" class="yb-text">audio worker / dispatch loop</text>
-  <text x="770" y="162" text-anchor="middle" class="yb-small">TIME_CRITICAL via Win32 APIs, same-thread plugin callback execution</text>
+  <rect x="168" y="462" width="624" height="40" class="yb-note"/>
+  <text x="480" y="487" text-anchor="middle" class="yb-head-r">Current contract</text>
+  <text x="480" y="501" text-anchor="middle" class="yb-small">control/editor traffic stays on the older socket path</text>
+  <text x="480" y="515" text-anchor="middle" class="yb-small">the audio callback path is the one that moves onto PI rendezvous</text>
+  <text x="480" y="529" text-anchor="middle" class="yb-small">and fixed-layout envelopes</text>
 
-  <rect x="648" y="198" width="244" height="58" class="yb-box"/>
-  <text x="770" y="222" text-anchor="middle" class="yb-text">Windows plugin module</text>
-  <text x="770" y="238" text-anchor="middle" class="yb-small">VST2 / VST3 / CLAP implementation and any plugin-spawned workers</text>
-
-  <rect x="120" y="330" width="720" height="62" class="yb-kern"/>
-  <text x="480" y="356" text-anchor="middle" class="yb-head-b">Wine-NSPA substrate used by the bridge</text>
-  <text x="480" y="372" text-anchor="middle" class="yb-small">vendored `rtpi.h`, Win32 priority mapping, wineserver warm-start</text>
-  <text x="480" y="386" text-anchor="middle" class="yb-small">pidfd teardown, and Wine-side sync fixes</text>
-
-  <line x1="312" y1="227" x2="370" y2="175" class="yb-line-g"/>
-  <line x1="590" y1="175" x2="648" y2="151" class="yb-line-y"/>
-  <line x1="190" y1="290" x2="190" y2="330" class="yb-line-g"/>
-  <line x1="770" y1="290" x2="770" y2="330" class="yb-line-p"/>
-  <line x1="480" y1="238" x2="480" y2="330" class="yb-line-y"/>
+  <line x1="310" y1="188" x2="356" y2="188" class="yb-line-g"/>
+  <line x1="624" y1="188" x2="670" y2="188" class="yb-line-y"/>
+  <path d="M177 290 L177 346" class="yb-line-g"/>
+  <path d="M803 290 L803 346" class="yb-line-p"/>
+  <path d="M490 302 L490 346" class="yb-line-y"/>
 </svg>
 </div>
 
@@ -256,13 +263,19 @@ priorities itself.
 Instead:
 
 - `yabridge-host` sets `REALTIME_PRIORITY_CLASS` at process scope
-- wine-host worker threads and dispatch loops use
-  `SetThreadPriority(THREAD_PRIORITY_TIME_CRITICAL)`
-- scoped module-load and plugin-init brackets use
-  `ScopedTimeCriticalBoost` so plugin-spawned workers inherit the intended RT
-  entitlement
+- genuine audio workers call `set_thread_time_critical()`
+- dispatch/control/parameter loops call `set_thread_realtime_idle()`
+- scoped module-load and plugin-init brackets use `ScopedRealtimeIdleBoost`
 - demotion restores the previous Win32 thread priority instead of forcing the
   caller back to `SCHED_OTHER`
+
+The split is intentional:
+
+| Thread class | Helper | Practical result |
+|---|---|---|
+| Audio callback workers | `set_thread_time_critical()` | maps to Wine-NSPA's top audio band (`TIME_CRITICAL`) |
+| Dispatch / control / parameter loops | `set_thread_realtime_idle()` | stays inside the Win32 realtime class so child RT inheritance works, but below the audio band |
+| `LoadLibrary`, plugin construction, init brackets | `ScopedRealtimeIdleBoost` | child worker threads inherit RT entitlement without running heavyweight init at the audio ceiling |
 
 That has two practical effects:
 
@@ -284,6 +297,22 @@ The point is to let the DAW thread's effective priority reach the Wine-host
 worker during the callback, not to mirror scheduler state in userspace on a
 timer.
 
+```cpp
+// Current pattern: audio workers at the ceiling, control/init work in the
+// lowest Win32 RT band, still inside REALTIME_PRIORITY_CLASS.
+void audio_worker_entry() {
+    yabridge::nspa::set_thread_time_critical();
+    run_plugin_audio_loop();
+}
+
+void dispatch_loop_entry() {
+    yabridge::nspa::set_thread_realtime_idle();
+    run_dispatch_and_control_loop();
+}
+
+HMODULE module = yabridge::nspa::load_library_rt(dos_path);
+```
+
 ---
 
 ## 6. Per-callback transport
@@ -295,7 +324,7 @@ The key invariant is that the cross-process lock is **not** held across the
 plugin's callback body.
 
 <div class="diagram-container">
-<svg width="100%" viewBox="0 0 960 420" xmlns="http://www.w3.org/2000/svg">
+<svg width="100%" viewBox="0 0 980 500" xmlns="http://www.w3.org/2000/svg">
   <style>
     .tr-bg { fill: #1a1b26; }
     .tr-box { fill: #24283b; stroke: #3b4261; stroke-width: 1.2; rx: 8; }
@@ -311,40 +340,61 @@ plugin's callback body.
     .tr-text { fill: #c0caf5; font: 10px 'JetBrains Mono', monospace; }
     .tr-small { fill: #a9b1d6; font: 9px 'JetBrains Mono', monospace; }
     .tr-line-g { stroke: #9ece6a; stroke-width: 1.4; fill: none; }
-    .tr-line-p { stroke: #bb9af7; stroke-width: 1.4; fill: none; }
     .tr-line-y { stroke: #e0af68; stroke-width: 1.4; fill: none; }
   </style>
 
-  <rect x="0" y="0" width="960" height="420" class="tr-bg"/>
-  <text x="480" y="28" text-anchor="middle" class="tr-title">Audio callback rendezvous</text>
+  <rect x="0" y="0" width="980" height="500" class="tr-bg"/>
+  <text x="490" y="28" text-anchor="middle" class="tr-title">Audio callback rendezvous: lock only the state transition, never the plugin body</text>
 
-  <rect x="40" y="92" width="240" height="86" class="tr-daw"/>
-  <text x="160" y="118" text-anchor="middle" class="tr-head-g">DAW audio thread</text>
-  <text x="160" y="140" text-anchor="middle" class="tr-small">populate request metadata</text>
-  <text x="160" y="156" text-anchor="middle" class="tr-small">signal request cond, then wait on reply cond</text>
+  <rect x="42" y="82" width="204" height="300" class="tr-daw"/>
+  <text x="144" y="108" text-anchor="middle" class="tr-head-g">DAW audio thread</text>
+  <text x="144" y="134" text-anchor="middle" class="tr-small">1. fill request payload</text>
+  <text x="144" y="150" text-anchor="middle" class="tr-small">2. lock request side</text>
+  <text x="144" y="166" text-anchor="middle" class="tr-small">3. publish `REQUEST_READY`</text>
+  <text x="144" y="182" text-anchor="middle" class="tr-small">4. signal request cond</text>
+  <text x="144" y="198" text-anchor="middle" class="tr-small">5. unlock request side</text>
+  <text x="144" y="214" text-anchor="middle" class="tr-small">6. wait on reply cond</text>
 
-  <rect x="360" y="66" width="240" height="138" class="tr-shm"/>
-  <text x="480" y="92" text-anchor="middle" class="tr-head-y">AudioControlShm</text>
-  <text x="480" y="116" text-anchor="middle" class="tr-small">request lock + cond</text>
-  <text x="480" y="132" text-anchor="middle" class="tr-small">fixed-layout metadata or bounded fallback payload</text>
-  <text x="480" y="148" text-anchor="middle" class="tr-small">reply lock + cond</text>
-  <text x="480" y="176" text-anchor="middle" class="tr-text">same callback ownership, cross-process PI handoff</text>
+  <rect x="286" y="82" width="188" height="300" class="tr-shm"/>
+  <text x="380" y="108" text-anchor="middle" class="tr-head-y">request side</text>
+  <text x="380" y="134" text-anchor="middle" class="tr-small">`req_lock` + `req_cv`</text>
+  <text x="380" y="150" text-anchor="middle" class="tr-small">state + direct envelope fields</text>
+  <text x="380" y="166" text-anchor="middle" class="tr-small">bounded payload / fallback metadata</text>
 
-  <rect x="680" y="92" width="240" height="86" class="tr-host"/>
-  <text x="800" y="118" text-anchor="middle" class="tr-head-p">wine-host audio worker</text>
-  <text x="800" y="140" text-anchor="middle" class="tr-small">wake, copy request, release request lock</text>
-  <text x="800" y="156" text-anchor="middle" class="tr-small">run plugin callback, then publish reply</text>
+  <rect x="506" y="82" width="188" height="300" class="tr-shm"/>
+  <text x="600" y="108" text-anchor="middle" class="tr-head-y">reply side</text>
+  <text x="600" y="134" text-anchor="middle" class="tr-small">`reply_lock` + `reply_cv`</text>
+  <text x="600" y="150" text-anchor="middle" class="tr-small">reply payload + status</text>
+  <text x="600" y="166" text-anchor="middle" class="tr-small">wake producer once reply is ready</text>
 
-  <line x1="280" y1="135" x2="360" y2="135" class="tr-line-g"/>
-  <line x1="600" y1="135" x2="680" y2="135" class="tr-line-y"/>
+  <rect x="734" y="82" width="204" height="300" class="tr-host"/>
+  <text x="836" y="108" text-anchor="middle" class="tr-head-p">wine-host audio worker</text>
+  <text x="836" y="134" text-anchor="middle" class="tr-small">1. wake with PI on request cond</text>
+  <text x="836" y="150" text-anchor="middle" class="tr-small">2. copy request into local buffer</text>
+  <text x="836" y="166" text-anchor="middle" class="tr-small">3. unlock request side</text>
+  <text x="836" y="182" text-anchor="middle" class="tr-small">4. run plugin callback</text>
+  <text x="836" y="198" text-anchor="middle" class="tr-small">5. lock reply side</text>
+  <text x="836" y="214" text-anchor="middle" class="tr-small">6. publish `REPLY_READY`</text>
+  <text x="836" y="230" text-anchor="middle" class="tr-small">7. signal reply cond</text>
 
-  <rect x="250" y="242" width="460" height="78" class="tr-note"/>
-  <text x="480" y="268" text-anchor="middle" class="tr-head-b">Load-bearing invariant</text>
-  <text x="480" y="286" text-anchor="middle" class="tr-small">plugin `process()` / `processReplacing()` runs with no cross-process mutex held</text>
-  <text x="480" y="302" text-anchor="middle" class="tr-small">locks only cover state transition, memcpy, and cond signaling</text>
+  <line x1="246" y1="168" x2="286" y2="168" class="tr-line-g"/>
+  <line x1="474" y1="168" x2="734" y2="168" class="tr-line-y"/>
+  <line x1="734" y1="232" x2="694" y2="232" class="tr-line-y"/>
+  <line x1="506" y1="232" x2="246" y2="232" class="tr-line-g"/>
 
-  <rect x="110" y="340" width="740" height="46" class="tr-box"/>
-  <text x="480" y="366" text-anchor="middle" class="tr-text">request side: direct metadata when fixed-shape, fallback when oversized or variable-shape</text>
+  <rect x="170" y="412" width="640" height="56" class="tr-note"/>
+  <text x="490" y="436" text-anchor="middle" class="tr-head-b">Load-bearing invariant</text>
+  <text x="490" y="454" text-anchor="middle" class="tr-small">plugin `process()` / `processReplacing()` runs after the request side is unlocked</text>
+  <text x="490" y="470" text-anchor="middle" class="tr-small">and before the reply side is locked</text>
+  <text x="490" y="486" text-anchor="middle" class="tr-small">so no cross-process mutex spans arbitrary plugin code</text>
+
+  <rect x="178" y="272" width="624" height="90" class="tr-box"/>
+  <text x="490" y="298" text-anchor="middle" class="tr-text">Current direct-envelope contract</text>
+  <text x="490" y="318" text-anchor="middle" class="tr-small">layout version 9, creator/peer version match required</text>
+  <text x="490" y="334" text-anchor="middle" class="tr-small">direct envelope active only when both sides agree</text>
+  <text x="490" y="350" text-anchor="middle" class="tr-small">VST2: `VstTimeInfo`; VST3: `ProcessContext` + event ring + param queues + reply envelope</text>
+  <text x="490" y="366" text-anchor="middle" class="tr-small">CLAP: transport + event ring + reply envelope</text>
+  <text x="490" y="350" text-anchor="middle" class="tr-small">fallback remains bounded and transparent when a block shape does not fit</text>
 </svg>
 </div>
 
@@ -368,6 +418,22 @@ enough to stop dominating the bridge:
 On a representative ACE VST3 capture with the direct envelope enabled, the
 remaining bitsery encode/decode surface dropped to roughly `0.10%` of
 `yabridge-host` CPU, while `pi_mutex_lock` itself sat at roughly `0.01%`.
+
+```cpp
+// Shape only: publish request, release the cross-process lock before plugin
+// code, then publish reply under the reply-side lock.
+pi_mutex_lock(&layout->req_lock);
+write_request(layout, request);
+layout->state = RequestReady;
+pi_cond_signal(&layout->req_cv);
+pi_mutex_unlock(&layout->req_lock);
+
+pi_mutex_lock(&layout->reply_lock);
+while (layout->state != ReplyReady)
+    pi_cond_wait(&layout->reply_cv, &layout->reply_lock);
+read_reply(layout, reply);
+pi_mutex_unlock(&layout->reply_lock);
+```
 
 ---
 
@@ -451,7 +517,7 @@ plugin-hosting sessions.
 | Area | Final behavior |
 |---|---|
 | Module path exposure | module loads use DOS-path conversion so plugin-side `GetModuleFileNameW()` sees a parseable Windows path instead of a raw `\\\\?\\unix\\...` host path |
-| Plugin load entitlement | `LoadLibrary` and selected plugin-init calls are bracketed with a scoped TIME_CRITICAL boost so worker threads spawned during `DllMain` or init inherit the intended RT entitlement |
+| Plugin load entitlement | `LoadLibrary` and selected plugin-init calls are bracketed with `ScopedRealtimeIdleBoost`, so child worker threads inherit RT entitlement without pinning heavyweight init work at the audio ceiling |
 | Cold wineserver startup | the host side pre-warms wineserver before launching `yabridge-host`, avoiding a class of cold-spawn failures in hosts that hit the first Wine launch of the session |
 | Host startup failure | startup failure no longer aborts the native DAW; the bridge closes sockets and returns an error instead of taking the whole host down |
 | DAW exit detection | pidfd-based watchdog wakes on parent exit instead of relying only on a coarse polling timer |

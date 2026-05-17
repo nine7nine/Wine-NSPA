@@ -447,23 +447,31 @@ co-locate in the same memfd for protocol-passing economy.</p>
 
 <h3 id="31-nspa_msg_ring_t--forward-ring">3.1 <code>nspa_msg_ring_t</code> — forward ring</h3>
 
-<p>Sized at 64 slots × 128 bytes ≈ 8 KB. Header fields (<code>protocol.def</code>
-lines 1069-1082):</p>
+<p>Sized at 64 slots × 128 bytes ≈ 8 KB. Current header layout
+(<code>include/wine/server_protocol.h</code>):</p>
 
 <pre><code class="code-block">typedef volatile struct {
-    unsigned int head;              /* MPSC producer index */
-    unsigned int tail;              /* SPSC consumer index */
-    unsigned int overflow;          /* fall-back-to-server count */
-    unsigned int active;            /* 0 = ring disabled */
-    unsigned int pending_count;     /* total READY slots */
-    unsigned int pending_send_count;/* SEND-class subset */
-    unsigned int next_post_seq;     /* canonical post ordering */
-    unsigned int change_seq;        /* bumped on each publish */
-    unsigned int change_ack_seq;    /* owner-side ack */
+    unsigned int __attribute__((aligned(64))) head;
+    unsigned int __attribute__((aligned(64))) tail;
+    unsigned int __attribute__((aligned(64))) overflow;
+    unsigned int active;
+    unsigned int pending_count;
+    unsigned int pending_send_count;
+    unsigned int next_post_seq;
+    unsigned int change_seq;
+    unsigned int change_ack_seq;
     unsigned int __pad;
-    nspa_msg_slot_t slots[NSPA_MSG_RING_SLOTS];
+    nspa_msg_slot_t __attribute__((aligned(64))) slots[NSPA_MSG_RING_SLOTS];
 } nspa_msg_ring_t;
 </code></pre>
+
+<p>The 2026-05-16 layout change is load-bearing, not cosmetic. The hot producer
+<code>head</code> CAS and the consumer&rsquo;s <code>tail</code> advance no longer bounce the same
+cacheline on every same-process message transfer. <code>overflow</code> also gets its own
+aligned line, while the remaining control fields stay co-located on a third
+cacheline because they are not the primary producer/consumer ping-pong pair.
+The timer and redraw rings follow the same cacheline discipline for the same
+reason.</p>
 
 <p>Each slot (<code>nspa_msg_slot_t</code>, 128 B, lines 1046-1067) carries the
 forwarded message plus routing metadata:</p>
@@ -619,29 +627,27 @@ slot:</p>
     .rl-label-green { fill: #9ece6a; font-size: 10px; font-weight: bold; font-family: 'JetBrains Mono', monospace; }
   </style>
 
-  <text x="460" y="24" class="rl-label-accent" text-anchor="middle">nspa_queue_bypass_shm_t (memfd, ~10 KB + class rings, mlock'd)</text>
+  <text x="460" y="24" class="rl-label-accent" text-anchor="middle">nspa_queue_bypass_shm_t (memfd, cacheline-isolated ring headers)</text>
 
   <rect x="20" y="35" width="880" height="355" rx="10" fill="none" stroke="#6b7398" stroke-width="1" stroke-dasharray="5,3"/>
 
   <rect x="40" y="55" width="840" height="160" class="rl-box-nspa" rx="6"/>
   <text x="460" y="74" class="rl-label-accent" text-anchor="middle">nspa_msg_ring_t (forward MPSC, 64 slots)</text>
 
-  <rect x="60" y="85" width="800" height="38" class="rl-box" rx="6"/>
-  <text x="90" y="102" class="rl-label-cyan">head</text>
-  <text x="90" y="115" class="rl-label-sm">producer (CAS)</text>
-  <text x="180" y="102" class="rl-label-cyan">tail</text>
-  <text x="180" y="115" class="rl-label-sm">consumer cursor</text>
-  <text x="280" y="102" class="rl-label-cyan">active</text>
-  <text x="280" y="115" class="rl-label-sm">0 = disabled</text>
-  <text x="370" y="102" class="rl-label-cyan">pending_count</text>
-  <text x="370" y="115" class="rl-label-sm">+ pending_send_count</text>
-  <text x="540" y="102" class="rl-label-cyan">next_post_seq</text>
-  <text x="540" y="115" class="rl-label-sm">canonical ordering</text>
-  <text x="690" y="102" class="rl-label-cyan">change_seq / ack</text>
-  <text x="690" y="115" class="rl-label-sm">wake-bit edge detect</text>
+  <rect x="60" y="85" width="180" height="38" class="rl-box" rx="6"/>
+  <text x="150" y="102" class="rl-label-cyan" text-anchor="middle">cacheline 0: `head`</text>
+  <text x="150" y="115" class="rl-label-sm" text-anchor="middle">producer CAS only</text>
+
+  <rect x="260" y="85" width="180" height="38" class="rl-box" rx="6"/>
+  <text x="350" y="102" class="rl-label-cyan" text-anchor="middle">cacheline 1: `tail`</text>
+  <text x="350" y="115" class="rl-label-sm" text-anchor="middle">consumer advance only</text>
+
+  <rect x="460" y="85" width="400" height="38" class="rl-box" rx="6"/>
+  <text x="660" y="102" class="rl-label-cyan" text-anchor="middle">cacheline 2: `overflow`, `active`, `pending_*`, `next_post_seq`, `change_*`</text>
+  <text x="660" y="115" class="rl-label-sm" text-anchor="middle">control fields and counters that are not the head/tail ping-pong pair</text>
 
   <text x="70" y="143" class="rl-label-yellow">slots[0..63]</text>
-  <text x="70" y="155" class="rl-label-muted">nspa_msg_slot_t (128 B)</text>
+  <text x="70" y="155" class="rl-label-muted">`slots[]` begins on its own 64-byte boundary; each slot is `nspa_msg_slot_t` (128 B)</text>
 
   <rect x="180" y="140" width="90" height="65" class="rl-slot" rx="6"/>
   <text x="225" y="157" class="rl-label-sm" text-anchor="middle">state</text>
@@ -695,6 +701,11 @@ slot:</p>
 </svg>
 </div>
 
+
+<p>The timer and redraw rings are simpler SPSC variants, but they now follow the
+same cacheline split on <code>head</code> / <code>tail</code> / <code>overflow</code>: keep the hot writer and
+hot reader indices from sharing a line, then align <code>slots[]</code> separately so the
+payload array starts cleanly.</p>
 
 <p>The forward ring&rsquo;s <code>state</code> transitions are CAS-claimed (multi-producer
 head, single-consumer tail). The reply ring&rsquo;s <code>generation</code> field

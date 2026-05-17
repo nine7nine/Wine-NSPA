@@ -36,57 +36,75 @@ host process that can load Windows VST2 and VST3 modules directly and keep
 their Win32 GUI and callback rules intact.
 
 <div class="diagram-container">
-<svg width="100%" viewBox="0 0 960 430" xmlns="http://www.w3.org/2000/svg">
+<svg width="100%" viewBox="0 0 980 560" xmlns="http://www.w3.org/2000/svg">
   <style>
     .jn-bg { fill: #1a1b26; }
-    .jn-box { fill: #24283b; stroke: #3b4261; stroke-width: 1.4; rx: 8; }
+    .jn-lane { fill: #1f2535; stroke: #3b4261; stroke-width: 1.2; rx: 10; }
     .jn-app { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
     .jn-host { fill: #1a2235; stroke: #7aa2f7; stroke-width: 1.8; rx: 8; }
     .jn-plug { fill: #2a2137; stroke: #bb9af7; stroke-width: 1.8; rx: 8; }
-    .jn-note { fill: #2a2418; stroke: #e0af68; stroke-width: 1.6; rx: 8; }
+    .jn-sync { fill: #2a2418; stroke: #e0af68; stroke-width: 1.8; rx: 8; }
+    .jn-note { fill: #2a1a1a; stroke: #f7768e; stroke-width: 1.6; rx: 8; }
     .jn-title { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
     .jn-head-g { fill: #9ece6a; font: bold 11px 'JetBrains Mono', monospace; }
     .jn-head-b { fill: #7aa2f7; font: bold 11px 'JetBrains Mono', monospace; }
     .jn-head-p { fill: #bb9af7; font: bold 11px 'JetBrains Mono', monospace; }
     .jn-head-y { fill: #e0af68; font: bold 11px 'JetBrains Mono', monospace; }
+    .jn-head-r { fill: #f7768e; font: bold 11px 'JetBrains Mono', monospace; }
     .jn-text { fill: #c0caf5; font: 10px 'JetBrains Mono', monospace; }
     .jn-small { fill: #a9b1d6; font: 9px 'JetBrains Mono', monospace; }
-    .jn-line-g { stroke: #9ece6a; stroke-width: 1.3; fill: none; }
-    .jn-line-b { stroke: #7aa2f7; stroke-width: 1.3; fill: none; }
-    .jn-line-p { stroke: #bb9af7; stroke-width: 1.3; fill: none; }
+    .jn-line-g { stroke: #9ece6a; stroke-width: 1.4; fill: none; }
+    .jn-line-b { stroke: #7aa2f7; stroke-width: 1.4; fill: none; }
+    .jn-line-p { stroke: #bb9af7; stroke-width: 1.4; fill: none; }
+    .jn-line-y { stroke: #e0af68; stroke-width: 1.4; fill: none; }
   </style>
 
-  <rect x="0" y="0" width="960" height="430" class="jn-bg"/>
-  <text x="480" y="28" text-anchor="middle" class="jn-title">JUCE-NSPA runtime shape</text>
+  <rect x="0" y="0" width="980" height="560" class="jn-bg"/>
+  <text x="490" y="26" text-anchor="middle" class="jn-title">JUCE-NSPA: framework-level winelib substrate for Windows plugin hosting</text>
 
-  <rect x="45" y="86" width="250" height="118" class="jn-app"/>
-  <text x="170" y="112" text-anchor="middle" class="jn-head-g">Linux app / host UI</text>
-  <text x="170" y="136" text-anchor="middle" class="jn-small">JUCE event loop, X11 peer, native app shell</text>
-  <text x="170" y="152" text-anchor="middle" class="jn-small">creates `WineHWNDEmbedComponent` for editors</text>
-  <text x="170" y="168" text-anchor="middle" class="jn-small">owns foreign X11 parent window</text>
+  <rect x="24" y="52" width="932" height="470" class="jn-lane"/>
+  <text x="42" y="72" class="jn-small">framework responsibilities, not app-specific policy</text>
 
-  <rect x="355" y="70" width="250" height="150" class="jn-host"/>
-  <text x="480" y="96" text-anchor="middle" class="jn-head-b">JUCE-NSPA winelib host</text>
-  <text x="480" y="120" text-anchor="middle" class="jn-small">winegcc / wineg++ build</text>
-  <text x="480" y="136" text-anchor="middle" class="jn-small">Win32 ABI shims, `LoadLibraryW()`, Win32 dispatch</text>
-  <text x="480" y="152" text-anchor="middle" class="jn-small">PI-aware dispatcher and explicit message pump</text>
-  <text x="480" y="168" text-anchor="middle" class="jn-small">X11 embed handoff through Wine-NSPA</text>
+  <rect x="44" y="94" width="250" height="160" class="jn-app"/>
+  <text x="169" y="118" text-anchor="middle" class="jn-head-g">Linux host side</text>
+  <text x="169" y="140" text-anchor="middle" class="jn-small">JUCE event loop, peer tree, X11 parent ownership</text>
+  <text x="169" y="156" text-anchor="middle" class="jn-small">host windows stay native Linux objects</text>
+  <text x="169" y="172" text-anchor="middle" class="jn-small">editor parents and bounds originate here</text>
+  <text x="169" y="198" text-anchor="middle" class="jn-text">native shell stays native</text>
 
-  <rect x="665" y="86" width="250" height="118" class="jn-plug"/>
-  <text x="790" y="112" text-anchor="middle" class="jn-head-p">Windows plugin module</text>
-  <text x="790" y="136" text-anchor="middle" class="jn-small">VST2 `.dll` or VST3 PE module</text>
-  <text x="790" y="152" text-anchor="middle" class="jn-small">Win32 editor window and plugin callbacks</text>
-  <text x="790" y="168" text-anchor="middle" class="jn-small">runs in the same Linux process through Wine</text>
+  <rect x="362" y="82" width="256" height="184" class="jn-host"/>
+  <text x="490" y="106" text-anchor="middle" class="jn-head-b">JUCE-NSPA host substrate</text>
+  <text x="490" y="128" text-anchor="middle" class="jn-small">winegcc / wineg++ toolchain pivot</text>
+  <text x="490" y="144" text-anchor="middle" class="jn-small">`LoadLibraryW()` PE module loading</text>
+  <text x="490" y="160" text-anchor="middle" class="jn-small">VST2 `ms_abi` / VST3 `__stdcall` boundary fixes</text>
+  <text x="490" y="176" text-anchor="middle" class="jn-small">per-instance Win32 dispatch lanes</text>
+  <text x="490" y="192" text-anchor="middle" class="jn-small">`PiMutex` / `PiCond` wrappers for the winelib-facing sync layer</text>
+  <text x="490" y="218" text-anchor="middle" class="jn-text">framework-level Win32 ownership lives here</text>
 
-  <line x1="295" y1="145" x2="355" y2="145" class="jn-line-g"/>
-  <line x1="605" y1="145" x2="665" y2="145" class="jn-line-b"/>
+  <rect x="686" y="94" width="250" height="160" class="jn-plug"/>
+  <text x="811" y="118" text-anchor="middle" class="jn-head-p">Windows plugin side</text>
+  <text x="811" y="140" text-anchor="middle" class="jn-small">VST2 `.dll` and VST3 PE modules</text>
+  <text x="811" y="156" text-anchor="middle" class="jn-small">Win32 editor HWNDs and child windows</text>
+  <text x="811" y="172" text-anchor="middle" class="jn-small">plugin callbacks still observe Win32 rules</text>
+  <text x="811" y="198" text-anchor="middle" class="jn-text">same process, Wine-backed code</text>
 
-  <rect x="190" y="282" width="580" height="84" class="jn-note"/>
-  <text x="480" y="310" text-anchor="middle" class="jn-head-y">Load-bearing split</text>
-  <text x="480" y="328" text-anchor="middle" class="jn-small">Linux app structure stays native, but plugin load and callback ownership</text>
-  <text x="480" y="344" text-anchor="middle" class="jn-small">still follow Win32 rules inside the same process</text>
-  <text x="480" y="360" text-anchor="middle" class="jn-small">Wine-NSPA supplies the embed primitive</text>
-  <text x="480" y="376" text-anchor="middle" class="jn-small">and the RT-aware Win32 runtime beneath that host layer</text>
+  <rect x="126" y="318" width="728" height="126" class="jn-sync"/>
+  <text x="490" y="342" text-anchor="middle" class="jn-head-y">Editor embed and message ownership</text>
+  <text x="490" y="366" text-anchor="middle" class="jn-small">`WineHWNDEmbedComponent` creates a real Wine HWND, resolves `wine_x11_window`,</text>
+  <text x="490" y="382" text-anchor="middle" class="jn-small">sends `WM_X11DRV_NSPA_EMBED_WINDOW`, then pumps Win32 messages on a timer</text>
+  <text x="490" y="398" text-anchor="middle" class="jn-small">`WM_X11DRV_NSPA_EMBED_DONE` is the completion fence</text>
+  <text x="490" y="414" text-anchor="middle" class="jn-small">host-side geometry stays split between `SetWindowPos()` for Wine rects</text>
+  <text x="490" y="430" text-anchor="middle" class="jn-small">and `XMoveResizeWindow()` for the X11 child</text>
+  <text x="490" y="408" text-anchor="middle" class="jn-text">framework owns the Linux/X11 <-> Win32/HWND seam</text>
+
+  <rect x="166" y="468" width="648" height="36" class="jn-note"/>
+  <text x="490" y="491" text-anchor="middle" class="jn-head-r">Load-bearing split</text>
+  <text x="490" y="505" text-anchor="middle" class="jn-small">Linux host structure stays native, but plugin load, editor HWNDs,</text>
+  <text x="490" y="519" text-anchor="middle" class="jn-small">and callback ABI still follow Win32 rules inside the same process</text>
+
+  <line x1="294" y1="176" x2="362" y2="176" class="jn-line-g"/>
+  <line x1="618" y1="176" x2="686" y2="176" class="jn-line-b"/>
+  <path d="M490 266 L490 318" class="jn-line-y"/>
 </svg>
 </div>
 
@@ -142,7 +160,7 @@ other JUCE-supported host platforms.
 
 The plugin-loading surface is split by format.
 
-### 3.1 VST3
+### 4.1 VST3
 
 The VST3 side loads PE plugin modules through Wine's `LoadLibraryW()` path.
 That is paired with:
@@ -151,7 +169,7 @@ That is paired with:
 - Winelib-safe path conversion helpers
 - Win32 ABI fixes in the embedded VST3 SDK host layer
 
-### 3.2 VST2
+### 4.2 VST2
 
 The VST2 side adds the corresponding Windows-module assumptions:
 
@@ -257,6 +275,10 @@ Editor hosting has two parts:
 2. the component embeds that child under the JUCE peer's X11 window through
    `WM_X11DRV_NSPA_EMBED_WINDOW`
 
+The completion edge is also explicit now: Wine posts
+`WM_X11DRV_NSPA_EMBED_DONE` back to the same HWND after the embed handshake has
+reparented, mapped, and settled its WM state.
+
 The component also owns an explicit Win32 message pump:
 
 - `PeekMessageW()`
@@ -266,6 +288,28 @@ The component also owns an explicit Win32 message pump:
 That pump is required because the Linux JUCE host loop is not a native Win32
 message loop, but the embedded editor HWNDs and their child windows still
 expect one.
+
+The current host-side shape is straightforward:
+
+```cpp
+HWND hostHwnd = CreateWindowExW(...);
+
+SendMessageW(hostHwnd, WM_X11DRV_NSPA_EMBED_WINDOW,
+             (WPARAM) peerX11Parent,
+             MAKELPARAM(peerX, peerY));
+
+while (PeekMessageW(&msg, hostHwnd, 0, 0, PM_REMOVE)) {
+    if (msg.message == WM_X11DRV_NSPA_EMBED_DONE)
+        embedSettled = true;
+
+    TranslateMessage(&msg);
+    DispatchMessageW(&msg);
+}
+```
+
+What matters is not the exact wrapper code but the contract it follows: one
+real Wine HWND, one explicit embed request, one explicit completion edge, and
+an explicit Win32 pump that stays alive inside the Linux host.
 
 The same component also keeps screen-position tracking split correctly:
 
@@ -285,58 +329,75 @@ The embed component is where most of the winelib host-side GUI work lives.
 | Win32 surface creation | creates a real top-level Wine HWND with `CreateWindowExW()` |
 | X11 child lookup | resolves the backing `wine_x11_window` for that HWND |
 | Embed handoff | sends `WM_X11DRV_NSPA_EMBED_WINDOW` to hand the child to Wine's embed path |
+| Completion fence | handles `WM_X11DRV_NSPA_EMBED_DONE` if the host wants a deterministic "embed settled" point |
 | Win32 pump | runs a `PeekMessageW()` / `TranslateMessage()` / `DispatchMessageW()` loop on a timer |
 | Geometry sync | uses `SetWindowPos()` for Wine rects and `XMoveResizeWindow()` for host-relative X11 placement |
 
 <div class="diagram-container">
-<svg width="100%" viewBox="0 0 960 400" xmlns="http://www.w3.org/2000/svg">
+<svg width="100%" viewBox="0 0 980 470" xmlns="http://www.w3.org/2000/svg">
   <style>
     .eh-bg { fill: #1a1b26; }
-    .eh-box { fill: #24283b; stroke: #3b4261; stroke-width: 1.4; rx: 8; }
+    .eh-box { fill: #24283b; stroke: #3b4261; stroke-width: 1.2; rx: 8; }
     .eh-host { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
-    .eh-w32 { fill: #1a2235; stroke: #7aa2f7; stroke-width: 1.8; rx: 8; }
-    .eh-x11 { fill: #2a2137; stroke: #bb9af7; stroke-width: 1.8; rx: 8; }
-    .eh-note { fill: #2a2418; stroke: #e0af68; stroke-width: 1.6; rx: 8; }
+    .eh-msg { fill: #2a2418; stroke: #e0af68; stroke-width: 1.8; rx: 8; }
+    .eh-wine { fill: #1a2235; stroke: #7aa2f7; stroke-width: 1.8; rx: 8; }
+    .eh-plugin { fill: #2a2137; stroke: #bb9af7; stroke-width: 1.8; rx: 8; }
+    .eh-note { fill: #2a1a1a; stroke: #f7768e; stroke-width: 1.6; rx: 8; }
     .eh-title { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
     .eh-head-g { fill: #9ece6a; font: bold 11px 'JetBrains Mono', monospace; }
+    .eh-head-y { fill: #e0af68; font: bold 11px 'JetBrains Mono', monospace; }
     .eh-head-b { fill: #7aa2f7; font: bold 11px 'JetBrains Mono', monospace; }
     .eh-head-p { fill: #bb9af7; font: bold 11px 'JetBrains Mono', monospace; }
-    .eh-head-y { fill: #e0af68; font: bold 11px 'JetBrains Mono', monospace; }
+    .eh-head-r { fill: #f7768e; font: bold 11px 'JetBrains Mono', monospace; }
     .eh-small { fill: #a9b1d6; font: 9px 'JetBrains Mono', monospace; }
-    .eh-line-g { stroke: #9ece6a; stroke-width: 1.3; fill: none; }
-    .eh-line-b { stroke: #7aa2f7; stroke-width: 1.3; fill: none; }
+    .eh-line-g { stroke: #9ece6a; stroke-width: 1.4; fill: none; }
+    .eh-line-y { stroke: #e0af68; stroke-width: 1.4; fill: none; }
+    .eh-line-b { stroke: #7aa2f7; stroke-width: 1.4; fill: none; }
   </style>
 
-  <rect x="0" y="0" width="960" height="400" class="eh-bg"/>
-  <text x="480" y="28" text-anchor="middle" class="eh-title">Embed component responsibilities</text>
+  <rect x="0" y="0" width="980" height="470" class="eh-bg"/>
+  <text x="490" y="26" text-anchor="middle" class="eh-title">`WineHWNDEmbedComponent`: embed lifecycle and ownership split</text>
 
-  <rect x="70" y="92" width="230" height="112" class="eh-host"/>
-  <text x="185" y="118" text-anchor="middle" class="eh-head-g">JUCE peer / Linux side</text>
-  <text x="185" y="142" text-anchor="middle" class="eh-small">owns the foreign X11 parent</text>
-  <text x="185" y="158" text-anchor="middle" class="eh-small">supplies peer-relative bounds</text>
-  <text x="185" y="174" text-anchor="middle" class="eh-small">drives layout and visibility</text>
+  <rect x="48" y="82" width="210" height="250" class="eh-host"/>
+  <text x="153" y="106" text-anchor="middle" class="eh-head-g">JUCE peer / Linux side</text>
+  <text x="153" y="132" text-anchor="middle" class="eh-small">1. own foreign X11 parent</text>
+  <text x="153" y="148" text-anchor="middle" class="eh-small">2. compute peer-relative bounds</text>
+  <text x="153" y="164" text-anchor="middle" class="eh-small">3. host creates embed component</text>
+  <text x="153" y="180" text-anchor="middle" class="eh-small">4. later drives `XMoveResizeWindow()`</text>
 
-  <rect x="365" y="76" width="230" height="144" class="eh-w32"/>
-  <text x="480" y="102" text-anchor="middle" class="eh-head-b">`WineHWNDEmbedComponent`</text>
-  <text x="480" y="126" text-anchor="middle" class="eh-small">creates Wine HWND</text>
-  <text x="480" y="142" text-anchor="middle" class="eh-small">looks up the backing X11 child</text>
-  <text x="480" y="158" text-anchor="middle" class="eh-small">sends the embed message</text>
-  <text x="480" y="174" text-anchor="middle" class="eh-small">pumps the Win32 queue on a timer</text>
-  <text x="480" y="190" text-anchor="middle" class="eh-small">keeps Win32 and X11 geometry aligned</text>
+  <rect x="298" y="82" width="184" height="250" class="eh-msg"/>
+  <text x="390" y="106" text-anchor="middle" class="eh-head-y">Embed component</text>
+  <text x="390" y="132" text-anchor="middle" class="eh-small">1. `CreateWindowExW()`</text>
+  <text x="390" y="148" text-anchor="middle" class="eh-small">2. find `wine_x11_window`</text>
+  <text x="390" y="164" text-anchor="middle" class="eh-small">3. `SendMessageW(...EMBED_WINDOW...)`</text>
+  <text x="390" y="180" text-anchor="middle" class="eh-small">4. timer pump: `PeekMessageW()` /</text>
+  <text x="390" y="196" text-anchor="middle" class="eh-small">   `TranslateMessage()` / `DispatchMessageW()`</text>
+  <text x="390" y="212" text-anchor="middle" class="eh-small">5. `SetWindowPos()` for Wine rects</text>
 
-  <rect x="660" y="92" width="230" height="112" class="eh-x11"/>
-  <text x="775" y="118" text-anchor="middle" class="eh-head-p">plugin editor window</text>
-  <text x="775" y="142" text-anchor="middle" class="eh-small">Win32 editor HWND</text>
-  <text x="775" y="158" text-anchor="middle" class="eh-small">embedded X11 child under the JUCE peer</text>
-  <text x="775" y="174" text-anchor="middle" class="eh-small">receives normal Win32 messages</text>
+  <rect x="522" y="82" width="184" height="250" class="eh-wine"/>
+  <text x="614" y="106" text-anchor="middle" class="eh-head-b">Wine-NSPA embed path</text>
+  <text x="614" y="132" text-anchor="middle" class="eh-small">1. reparent X11 child</text>
+  <text x="614" y="148" text-anchor="middle" class="eh-small">2. flip embedded mode</text>
+  <text x="614" y="164" text-anchor="middle" class="eh-small">3. map child + settle WM state</text>
+  <text x="614" y="180" text-anchor="middle" class="eh-small">4. `PostMessage(EMBED_DONE)`</text>
+  <text x="614" y="196" text-anchor="middle" class="eh-small">5. keep Win32 rects authoritative</text>
 
-  <line x1="300" y1="148" x2="365" y2="148" class="eh-line-g"/>
-  <line x1="595" y1="148" x2="660" y2="148" class="eh-line-b"/>
+  <rect x="746" y="82" width="186" height="250" class="eh-plugin"/>
+  <text x="839" y="106" text-anchor="middle" class="eh-head-p">Plugin editor HWND</text>
+  <text x="839" y="132" text-anchor="middle" class="eh-small">embedded Win32 window</text>
+  <text x="839" y="148" text-anchor="middle" class="eh-small">receives normal Win32 messages</text>
+  <text x="839" y="164" text-anchor="middle" class="eh-small">host sees settled attach after</text>
+  <text x="839" y="180" text-anchor="middle" class="eh-small">`WM_X11DRV_NSPA_EMBED_DONE` if needed</text>
 
-  <rect x="170" y="280" width="620" height="70" class="eh-note"/>
-  <text x="480" y="308" text-anchor="middle" class="eh-head-y">Why the component exists</text>
-  <text x="480" y="326" text-anchor="middle" class="eh-small">it packages the Wine HWND, the X11 embed handoff,</text>
-  <text x="480" y="342" text-anchor="middle" class="eh-small">the Win32 message pump, and the dual Win32/X11 geometry sync</text>
+  <rect x="170" y="370" width="640" height="68" class="eh-note"/>
+  <text x="490" y="396" text-anchor="middle" class="eh-head-r">Why this matters</text>
+  <text x="490" y="414" text-anchor="middle" class="eh-small">the framework owns one explicit lifecycle: create HWND, embed, receive completion,</text>
+  <text x="490" y="430" text-anchor="middle" class="eh-small">pump Win32 messages, and keep Win32/X11 geometry in sync without inventing</text>
+  <text x="490" y="446" text-anchor="middle" class="eh-small">a second windowing model</text>
+
+  <line x1="258" y1="178" x2="298" y2="178" class="eh-line-g"/>
+  <line x1="482" y1="178" x2="522" y2="178" class="eh-line-y"/>
+  <line x1="706" y1="178" x2="746" y2="178" class="eh-line-b"/>
 </svg>
 </div>
 

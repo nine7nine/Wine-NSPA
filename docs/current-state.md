@@ -13,7 +13,7 @@ architecture boundary.
 3. [Active subsystems](#3-active-subsystems)
 4. [Validation and performance](#4-validation-and-performance)
 5. [Open work, in priority order](#5-open-work-in-priority-order)
-6. [Recent landed arc](#6-recent-landed-arc-2026-04-30-to-2026-05-10)
+6. [Recent landed arc](#6-recent-landed-arc-2026-04-30-to-2026-05-16)
 7. [Configuration reference](#7-configuration-reference)
 8. [Doc index](#8-doc-index)
 
@@ -21,7 +21,7 @@ architecture boundary.
 
 ## 1. Overview
 
-The public 2026-05-09 state is no longer just "aggregate-wait plus a faster
+The public 2026-05-16 state is no longer just "aggregate-wait plus a faster
 dispatcher". The current stack layers several larger client-side and
 shared-state follow-ons on top of that base:
 
@@ -47,8 +47,9 @@ shared-state follow-ons on top of that base:
 - the **hot-path optimization layer**, which includes x86_64 TEB-relative
   thread state, inline current-thread/current-process/PEB/tick helpers,
   msg-ring per-thread cache lookups inside the TEB, cacheline-isolated
-  `inproc_sync` entries, smaller wait-path helper cost, and AVX2
-  ASCII-burst string / Unicode loops on x86_64
+  msg/timer/redraw ring headers, cacheline-isolated `inproc_sync` entries,
+  smaller wait-path helper cost, and AVX2 ASCII-burst string / Unicode loops
+  on x86_64
 
 The important architectural distinction is that these are not isolated feature
 flags. They continue the same direction as gamma, local-file, msg-ring, and
@@ -89,9 +90,10 @@ remains available.
 | Async socket path | `io_uring` `RECVMSG` / `SENDMSG` on the deferred path |
 | Shared-state query path | thread + process shared-object readers; zero-time process wait can short-circuit from `process_shm`, and zero-time thread wait can short-circuit from `thread_shm` |
 | Message-pump cache | empty same-filter `get_message` polls can return locally when `queue_shm->nspa_change_seq` has not advanced, and msg-ring per-thread caches read through TEB-backed state |
-| Hot-path optimization layer | x86_64 unix-side `NtCurrentTeb()` is inline, `get_thread_data()` reads through a TEB backpointer, `inproc_sync` entries are cacheline-isolated, dormant `io_uring` helper calls are inlined away, and ASCII-dominant string / Unicode loops use AVX2 fast windows on x86_64 |
+| Hot-path optimization layer | x86_64 unix-side `NtCurrentTeb()` is inline, `get_thread_data()` reads through a TEB backpointer, msg/timer/redraw ring producer and consumer indices are cacheline-isolated, `inproc_sync` entries are cacheline-isolated, dormant `io_uring` helper calls are inlined away, and ASCII-dominant string / Unicode loops use AVX2 fast windows on x86_64 |
 | Memory surface | local sections, large pages, current-process `QueryWorkingSetEx`, working-set quota bookkeeping, RT-keyed `mlockall()`, automatic hugetlb promotion, and heap arena hugetlb backing |
 | Local sync path | anonymous events client-range by default; timers piggyback on that base |
+| X11 embed path | atomic embed via `WM_X11DRV_NSPA_EMBED_WINDOW`, explicit `XMapWindow()`, async `WM_X11DRV_NSPA_EMBED_DONE`, and host-owned X11 size authority for `nspa_embedded` windows |
 | X11 flush policy | `NSPA_FLUSH_THROTTLE_MS=8`, default ON |
 
 ### 2.3 Patch stack on top of upstream ntsync
@@ -176,6 +178,7 @@ remains available.
 | x86_64 inline `NtCurrentTeb()` | 30 s playback counters: CPU cycles `257.8B -> 220.9B`, iTLB-load-misses `242M -> 185M`, `NtCurrentTeb` function calls `9,961,441 -> 566` |
 | x86_64 inline current-thread/current-process/PEB/tick helpers | `PsGetCurrent*Id()`, `RtlGetCurrentPeb()`, `WINE_UNIX_LIB` `GetCurrent*Id()`, and `NtGetTickCount()` collapse to direct TEB or `KUSER_SHARED_DATA` reads on the Unix side |
 | msg-ring TEB-backed per-thread caches | 30 s playback counters: CPU cycles `220.9B -> 212.4B`, `pthread_getspecific` self time `0.46% -> 0.09%`, `nspa_get_own_bypass_shm` `0.26% -> 0.20%` |
+| msg/timer/redraw ring head/tail cacheline isolation | forward-message, timer, and redraw rings keep producer and consumer indices on separate cachelines, removing avoidable ping-pong on the same-process UI fast path |
 | `inproc_sync` cacheline isolation + capacity restore | each entry occupies one cacheline, removing cross-handle false sharing on hot refcount `LOCK` ops while keeping total cacheable handle capacity at `524288` |
 | client-range sync `DuplicateHandle` | same-process, non-inheritable duplicate of anonymous mutex/semaphore/event now duplicates the ntsync fd client-side instead of failing on an invisible wineserver handle |
 | LFH bin cacheline padding | `struct bin` is cacheline-shaped so concurrent LFH counters on adjacent size classes stop false-sharing |
@@ -286,7 +289,7 @@ own correctness proof and gate.
   </style>
 
   <rect x="0" y="0" width="940" height="500" class="cs-bg"/>
-  <text x="470" y="28" text-anchor="middle" class="cs-title">2026-05-09 deployment board: active state, diagnostics, and remaining work</text>
+  <text x="470" y="28" text-anchor="middle" class="cs-title">2026-05-16 deployment board: active state, diagnostics, and remaining work</text>
 
   <rect x="50" y="70" width="250" height="150" class="cs-green"/>
   <text x="175" y="96" text-anchor="middle" class="cs-tag-green">Kernel / sync substrate</text>
@@ -318,7 +321,7 @@ own correctness proof and gate.
   <text x="175" y="382" text-anchor="middle" class="cs-small">kept for validation and regression isolation, not as the default path</text>
 
   <rect x="345" y="270" width="250" height="140" class="cs-green"/>
-  <text x="470" y="296" text-anchor="middle" class="cs-tag-green">2026-05-06 to 2026-05-09 follow-ons</text>
+  <text x="470" y="296" text-anchor="middle" class="cs-tag-green">2026-05-06 to 2026-05-16 follow-ons</text>
   <text x="470" y="322" text-anchor="middle" class="cs-label">thread/process shared-state bypass</text>
   <text x="470" y="340" text-anchor="middle" class="cs-small">query RTTs and zero-time process/thread waits hit shared snapshots first</text>
   <text x="470" y="364" text-anchor="middle" class="cs-label">message-pump + hot-path + hugetlb safety</text>
@@ -421,7 +424,7 @@ System-wide samples: `38,588 -> 19,415` per 30s.
 | total `winex11.so` AVX2 | 6.76% | 2.43% | −4.33pp |
 | total kernel after AVX2 | 10.22% | 8.58% | −1.64pp |
 
-#### 2026-05-02 through 2026-05-10 feature-specific wins
+#### 2026-05-02 through 2026-05-16 feature-specific wins
 
 | Feature | Result |
 |---|---|
@@ -434,6 +437,8 @@ System-wide samples: `38,588 -> 19,415` per 30s.
 | x86_64 TEB hot state | cumulative playback CPU cycles `257.8B -> 212.4B` across inline `NtCurrentTeb()` plus msg-ring TEB-cache carries |
 | x86_64 AVX2 string / Unicode loops | synthetic ASCII-path cuts range from `~4x` (`hash_strW`) to `~25x` (`utf8_mbstowcs`), while preserving scalar fallback for non-ASCII windows |
 | x86_64 inline + AVX2 bundle | full 30 s triplet diff: user-mode samples `97K -> 86K` (`-11.3%`), iTLB `229.7M -> 180.8M` (`-21.30%`), dTLB `51.5M -> 42.4M` (`-17.69%`), branch-misses `348.3M -> 308.4M` (`-11.45%`), `NtGetTickCount` `3,081,551 -> 0`, page-faults `130,349 -> 71,754` (`-44.95%`) |
+| msg/timer/redraw ring cacheline isolation | the hot producer `head` and consumer `tail` indices stop false-sharing one cacheline across same-process message, timer, and redraw traffic |
+| X11 embed completion + size ownership | embed consumers get an explicit completion edge, explicit child mapping, and stable host-owned X11 sizing for `nspa_embedded` windows |
 | LFH + heap-shaping follow-ons | LFH bins are cacheline-shaped; non-hugetlb subheaps widen commit/decommit hysteresis to `1 MiB` under the RT huge-arenas gate, cutting lock-held VM churn on allocator-heavy paths |
 | local-file EOF path | direct handler-time saving `~8 ms / snapshot`, plus eligible `ftruncate()` no longer blocks the wineserver loop inline |
 | RT-keyed heap arena hugetlb backing | hugepage regions `3/6` -> `104`; `mmap` rate `33-61/s` -> `0.13/s`; `mprotect` rate `56-90/s` -> `0.03/s`; page-faults `753-869/s` -> `2.8/s` |
@@ -470,7 +475,7 @@ System-wide samples: `38,588 -> 19,415` per 30s.
 
 ---
 
-## 6. Recent landed arc (2026-04-30 to 2026-05-10)
+## 6. Recent landed arc (2026-04-30 to 2026-05-16)
 
 | Date | Work | Public result |
 |---|---|---|
@@ -497,6 +502,10 @@ System-wide samples: `38,588 -> 19,415` per 30s.
 | 2026-05-10 | x86_64 AVX2 string / Unicode carries | server name compare/hash and Unix-side UTF conversion helpers vectorize ASCII windows while reusing the scalar path for mixed or non-ASCII windows |
 | 2026-05-10 | LFH and local-file optimization follow-ons | LFH bins gain cacheline isolation, non-hugetlb heap hysteresis widens under the RT huge-arenas gate, and local-file bypass opens retain sequential/random `posix_fadvise` hints |
 | 2026-05-12 | client-range sync duplicate + RT demote fix | same-process duplicate of client-created sync handles stays local, and app-thread RT promotions no longer set sticky `SCHED_RESET_ON_FORK` on the app-facing promotion path |
+| 2026-05-15 | atomic X11 embed path | `WM_X11DRV_NSPA_EMBED_WINDOW`, host-drag rect propagation, and the embedded cursor-jump fix land as the current host-facing contract |
+| 2026-05-16 | embed completion and X11 ownership follow-ons | `WM_X11DRV_NSPA_EMBED_DONE`, explicit `XMapWindow()`, and X11 size-emission suppression give hosts a deterministic completion edge while keeping `nspa_embedded` sizing host-authoritative |
+| 2026-05-16 | msg/timer/redraw ring cacheline isolation | the hot producer and consumer indices stop false-sharing on the same-process UI rings |
+| 2026-05-16 | `--enable-nspa-arch=LEVEL` | x86_64 builds can opt into an explicit microarch target while bundling `-ffp-contract=off` so FP semantics stay stable |
 
 ---
 
@@ -515,7 +524,18 @@ System-wide samples: `38,588 -> 19,415` per 30s.
 | `NSPA_DISABLE_EPOLL=1` | A/B PREEMPT_RT poll vs epoll on wineserver main loop. Default upstream (epoll). |
 | `WINEPRELOADREMAPVDSO=force\|skip\|on-conflict` | vDSO preloader behaviour. Default `on-conflict`. |
 
-### 7.2 RT priority mapping (with `NSPA_RT_PRIO=80`)
+### 7.2 Build-time x86_64 microarch option
+
+| Option | Effect |
+|---|---|
+| `--enable-nspa-arch=v2` / `v3` / `v4-narrow` / `v4` / `native` | Adds `-march=... -ffp-contract=off` to both PE and ELF compile flags on x86_64. `v3` is the conservative AVX2-era choice; `v4-narrow` exposes AVX-512 ISA features while preferring 256-bit vector widths; `v4` enables full 512-bit widths and may frequency-throttle some client CPUs; `native` is machine-specific. Default is disabled. |
+
+The bundled `-ffp-contract=off` is deliberate. It keeps single-expression
+`a*b+c` math from silently changing under FMA-capable targets, so the uplift is
+explicitly about code generation width and ISA selection, not a hidden change
+to Win32-visible FP behavior.
+
+### 7.3 RT priority mapping (with `NSPA_RT_PRIO=80`)
 
 Formula: `fifo_prio = nspa_rt_prio_base - (31 - nt_band)`, clamped to `[1..98]`.
 
@@ -542,12 +562,13 @@ State boards and architecture deep-dives produced by the project:
 
 | Doc | Subject |
 |---|---|
-| `current-state.md` | This document — state of the art on 2026-05-10 |
+| `current-state.md` | This document — state of the art on 2026-05-16 |
 | `client-scheduler-architecture.gen.html` | spawn-main + `ntdll_sched`, default-class and RT-class scheduler hosts, and the consumers routed through them |
 | `cs-pi.gen.html` | Critical Section Priority Inheritance (CS-PI v2.3) — twelve-section deep dive |
 | `condvar-pi-requeue.gen.html` | `RtlSleepConditionVariableCS` `FUTEX_WAIT_REQUEUE_PI` slow path |
 | `aggregate-wait-and-async-completion.gen.html` | Aggregate-wait plus same-thread async completion architecture |
 | `gamma-channel-dispatcher.gen.html` | Gamma request/reply transport plus post-1010 aggregate-wait dispatcher loop |
+| `nspa-x11-embed-protocol.gen.html` | Wine-NSPA atomic X11 embed contract for winelib hosts |
 | `thread-and-process-shared-state.gen.html` | server-published thread/process snapshots, query bypass coverage, and zero-time process/thread waits |
 | `ntsync-pi-driver.gen.html` | NTSync PI kernel overlay: PI baseline, channel transport, aggregate-wait, and later kernel hardening |
 | `ntsync-userspace.gen.html` | Wine in-process sync path: handle-to-fd cache, client-created sync objects, direct wait/signal helpers, and dispatcher-facing wrappers |
@@ -559,17 +580,21 @@ State boards and architecture deep-dives produced by the project:
 | `nspa-local-file-architecture.gen.html` | NT-local file bypass (`NtCreateFile` short-circuit) |
 | `nt-local-stubs.gen.html` | NT-local stub pattern, including local sections, local events, and sched-hosted timer dispatch |
 | `shmem-ipc.gen.html` | NSPA shmem IPC primitives (γ + redraw + paint-cache) |
+| `juce-nspa.gen.html` | JUCE-NSPA framework substrate for Linux winelib Windows-plugin hosts |
+| `element-plugin-host.gen.html` | Element-NSPA application port with JACK-first MIDI routing |
+| `yabridge-nspa.gen.html` | Yabridge-NSPA bridge alignment for native Linux DAWs hosting Windows plugins |
 | `nspa-rt-test.gen.html` | nspa_rt_test PE harness reference |
 | `architecture.gen.html` | Whole-system architecture overview |
 | `decoration-loop-investigation.gen.html` | X11 windowing decoration-loop bug 57955 case study |
 | `sync-primitives-research.gen.html` | Background research on sync primitive selection |
 
-The architecture-heavy pieces added through 2026-05-10 are covered
+The architecture-heavy pieces added through 2026-05-16 are covered
 in the public docs set, including the client scheduler, local events,
 socket `io_uring`, gamma, aggregate-wait, hook cache, thread/process
 shared-state readers, local-file, local sections, hot-path optimizations,
-memory follow-ons, msg-ring, and the decomposition notes.
+memory follow-ons, msg-ring, the X11 embed contract, and the current
+winelib-host application pages.
 
 ---
 
-*Generated 2026-05-10. State board reflects the 2026-05-10 set on kernel `6.19.11-rt1-1-nspa`.*
+*Generated 2026-05-17. State board reflects the 2026-05-16 set on kernel `6.19.11-rt1-1-nspa`.*

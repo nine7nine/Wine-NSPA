@@ -122,7 +122,7 @@ architecture boundary.</p>
 <li><a href="#3-active-subsystems">Active subsystems</a></li>
 <li><a href="#4-validation-and-performance">Validation and performance</a></li>
 <li><a href="#5-open-work-in-priority-order">Open work, in priority order</a></li>
-<li><a href="#6-recent-landed-arc-2026-04-30-to-2026-05-10">Recent landed arc</a></li>
+<li><a href="#6-recent-landed-arc-2026-04-30-to-2026-05-16">Recent landed arc</a></li>
 <li><a href="#7-configuration-reference">Configuration reference</a></li>
 <li><a href="#8-doc-index">Doc index</a></li>
 </ol>
@@ -132,7 +132,7 @@ architecture boundary.</p>
 
 <h2 id="1-overview">1. Overview</h2>
 
-<p>The public 2026-05-09 state is no longer just &ldquo;aggregate-wait plus a faster
+<p>The public 2026-05-16 state is no longer just &ldquo;aggregate-wait plus a faster
 dispatcher&rdquo;. The current stack layers several larger client-side and
 shared-state follow-ons on top of that base:</p>
 
@@ -159,8 +159,9 @@ pool pressure, partial view operations, <code>MEM_RESET</code>, and RWX JIT allo
 <li>the <strong>hot-path optimization layer</strong>, which includes x86_64 TEB-relative
 thread state, inline current-thread/current-process/PEB/tick helpers,
 msg-ring per-thread cache lookups inside the TEB, cacheline-isolated
-<code>inproc_sync</code> entries, smaller wait-path helper cost, and AVX2
-ASCII-burst string / Unicode loops on x86_64</li>
+msg/timer/redraw ring headers, cacheline-isolated <code>inproc_sync</code> entries,
+smaller wait-path helper cost, and AVX2 ASCII-burst string / Unicode loops
+on x86_64</li>
 </ul>
 
 
@@ -256,7 +257,7 @@ remains available.</p>
 </tr>
 <tr>
 <td> Hot-path optimization layer </td>
-<td> x86_64 unix-side <code>NtCurrentTeb()</code> is inline, <code>get_thread_data()</code> reads through a TEB backpointer, <code>inproc_sync</code> entries are cacheline-isolated, dormant <code>io_uring</code> helper calls are inlined away, and ASCII-dominant string / Unicode loops use AVX2 fast windows on x86_64 </td>
+<td> x86_64 unix-side <code>NtCurrentTeb()</code> is inline, <code>get_thread_data()</code> reads through a TEB backpointer, msg/timer/redraw ring producer and consumer indices are cacheline-isolated, <code>inproc_sync</code> entries are cacheline-isolated, dormant <code>io_uring</code> helper calls are inlined away, and ASCII-dominant string / Unicode loops use AVX2 fast windows on x86_64 </td>
 </tr>
 <tr>
 <td> Memory surface </td>
@@ -265,6 +266,10 @@ remains available.</p>
 <tr>
 <td> Local sync path </td>
 <td> anonymous events client-range by default; timers piggyback on that base </td>
+</tr>
+<tr>
+<td> X11 embed path </td>
+<td> atomic embed via <code>WM_X11DRV_NSPA_EMBED_WINDOW</code>, explicit <code>XMapWindow()</code>, async <code>WM_X11DRV_NSPA_EMBED_DONE</code>, and host-owned X11 size authority for <code>nspa_embedded</code> windows </td>
 </tr>
 <tr>
 <td> X11 flush policy </td>
@@ -584,6 +589,10 @@ remains available.</p>
 <tr>
 <td> msg-ring TEB-backed per-thread caches </td>
 <td> 30 s playback counters: CPU cycles <code>220.9B -&gt; 212.4B</code>, <code>pthread_getspecific</code> self time <code>0.46% -&gt; 0.09%</code>, <code>nspa_get_own_bypass_shm</code> <code>0.26% -&gt; 0.20%</code> </td>
+</tr>
+<tr>
+<td> msg/timer/redraw ring head/tail cacheline isolation </td>
+<td> forward-message, timer, and redraw rings keep producer and consumer indices on separate cachelines, removing avoidable ping-pong on the same-process UI fast path </td>
 </tr>
 <tr>
 <td> <code>inproc_sync</code> cacheline isolation + capacity restore </td>
@@ -947,7 +956,7 @@ own correctness proof and gate.</p>
   </style>
 
   <rect x="0" y="0" width="940" height="500" class="cs-bg" rx="6"/>
-  <text x="470" y="28" text-anchor="middle" class="cs-title">2026-05-09 deployment board: active state, diagnostics, and remaining work</text>
+  <text x="470" y="28" text-anchor="middle" class="cs-title">2026-05-16 deployment board: active state, diagnostics, and remaining work</text>
 
   <rect x="50" y="70" width="250" height="150" class="cs-green" rx="6"/>
   <text x="175" y="96" text-anchor="middle" class="cs-tag-green">Kernel / sync substrate</text>
@@ -979,7 +988,7 @@ own correctness proof and gate.</p>
   <text x="175" y="382" text-anchor="middle" class="cs-small">kept for validation and regression isolation, not as the default path</text>
 
   <rect x="345" y="270" width="250" height="140" class="cs-green" rx="6"/>
-  <text x="470" y="296" text-anchor="middle" class="cs-tag-green">2026-05-06 to 2026-05-09 follow-ons</text>
+  <text x="470" y="296" text-anchor="middle" class="cs-tag-green">2026-05-06 to 2026-05-16 follow-ons</text>
   <text x="470" y="322" text-anchor="middle" class="cs-label">thread/process shared-state bypass</text>
   <text x="470" y="340" text-anchor="middle" class="cs-small">query RTTs and zero-time process/thread waits hit shared snapshots first</text>
   <text x="470" y="364" text-anchor="middle" class="cs-label">message-pump + hot-path + hugetlb safety</text>
@@ -1282,7 +1291,7 @@ and hot-path carries without redefining the archive again.</p>
 </table>
 
 
-<h4 id="2026-05-02-through-2026-05-10-feature-specific-wins">2026-05-02 through 2026-05-10 feature-specific wins</h4>
+<h4 id="2026-05-02-through-2026-05-16-feature-specific-wins">2026-05-02 through 2026-05-16 feature-specific wins</h4>
 
 <table>
 <thead>
@@ -1327,6 +1336,14 @@ and hot-path carries without redefining the archive again.</p>
 <tr>
 <td> x86_64 inline + AVX2 bundle </td>
 <td> full 30 s triplet diff: user-mode samples <code>97K -&gt; 86K</code> (<code>-11.3%</code>), iTLB <code>229.7M -&gt; 180.8M</code> (<code>-21.30%</code>), dTLB <code>51.5M -&gt; 42.4M</code> (<code>-17.69%</code>), branch-misses <code>348.3M -&gt; 308.4M</code> (<code>-11.45%</code>), <code>NtGetTickCount</code> <code>3,081,551 -&gt; 0</code>, page-faults <code>130,349 -&gt; 71,754</code> (<code>-44.95%</code>) </td>
+</tr>
+<tr>
+<td> msg/timer/redraw ring cacheline isolation </td>
+<td> the hot producer <code>head</code> and consumer <code>tail</code> indices stop false-sharing one cacheline across same-process message, timer, and redraw traffic </td>
+</tr>
+<tr>
+<td> X11 embed completion + size ownership </td>
+<td> embed consumers get an explicit completion edge, explicit child mapping, and stable host-owned X11 sizing for <code>nspa_embedded</code> windows </td>
 </tr>
 <tr>
 <td> LFH + heap-shaping follow-ons </td>
@@ -1382,7 +1399,7 @@ timer/fd-poll/router splits remain longer-horizon work.</li>
 
 <hr />
 
-<h2 id="6-recent-landed-arc-2026-04-30-to-2026-05-10">6. Recent landed arc (2026-04-30 to 2026-05-10)</h2>
+<h2 id="6-recent-landed-arc-2026-04-30-to-2026-05-16">6. Recent landed arc (2026-04-30 to 2026-05-16)</h2>
 
 <table>
 <thead>
@@ -1508,6 +1525,26 @@ timer/fd-poll/router splits remain longer-horizon work.</li>
 <td> client-range sync duplicate + RT demote fix </td>
 <td> same-process duplicate of client-created sync handles stays local, and app-thread RT promotions no longer set sticky <code>SCHED_RESET_ON_FORK</code> on the app-facing promotion path </td>
 </tr>
+<tr>
+<td> 2026-05-15 </td>
+<td> atomic X11 embed path </td>
+<td> <code>WM_X11DRV_NSPA_EMBED_WINDOW</code>, host-drag rect propagation, and the embedded cursor-jump fix land as the current host-facing contract </td>
+</tr>
+<tr>
+<td> 2026-05-16 </td>
+<td> embed completion and X11 ownership follow-ons </td>
+<td> <code>WM_X11DRV_NSPA_EMBED_DONE</code>, explicit <code>XMapWindow()</code>, and X11 size-emission suppression give hosts a deterministic completion edge while keeping <code>nspa_embedded</code> sizing host-authoritative </td>
+</tr>
+<tr>
+<td> 2026-05-16 </td>
+<td> msg/timer/redraw ring cacheline isolation </td>
+<td> the hot producer and consumer indices stop false-sharing on the same-process UI rings </td>
+</tr>
+<tr>
+<td> 2026-05-16 </td>
+<td> <code>--enable-nspa-arch=LEVEL</code> </td>
+<td> x86_64 builds can opt into an explicit microarch target while bundling <code>-ffp-contract=off</code> so FP semantics stay stable </td>
+</tr>
 </tbody>
 </table>
 
@@ -1562,7 +1599,30 @@ timer/fd-poll/router splits remain longer-horizon work.</li>
 </table>
 
 
-<h3 id="72-rt-priority-mapping-with-nspa_rt_prio80">7.2 RT priority mapping (with <code>NSPA_RT_PRIO=80</code>)</h3>
+<h3 id="72-build-time-x86_64-microarch-option">7.2 Build-time x86_64 microarch option</h3>
+
+<table>
+<thead>
+<tr>
+<th> Option </th>
+<th> Effect </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> <code>--enable-nspa-arch=v2</code> / <code>v3</code> / <code>v4-narrow</code> / <code>v4</code> / <code>native</code> </td>
+<td> Adds <code>-march=... -ffp-contract=off</code> to both PE and ELF compile flags on x86_64. <code>v3</code> is the conservative AVX2-era choice; <code>v4-narrow</code> exposes AVX-512 ISA features while preferring 256-bit vector widths; <code>v4</code> enables full 512-bit widths and may frequency-throttle some client CPUs; <code>native</code> is machine-specific. Default is disabled. </td>
+</tr>
+</tbody>
+</table>
+
+
+<p>The bundled <code>-ffp-contract=off</code> is deliberate. It keeps single-expression
+<code>a*b+c</code> math from silently changing under FMA-capable targets, so the uplift is
+explicitly about code generation width and ISA selection, not a hidden change
+to Win32-visible FP behavior.</p>
+
+<h3 id="73-rt-priority-mapping-with-nspa_rt_prio80">7.3 RT priority mapping (with <code>NSPA_RT_PRIO=80</code>)</h3>
 
 <p>Formula: <code>fifo_prio = nspa_rt_prio_base - (31 - nt_band)</code>, clamped to <code>[1..98]</code>.</p>
 
@@ -1648,7 +1708,7 @@ REALTIME-class priorities scale linearly below it.</p>
 <tbody>
 <tr>
 <td> <code>current-state.md</code> </td>
-<td> This document — state of the art on 2026-05-10 </td>
+<td> This document — state of the art on 2026-05-16 </td>
 </tr>
 <tr>
 <td> <code>client-scheduler-architecture.gen.html</code> </td>
@@ -1669,6 +1729,10 @@ REALTIME-class priorities scale linearly below it.</p>
 <tr>
 <td> <code>gamma-channel-dispatcher.gen.html</code> </td>
 <td> Gamma request/reply transport plus post-1010 aggregate-wait dispatcher loop </td>
+</tr>
+<tr>
+<td> <code>nspa-x11-embed-protocol.gen.html</code> </td>
+<td> Wine-NSPA atomic X11 embed contract for winelib hosts </td>
 </tr>
 <tr>
 <td> <code>thread-and-process-shared-state.gen.html</code> </td>
@@ -1715,6 +1779,18 @@ REALTIME-class priorities scale linearly below it.</p>
 <td> NSPA shmem IPC primitives (γ + redraw + paint-cache) </td>
 </tr>
 <tr>
+<td> <code>juce-nspa.gen.html</code> </td>
+<td> JUCE-NSPA framework substrate for Linux winelib Windows-plugin hosts </td>
+</tr>
+<tr>
+<td> <code>element-plugin-host.gen.html</code> </td>
+<td> Element-NSPA application port with JACK-first MIDI routing </td>
+</tr>
+<tr>
+<td> <code>yabridge-nspa.gen.html</code> </td>
+<td> Yabridge-NSPA bridge alignment for native Linux DAWs hosting Windows plugins </td>
+</tr>
+<tr>
 <td> <code>nspa-rt-test.gen.html</code> </td>
 <td> nspa_rt_test PE harness reference </td>
 </tr>
@@ -1734,15 +1810,16 @@ REALTIME-class priorities scale linearly below it.</p>
 </table>
 
 
-<p>The architecture-heavy pieces added through 2026-05-10 are covered
+<p>The architecture-heavy pieces added through 2026-05-16 are covered
 in the public docs set, including the client scheduler, local events,
 socket <code>io_uring</code>, gamma, aggregate-wait, hook cache, thread/process
 shared-state readers, local-file, local sections, hot-path optimizations,
-memory follow-ons, msg-ring, and the decomposition notes.</p>
+memory follow-ons, msg-ring, the X11 embed contract, and the current
+winelib-host application pages.</p>
 
 <hr />
 
-<p><em>Generated 2026-05-10. State board reflects the 2026-05-10 set on kernel <code>6.19.11-rt1-1-nspa</code>.</em></p>
+<p><em>Generated 2026-05-17. State board reflects the 2026-05-16 set on kernel <code>6.19.11-rt1-1-nspa</code>.</em></p>
 
 <script>
 document.addEventListener("DOMContentLoaded", function () {

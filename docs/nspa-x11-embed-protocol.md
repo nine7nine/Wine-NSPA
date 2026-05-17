@@ -81,6 +81,35 @@ The protocol does not make the host passive. After the embed handoff:
 That split is deliberate: Wine keeps Win32 state authoritative, while the host
 keeps the X11 embed tree authoritative.
 
+### 2.4 Minimal host-side flow
+
+The working host-side sequence is small, but each step is load-bearing:
+
+```cpp
+SendMessageW(embedHwnd, WM_X11DRV_NSPA_EMBED_WINDOW,
+             (WPARAM) foreignParent,
+             MAKELPARAM(peerX, peerY));
+
+for (;;) {
+    while (PeekMessageW(&msg, embedHwnd, 0, 0, PM_REMOVE)) {
+        if (msg.message == WM_X11DRV_NSPA_EMBED_DONE)
+            return;
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+}
+```
+
+After that completion edge, the host still owns X11 geometry:
+
+```cpp
+SetWindowPos(embedHwnd, 0, screenX, screenY, width, height, SWP_NOZORDER);
+XMoveResizeWindow(display, wineChild, peerX, peerY, width, height);
+```
+
+That split is the protocol. `SetWindowPos()` keeps Wine's Win32-side rects
+honest; `XMoveResizeWindow()` keeps the foreign-parent X11 tree honest.
+
 <div class="diagram-container">
 <svg width="100%" viewBox="0 0 960 420" xmlns="http://www.w3.org/2000/svg">
   <style>
@@ -286,6 +315,7 @@ plugin editors into native Linux UI trees.
 |---|---|
 | JUCE-NSPA | `WineHWNDEmbedComponent` creates a real Wine HWND and embeds it under a JUCE peer's X11 window |
 | Element-NSPA | inherits the JUCE-NSPA embed path for VST2 and VST3 editors |
+| Yabridge-NSPA | keeps a wrapper window as the immediate host-owned parent, but hands the Wine child off through the atomic embed message beneath that wrapper |
 
 The protocol stays intentionally small. It is a Wine-side primitive for hosts
 that already manage a foreign X11 parent, not a full host toolkit.
@@ -300,3 +330,4 @@ that already manage a foreign X11 parent, not a full host toolkit.
 - `dlls/winex11.drv/mouse.c`
 - [JUCE-NSPA](juce-nspa.gen.html)
 - [Element-NSPA](element-plugin-host.gen.html)
+- [Yabridge-NSPA](yabridge-nspa.gen.html)

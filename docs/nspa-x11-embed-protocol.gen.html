@@ -231,6 +231,37 @@ correct absolute screen location</li>
 <p>That split is deliberate: Wine keeps Win32 state authoritative, while the host
 keeps the X11 embed tree authoritative.</p>
 
+<h3 id="24-minimal-host-side-flow">2.4 Minimal host-side flow</h3>
+
+<p>The working host-side sequence is small, but each step is load-bearing:</p>
+
+<pre><code class="language-cpp code-block">
+SendMessageW(embedHwnd, WM_X11DRV_NSPA_EMBED_WINDOW,
+             (WPARAM) foreignParent,
+             MAKELPARAM(peerX, peerY));
+
+for (;;) {
+    while (PeekMessageW(&amp;msg, embedHwnd, 0, 0, PM_REMOVE)) {
+        if (msg.message == WM_X11DRV_NSPA_EMBED_DONE)
+            return;
+        TranslateMessage(&amp;msg);
+        DispatchMessageW(&amp;msg);
+    }
+}
+</code></pre>
+
+
+<p>After that completion edge, the host still owns X11 geometry:</p>
+
+<pre><code class="language-cpp code-block">
+SetWindowPos(embedHwnd, 0, screenX, screenY, width, height, SWP_NOZORDER);
+XMoveResizeWindow(display, wineChild, peerX, peerY, width, height);
+</code></pre>
+
+
+<p>That split is the protocol. <code>SetWindowPos()</code> keeps Wine&rsquo;s Win32-side rects
+honest; <code>XMoveResizeWindow()</code> keeps the foreign-parent X11 tree honest.</p>
+
 <div class="diagram-container">
 <svg width="100%" viewBox="0 0 960 420" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
   <style>
@@ -483,6 +514,10 @@ plugin editors into native Linux UI trees.</p>
 <td> Element-NSPA </td>
 <td> inherits the JUCE-NSPA embed path for VST2 and VST3 editors </td>
 </tr>
+<tr>
+<td> Yabridge-NSPA </td>
+<td> keeps a wrapper window as the immediate host-owned parent, but hands the Wine child off through the atomic embed message beneath that wrapper </td>
+</tr>
 </tbody>
 </table>
 
@@ -501,6 +536,7 @@ that already manage a foreign X11 parent, not a full host toolkit.</p>
 <li><code>dlls/winex11.drv/mouse.c</code></li>
 <li><a href="juce-nspa.gen.html">JUCE-NSPA</a></li>
 <li><a href="element-plugin-host.gen.html">Element-NSPA</a></li>
+<li><a href="yabridge-nspa.gen.html">Yabridge-NSPA</a></li>
 </ul>
 
 

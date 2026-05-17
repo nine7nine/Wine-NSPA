@@ -108,8 +108,9 @@
 <div class="page-nav"><a href="index.html">Docs Home</a></div>
 <h1 id="wine-nspa--element-nspa">Wine-NSPA &ndash; Element-NSPA</h1>
 
-<p>This page documents the Element-NSPA port that hosts Windows plugins through
-JUCE-NSPA and Wine-NSPA.</p>
+<p>This page documents the Element-NSPA application port that hosts Windows
+plugins through JUCE-NSPA and Wine-NSPA while also exposing a JACK-first native
+MIDI path inside the same graph.</p>
 
 <h2 id="table-of-contents">Table of Contents</h2>
 
@@ -117,11 +118,12 @@ JUCE-NSPA and Wine-NSPA.</p>
 <li><a href="#1-overview">Overview</a></li>
 <li><a href="#2-why-a-separate-port-exists">Why a separate port exists</a></li>
 <li><a href="#3-host-bootstrap">Host bootstrap</a></li>
-<li><a href="#4-plugin-formats-and-search-paths">Plugin formats and search paths</a></li>
-<li><a href="#5-editor-and-ui-behavior">Editor and UI behavior</a></li>
-<li><a href="#6-integration-with-wine-nspa-and-juce-nspa">Integration with Wine-NSPA and JUCE-NSPA</a></li>
-<li><a href="#7-intentional-boundaries">Intentional boundaries</a></li>
-<li><a href="#8-references">References</a></li>
+<li><a href="#4-plugin-surface-and-scan-policy">Plugin surface and scan policy</a></li>
+<li><a href="#5-jack-first-midi-graph-path">JACK-first MIDI graph path</a></li>
+<li><a href="#6-editor-and-ui-behavior">Editor and UI behavior</a></li>
+<li><a href="#7-relationship-to-juce-nspa-and-wine-nspa">Relationship to JUCE-NSPA and Wine-NSPA</a></li>
+<li><a href="#8-current-scope">Current scope</a></li>
+<li><a href="#9-references">References</a></li>
 </ol>
 
 
@@ -129,73 +131,98 @@ JUCE-NSPA and Wine-NSPA.</p>
 
 <h2 id="1-overview">1. Overview</h2>
 
-<p>Element-NSPA is an application port that runs Element as a Linux winelib
-binary while hosting Windows VST2 and VST3 plugins through Wine.</p>
-
-<p>The port sits on top of JUCE-NSPA&rsquo;s framework changes, then adds the
-application-level work Element needs:</p>
+<p>Element-NSPA is a Linux winelib build of Element that hosts Windows VST2 and
+VST3 plugins in-process through Wine. It is not just &ldquo;Element built with a
+different compiler&rdquo;. The port changes the runtime contract at three different
+surfaces:</p>
 
 <ul>
-<li>winelib host bootstrap before any plugin static initialization</li>
-<li>plugin-format selection and scanning rules that match a Windows-plugin host</li>
-<li>Wine-prefix path discovery so a fresh host finds Windows plugins</li>
-<li>editor-window behavior that matches the embedded Win32 GUI path</li>
+<li>Windows plugin load and scan policy</li>
+<li>Win32 editor embedding inside a native Linux UI tree</li>
+<li>JACK-first native MIDI integration for the graph itself</li>
 </ul>
 
 
-<p>The result is not a generic Linux Element build. It is a Linux-hosted,
-Wine-backed Windows plugin host.</p>
+<p>That last point matters. The current Element JACK build is no longer treating
+ALSA-seq as the primary MIDI surface and then bolting JACK on afterward. It now
+has native JACK MIDI input/output ports, per-port graph nodes, sample-offset
+preserving ingress, and per-port outbound routing. The implementation is still
+work-in-progress, but it is already functional and load-bearing.</p>
 
 <div class="diagram-container">
-<svg width="100%" viewBox="0 0 960 430" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
+<svg width="100%" viewBox="0 0 980 560" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
   <style>
-    .el-bg { fill: #1a1b26; }
-    .el-box { fill: #24283b; stroke: #3b4261; stroke-width: 1.4; rx: 8; }
-    .el-app { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
-    .el-host { fill: #1a2235; stroke: #7aa2f7; stroke-width: 1.8; rx: 8; }
-    .el-plug { fill: #2a2137; stroke: #bb9af7; stroke-width: 1.8; rx: 8; }
-    .el-note { fill: #2a2418; stroke: #e0af68; stroke-width: 1.6; rx: 8; }
-    .el-title { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
-    .el-head-g { fill: #9ece6a; font: bold 11px 'JetBrains Mono', monospace; }
-    .el-head-b { fill: #7aa2f7; font: bold 11px 'JetBrains Mono', monospace; }
-    .el-head-p { fill: #bb9af7; font: bold 11px 'JetBrains Mono', monospace; }
-    .el-head-y { fill: #e0af68; font: bold 11px 'JetBrains Mono', monospace; }
-    .el-text { fill: #c0caf5; font: 10px 'JetBrains Mono', monospace; }
-    .el-small { fill: #a9b1d6; font: 9px 'JetBrains Mono', monospace; }
-    .el-line-g { stroke: #9ece6a; stroke-width: 1.3; fill: none; }
-    .el-line-b { stroke: #7aa2f7; stroke-width: 1.3; fill: none; }
-    .el-line-p { stroke: #bb9af7; stroke-width: 1.3; fill: none; }
+    .ov-bg { fill: #1a1b26; }
+    .ov-lane { fill: #1f2535; stroke: #3b4261; stroke-width: 0.9; rx: 10; }
+    .ov-native { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
+    .ov-host { fill: #1a2235; stroke: #7aa2f7; stroke-width: 1.8; rx: 8; }
+    .ov-plugin { fill: #2a2137; stroke: #bb9af7; stroke-width: 1.8; rx: 8; }
+    .ov-jack { fill: #2a2418; stroke: #e0af68; stroke-width: 1.8; rx: 8; }
+    .ov-note { fill: #2a1a1a; stroke: #f7768e; stroke-width: 1.6; rx: 8; }
+    .ov-title { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
+    .ov-head-g { fill: #9ece6a; font: bold 11px 'JetBrains Mono', monospace; }
+    .ov-head-b { fill: #7aa2f7; font: bold 11px 'JetBrains Mono', monospace; }
+    .ov-head-p { fill: #bb9af7; font: bold 11px 'JetBrains Mono', monospace; }
+    .ov-head-y { fill: #e0af68; font: bold 11px 'JetBrains Mono', monospace; }
+    .ov-head-r { fill: #f7768e; font: bold 11px 'JetBrains Mono', monospace; }
+    .ov-text { fill: #c0caf5; font: 10px 'JetBrains Mono', monospace; }
+    .ov-small { fill: #a9b1d6; font: 9px 'JetBrains Mono', monospace; }
+    .ov-line-g { stroke: #9ece6a; stroke-width: 1.15; fill: none; }
+    .ov-line-b { stroke: #7aa2f7; stroke-width: 1.15; fill: none; }
+    .ov-line-p { stroke: #bb9af7; stroke-width: 1.15; fill: none; }
+    .ov-line-y { stroke: #e0af68; stroke-width: 1.15; fill: none; }
+    .ov-line-r { stroke: #f7768e; stroke-width: 1.15; fill: none; stroke-dasharray: 5,3; }
   </style>
 
-  <rect x="0" y="0" width="960" height="430" class="el-bg" rx="6"/>
-  <text x="480" y="28" text-anchor="middle" class="el-title">Element winelib host layout</text>
+  <rect x="0" y="0" width="980" height="560" class="ov-bg" rx="6"/>
+  <text x="490" y="26" text-anchor="middle" class="ov-title">Element-NSPA: application policy + winelib plugin hosting + JACK-first MIDI</text>
 
-  <rect x="45" y="86" width="230" height="118" class="el-app" rx="6"/>
-  <text x="160" y="112" text-anchor="middle" class="el-head-g">Element app shell</text>
-  <text x="160" y="136" text-anchor="middle" class="el-small">graph, transport, plugin manager UI</text>
-  <text x="160" y="152" text-anchor="middle" class="el-small">native Linux process, JUCE event loop</text>
-  <text x="160" y="168" text-anchor="middle" class="el-small">scan path editing and editor windows</text>
+  <rect x="24" y="52" width="932" height="468" class="ov-lane" rx="6"/>
+  <text x="42" y="72" class="ov-small">single Linux process, mixed native + Wine-backed responsibilities</text>
 
-  <rect x="335" y="70" width="290" height="150" class="el-host" rx="6"/>
-  <text x="480" y="96" text-anchor="middle" class="el-head-b">winelib host runtime</text>
-  <text x="480" y="120" text-anchor="middle" class="el-small">`SetPriorityClass()` + `OleInitialize()` before plugin load</text>
-  <text x="480" y="136" text-anchor="middle" class="el-small">JUCE-NSPA VST2 / VST3 loading and Win32 dispatch</text>
-  <text x="480" y="152" text-anchor="middle" class="el-small">Wine-NSPA X11 embed path for plugin editors</text>
-  <text x="480" y="168" text-anchor="middle" class="el-small">Wine-prefix VST path discovery</text>
+  <rect x="46" y="94" width="250" height="158" class="ov-native" rx="6"/>
+  <text x="171" y="118" text-anchor="middle" class="ov-head-g">Element application layer</text>
+  <text x="171" y="140" text-anchor="middle" class="ov-small">plugin manager, graph editor, session/UI shell</text>
+  <text x="171" y="156" text-anchor="middle" class="ov-small">async plugin-path editor under winelib</text>
+  <text x="171" y="172" text-anchor="middle" class="ov-small">toolbar-free plugin windows for embedded editors</text>
+  <text x="171" y="188" text-anchor="middle" class="ov-small">root graph owns top-level JACK MIDI routing choices</text>
+  <text x="171" y="214" text-anchor="middle" class="ov-text">application policy lives here</text>
 
-  <rect x="685" y="86" width="230" height="118" class="el-plug" rx="6"/>
-  <text x="800" y="112" text-anchor="middle" class="el-head-p">Windows plugins</text>
-  <text x="800" y="136" text-anchor="middle" class="el-small">VST2 `.dll` and VST3 PE modules</text>
-  <text x="800" y="152" text-anchor="middle" class="el-small">editor HWNDs embedded into Linux UI</text>
-  <text x="800" y="168" text-anchor="middle" class="el-small">loaded in-process through Wine</text>
+  <rect x="364" y="82" width="252" height="182" class="ov-host" rx="6"/>
+  <text x="490" y="106" text-anchor="middle" class="ov-head-b">JUCE-NSPA / winelib host substrate</text>
+  <text x="490" y="128" text-anchor="middle" class="ov-small">winegcc / wineg++ build, PE module loading</text>
+  <text x="490" y="144" text-anchor="middle" class="ov-small">Win32 ABI fixes, `LoadLibraryW()`, per-instance dispatch</text>
+  <text x="490" y="160" text-anchor="middle" class="ov-small">`WineHWNDEmbedComponent` + Win32 pump</text>
+  <text x="490" y="176" text-anchor="middle" class="ov-small">`WM_X11DRV_NSPA_EMBED_WINDOW` / `EMBED_DONE` handshake</text>
+  <text x="490" y="202" text-anchor="middle" class="ov-text">framework layer reused by the app</text>
 
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="275" y1="145" x2="335" y2="145" class="el-line-g"/>
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="625" y1="145" x2="685" y2="145" class="el-line-b"/>
+  <rect x="684" y="94" width="250" height="158" class="ov-plugin" rx="6"/>
+  <text x="809" y="118" text-anchor="middle" class="ov-head-p">Windows plugins</text>
+  <text x="809" y="140" text-anchor="middle" class="ov-small">VST2 `.dll` and VST3 PE modules</text>
+  <text x="809" y="156" text-anchor="middle" class="ov-small">editor HWNDs embedded under Linux peers</text>
+  <text x="809" y="172" text-anchor="middle" class="ov-small">Win32 message flow and plugin callbacks stay intact</text>
+  <text x="809" y="198" text-anchor="middle" class="ov-text">loaded in-process through Wine</text>
 
-  <rect x="170" y="286" width="620" height="82" class="el-note" rx="6"/>
-  <text x="480" y="314" text-anchor="middle" class="el-head-y">Application-level port</text>
-  <text x="480" y="334" text-anchor="middle" class="el-small">JUCE-NSPA provides the framework substrate, but Element still needs</text>
-  <text x="480" y="350" text-anchor="middle" class="el-small">its own scan policy, UI behavior, and runtime bootstrap as an application host</text>
+  <rect x="46" y="308" width="888" height="128" class="ov-jack" rx="6"/>
+  <text x="490" y="334" text-anchor="middle" class="ov-head-y">JACK-first audio / MIDI engine inside Element</text>
+  <text x="490" y="356" text-anchor="middle" class="ov-small">audio callback and JACK process callback are the same RT thread in practice</text>
+  <text x="490" y="372" text-anchor="middle" class="ov-small">native `midi_in_N` ingress preserves JACK sample offsets into JUCE MidiBuffers</text>
+  <text x="490" y="388" text-anchor="middle" class="ov-small">`JackMidiInputNode` reads per-port buffers</text>
+  <text x="490" y="404" text-anchor="middle" class="ov-small">`JackMidiOutputNode` stages outbound events per port</text>
+  <text x="490" y="420" text-anchor="middle" class="ov-small">current outbound path is one-period delayed through an mlocked ringbuffer</text>
+  <text x="490" y="436" text-anchor="middle" class="ov-small">sample-accurate output scheduling is still follow-up work</text>
+
+  <rect x="110" y="454" width="760" height="46" class="ov-note" rx="6"/>
+  <text x="490" y="482" text-anchor="middle" class="ov-head-r">Result</text>
+  <text x="490" y="498" text-anchor="middle" class="ov-small">Windows plugin hosting, native JACK MIDI routing, and Linux UI/editor ownership</text>
+  <text x="490" y="512" text-anchor="middle" class="ov-small">all live in one process, but they are not the same layer</text>
+
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="296" y1="174" x2="364" y2="174" class="ov-line-g"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="616" y1="174" x2="684" y2="174" class="ov-line-b"/>
+  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M171 252 L171 308" class="ov-line-g"/>
+  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M490 264 L490 308" class="ov-line-b"/>
+  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M809 252 L809 308" class="ov-line-p"/>
+  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M490 308 L490 252" class="ov-line-r"/>
 </svg>
 </div>
 
@@ -204,16 +231,18 @@ Wine-backed Windows plugin host.</p>
 
 <h2 id="2-why-a-separate-port-exists">2. Why a separate port exists</h2>
 
-<p>Upstream Element is not built around a Linux winelib host for Windows plugins.
-The port exists because the application has to make decisions that are more
+<p>Upstream Element is not designed around a Linux winelib host for Windows
+plugins. The application layer still has to make decisions that are more
 specific than the JUCE framework layer:</p>
 
 <ul>
-<li>which plugin formats belong in this winelib process</li>
+<li>which plugin formats belong in this process</li>
 <li>how scan paths should be derived from <code>WINEPREFIX</code></li>
-<li>how the host should bootstrap COM and Win32 priority state before plugin load</li>
-<li>how the editor window and plugin-manager UI should behave once the plugin is
-a Wine-hosted Win32 surface instead of a native Linux plugin view</li>
+<li>how early the host has to bootstrap COM and Win32 process-class state</li>
+<li>how plugin editor windows should fit a Linux UI tree once they are real Wine
+HWND-backed children</li>
+<li>how JACK MIDI should be treated in the graph when the primary plugin-host
+target is a low-latency JACK workflow</li>
 </ul>
 
 
@@ -230,24 +259,29 @@ file.&rdquo;</p>
 </thead>
 <tbody>
 <tr>
-<td> Target plugin surface </td>
+<td> Plugin target </td>
 <td> native Linux formats plus platform-native host formats </td>
 <td> Windows VST2 and VST3 through winelib + Wine </td>
 </tr>
 <tr>
-<td> Default scan paths </td>
+<td> Scan defaults </td>
 <td> native host defaults </td>
 <td> Wine-prefix VST/VST3 directories are part of the default scan surface </td>
 </tr>
 <tr>
 <td> Runtime bootstrap </td>
 <td> native app bootstrap </td>
-<td> OLE and Win32 process-class state prepared before plugin init </td>
+<td> namespace-scope <code>SetPriorityClass()</code> + <code>OleInitialize()</code> before plugin init </td>
 </tr>
 <tr>
 <td> Editor hosting </td>
 <td> native plugin editor assumptions </td>
-<td> embedded Wine HWND-backed editor windows inside the Linux UI </td>
+<td> embedded Wine HWND-backed editor windows in the Linux UI </td>
+</tr>
+<tr>
+<td> MIDI shape on JACK builds </td>
+<td> generic Linux MIDI backends </td>
+<td> JACK-first native MIDI ports plus graph nodes; ALSA-seq is no longer the central model </td>
 </tr>
 </tbody>
 </table>
@@ -270,18 +304,18 @@ to run static constructors.</p>
 
 <p>The order matters. Process-class promotion happens first so any helper threads
 spawned during COM or plugin initialization inherit the intended Win32 priority
-class.</p>
+class before Wine-NSPA maps those priorities to Linux scheduler state.</p>
 
-<p>This mirrors the host-side bootstrap needed by other Wine-NSPA Winelib hosts:
+<p>This mirrors the host-side bootstrap used by the other Wine-NSPA winelib hosts:
 plugin code should see a valid OLE environment and the correct process-class
 state before its own initialization tree starts.</p>
 
 <hr />
 
-<h2 id="4-plugin-formats-and-search-paths">4. Plugin formats and search paths</h2>
+<h2 id="4-plugin-surface-and-scan-policy">4. Plugin surface and scan policy</h2>
 
 <p>The Element port narrows its plugin surface to the Windows formats that make
-sense inside a winelib host.</p>
+sense inside this winelib host.</p>
 
 <table>
 <thead>
@@ -312,14 +346,14 @@ sense inside a winelib host.</p>
 
 
 <p>The LV2 and LADSPA exclusions are deliberate. They are Linux-native plugin
-formats, and loading them inside the same winelib process would bring in
-unrelated native plugin trees and their copies of framework globals. For this
-host, that is the wrong process boundary.</p>
+formats, and loading them inside the same winelib process would pull unrelated
+native plugin trees and their copies of framework globals into the same address
+space. For this host, that is the wrong process boundary.</p>
 
-<h3 id="31-wine-prefix-path-discovery">3.1 Wine-prefix path discovery</h3>
+<h3 id="41-wine-prefix-path-discovery">4.1 Wine-prefix path discovery</h3>
 
-<p>Element also augments default search paths with Windows-plugin directories
-inside <code>WINEPREFIX</code>.</p>
+<p>Element augments default scan paths with Windows-plugin directories inside
+<code>WINEPREFIX</code>.</p>
 
 <p>Current additions are:</p>
 
@@ -335,7 +369,7 @@ inside <code>WINEPREFIX</code>.</p>
 is x86_64 winelib, so 32-bit plugin DLLs are not loadable here and would only
 pollute scan results with permanently broken entries.</p>
 
-<h3 id="32-plugin-path-ui">3.2 Plugin-path UI</h3>
+<h3 id="42-plugin-path-ui">4.2 Plugin-path UI</h3>
 
 <p>The plugin-path editor is also adjusted for the winelib host model:</p>
 
@@ -347,168 +381,275 @@ scan paths manually</li>
 </ul>
 
 
-<div class="diagram-container">
-<svg width="100%" viewBox="0 0 960 420" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
-  <style>
-    .sp-bg { fill: #1a1b26; }
-    .sp-box { fill: #24283b; stroke: #3b4261; stroke-width: 1.4; rx: 8; }
-    .sp-g { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
-    .sp-b { fill: #1a2235; stroke: #7aa2f7; stroke-width: 1.8; rx: 8; }
-    .sp-p { fill: #2a2137; stroke: #bb9af7; stroke-width: 1.8; rx: 8; }
-    .sp-r { fill: #2a1a1a; stroke: #f7768e; stroke-width: 1.8; rx: 8; }
-    .sp-title { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
-    .sp-head-g { fill: #9ece6a; font: bold 11px 'JetBrains Mono', monospace; }
-    .sp-head-b { fill: #7aa2f7; font: bold 11px 'JetBrains Mono', monospace; }
-    .sp-head-p { fill: #bb9af7; font: bold 11px 'JetBrains Mono', monospace; }
-    .sp-head-r { fill: #f7768e; font: bold 11px 'JetBrains Mono', monospace; }
-    .sp-text { fill: #c0caf5; font: 10px 'JetBrains Mono', monospace; }
-    .sp-small { fill: #a9b1d6; font: 9px 'JetBrains Mono', monospace; }
-    .sp-line-g { stroke: #9ece6a; stroke-width: 1.3; fill: none; }
-    .sp-line-b { stroke: #7aa2f7; stroke-width: 1.3; fill: none; }
-    .sp-line-p { stroke: #bb9af7; stroke-width: 1.3; fill: none; }
-  </style>
-
-  <rect x="0" y="0" width="960" height="420" class="sp-bg" rx="6"/>
-  <text x="480" y="28" text-anchor="middle" class="sp-title">Scan surface under the winelib Element host</text>
-
-  <rect x="70" y="96" width="220" height="100" class="sp-g" rx="6"/>
-  <text x="180" y="122" text-anchor="middle" class="sp-head-g">default path builder</text>
-  <text x="180" y="144" text-anchor="middle" class="sp-small">JUCE defaults + `WINEPREFIX` augmentation</text>
-  <text x="180" y="160" text-anchor="middle" class="sp-small">VST and VST3 stay discoverable on a fresh install</text>
-
-  <rect x="370" y="78" width="220" height="136" class="sp-b" rx="6"/>
-  <text x="480" y="104" text-anchor="middle" class="sp-head-b">enabled formats</text>
-  <text x="480" y="128" text-anchor="middle" class="sp-small">VST</text>
-  <text x="480" y="144" text-anchor="middle" class="sp-small">VST3</text>
-  <text x="480" y="160" text-anchor="middle" class="sp-small">scan UI remains visible for both</text>
-  <text x="480" y="176" text-anchor="middle" class="sp-small">path editor keeps the event loop alive</text>
-
-  <rect x="670" y="96" width="220" height="100" class="sp-p" rx="6"/>
-  <text x="780" y="122" text-anchor="middle" class="sp-head-p">plugin load target</text>
-  <text x="780" y="144" text-anchor="middle" class="sp-small">64-bit Windows plugin modules only</text>
-  <text x="780" y="160" text-anchor="middle" class="sp-small">no `(x86)` auto-seed in this host</text>
-
-  <rect x="300" y="276" width="360" height="74" class="sp-r" rx="6"/>
-  <text x="480" y="304" text-anchor="middle" class="sp-head-r">intentionally excluded</text>
-  <text x="480" y="324" text-anchor="middle" class="sp-small">LV2 and LADSPA stay out of the winelib process</text>
-
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="290" y1="146" x2="370" y2="146" class="sp-line-g"/>
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="590" y1="146" x2="670" y2="146" class="sp-line-b"/>
-</svg>
-</div>
-
+<p>The practical goal is that a clean Wine prefix plus a clean Element profile can
+still find Windows plugins without requiring the user to know the port&rsquo;s
+internal assumptions first.</p>
 
 <hr />
 
-<h2 id="5-editor-and-ui-behavior">5. Editor and UI behavior</h2>
+<h2 id="5-jack-first-midi-graph-path">5. JACK-first MIDI graph path</h2>
 
-<p>The editor path follows JUCE-NSPA&rsquo;s embedded Win32 GUI model, so plugin editor
-windows are still real Wine HWND-backed windows inside a Linux UI tree.</p>
-
-<p>Element adds two application-level adjustments on top of that:</p>
+<p>The current Element JACK MIDI implementation is <strong>functional WIP</strong>. The
+important distinction is between &ldquo;not finished&rdquo; and &ldquo;not real&rdquo;. This is not a
+placeholder anymore. The following pieces are live now:</p>
 
 <ul>
-<li>the PluginWindow toolbar is disabled in the current port so the plugin editor
-fills the full content area instead of leaving a dead gap</li>
-<li>editor window behavior is aligned to the host&rsquo;s embedded-child layout rather
-than the older internal toolbar reservation assumptions</li>
+<li>native JACK MIDI input and output port registration</li>
+<li>user-configurable JACK MIDI port counts</li>
+<li>per-port enable masks read directly by the RT callback</li>
+<li>a combined graph-wide JACK MIDI input surface</li>
+<li>per-port <code>JackMidiInputNode</code> and <code>JackMidiOutputNode</code></li>
+<li>optional Program Change -> <code>setCurrentProgram()</code> translation on the input
+node</li>
 </ul>
 
 
-<p>This keeps the application UI aligned to the Winelib plugin host shape instead
-of preserving native-Linux assumptions that no longer fit.</p>
+<h3 id="51-what-jack-first-means-right-now">5.1 What &ldquo;JACK-first&rdquo; means right now</h3>
 
-<p>The port also carries one winelib-specific runtime fix in the Lua side:
-<code>setjmp</code> use is written in a form that bypasses glibc&rsquo;s macro rewrite and keeps
-the runtime on glibc&rsquo;s <code>setjmp()</code> implementation instead of resolving into
-Wine&rsquo;s MSVCRT <code>_setjmp</code> path.</p>
+<p><code>JackAudioIODevice::process()</code> is the timing authority. JACK ingress, Element&rsquo;s
+audio callback, graph MIDI consumption, and outbound MIDI staging all happen on
+that same callback thread.</p>
 
-<h3 id="51-application-level-adjustments">5.1 Application-level adjustments</h3>
+<p>Current inbound shape:</p>
 
-<p>The application port carries a small set of Element-specific choices above the
-JUCE-NSPA framework layer.</p>
+<ol>
+<li><code>jack_midi_event_get()</code> reads events from each enabled <code>midi_in_N</code> port.</li>
+<li>Element writes those bytes into:
+
+<ul>
+<li><code>currentPeriodMidiInput</code> for the graph-wide &ldquo;any JACK MIDI&rdquo; path</li>
+<li><code>currentPeriodMidiInputPerPort[N]</code> for explicit per-port routing</li>
+</ul>
+</li>
+<li>Each event keeps <code>jack_midi_event_t::time</code> as its sample offset within the
+current JACK period.</li>
+<li><code>AudioEngine</code> reads the combined buffer on the same callback thread.</li>
+<li><code>JackMidiInputNode</code> reads one per-port buffer on that same callback thread.</li>
+</ol>
+
+
+<p>Current outbound shape:</p>
+
+<ol>
+<li><code>JackMidiOutputNode</code> iterates its incoming <code>juce::MidiBuffer</code>.</li>
+<li>Each event is written into <code>outMidiRb</code> as
+<code>[port][size_lo][size_hi][raw bytes...]</code>.</li>
+<li>On the next JACK period, the same callback drains <code>outMidiRb</code>.</li>
+<li>Events are written to <code>jack_midi_event_write()</code> on <code>midi_out_N</code> at sample
+offset <code>0</code>.</li>
+</ol>
+
+
+<p>That last point is why this is still WIP. Ingress is same-period and preserves
+sample offsets. Egress is per-port and fully functional, but currently lands on
+the next period at offset <code>0</code>. The code deliberately chooses correctness and RT
+safety first, then finer output scheduling later.</p>
+
+<h3 id="52-not-literally-zero-copy-but-zero-thread-hop">5.2 Not literally zero-copy, but zero-thread-hop</h3>
+
+<p>The current implementation is <strong>not</strong> literal end-to-end zero-copy:</p>
+
+<ul>
+<li>ingress copies JACK event bytes into JUCE <code>MidiBuffer</code> storage</li>
+<li>egress copies outbound events into the mlocked JACK ringbuffer</li>
+</ul>
+
+
+<p>What it <em>does</em> remove is the wrong abstraction boundary:</p>
+
+<ul>
+<li>no ALSA-seq millisecond quantization as the primary JACK-build path</li>
+<li>no helper consumer thread between JACK ingress and Element graph consumption</li>
+<li>no cross-thread handoff before the graph sees the event</li>
+</ul>
+
+
+<p>So the current value is best described as <strong>JACK-first, same-thread, and
+sample-offset-preserving on ingress</strong>, not as &ldquo;every byte stays in place
+forever&rdquo;.</p>
+
+<p>At a code-shape level, the current callback path looks like this:</p>
+
+<pre><code class="language-cpp code-block">
+for (int port = 0; port &lt; midiInputPorts.size(); ++port) {
+    void* jackBuf = jack_port_get_buffer(midiInputPorts[port], numFrames);
+    jack_midi_event_t ev {};
+
+    for (uint32_t i = 0; jack_midi_event_get(&amp;ev, jackBuf, i) == 0; ++i) {
+        currentPeriodMidiInput.addEvent(ev.buffer, ev.size, (int) ev.time);
+        currentPeriodMidiInputPerPort[port].addEvent(ev.buffer, ev.size,
+                                                     (int) ev.time);
+    }
+}
+
+for (const auto meta : outputMidi) {
+    outMidiRb.write(&amp;portIndex, 1);
+    outMidiRb.write(&amp;sizeLo, 1);
+    outMidiRb.write(&amp;sizeHi, 1);
+    outMidiRb.write(meta.data, meta.numBytes);
+}
+</code></pre>
+
+
+<p>That is the current contract in one screen: same-period JACK ingress writes
+directly into the per-period JUCE buffers with preserved sample offsets, while
+egress stages per-port bytes for the next callback period.</p>
+
+<h3 id="53-port-model-and-graph-exposure">5.3 Port model and graph exposure</h3>
+
+<p>The host now exposes JACK MIDI as actual graph topology instead of a hidden
+device side effect.</p>
 
 <table>
 <thead>
 <tr>
-<th> Area </th>
+<th> Surface </th>
 <th> Current behavior </th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td> Plugin-window chrome </td>
-<td> toolbar path is disabled so the embedded editor fills the full content area </td>
+<td> Port counts </td>
+<td> audio and MIDI both use the same Auto / 2 / 4 / 8 / 16 / 32 shape </td>
 </tr>
 <tr>
-<td> Path editing UI </td>
-<td> plugin path editor uses an async modal flow so file choosers still open under the winelib host </td>
+<td> Input exposure </td>
+<td> graph-wide combined JACK MIDI input plus one <code>JackMidiInputNode</code> per configured port </td>
 </tr>
 <tr>
-<td> Format list in the UI </td>
-<td> VST and VST3 stay exposed; LV2/LADSPA do not become active scan targets in this process </td>
+<td> Output exposure </td>
+<td> one <code>JackMidiOutputNode</code> per configured <code>midi_out_N</code> port </td>
 </tr>
 <tr>
-<td> Lua runtime </td>
-<td> <code>setjmp</code> macro bypass keeps the runtime on glibc&rsquo;s <code>setjmp()</code> path </td>
+<td> Port enable state </td>
+<td> input/output enable masks are atomically read once per JACK period </td>
+</tr>
+<tr>
+<td> Graph UI </td>
+<td> right-click menu lists live <code>midi_in_N</code> / <code>midi_out_N</code> entries with connection state </td>
 </tr>
 </tbody>
 </table>
 
 
+<p><code>JackMidiInputNode</code> also has one focused extra behavior: it can optionally
+translate inbound MIDI Program Change into a message-thread
+<code>setCurrentProgram()</code> walk over every downstream plugin reachable through MIDI
+connections. The MIDI Program Change event itself is still forwarded in the RT
+stream; the extra dispatcher call is additive, not a replacement.</p>
+
 <div class="diagram-container">
-<svg width="100%" viewBox="0 0 960 390" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
+<svg width="100%" viewBox="0 0 980 620" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
   <style>
-    .ap-bg { fill: #1a1b26; }
-    .ap-box { fill: #24283b; stroke: #3b4261; stroke-width: 1.4; rx: 8; }
-    .ap-app { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
-    .ap-host { fill: #1a2235; stroke: #7aa2f7; stroke-width: 1.8; rx: 8; }
-    .ap-ui { fill: #2a2137; stroke: #bb9af7; stroke-width: 1.8; rx: 8; }
-    .ap-note { fill: #2a2418; stroke: #e0af68; stroke-width: 1.6; rx: 8; }
-    .ap-title { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
-    .ap-head-g { fill: #9ece6a; font: bold 11px 'JetBrains Mono', monospace; }
-    .ap-head-b { fill: #7aa2f7; font: bold 11px 'JetBrains Mono', monospace; }
-    .ap-head-p { fill: #bb9af7; font: bold 11px 'JetBrains Mono', monospace; }
-    .ap-head-y { fill: #e0af68; font: bold 11px 'JetBrains Mono', monospace; }
-    .ap-small { fill: #a9b1d6; font: 9px 'JetBrains Mono', monospace; }
-    .ap-line-g { stroke: #9ece6a; stroke-width: 1.3; fill: none; }
-    .ap-line-b { stroke: #7aa2f7; stroke-width: 1.3; fill: none; }
+    .jm-bg { fill: #1a1b26; }
+    .jm-lane { fill: #1f2535; stroke: #3b4261; stroke-width: 0.9; rx: 10; }
+    .jm-rt { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
+    .jm-buf { fill: #1a2235; stroke: #7aa2f7; stroke-width: 1.8; rx: 8; }
+    .jm-node { fill: #2a2137; stroke: #bb9af7; stroke-width: 1.8; rx: 8; }
+    .jm-ring { fill: #2a2418; stroke: #e0af68; stroke-width: 1.8; rx: 8; }
+    .jm-note { fill: #2a1a1a; stroke: #f7768e; stroke-width: 1.6; rx: 8; }
+    .jm-title { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
+    .jm-head-g { fill: #9ece6a; font: bold 11px 'JetBrains Mono', monospace; }
+    .jm-head-b { fill: #7aa2f7; font: bold 11px 'JetBrains Mono', monospace; }
+    .jm-head-p { fill: #bb9af7; font: bold 11px 'JetBrains Mono', monospace; }
+    .jm-head-y { fill: #e0af68; font: bold 11px 'JetBrains Mono', monospace; }
+    .jm-head-r { fill: #f7768e; font: bold 11px 'JetBrains Mono', monospace; }
+    .jm-small { fill: #a9b1d6; font: 9px 'JetBrains Mono', monospace; }
+    .jm-text { fill: #c0caf5; font: 10px 'JetBrains Mono', monospace; }
+    .jm-line-g { stroke: #9ece6a; stroke-width: 1.15; fill: none; }
+    .jm-line-b { stroke: #7aa2f7; stroke-width: 1.15; fill: none; }
+    .jm-line-p { stroke: #bb9af7; stroke-width: 1.15; fill: none; }
+    .jm-line-y { stroke: #e0af68; stroke-width: 1.15; fill: none; }
+    .jm-line-r { stroke: #f7768e; stroke-width: 1.15; fill: none; stroke-dasharray: 5,3; }
   </style>
 
-  <rect x="0" y="0" width="960" height="390" class="ap-bg" rx="6"/>
-  <text x="480" y="28" text-anchor="middle" class="ap-title">Element-NSPA application policy on top of JUCE-NSPA</text>
+  <rect x="0" y="0" width="980" height="620" class="jm-bg" rx="6"/>
+  <text x="490" y="26" text-anchor="middle" class="jm-title">Element JACK MIDI: same-period ingress, next-period egress</text>
 
-  <rect x="65" y="94" width="240" height="104" class="ap-app" rx="6"/>
-  <text x="185" y="120" text-anchor="middle" class="ap-head-g">Element application layer</text>
-  <text x="185" y="144" text-anchor="middle" class="ap-small">plugin manager, node graph, editor windows</text>
-  <text x="185" y="160" text-anchor="middle" class="ap-small">application-level scan and UI decisions</text>
+  <rect x="28" y="50" width="924" height="534" class="jm-lane" rx="6"/>
 
-  <rect x="360" y="80" width="240" height="132" class="ap-host" rx="6"/>
-  <text x="480" y="106" text-anchor="middle" class="ap-head-b">host policy</text>
-  <text x="480" y="130" text-anchor="middle" class="ap-small">Wine-prefix path augmentation</text>
-  <text x="480" y="146" text-anchor="middle" class="ap-small">LV2/LADSPA exclusion in this process</text>
-  <text x="480" y="162" text-anchor="middle" class="ap-small">OLE + process-class bootstrap before plugin init</text>
-  <text x="480" y="178" text-anchor="middle" class="ap-small">winelib-safe path editor and runtime fixes</text>
+  <rect x="48" y="88" width="250" height="166" class="jm-rt" rx="6"/>
+  <text x="173" y="112" text-anchor="middle" class="jm-head-g">JACK process callback / RT thread</text>
+  <text x="173" y="136" text-anchor="middle" class="jm-small">authoritative timing source</text>
+  <text x="173" y="152" text-anchor="middle" class="jm-small">reads `jack_midi_event_get()` from enabled `midi_in_N`</text>
+  <text x="173" y="168" text-anchor="middle" class="jm-small">preserves `ev.time` as sample offset within this period</text>
+  <text x="173" y="184" text-anchor="middle" class="jm-small">later drains `outMidiRb` into `midi_out_N` on the next period</text>
+  <text x="173" y="210" text-anchor="middle" class="jm-text">same thread also runs Element's audio callback</text>
 
-  <rect x="655" y="94" width="240" height="104" class="ap-ui" rx="6"/>
-  <text x="775" y="120" text-anchor="middle" class="ap-head-p">visible result</text>
-  <text x="775" y="144" text-anchor="middle" class="ap-small">Windows plugins scan and open normally</text>
-  <text x="775" y="160" text-anchor="middle" class="ap-small">embedded editors fit the host UI without extra chrome</text>
+  <rect x="364" y="76" width="252" height="190" class="jm-buf" rx="6"/>
+  <text x="490" y="100" text-anchor="middle" class="jm-head-b">Per-period MIDI state inside `JackAudioIODevice`</text>
+  <text x="490" y="124" text-anchor="middle" class="jm-small">`currentPeriodMidiInput`</text>
+  <text x="490" y="140" text-anchor="middle" class="jm-small">combined buffer for graph-wide JACK MIDI ingress</text>
+  <text x="490" y="164" text-anchor="middle" class="jm-small">`currentPeriodMidiInputPerPort[N]`</text>
+  <text x="490" y="180" text-anchor="middle" class="jm-small">per-port buffers for explicit routing nodes</text>
+  <text x="490" y="204" text-anchor="middle" class="jm-small">cleared at the start of every period</text>
+  <text x="490" y="220" text-anchor="middle" class="jm-small">read synchronously by the graph on the same callback</text>
 
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="305" y1="146" x2="360" y2="146" class="ap-line-g"/>
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="600" y1="146" x2="655" y2="146" class="ap-line-b"/>
+  <rect x="682" y="88" width="230" height="166" class="jm-node" rx="6"/>
+  <text x="797" y="112" text-anchor="middle" class="jm-head-p">Element graph layer</text>
+  <text x="797" y="136" text-anchor="middle" class="jm-small">AudioEngine consumes combined JACK MIDI input</text>
+  <text x="797" y="152" text-anchor="middle" class="jm-small">`JackMidiInputNode(port=N)` consumes one per-port buffer</text>
+  <text x="797" y="168" text-anchor="middle" class="jm-small">optional PC relay triggers message-thread `setCurrentProgram()` walk</text>
+  <text x="797" y="184" text-anchor="middle" class="jm-small">`JackMidiOutputNode(port=N)` stages outbound events</text>
+  <text x="797" y="210" text-anchor="middle" class="jm-text">per-port graph routing is real now</text>
 
-  <rect x="180" y="272" width="600" height="68" class="ap-note" rx="6"/>
-  <text x="480" y="300" text-anchor="middle" class="ap-head-y">Scope</text>
-  <text x="480" y="318" text-anchor="middle" class="ap-small">these are application decisions above the JUCE-NSPA framework layer,</text>
-  <text x="480" y="334" text-anchor="middle" class="ap-small">not generic framework behavior</text>
+  <rect x="110" y="324" width="760" height="154" class="jm-ring" rx="6"/>
+  <text x="490" y="348" text-anchor="middle" class="jm-head-y">Outbound staging path</text>
+  <text x="490" y="372" text-anchor="middle" class="jm-small" style="font-size:8px; letter-spacing:-0.15px">`JackMidiOutputNode` writes `[port][size_lo][size_hi][data...]` into mlocked `outMidiRb`</text>
+  <text x="490" y="388" text-anchor="middle" class="jm-small">writer and reader are the same RT thread at different points in the callback cycle</text>
+  <text x="490" y="404" text-anchor="middle" class="jm-small">drain happens at the start of the next JACK period</text>
+  <text x="490" y="420" text-anchor="middle" class="jm-small">and writes to `jack_midi_event_write(..., sample_offset=0)`</text>
+  <text x="490" y="430" text-anchor="middle" class="jm-text">functional now; finer outbound sample scheduling is a follow-up</text>
+
+  <rect x="184" y="508" width="612" height="48" class="jm-note" rx="6"/>
+  <text x="490" y="534" text-anchor="middle" class="jm-head-r">Current truth</text>
+  <text x="490" y="550" text-anchor="middle" class="jm-small">not literal zero-copy, but no helper-thread hop between JACK ingress</text>
+  <text x="490" y="566" text-anchor="middle" class="jm-small">and graph consumption, and no ALSA-seq-first timing model</text>
+
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="298" y1="170" x2="364" y2="170" class="jm-line-g"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="616" y1="170" x2="682" y2="170" class="jm-line-b"/>
+  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M797 254 L797 324" class="jm-line-p"/>
+  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M236 324 L236 254" class="jm-line-r"/>
+  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M236 254 L236 324" class="jm-line-y"/>
 </svg>
 </div>
 
 
 <hr />
 
-<h2 id="6-integration-with-wine-nspa-and-juce-nspa">6. Integration with Wine-NSPA and JUCE-NSPA</h2>
+<h2 id="6-editor-and-ui-behavior">6. Editor and UI behavior</h2>
+
+<p>The editor path follows JUCE-NSPA&rsquo;s embedded Win32 GUI model, so plugin editor
+windows are still real Wine HWND-backed windows inside a Linux UI tree.</p>
+
+<p>Element adds a small but important application policy layer on top:</p>
+
+<ul>
+<li>the <code>PluginWindow</code> toolbar path is disabled so the embedded editor fills the
+content area instead of reserving dead chrome</li>
+<li>plugin path dialogs run asynchronously so the winelib host does not stall its
+own event processing during file chooser use</li>
+<li>the Lua side bypasses glibc&rsquo;s <code>setjmp</code> macro rewrite so the runtime stays on
+glibc&rsquo;s <code>setjmp()</code> instead of resolving into Wine&rsquo;s MSVCRT <code>_setjmp</code> path</li>
+</ul>
+
+
+<p>The port also inherits the newer embed contract from Wine-NSPA:</p>
+
+<ul>
+<li><code>WM_X11DRV_NSPA_EMBED_DONE</code> is the explicit completion fence if the host wants
+one</li>
+<li>the host owns X11 sizing of the embedded child</li>
+<li>Wine owns the Win32-side rect state and message semantics</li>
+</ul>
+
+
+<p>That split is why the editor path behaves like one coherent window instead of a
+Linux wrapper pretending to be the plugin.</p>
+
+<hr />
+
+<h2 id="7-relationship-to-juce-nspa-and-wine-nspa">7. Relationship to JUCE-NSPA and Wine-NSPA</h2>
 
 <p>Element-NSPA sits on top of both framework and runtime layers.</p>
 
@@ -522,40 +663,39 @@ JUCE-NSPA framework layer.</p>
 <tbody>
 <tr>
 <td> JUCE-NSPA </td>
-<td> Winelib build support, VST2/VST3 Windows-plugin loading, Win32 dispatch, and editor embedding substrate </td>
+<td> winelib build support, VST2/VST3 Windows-plugin loading, Win32 dispatch, and editor embedding substrate </td>
 </tr>
 <tr>
 <td> Wine-NSPA X11 embed protocol </td>
-<td> embeds plugin editor HWNDs under Linux host windows </td>
+<td> embeds plugin editor HWNDs under Linux host windows without a second wrapper protocol </td>
 </tr>
 <tr>
 <td> Wine-NSPA Win32 runtime </td>
 <td> supplies the window/message model and Wine-side plugin module loading path </td>
 </tr>
 <tr>
-<td> Wine-NSPA-oriented PI layer </td>
-<td> inherited where JUCE-NSPA&rsquo;s dispatcher and sync wrappers use vendored <code>rtpi.h</code> </td>
+<td> Element-specific JACK layer </td>
+<td> exposes JACK-first MIDI routing inside the graph on top of the same host process </td>
 </tr>
 </tbody>
 </table>
 
 
-<p>The practical advantages of the ported shape are therefore technical:</p>
+<p>The practical advantages of the ported shape are technical:</p>
 
 <ul>
 <li>plugin scan and load rules match the actual Windows-plugin target set</li>
-<li>the host does not need a second wrapper layer just to display plugin editors</li>
-<li>application code can treat Windows VST2 and VST3 hosting as part of the
-normal Element runtime instead of a sidecar process boundary</li>
+<li>the host does not need a sidecar GUI bridge just to display editors</li>
+<li>JACK MIDI enters the graph on the same RT callback thread that owns the audio
+period</li>
+<li>application code can treat Windows VST hosting and native JACK routing as one
+runtime, even though they live on different layers internally</li>
 </ul>
 
 
-<p>The port still depends on the lower layers for the hard parts. Element itself
-adds the application policy, bootstrap order, and UI behavior on top.</p>
-
 <hr />
 
-<h2 id="7-intentional-boundaries">7. Intentional boundaries</h2>
+<h2 id="8-current-scope">8. Current scope</h2>
 
 <p>The current Element port is intentionally narrow.</p>
 
@@ -580,6 +720,10 @@ adds the application policy, bootstrap order, and UI behavior on top.</p>
 <td> excluded </td>
 </tr>
 <tr>
+<td> JACK MIDI status </td>
+<td> functional WIP: ingress, egress, per-port nodes, and PC relay are live; outbound scheduling and graph-surface cleanup still have follow-up work </td>
+</tr>
+<tr>
 <td> Scan path policy </td>
 <td> 64-bit Windows-plugin directories only </td>
 </tr>
@@ -587,13 +731,13 @@ adds the application policy, bootstrap order, and UI behavior on top.</p>
 </table>
 
 
-<p>This page is therefore about a specific application port shape, not a claim
+<p>This page therefore describes a specific application port shape, not a claim
 that every Element feature or every native-Linux plugin surface should live in
 the same process as the winelib Windows-plugin host.</p>
 
 <hr />
 
-<h2 id="8-references">8. References</h2>
+<h2 id="9-references">9. References</h2>
 
 <ul>
 <li><code>src/main.cc</code></li>
@@ -601,6 +745,11 @@ the same process as the winelib Windows-plugin host.</p>
 <li><code>src/pluginmanager.cpp</code></li>
 <li><code>src/ui/pluginmanagercomponent.cpp</code></li>
 <li><code>src/ui/pluginwindow.cpp</code></li>
+<li><code>src/engine/jack.{h,cpp}</code></li>
+<li><code>src/nodes/jackmidiinputnode.hpp</code></li>
+<li><code>src/nodes/jackmidioutputnode.hpp</code></li>
+<li><code>src/services/engineservice.cpp</code></li>
+<li><code>src/ui/grapheditorcomponent.cpp</code></li>
 <li><a href="juce-nspa.gen.html">JUCE-NSPA</a></li>
 <li><a href="nspa-x11-embed-protocol.gen.html">NSPA X11 Embed Protocol</a></li>
 </ul>

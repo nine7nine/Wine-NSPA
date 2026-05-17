@@ -316,7 +316,10 @@ cache keeps a per-thread snapshot of the last empty filter tuple plus
 changes, Wine returns `STATUS_PENDING` locally instead of paying another
 wineserver round-trip. The message path also reads its hot per-thread caches
 through `TEB->Win32ClientInfo` instead of repeated
-`pthread_getspecific()` calls.
+`pthread_getspecific()` calls. On the current 2026-05-16 layout, the forward
+msg ring and the co-located timer/redraw rings also keep hot producer and
+consumer indices on separate cachelines so the writer's `head` updates and the
+reader's `tail` advances do not false-share the same line.
 
 Three pre-existing wine-userspace bugs in `dlls/win32u/nspa/msg_ring.c` were found and fixed in the 2026-04-27 audit (MR1 reply-slot ABA, MR2 `FUTEX_PRIVATE` on `MAP_SHARED` memfd, MR4 POST wake-loss on dual-signal-fail rollback), all of the silent-contract-violation class.
 
@@ -411,7 +414,7 @@ Each bypass moves a specific class of NT-API state or I/O work out of wineserver
 
 The current topology covers the active bypass surfaces plus the
 residual wineserver floor (process/thread lifecycle, cross-process
-naming, path resolution, handle inheritance). As of 2026-05-09, the
+naming, path resolution, handle inheritance). As of 2026-05-16, the
 default-on set includes sync primitives, hook caching,
 thread/process shared-state readers, zero-time process and thread wait polling,
 NT-local file and section handling, local events, sched-hosted timer dispatch,
@@ -533,6 +536,10 @@ Master overview (this doc) plus dedicated subsystem pages.
 | `condvar-pi-requeue.gen.html` | `RtlSleepConditionVariableCS` with `FUTEX_WAIT_REQUEUE_PI` (Path D) |
 | `io_uring-architecture.gen.html` | `io_uring` file I/O, async `CreateFile`, and socket SQEs |
 | `audio-stack.gen.html` | winejack.drv + nspaASIO low-latency audio path |
+| `nspa-x11-embed-protocol.gen.html` | Wine-NSPA atomic X11 embed contract for winelib hosts |
+| `juce-nspa.gen.html` | JUCE-NSPA framework substrate for Linux winelib Windows-plugin hosts |
+| `element-plugin-host.gen.html` | Element-NSPA application port with JACK-first MIDI routing |
+| `yabridge-nspa.gen.html` | Yabridge-NSPA bridge alignment for native Linux DAWs hosting Windows plugins |
 | `nspa-rt-test.gen.html` | nspa_rt_test PE harness reference |
 | `decoration-loop-investigation.gen.html` | X11 decoration-loop bug 57955 case study |
 | `sync-primitives-research.gen.html` | Background research on sync-primitive selection |
@@ -544,4 +551,4 @@ here.
 
 ---
 
-*Master overview updated 2026-05-10. Per-subsystem detail is in the dedicated pages linked above; live state is in `current-state.gen.html`.*
+*Master overview updated 2026-05-17. Per-subsystem detail is in the dedicated pages linked above; live state is in `current-state.gen.html`.*
