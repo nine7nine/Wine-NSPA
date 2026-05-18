@@ -313,8 +313,8 @@ plugin editors into native Linux UI trees.
 
 | Consumer | Use |
 |---|---|
-| JUCE-NSPA | `WineHWNDEmbedComponent` creates a real Wine HWND and embeds it under a JUCE peer's X11 window |
-| Element-NSPA | inherits the JUCE-NSPA embed path for VST2 and VST3 editors |
+| JUCE-NSPA | `WineHWNDEmbedComponent` creates a real Wine HWND and embeds it under a JUCE peer's X11 window for VST2, VST3, and CLAP editors |
+| Element-NSPA | inherits the JUCE-NSPA embed path for VST2, VST3, and CLAP editors |
 | Yabridge-NSPA | keeps a wrapper window as the immediate host-owned parent, but hands the Wine child off through the atomic embed message beneath that wrapper |
 
 The protocol stays intentionally small. It is a Wine-side primitive for hosts

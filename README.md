@@ -43,8 +43,8 @@ surfaces, and RT-oriented memory and I/O work.
 
 | Document | Description |
 |----------|-------------|
-| [Element-NSPA](https://nine7nine.github.io/Wine-NSPA/element-plugin-host.gen.html) | Element port for Windows VST2 and VST3 hosting on Wine-NSPA. |
-| [JUCE-NSPA](https://nine7nine.github.io/Wine-NSPA/juce-nspa.gen.html) | JUCE fork for Linux winelib hosting of Windows plugins. |
+| [Element-NSPA](https://nine7nine.github.io/Wine-NSPA/element-plugin-host.gen.html) | Element port for Windows VST2, VST3, and CLAP hosting on Wine-NSPA. |
+| [JUCE-NSPA](https://nine7nine.github.io/Wine-NSPA/juce-nspa.gen.html) | JUCE fork for Linux winelib hosting of Windows VST2, VST3, and CLAP plugins. |
 | [Yabridge-NSPA](https://nine7nine.github.io/Wine-NSPA/yabridge-nspa.gen.html) | Linux VST bridge fork aligned to Wine-NSPA RT and PI rules. |
 
 ### Test Results & Validation

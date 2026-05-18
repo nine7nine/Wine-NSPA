@@ -109,7 +109,7 @@
 <h1 id="wine-nspa--juce-nspa">Wine-NSPA &ndash; JUCE-NSPA</h1>
 
 <p>This page documents the JUCE fork that builds JUCE as a Linux winelib host for
-Windows VST2 and VST3 plugins on top of Wine-NSPA.</p>
+Windows VST2, VST3, and CLAP plugins on top of Wine-NSPA.</p>
 
 <h2 id="table-of-contents">Table of Contents</h2>
 
@@ -118,9 +118,9 @@ Windows VST2 and VST3 plugins on top of Wine-NSPA.</p>
 <li><a href="#2-why-a-separate-fork-exists">Why a separate fork exists</a></li>
 <li><a href="#3-build-and-runtime-pivot">Build and runtime pivot</a></li>
 <li><a href="#4-plugin-loading-and-discovery">Plugin loading and discovery</a></li>
-<li><a href="#5-per-instance-dispatch-and-synchronization">Per-instance dispatch and synchronization</a></li>
-<li><a href="#6-editor-embedding-and-message-pumping">Editor embedding and message pumping</a></li>
-<li><a href="#7-integration-with-wine-nspa">Integration with Wine-NSPA</a></li>
+<li><a href="#5-dispatch-synchronization-and-async-load">Dispatch, synchronization, and async load</a></li>
+<li><a href="#6-editor-embedding-and-clap-gui-ownership">Editor embedding and CLAP GUI ownership</a></li>
+<li><a href="#7-relationship-to-wine-nspa">Relationship to Wine-NSPA</a></li>
 <li><a href="#8-current-scope">Current scope</a></li>
 <li><a href="#9-references">References</a></li>
 </ol>
@@ -137,23 +137,23 @@ Windows plugin binaries in-process through Wine.</p>
 
 <ul>
 <li>winelib build support instead of a native Windows-only assumption</li>
-<li>PE plugin loading through Wine&rsquo;s <code>LoadLibraryW()</code> path</li>
-<li>per-instance Win32 dispatch for plugin lifecycle and audio calls</li>
-<li>Wine-NSPA-aware synchronization for the host-side dispatcher</li>
-<li>an X11 embed component that bridges JUCE peers to Wine HWND-backed editor
-windows</li>
+<li>PE plugin loading for Windows VST2, VST3, and CLAP modules</li>
+<li>x86_64 ABI shims where the Windows plugin boundary cannot follow the native
+Linux calling convention</li>
+<li>one-shot Win32 worker threads for asynchronous plugin creation under winelib</li>
+<li>per-instance Win32 dispatch lanes after the instance is live</li>
+<li><code>PiMutex</code> / <code>PiCond</code> wrappers where the host-facing sync layer needs
+Wine-NSPA-compatible PI behavior</li>
+<li><code>WineHWNDEmbedComponent</code> for VST2, VST3, and CLAP editors under a native
+Linux X11 peer</li>
 </ul>
 
-
-<p>The point is not &ldquo;JUCE on Linux&rdquo; in the general sense. The point is a Linux
-host process that can load Windows VST2 and VST3 modules directly and keep
-their Win32 GUI and callback rules intact.</p>
 
 <div class="diagram-container">
 <svg width="100%" viewBox="0 0 980 560" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
   <style>
     .jn-bg { fill: #1a1b26; }
-    .jn-lane { fill: #1f2535; stroke: #3b4261; stroke-width: 0.9; rx: 10; }
+    .jn-lane { fill: #1f2535; stroke: #6b7398; stroke-width: 0.9; rx: 10; }
     .jn-app { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
     .jn-host { fill: #1a2235; stroke: #7aa2f7; stroke-width: 1.8; rx: 8; }
     .jn-plug { fill: #2a2137; stroke: #bb9af7; stroke-width: 1.8; rx: 8; }
@@ -177,7 +177,7 @@ their Win32 GUI and callback rules intact.</p>
   <text x="490" y="26" text-anchor="middle" class="jn-title">JUCE-NSPA: framework-level winelib substrate for Windows plugin hosting</text>
 
   <rect x="24" y="52" width="932" height="470" class="jn-lane" rx="6"/>
-  <text x="42" y="72" class="jn-small">framework responsibilities, not app-specific policy</text>
+  <text x="42" y="72" class="jn-small">framework responsibilities, not app-specific host policy</text>
 
   <rect x="44" y="94" width="250" height="160" class="jn-app" rx="6"/>
   <text x="169" y="118" text-anchor="middle" class="jn-head-g">Linux host side</text>
@@ -188,31 +188,30 @@ their Win32 GUI and callback rules intact.</p>
 
   <rect x="362" y="82" width="256" height="184" class="jn-host" rx="6"/>
   <text x="490" y="106" text-anchor="middle" class="jn-head-b">JUCE-NSPA host substrate</text>
-  <text x="490" y="128" text-anchor="middle" class="jn-small">winegcc / wineg++ toolchain pivot</text>
-  <text x="490" y="144" text-anchor="middle" class="jn-small">`LoadLibraryW()` PE module loading</text>
-  <text x="490" y="160" text-anchor="middle" class="jn-small">VST2 `ms_abi` / VST3 `__stdcall` boundary fixes</text>
-  <text x="490" y="176" text-anchor="middle" class="jn-small">per-instance Win32 dispatch lanes</text>
-  <text x="490" y="192" text-anchor="middle" class="jn-small">`PiMutex` / `PiCond` wrappers for the winelib-facing sync layer</text>
+  <text x="490" y="128" text-anchor="middle" class="jn-small">winegcc / wineg++ build, Linux winelib process</text>
+  <text x="490" y="144" text-anchor="middle" class="jn-small">PE module loading through `LoadLibraryW()`</text>
+  <text x="490" y="160" text-anchor="middle" class="jn-small">VST2 `ms_abi`, VST3 `__stdcall`, CLAP `CLAP_ABI` shim</text>
+  <text x="490" y="176" text-anchor="middle" class="jn-small">one-shot `CreateThread` load worker + per-instance dispatch</text>
+  <text x="490" y="192" text-anchor="middle" class="jn-small">`PiMutex` / `PiCond` wrappers + `WineHWNDEmbedComponent`</text>
   <text x="490" y="218" text-anchor="middle" class="jn-text">framework-level Win32 ownership lives here</text>
 
   <rect x="686" y="94" width="250" height="160" class="jn-plug" rx="6"/>
   <text x="811" y="118" text-anchor="middle" class="jn-head-p">Windows plugin side</text>
-  <text x="811" y="140" text-anchor="middle" class="jn-small">VST2 `.dll` and VST3 PE modules</text>
+  <text x="811" y="140" text-anchor="middle" class="jn-small">VST2 `.dll`, VST3 PE module, CLAP `.clap` PE DLL</text>
   <text x="811" y="156" text-anchor="middle" class="jn-small">Win32 editor HWNDs and child windows</text>
   <text x="811" y="172" text-anchor="middle" class="jn-small">plugin callbacks still observe Win32 rules</text>
   <text x="811" y="198" text-anchor="middle" class="jn-text">same process, Wine-backed code</text>
 
   <rect x="126" y="318" width="728" height="126" class="jn-sync" rx="6"/>
-  <text x="490" y="342" text-anchor="middle" class="jn-head-y">Editor embed and message ownership</text>
+  <text x="490" y="342" text-anchor="middle" class="jn-head-y">Editor embed and thread ownership</text>
   <text x="490" y="366" text-anchor="middle" class="jn-small">`WineHWNDEmbedComponent` creates a real Wine HWND, resolves `wine_x11_window`,</text>
-  <text x="490" y="382" text-anchor="middle" class="jn-small">sends `WM_X11DRV_NSPA_EMBED_WINDOW`, then pumps Win32 messages on a timer</text>
-  <text x="490" y="398" text-anchor="middle" class="jn-small">`WM_X11DRV_NSPA_EMBED_DONE` is the completion fence</text>
-  <text x="490" y="414" text-anchor="middle" class="jn-small">host-side geometry stays split between `SetWindowPos()` for Wine rects</text>
-  <text x="490" y="430" text-anchor="middle" class="jn-small">and `XMoveResizeWindow()` for the X11 child</text>
-  <text x="490" y="408" text-anchor="middle" class="jn-text">framework owns the Linux/X11 <-> Win32/HWND seam</text>
+  <text x="490" y="382" text-anchor="middle" class="jn-small">sends `WM_X11DRV_NSPA_EMBED_WINDOW`, and pumps Win32 messages on a timer</text>
+  <text x="490" y="398" text-anchor="middle" class="jn-small">CLAP editor setup runs directly on the JUCE message thread to avoid deadlock</text>
+  <text x="490" y="414" text-anchor="middle" class="jn-small">with the same Win32 pump that must service `set_parent()` and `show()`</text>
+  <text x="490" y="430" text-anchor="middle" class="jn-text">framework owns the Linux/X11 <-> Win32/HWND seam</text>
 
   <rect x="166" y="468" width="648" height="36" class="jn-note" rx="6"/>
-  <text x="490" y="491" text-anchor="middle" class="jn-head-r">Load-bearing split</text>
+  <text x="490" y="491" text-anchor="middle" class="jn-head-r">Scope</text>
   <text x="490" y="505" text-anchor="middle" class="jn-small">Linux host structure stays native, but plugin load, editor HWNDs,</text>
   <text x="490" y="519" text-anchor="middle" class="jn-small">and callback ABI still follow Win32 rules inside the same process</text>
 
@@ -223,23 +222,26 @@ their Win32 GUI and callback rules intact.</p>
 </div>
 
 
+<p>JUCE-NSPA is framework infrastructure. It exists so application ports can reuse
+one host substrate instead of re-solving Win32 load, thread, and embed rules
+per application.</p>
+
 <hr />
 
 <h2 id="2-why-a-separate-fork-exists">2. Why a separate fork exists</h2>
 
-<p>Upstream JUCE can already build Linux hosts and Windows hosts, but it does not
+<p>Upstream JUCE already supports Linux hosts and Windows hosts, but it does not
 provide the combined shape this stack needs:</p>
 
 <ul>
 <li>a Linux binary</li>
-<li>loading Windows VST2 and VST3 modules in-process</li>
-<li>keeping Win32 callback and windowing rules intact</li>
-<li>integrating with Wine-NSPA&rsquo;s X11 embed and RT-oriented runtime rules</li>
+<li>loading Windows VST2, VST3, and CLAP modules in-process</li>
+<li>keeping Win32 callback, TLS, and windowing rules intact</li>
+<li>integrating with Wine-NSPA&rsquo;s embed and RT-oriented synchronization rules</li>
 </ul>
 
 
-<p>That is why the work lives as a fork instead of a small application-side patch
-set.</p>
+<p>That is why this work lives as a fork instead of an application-side patch set.</p>
 
 <table>
 <thead>
@@ -261,9 +263,19 @@ set.</p>
 <td> Windows PE modules through Wine <code>LoadLibraryW()</code> </td>
 </tr>
 <tr>
+<td> Format surface </td>
+<td> VST2/VST3 plus native-Linux assumptions </td>
+<td> Windows VST2, VST3, and CLAP only </td>
+</tr>
+<tr>
 <td> GUI embedding </td>
 <td> toolkit-native child windows or native Windows HWNDs </td>
 <td> Wine HWND-backed editor embedded under a Linux X11 peer </td>
+</tr>
+<tr>
+<td> Threading model </td>
+<td> generic async worker or message-thread deferred sync load </td>
+<td> Win32-registered worker for plugin creation, then per-instance dispatch </td>
 </tr>
 <tr>
 <td> Host-side sync </td>
@@ -274,9 +286,9 @@ set.</p>
 </table>
 
 
-<p>The fork therefore exists to provide a framework substrate for Linux
-applications that want to host Windows plugins through Wine-NSPA without
-re-solving the same low-level Win32 and X11 boundary issues.</p>
+<p>The fork therefore provides a framework substrate for Linux applications that
+want to host Windows plugins through Wine-NSPA without solving the same ABI,
+thread-registration, and X11-embed issues independently.</p>
 
 <hr />
 
@@ -302,25 +314,49 @@ still drives Win32 plugin code in-process.&rdquo;</p>
 </tr>
 <tr>
 <td> ABI surface </td>
-<td> Windows-facing plugin boundaries use Win32 calling conventions where needed, including VST3 <code>PLUGIN_API = __stdcall</code> and audited VST2 <code>ms_abi</code> call sites </td>
+<td> Windows-facing plugin boundaries use Win32 calling conventions where needed, including VST3 <code>PLUGIN_API = __stdcall</code>, audited VST2 <code>ms_abi</code> call sites, and CLAP <code>CLAP_ABI</code> under winelib x86_64 </td>
 </tr>
 <tr>
-<td> Character width and path handling </td>
-<td> winelib-specific <code>WCHAR</code> / path helpers keep JUCE&rsquo;s host code aligned with Wine&rsquo;s 16-bit <code>WCHAR</code> and DOS-path loading model </td>
+<td> Runtime assumptions </td>
+<td> Wine provides the PE loader, Win32 thread state, and HWND/message model inside a Linux process </td>
 </tr>
 </tbody>
 </table>
 
 
-<p>The fork is intentionally Linux-only. It assumes a Linux host process and a
-Wine runtime underneath that process. It is not trying to stay portable to
-other JUCE-supported host platforms.</p>
+<p>The fork is intentionally Linux-only and x86_64-only. That is not just build
+policy. The host shape depends on Wine&rsquo;s Linux winelib runtime, and the current
+CLAP/VST ABI shims are specifically authored for the x86_64 Win32 boundary.</p>
 
 <hr />
 
 <h2 id="4-plugin-loading-and-discovery">4. Plugin loading and discovery</h2>
 
 <p>The plugin-loading surface is split by format.</p>
+
+<table>
+<thead>
+<tr>
+<th> Format </th>
+<th> Current behavior </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> VST3 </td>
+<td> loads single-file Windows PE modules through Wine <code>LoadLibraryW()</code> with Winelib-safe VST3 host fixes </td>
+</tr>
+<tr>
+<td> VST2 </td>
+<td> scans <code>.dll</code>, rejects non-PE candidates, and routes entry points through audited <code>ms_abi</code> call sites </td>
+</tr>
+<tr>
+<td> CLAP </td>
+<td> hosts Windows <code>.clap</code> PE DLLs through a dedicated CLAP format stack; there is no native-Linux <code>.so</code> CLAP path in this fork </td>
+</tr>
+</tbody>
+</table>
+
 
 <h3 id="41-vst3">4.1 VST3</h3>
 
@@ -342,19 +378,100 @@ That is paired with:</p>
 <li>scanner looks for <code>.dll</code>, not <code>.so</code></li>
 <li>scanner rejects non-PE candidates</li>
 <li>VST2 function boundaries are cast through <code>ms_abi</code> where JUCE&rsquo;s generic host
-layer would otherwise assume native Linux calling conventions</li>
+layer would otherwise assume the native Linux calling convention</li>
 </ul>
 
 
-<p>The point is to make the host discover and load Windows plugins directly,
-instead of pretending that Linux plugin conventions still apply.</p>
+<h3 id="43-clap">4.3 CLAP</h3>
+
+<p>The CLAP side adds a third Windows plugin format to the same winelib host
+substrate.</p>
+
+<p>The current implementation is split in two:</p>
+
+<ul>
+<li><code>CLAPPluginFormatHeadless</code> in <code>juce_audio_processors_headless</code></li>
+<li><code>CLAPPluginFormat</code> in <code>juce_audio_processors</code> for GUI/editor support</li>
+</ul>
+
+
+<p>Important details:</p>
+
+<ul>
+<li>JUCE-NSPA vendors CLAP 1.2.0 headers into the tree</li>
+<li>the fork adds a winelib <code>CLAP_ABI</code> shim on x86_64 so host/plugin callbacks
+follow the Windows ABI instead of native SysV</li>
+<li><code>JUCE_PLUGINHOST_CLAP</code> gates the format wiring</li>
+<li>the format only accepts Windows <code>.clap</code> PE DLLs; there is no Linux <code>.so</code>
+CLAP loader path here</li>
+</ul>
+
+
+<p>The headless CLAP implementation already covers the load-bearing runtime
+surfaces:</p>
+
+<ul>
+<li>module/factory enumeration</li>
+<li>instance lifecycle</li>
+<li>note-port probing at activate time</li>
+<li>transport injection from JUCE <code>AudioPlayHead</code></li>
+<li>input MIDI translation into CLAP note or MIDI events</li>
+<li>output MIDI translation back into JUCE <code>MidiBuffer</code></li>
+</ul>
+
+
+<p><code>acceptsMidi()</code> and <code>producesMidi()</code> are derived from the plugin&rsquo;s note-port
+shape, not hardcoded.</p>
+
+<h3 id="44-clap-event-and-transport-bridge">4.4 CLAP event and transport bridge</h3>
+
+<p>The CLAP audio path does more than just &ldquo;call process.&rdquo;</p>
+
+<p>At block time:</p>
+
+<ol>
+<li>JUCE <code>MidiBuffer</code> events are translated into CLAP events.</li>
+<li>The bridge picks note encoding from the first input port&rsquo;s preferred
+dialect:
+
+<ul>
+<li>CLAP note dialect -> <code>CLAP_EVENT_NOTE_ON/OFF</code></li>
+<li>MIDI / MIDI-MPE dialect -> <code>CLAP_EVENT_MIDI</code></li>
+</ul>
+</li>
+<li><code>fillTransportFromPlayHead()</code> builds <code>clap_event_transport_t</code> from JUCE&rsquo;s
+<code>AudioPlayHead</code>.</li>
+<li>Plugin output events are translated back into JUCE MIDI after <code>process()</code>
+returns.</li>
+</ol>
+
+
+<p>Current output translation covers:</p>
+
+<ul>
+<li>note on / note off</li>
+<li>raw 3-byte MIDI</li>
+</ul>
+
+
+<p>Current accepted-but-skipped surfaces include:</p>
+
+<ul>
+<li>parameter events</li>
+<li>note-expression events</li>
+<li>MIDI 2</li>
+<li>sysex</li>
+</ul>
+
+
+<p>Those are omitted because they do not fit JUCE&rsquo;s <code>MidiBuffer</code> model directly.</p>
 
 <hr />
 
-<h2 id="5-per-instance-dispatch-and-synchronization">5. Per-instance dispatch and synchronization</h2>
+<h2 id="5-dispatch-synchronization-and-async-load">5. Dispatch, synchronization, and async load</h2>
 
 <p>JUCE-NSPA does not run all plugin work through one global helper thread.
-Instead, the current host model is per-instance.</p>
+Instead, the current host model is per-instance after creation succeeds.</p>
 
 <table>
 <thead>
@@ -373,16 +490,22 @@ Instead, the current host model is per-instance.</p>
 <td> per-instance dispatcher plus shared winelib support code </td>
 </tr>
 <tr>
+<td> CLAP lifecycle + audio </td>
+<td> per-instance dispatcher, with CLAP main-thread and audio-thread roles tracked explicitly </td>
+</tr>
+<tr>
 <td> Shared sync wrappers </td>
 <td> vendored <code>PiMutex</code> / <code>PiCond</code> wrappers over Wine-NSPA-compatible <code>rtpi.h</code> </td>
+</tr>
+<tr>
+<td> Async plugin creation </td>
+<td> one-shot Wine <code>CreateThread</code> worker, callback returned to the JUCE message thread </td>
 </tr>
 </tbody>
 </table>
 
 
-<p>Two details matter here.</p>
-
-<h3 id="51-the-dispatcher-is-pi-aware-where-the-host-needs-it">5.1 The dispatcher is PI-aware where the host needs it</h3>
+<h3 id="51-pi-aware-sync-where-the-host-needs-it">5.1 PI-aware sync where the host needs it</h3>
 
 <p>The vendored <code>PiMutex</code> / <code>PiCond</code> wrappers exist for the host-side dispatcher
 and shared sync surfaces that need Wine-NSPA-compatible priority inheritance.
@@ -393,67 +516,107 @@ They are not a claim that JUCE&rsquo;s entire locking surface was replaced.</p>
 wrappers are for the host&rsquo;s winelib-facing synchronization layer, including
 process-shared mode for the cases that need a shared-memory rendezvous shape.</p>
 
-<h3 id="52-the-host-keeps-plugin-instances-isolated">5.2 The host keeps plugin instances isolated</h3>
+<h3 id="52-async-load-must-use-a-win32-registered-thread">5.2 Async load must use a Win32-registered thread</h3>
+
+<p>Under winelib, asynchronous plugin creation cannot use a plain pthread worker.</p>
+
+<p>The reason is architectural:</p>
+
+<ul>
+<li><code>LoadLibraryW()</code> and PE module initialization need Wine-owned thread state</li>
+<li>Wine&rsquo;s loader, SEH, and TEB assumptions are not satisfied by an arbitrary
+<code>std::thread</code> / pthread worker</li>
+<li>a plain pthread worker can crash in PE initialization because Wine does not
+own the thread&rsquo;s Win32 registration state</li>
+</ul>
+
+
+<p>So JUCE-NSPA changes <code>createPluginInstanceAsync()</code> to:</p>
+
+<ol>
+<li>spawn a one-shot worker with Wine <code>CreateThread</code></li>
+<li>run synchronous <code>createPluginInstance()</code> on that worker</li>
+<li>hop the completion callback back to the JUCE message thread via
+<code>MessageManager::callAsync</code></li>
+</ol>
+
+
+<p>That keeps the documented JUCE callback contract intact while moving the actual
+plugin load off the message thread.</p>
+
+<h3 id="53-per-instance-ownership-stays-isolated">5.3 Per-instance ownership stays isolated</h3>
 
 <p>Per-instance dispatch avoids cross-plugin queue coupling. One plugin instance&rsquo;s
 lifecycle or audio callback work does not need to share a generic host queue
 with the next instance just because both live inside the same process.</p>
 
 <div class="diagram-container">
-<svg width="100%" viewBox="0 0 960 410" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
+<svg width="100%" viewBox="0 0 980 440" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
   <style>
-    .pd-bg { fill: #1a1b26; }
-    .pd-box { fill: #24283b; stroke: #3b4261; stroke-width: 1.4; rx: 8; }
-    .pd-inst { fill: #1a2235; stroke: #7aa2f7; stroke-width: 1.8; rx: 8; }
-    .pd-sync { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
-    .pd-plug { fill: #2a2137; stroke: #bb9af7; stroke-width: 1.8; rx: 8; }
-    .pd-note { fill: #2a2418; stroke: #e0af68; stroke-width: 1.6; rx: 8; }
-    .pd-title { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
-    .pd-head-b { fill: #7aa2f7; font: bold 11px 'JetBrains Mono', monospace; }
-    .pd-head-g { fill: #9ece6a; font: bold 11px 'JetBrains Mono', monospace; }
-    .pd-head-p { fill: #bb9af7; font: bold 11px 'JetBrains Mono', monospace; }
-    .pd-head-y { fill: #e0af68; font: bold 11px 'JetBrains Mono', monospace; }
-    .pd-text { fill: #c0caf5; font: 10px 'JetBrains Mono', monospace; }
-    .pd-small { fill: #a9b1d6; font: 9px 'JetBrains Mono', monospace; }
-    .pd-line-b { stroke: #7aa2f7; stroke-width: 1.3; fill: none; }
-    .pd-line-g { stroke: #9ece6a; stroke-width: 1.3; fill: none; }
-    .pd-line-p { stroke: #bb9af7; stroke-width: 1.3; fill: none; }
+    .ad-bg { fill: #1a1b26; }
+    .ad-host { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
+    .ad-load { fill: #1a2235; stroke: #7aa2f7; stroke-width: 1.8; rx: 8; }
+    .ad-inst { fill: #2a2137; stroke: #bb9af7; stroke-width: 1.8; rx: 8; }
+    .ad-sync { fill: #2a2418; stroke: #e0af68; stroke-width: 1.8; rx: 8; }
+    .ad-note { fill: #2a1a1a; stroke: #f7768e; stroke-width: 1.6; rx: 8; }
+    .ad-title { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
+    .ad-head-g { fill: #9ece6a; font: bold 11px 'JetBrains Mono', monospace; }
+    .ad-head-b { fill: #7aa2f7; font: bold 11px 'JetBrains Mono', monospace; }
+    .ad-head-p { fill: #bb9af7; font: bold 11px 'JetBrains Mono', monospace; }
+    .ad-head-y { fill: #e0af68; font: bold 11px 'JetBrains Mono', monospace; }
+    .ad-head-r { fill: #f7768e; font: bold 11px 'JetBrains Mono', monospace; }
+    .ad-small { fill: #a9b1d6; font: 9px 'JetBrains Mono', monospace; }
+    .ad-line-g { stroke: #9ece6a; stroke-width: 1.15; fill: none; }
+    .ad-line-b { stroke: #7aa2f7; stroke-width: 1.15; fill: none; }
+    .ad-line-p { stroke: #bb9af7; stroke-width: 1.15; fill: none; }
+    .ad-line-y { stroke: #e0af68; stroke-width: 1.15; fill: none; }
   </style>
 
-  <rect x="0" y="0" width="960" height="410" class="pd-bg" rx="6"/>
-  <text x="480" y="28" text-anchor="middle" class="pd-title">Per-instance dispatch and PI-aware sync</text>
+  <rect x="0" y="0" width="980" height="440" class="ad-bg" rx="6"/>
+  <text x="490" y="28" text-anchor="middle" class="ad-title">Async creation on a Win32 worker, then per-instance dispatch</text>
 
-  <rect x="70" y="96" width="230" height="100" class="pd-inst" rx="6"/>
-  <text x="185" y="122" text-anchor="middle" class="pd-head-b">plugin instance A</text>
-  <text x="185" y="144" text-anchor="middle" class="pd-small">own Win32 dispatch lane</text>
-  <text x="185" y="160" text-anchor="middle" class="pd-small">own lifecycle + audio callback ownership</text>
+  <rect x="46" y="104" width="210" height="112" class="ad-host" rx="6"/>
+  <text x="151" y="130" text-anchor="middle" class="ad-head-g">JUCE message thread</text>
+  <text x="151" y="154" text-anchor="middle" class="ad-small">host requests async create</text>
+  <text x="151" y="170" text-anchor="middle" class="ad-small">does not block UI while module loads</text>
+  <text x="151" y="186" text-anchor="middle" class="ad-small">completion callback returns here</text>
 
-  <rect x="365" y="72" width="230" height="148" class="pd-sync" rx="6"/>
-  <text x="480" y="98" text-anchor="middle" class="pd-head-g">host sync layer</text>
-  <text x="480" y="122" text-anchor="middle" class="pd-small">`PiMutex` / `PiCond` wrappers</text>
-  <text x="480" y="138" text-anchor="middle" class="pd-small">process-private now, process-shared shape available</text>
-  <text x="480" y="154" text-anchor="middle" class="pd-small">Wine-NSPA-compatible PI semantics</text>
-  <text x="480" y="170" text-anchor="middle" class="pd-small">no single global host lock required</text>
+  <rect x="308" y="80" width="182" height="160" class="ad-load" rx="6"/>
+  <text x="399" y="106" text-anchor="middle" class="ad-head-b">one-shot load worker</text>
+  <text x="399" y="130" text-anchor="middle" class="ad-small">Wine `CreateThread`</text>
+  <text x="399" y="146" text-anchor="middle" class="ad-small">valid TEB / SEH / loader state</text>
+  <text x="399" y="162" text-anchor="middle" class="ad-small">runs `createPluginInstance()`</text>
+  <text x="399" y="178" text-anchor="middle" class="ad-small">safe place for `LoadLibraryW()`</text>
 
-  <rect x="660" y="96" width="230" height="100" class="pd-plug" rx="6"/>
-  <text x="775" y="122" text-anchor="middle" class="pd-head-p">plugin instance B</text>
-  <text x="775" y="144" text-anchor="middle" class="pd-small">independent dispatch lane</text>
-  <text x="775" y="160" text-anchor="middle" class="pd-small">no unrelated instance queue coupling</text>
+  <rect x="544" y="80" width="182" height="160" class="ad-sync" rx="6"/>
+  <text x="635" y="106" text-anchor="middle" class="ad-head-y">shared host sync layer</text>
+  <text x="635" y="130" text-anchor="middle" class="ad-small">`PiMutex` / `PiCond` wrappers</text>
+  <text x="635" y="146" text-anchor="middle" class="ad-small">used where host-facing sync</text>
+  <text x="635" y="162" text-anchor="middle" class="ad-small">needs Wine-NSPA PI behavior</text>
 
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="300" y1="146" x2="365" y2="146" class="pd-line-b"/>
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="595" y1="146" x2="660" y2="146" class="pd-line-g"/>
+  <rect x="780" y="104" width="154" height="112" class="ad-inst" rx="6"/>
+  <text x="857" y="130" text-anchor="middle" class="ad-head-p">live instance</text>
+  <text x="857" y="154" text-anchor="middle" class="ad-small">VST2 / VST3 / CLAP</text>
+  <text x="857" y="170" text-anchor="middle" class="ad-small">owns its own Win32 lane</text>
+  <text x="857" y="186" text-anchor="middle" class="ad-small">no global plugin queue</text>
 
-  <rect x="180" y="274" width="600" height="90" class="pd-note" rx="6"/>
-  <text x="480" y="310" text-anchor="middle" class="pd-head-y">Why this matters</text>
-  <text x="480" y="330" text-anchor="middle" class="pd-small">plugin callback ownership stays close to each instance,</text>
-  <text x="480" y="346" text-anchor="middle" class="pd-small">while the host sync layer still follows Wine-NSPA PI rules where it matters</text>
+  <rect x="194" y="296" width="592" height="72" class="ad-note" rx="6"/>
+  <text x="490" y="322" text-anchor="middle" class="ad-head-r">Why the split exists</text>
+  <text x="490" y="340" text-anchor="middle" class="ad-small">plugin creation needs Wine-owned thread registration; steady-state callbacks</text>
+  <text x="490" y="356" text-anchor="middle" class="ad-small">need per-instance ownership instead of one shared host queue</text>
+
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="256" y1="160" x2="308" y2="160" class="ad-line-g"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="490" y1="160" x2="544" y2="160" class="ad-line-b"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="726" y1="160" x2="780" y2="160" class="ad-line-y"/>
+  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M399 240 L399 296" class="ad-line-b"/>
+  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M857 216 L857 296" class="ad-line-p"/>
 </svg>
 </div>
 
 
 <hr />
 
-<h2 id="6-editor-embedding-and-message-pumping">6. Editor embedding and message pumping</h2>
+<h2 id="6-editor-embedding-and-clap-gui-ownership">6. Editor embedding and CLAP GUI ownership</h2>
 
 <p>Editor hosting has two parts:</p>
 
@@ -465,7 +628,7 @@ X11 child window</li>
 </ol>
 
 
-<p>The completion edge is also explicit now: Wine posts
+<p>The completion edge is explicit: Wine posts
 <code>WM_X11DRV_NSPA_EMBED_DONE</code> back to the same HWND after the embed handshake has
 reparented, mapped, and settled its WM state.</p>
 
@@ -482,29 +645,6 @@ reparented, mapped, and settled its WM state.</p>
 message loop, but the embedded editor HWNDs and their child windows still
 expect one.</p>
 
-<p>The current host-side shape is straightforward:</p>
-
-<pre><code class="language-cpp code-block">
-HWND hostHwnd = CreateWindowExW(...);
-
-SendMessageW(hostHwnd, WM_X11DRV_NSPA_EMBED_WINDOW,
-             (WPARAM) peerX11Parent,
-             MAKELPARAM(peerX, peerY));
-
-while (PeekMessageW(&amp;msg, hostHwnd, 0, 0, PM_REMOVE)) {
-    if (msg.message == WM_X11DRV_NSPA_EMBED_DONE)
-        embedSettled = true;
-
-    TranslateMessage(&amp;msg);
-    DispatchMessageW(&amp;msg);
-}
-</code></pre>
-
-
-<p>What matters is not the exact wrapper code but the contract it follows: one
-real Wine HWND, one explicit embed request, one explicit completion edge, and
-an explicit Win32 pump that stays alive inside the Linux host.</p>
-
 <p>The same component also keeps screen-position tracking split correctly:</p>
 
 <ul>
@@ -514,12 +654,7 @@ location under the JUCE peer</li>
 </ul>
 
 
-<p>This is what lets a Linux JUCE app host Win32 editors in-process without
-falling back to a generic wrapper window or a second out-of-process GUI host.</p>
-
 <h3 id="61-winehwndembedcomponent-responsibilities">6.1 <code>WineHWNDEmbedComponent</code> responsibilities</h3>
-
-<p>The embed component is where most of the winelib host-side GUI work lives.</p>
 
 <table>
 <thead>
@@ -557,81 +692,107 @@ falling back to a generic wrapper window or a second out-of-process GUI host.</p
 </table>
 
 
+<h3 id="62-clap-gui-calls-stay-on-the-juce-message-thread">6.2 CLAP GUI calls stay on the JUCE message thread</h3>
+
+<p>The CLAP editor path uses the same embed substrate, but it adds one important
+threading rule: the <code>clap.gui</code> lifecycle calls are performed directly on the
+JUCE message thread.</p>
+
+<p>That is deliberate. Routing them through the per-instance dispatcher would
+deadlock the same thread that must keep the Win32 pump alive for <code>set_parent()</code>
+and <code>show()</code>.</p>
+
+<p>Current CLAP editor setup:</p>
+
+<ol>
+<li>resolve <code>clap.gui</code> on the plugin&rsquo;s main thread</li>
+<li><code>is_api_supported(CLAP_WINDOW_API_WIN32, false)</code></li>
+<li><code>create(CLAP_WINDOW_API_WIN32, false)</code></li>
+<li><code>get_size()</code></li>
+<li>create and show <code>WineHWNDEmbedComponent</code></li>
+<li><code>set_parent()</code> with the embed component&rsquo;s Wine HWND</li>
+<li><code>show()</code></li>
+<li>drive plugin-requested resize/close through a 30 Hz timer</li>
+</ol>
+
+
+<p>Teardown is symmetrical: <code>hide()</code> then <code>destroy()</code> on the same JUCE message
+thread, while <code>WineHWNDEmbedComponent</code> handles the deferred X11-side cleanup.</p>
+
 <div class="diagram-container">
 <svg width="100%" viewBox="0 0 980 470" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
   <style>
-    .eh-bg { fill: #1a1b26; }
-    .eh-box { fill: #24283b; stroke: #3b4261; stroke-width: 1.2; rx: 8; }
-    .eh-host { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
-    .eh-msg { fill: #2a2418; stroke: #e0af68; stroke-width: 1.8; rx: 8; }
-    .eh-wine { fill: #1a2235; stroke: #7aa2f7; stroke-width: 1.8; rx: 8; }
-    .eh-plugin { fill: #2a2137; stroke: #bb9af7; stroke-width: 1.8; rx: 8; }
-    .eh-note { fill: #2a1a1a; stroke: #f7768e; stroke-width: 1.6; rx: 8; }
-    .eh-title { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
-    .eh-head-g { fill: #9ece6a; font: bold 11px 'JetBrains Mono', monospace; }
-    .eh-head-y { fill: #e0af68; font: bold 11px 'JetBrains Mono', monospace; }
-    .eh-head-b { fill: #7aa2f7; font: bold 11px 'JetBrains Mono', monospace; }
-    .eh-head-p { fill: #bb9af7; font: bold 11px 'JetBrains Mono', monospace; }
-    .eh-head-r { fill: #f7768e; font: bold 11px 'JetBrains Mono', monospace; }
-    .eh-small { fill: #a9b1d6; font: 9px 'JetBrains Mono', monospace; }
-    .eh-line-g { stroke: #9ece6a; stroke-width: 1.15; fill: none; }
-    .eh-line-y { stroke: #e0af68; stroke-width: 1.15; fill: none; }
-    .eh-line-b { stroke: #7aa2f7; stroke-width: 1.15; fill: none; }
+    .cg-bg { fill: #1a1b26; }
+    .cg-host { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
+    .cg-msg { fill: #2a2418; stroke: #e0af68; stroke-width: 1.8; rx: 8; }
+    .cg-wine { fill: #1a2235; stroke: #7aa2f7; stroke-width: 1.8; rx: 8; }
+    .cg-plug { fill: #2a2137; stroke: #bb9af7; stroke-width: 1.8; rx: 8; }
+    .cg-note { fill: #2a1a1a; stroke: #f7768e; stroke-width: 1.6; rx: 8; }
+    .cg-title { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
+    .cg-head-g { fill: #9ece6a; font: bold 11px 'JetBrains Mono', monospace; }
+    .cg-head-y { fill: #e0af68; font: bold 11px 'JetBrains Mono', monospace; }
+    .cg-head-b { fill: #7aa2f7; font: bold 11px 'JetBrains Mono', monospace; }
+    .cg-head-p { fill: #bb9af7; font: bold 11px 'JetBrains Mono', monospace; }
+    .cg-head-r { fill: #f7768e; font: bold 11px 'JetBrains Mono', monospace; }
+    .cg-small { fill: #a9b1d6; font: 9px 'JetBrains Mono', monospace; }
+    .cg-line-g { stroke: #9ece6a; stroke-width: 1.15; fill: none; }
+    .cg-line-y { stroke: #e0af68; stroke-width: 1.15; fill: none; }
+    .cg-line-b { stroke: #7aa2f7; stroke-width: 1.15; fill: none; }
   </style>
 
-  <rect x="0" y="0" width="980" height="470" class="eh-bg" rx="6"/>
-  <text x="490" y="26" text-anchor="middle" class="eh-title">`WineHWNDEmbedComponent`: embed lifecycle and ownership split</text>
+  <rect x="0" y="0" width="980" height="470" class="cg-bg" rx="6"/>
+  <text x="490" y="26" text-anchor="middle" class="cg-title">CLAP editor handshake on the JUCE message thread</text>
 
-  <rect x="48" y="82" width="210" height="250" class="eh-host" rx="6"/>
-  <text x="153" y="106" text-anchor="middle" class="eh-head-g">JUCE peer / Linux side</text>
-  <text x="153" y="132" text-anchor="middle" class="eh-small">1. own foreign X11 parent</text>
-  <text x="153" y="148" text-anchor="middle" class="eh-small">2. compute peer-relative bounds</text>
-  <text x="153" y="164" text-anchor="middle" class="eh-small">3. host creates embed component</text>
-  <text x="153" y="180" text-anchor="middle" class="eh-small">4. later drives `XMoveResizeWindow()`</text>
+  <rect x="48" y="82" width="220" height="250" class="cg-host" rx="6"/>
+  <text x="158" y="106" text-anchor="middle" class="cg-head-g">JUCE message thread</text>
+  <text x="158" y="132" text-anchor="middle" class="cg-small">1. resolve `clap.gui`</text>
+  <text x="158" y="148" text-anchor="middle" class="cg-small">2. `is_api_supported(WIN32)`</text>
+  <text x="158" y="164" text-anchor="middle" class="cg-small">3. `create(WIN32)`</text>
+  <text x="158" y="180" text-anchor="middle" class="cg-small">4. `get_size()`</text>
+  <text x="158" y="196" text-anchor="middle" class="cg-small">5. add embed component</text>
+  <text x="158" y="212" text-anchor="middle" class="cg-small">6. `set_parent(hwnd)`</text>
+  <text x="158" y="228" text-anchor="middle" class="cg-small">7. `show()`</text>
 
-  <rect x="298" y="82" width="184" height="250" class="eh-msg" rx="6"/>
-  <text x="390" y="106" text-anchor="middle" class="eh-head-y">Embed component</text>
-  <text x="390" y="132" text-anchor="middle" class="eh-small">1. `CreateWindowExW()`</text>
-  <text x="390" y="148" text-anchor="middle" class="eh-small">2. find `wine_x11_window`</text>
-  <text x="390" y="164" text-anchor="middle" class="eh-small">3. `SendMessageW(...EMBED_WINDOW...)`</text>
-  <text x="390" y="180" text-anchor="middle" class="eh-small">4. timer pump: `PeekMessageW()` /</text>
-  <text x="390" y="196" text-anchor="middle" class="eh-small">   `TranslateMessage()` / `DispatchMessageW()`</text>
-  <text x="390" y="212" text-anchor="middle" class="eh-small">5. `SetWindowPos()` for Wine rects</text>
+  <rect x="304" y="82" width="184" height="250" class="cg-msg" rx="6"/>
+  <text x="396" y="106" text-anchor="middle" class="cg-head-y">Embed component</text>
+  <text x="396" y="132" text-anchor="middle" class="cg-small">creates Wine HWND</text>
+  <text x="396" y="148" text-anchor="middle" class="cg-small">resolves `wine_x11_window`</text>
+  <text x="396" y="164" text-anchor="middle" class="cg-small">sends `EMBED_WINDOW`</text>
+  <text x="396" y="180" text-anchor="middle" class="cg-small">pumps Win32 messages</text>
+  <text x="396" y="196" text-anchor="middle" class="cg-small">tracks `EMBED_DONE`</text>
+  <text x="396" y="212" text-anchor="middle" class="cg-small">timer also drives resize sync</text>
 
-  <rect x="522" y="82" width="184" height="250" class="eh-wine" rx="6"/>
-  <text x="614" y="106" text-anchor="middle" class="eh-head-b">Wine-NSPA embed path</text>
-  <text x="614" y="132" text-anchor="middle" class="eh-small">1. reparent X11 child</text>
-  <text x="614" y="148" text-anchor="middle" class="eh-small">2. flip embedded mode</text>
-  <text x="614" y="164" text-anchor="middle" class="eh-small">3. map child + settle WM state</text>
-  <text x="614" y="180" text-anchor="middle" class="eh-small">4. `PostMessage(EMBED_DONE)`</text>
-  <text x="614" y="196" text-anchor="middle" class="eh-small">5. keep Win32 rects authoritative</text>
+  <rect x="522" y="82" width="184" height="250" class="cg-wine" rx="6"/>
+  <text x="614" y="106" text-anchor="middle" class="cg-head-b">Wine embed path</text>
+  <text x="614" y="132" text-anchor="middle" class="cg-small">reparents X11 child</text>
+  <text x="614" y="148" text-anchor="middle" class="cg-small">settles embedded WM state</text>
+  <text x="614" y="164" text-anchor="middle" class="cg-small">keeps Win32 rects authoritative</text>
+  <text x="614" y="180" text-anchor="middle" class="cg-small">posts `EMBED_DONE`</text>
 
-  <rect x="746" y="82" width="186" height="250" class="eh-plugin" rx="6"/>
-  <text x="839" y="106" text-anchor="middle" class="eh-head-p">Plugin editor HWND</text>
-  <text x="839" y="132" text-anchor="middle" class="eh-small">embedded Win32 window</text>
-  <text x="839" y="148" text-anchor="middle" class="eh-small">receives normal Win32 messages</text>
-  <text x="839" y="164" text-anchor="middle" class="eh-small">host sees settled attach after</text>
-  <text x="839" y="180" text-anchor="middle" class="eh-small">`WM_X11DRV_NSPA_EMBED_DONE` if needed</text>
+  <rect x="740" y="82" width="192" height="250" class="cg-plug" rx="6"/>
+  <text x="836" y="106" text-anchor="middle" class="cg-head-p">CLAP plugin GUI</text>
+  <text x="836" y="132" text-anchor="middle" class="cg-small">Win32 parent API only</text>
+  <text x="836" y="148" text-anchor="middle" class="cg-small">plugin-requested resizes land in atomics</text>
+  <text x="836" y="164" text-anchor="middle" class="cg-small">30 Hz timer applies them to the host</text>
+  <text x="836" y="180" text-anchor="middle" class="cg-small">plugin-close request closes the editor window</text>
 
-  <rect x="170" y="370" width="640" height="68" class="eh-note" rx="6"/>
-  <text x="490" y="396" text-anchor="middle" class="eh-head-r">Why this matters</text>
-  <text x="490" y="414" text-anchor="middle" class="eh-small">the framework owns one explicit lifecycle: create HWND, embed, receive completion,</text>
-  <text x="490" y="430" text-anchor="middle" class="eh-small">pump Win32 messages, and keep Win32/X11 geometry in sync without inventing</text>
-  <text x="490" y="446" text-anchor="middle" class="eh-small">a second windowing model</text>
+  <rect x="170" y="370" width="640" height="68" class="cg-note" rx="6"/>
+  <text x="490" y="396" text-anchor="middle" class="cg-head-r">Why this stays on one thread</text>
+  <text x="490" y="414" text-anchor="middle" class="cg-small">`set_parent()` and `show()` need the same message-thread pump that services</text>
+  <text x="490" y="430" text-anchor="middle" class="cg-small">the embedded Wine HWND, so dispatcher-hopping would block the wrong thread</text>
 
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="258" y1="178" x2="298" y2="178" class="eh-line-g"/>
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="482" y1="178" x2="522" y2="178" class="eh-line-y"/>
-  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="706" y1="178" x2="746" y2="178" class="eh-line-b"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="268" y1="178" x2="304" y2="178" class="cg-line-g"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="488" y1="178" x2="522" y2="178" class="cg-line-y"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="706" y1="178" x2="740" y2="178" class="cg-line-b"/>
 </svg>
 </div>
 
 
 <hr />
 
-<h2 id="7-integration-with-wine-nspa">7. Integration with Wine-NSPA</h2>
+<h2 id="7-relationship-to-wine-nspa">7. Relationship to Wine-NSPA</h2>
 
-<p>JUCE-NSPA is not just &ldquo;JUCE under Wine.&rdquo; It depends on specific Wine-NSPA
-surfaces.</p>
+<p>JUCE-NSPA depends on specific Wine-NSPA surfaces.</p>
 
 <table>
 <thead>
@@ -647,7 +808,11 @@ surfaces.</p>
 </tr>
 <tr>
 <td> Wine <code>LoadLibraryW()</code> path </td>
-<td> loads Windows VST2 and VST3 modules in-process </td>
+<td> loads Windows VST2, VST3, and CLAP modules in-process </td>
+</tr>
+<tr>
+<td> Wine <code>CreateThread</code> path </td>
+<td> gives async plugin creation a Win32-registered worker thread with valid TEB/SEH/loader state </td>
 </tr>
 <tr>
 <td> vendored <code>rtpi.h</code> wrappers </td>
@@ -661,24 +826,12 @@ surfaces.</p>
 </table>
 
 
-<p>This is also where the port&rsquo;s practical advantages come from:</p>
-
-<ul>
-<li>no extra out-of-process GUI bridge for editor hosting</li>
-<li>no separate plugin wrapper protocol just to call VST2 or VST3 entry points</li>
-<li>a framework-level embed and dispatch model that applications can reuse</li>
-<li>host-side PI wrappers that already match the rest of the Wine-NSPA stack</li>
-</ul>
-
-
-<p>Those are implementation advantages, not product claims. They reduce the
-amount of application-specific host code needed above the framework layer.</p>
+<p>JUCE-NSPA is therefore not a generic Wine wrapper layer. It is a framework
+fork written around Wine-NSPA&rsquo;s specific load, thread, sync, and embed rules.</p>
 
 <hr />
 
 <h2 id="8-current-scope">8. Current scope</h2>
-
-<p>The current JUCE-NSPA surface is:</p>
 
 <table>
 <thead>
@@ -689,16 +842,20 @@ amount of application-specific host code needed above the framework layer.</p>
 </thead>
 <tbody>
 <tr>
+<td> Host architecture </td>
+<td> Linux-only x86_64 winelib host </td>
+</tr>
+<tr>
 <td> Plugin formats </td>
-<td> Windows VST2 and VST3 </td>
+<td> Windows VST2, VST3, and CLAP </td>
+</tr>
+<tr>
+<td> Async instantiation </td>
+<td> one-shot Wine <code>CreateThread</code> worker, callback returned to the JUCE message thread </td>
 </tr>
 <tr>
 <td> GUI embedding </td>
 <td> Wine HWND-backed editor windows inside Linux JUCE peers </td>
-</tr>
-<tr>
-<td> Host type </td>
-<td> Linux-only winelib host </td>
 </tr>
 <tr>
 <td> Current application consumer </td>
@@ -708,21 +865,26 @@ amount of application-specific host code needed above the framework layer.</p>
 </table>
 
 
-<p>JUCE-NSPA is a framework fork, not an end-user host by itself. Its public value
-is that application ports can build on one Winelib + Wine-NSPA substrate
-instead of re-solving the same VST loading, Win32 dispatch, and editor embed
-problems separately.</p>
+<p>JUCE-NSPA is a framework fork, not an end-user host by itself. Its value is
+that application ports can build on one winelib + Wine-NSPA substrate instead
+of re-solving the same module load, Win32 dispatch, and editor embed problems
+separately.</p>
 
 <hr />
 
 <h2 id="9-references">9. References</h2>
 
 <ul>
-<li><code>modules/juce_gui_extra/embedding/juce_WineHWNDEmbedComponent.h</code></li>
-<li><code>modules/juce_gui_extra/native/juce_WineHWNDEmbedComponent_linux.cpp</code></li>
-<li><code>modules/juce_audio_processors_headless/format_types/juce_winelib_pi_sync.h</code></li>
+<li><code>modules/juce_audio_processors_headless/format/juce_AudioPluginFormat.cpp</code></li>
+<li><code>modules/juce_audio_processors_headless/format_types/juce_CLAPPluginFormatHeadless.h</code></li>
+<li><code>modules/juce_audio_processors_headless/format_types/juce_CLAPPluginFormatImpl.h</code></li>
+<li><code>modules/juce_audio_processors_headless/format_types/clap/juce_clap_winelib_abi.h</code></li>
+<li><code>modules/juce_audio_processors/format_types/juce_CLAPPluginFormat.cpp</code></li>
 <li><code>modules/juce_audio_processors/format_types/juce_VSTPluginFormat.cpp</code></li>
 <li><code>modules/juce_audio_processors/format_types/juce_VST3PluginFormat.cpp</code></li>
+<li><code>modules/juce_audio_processors_headless/format_types/juce_winelib_pi_sync.h</code></li>
+<li><code>modules/juce_gui_extra/embedding/juce_WineHWNDEmbedComponent.h</code></li>
+<li><code>modules/juce_gui_extra/native/juce_WineHWNDEmbedComponent_linux.cpp</code></li>
 <li><a href="nspa-x11-embed-protocol.gen.html">NSPA X11 Embed Protocol</a></li>
 <li><a href="element-plugin-host.gen.html">Element-NSPA</a></li>
 </ul>
