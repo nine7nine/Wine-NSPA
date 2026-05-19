@@ -93,7 +93,7 @@ remains available.
 | Hot-path optimization layer | x86_64 unix-side `NtCurrentTeb()` is inline, `get_thread_data()` reads through a TEB backpointer, msg/timer/redraw ring producer and consumer indices are cacheline-isolated, `inproc_sync` entries are cacheline-isolated, dormant `io_uring` helper calls are inlined away, and ASCII-dominant string / Unicode loops use AVX2 fast windows on x86_64 |
 | Memory surface | local sections, large pages, current-process `QueryWorkingSetEx`, working-set quota bookkeeping, RT-keyed `mlockall()`, automatic hugetlb promotion, and heap arena hugetlb backing |
 | Local sync path | anonymous events client-range by default; timers piggyback on that base |
-| X11 embed path | atomic embed via `WM_X11DRV_NSPA_EMBED_WINDOW`, explicit `XMapWindow()`, async `WM_X11DRV_NSPA_EMBED_DONE`, and host-owned X11 size authority for `nspa_embedded` windows |
+| X11 embed path | atomic embed via `WM_X11DRV_NSPA_EMBED_WINDOW`, explicit `XMapWindow()`, async `WM_X11DRV_NSPA_EMBED_DONE`, host-owned X11 size authority for `nspa_embedded` windows, and bounded input-first consumer pumps in current hosts |
 | X11 flush policy | `NSPA_FLUSH_THROTTLE_MS=8`, default ON |
 
 ### 2.3 Patch stack on top of upstream ntsync
@@ -438,7 +438,7 @@ System-wide samples: `38,588 -> 19,415` per 30s.
 | x86_64 AVX2 string / Unicode loops | synthetic ASCII-path cuts range from `~4x` (`hash_strW`) to `~25x` (`utf8_mbstowcs`), while preserving scalar fallback for non-ASCII windows |
 | x86_64 inline + AVX2 bundle | full 30 s triplet diff: user-mode samples `97K -> 86K` (`-11.3%`), iTLB `229.7M -> 180.8M` (`-21.30%`), dTLB `51.5M -> 42.4M` (`-17.69%`), branch-misses `348.3M -> 308.4M` (`-11.45%`), `NtGetTickCount` `3,081,551 -> 0`, page-faults `130,349 -> 71,754` (`-44.95%`) |
 | msg/timer/redraw ring cacheline isolation | the hot producer `head` and consumer `tail` indices stop false-sharing one cacheline across same-process message, timer, and redraw traffic |
-| X11 embed completion + size ownership | embed consumers get an explicit completion edge, explicit child mapping, and stable host-owned X11 sizing for `nspa_embedded` windows |
+| X11 embed completion + size ownership | embed consumers get an explicit completion edge, explicit child mapping, stable host-owned X11 sizing for `nspa_embedded` windows, and a documented bounded pump contract for the editor thread queue |
 | LFH + heap-shaping follow-ons | LFH bins are cacheline-shaped; non-hugetlb subheaps widen commit/decommit hysteresis to `1 MiB` under the RT huge-arenas gate, cutting lock-held VM churn on allocator-heavy paths |
 | local-file EOF path | direct handler-time saving `~8 ms / snapshot`, plus eligible `ftruncate()` no longer blocks the wineserver loop inline |
 | RT-keyed heap arena hugetlb backing | hugepage regions `3/6` -> `104`; `mmap` rate `33-61/s` -> `0.13/s`; `mprotect` rate `56-90/s` -> `0.03/s`; page-faults `753-869/s` -> `2.8/s` |
@@ -503,7 +503,7 @@ System-wide samples: `38,588 -> 19,415` per 30s.
 | 2026-05-10 | LFH and local-file optimization follow-ons | LFH bins gain cacheline isolation, non-hugetlb heap hysteresis widens under the RT huge-arenas gate, and local-file bypass opens retain sequential/random `posix_fadvise` hints |
 | 2026-05-12 | client-range sync duplicate + RT demote fix | same-process duplicate of client-created sync handles stays local, and app-thread RT promotions no longer set sticky `SCHED_RESET_ON_FORK` on the app-facing promotion path |
 | 2026-05-15 | atomic X11 embed path | `WM_X11DRV_NSPA_EMBED_WINDOW`, host-drag rect propagation, and the embedded cursor-jump fix land as the current host-facing contract |
-| 2026-05-16 | embed completion and X11 ownership follow-ons | `WM_X11DRV_NSPA_EMBED_DONE`, explicit `XMapWindow()`, and X11 size-emission suppression give hosts a deterministic completion edge while keeping `nspa_embedded` sizing host-authoritative |
+| 2026-05-16 | embed completion and X11 ownership follow-ons | `WM_X11DRV_NSPA_EMBED_DONE`, explicit `XMapWindow()`, X11 size-emission suppression, and bounded input-first consumer pumps keep host-owned embedding deterministic and interactive |
 | 2026-05-16 | msg/timer/redraw ring cacheline isolation | the hot producer and consumer indices stop false-sharing on the same-process UI rings |
 | 2026-05-16 | `--enable-nspa-arch=LEVEL` | x86_64 builds can opt into an explicit microarch target while bundling `-ffp-contract=off` so FP semantics stay stable |
 

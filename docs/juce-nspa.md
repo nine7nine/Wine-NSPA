@@ -91,7 +91,7 @@ The load-bearing changes are:
   <rect x="126" y="318" width="728" height="126" class="jn-sync"/>
   <text x="490" y="342" text-anchor="middle" class="jn-head-y">Editor embed and thread ownership</text>
   <text x="490" y="366" text-anchor="middle" class="jn-small">`WineHWNDEmbedComponent` creates a real Wine HWND, resolves `wine_x11_window`,</text>
-  <text x="490" y="382" text-anchor="middle" class="jn-small">sends `WM_X11DRV_NSPA_EMBED_WINDOW`, and pumps Win32 messages on a timer</text>
+  <text x="490" y="382" text-anchor="middle" class="jn-small">sends `WM_X11DRV_NSPA_EMBED_WINDOW`, then runs an input-first bounded Win32 pump</text>
   <text x="490" y="398" text-anchor="middle" class="jn-small">CLAP editor setup runs directly on the JUCE message thread to avoid deadlock</text>
   <text x="490" y="414" text-anchor="middle" class="jn-small">with the same Win32 pump that must service `set_parent()` and `show()`</text>
   <text x="490" y="430" text-anchor="middle" class="jn-text">framework owns the Linux/X11 <-> Win32/HWND seam</text>
@@ -382,23 +382,39 @@ The completion edge is explicit: Wine posts
 `WM_X11DRV_NSPA_EMBED_DONE` back to the same HWND after the embed handshake has
 reparented, mapped, and settled its WM state.
 
-The component also owns an explicit Win32 message pump:
+The component also owns the Win32 message pump for the embedded thread queue.
+It does not drain only the top-level editor HWND, because the child windows
+below that editor carry the actual `WM_PAINT`, mouse, and keyboard traffic.
 
-- `PeekMessageW()`
-- `TranslateMessage()`
-- `DispatchMessageW()`
+The current pump shape is:
 
-That pump is required because the Linux JUCE host loop is not a native Win32
-message loop, but the embedded editor HWNDs and their child windows still
-expect one.
+- unbounded mouse-range peeks for `WM_MOUSEFIRST .. WM_MOUSELAST`
+- unbounded keyboard-range peeks for `WM_KEYFIRST .. WM_KEYLAST`
+- a 4 ms budget for the remaining general queue
 
-The same component also keeps screen-position tracking split correctly:
+That split keeps the JUCE message thread returning to its X11 poll instead of
+spinning forever on plugin-generated `WM_TIMER` / `WM_PAINT` backlogs, while
+still preserving responsive input under heavy redraw load.
+
+Geometry ownership stays split the same way:
 
 - `SetWindowPos()` updates Wine's Win32-side window rects
 - `XMoveResizeWindow()` keeps the X11 child at the correct parent-relative
   location under the JUCE peer
 
-### 6.1 `WineHWNDEmbedComponent` responsibilities
+### 6.1 Current pump contract
+
+The queue pump is a host-side contract, not a best-effort hint.
+
+| Pump surface | Current rule | Why |
+|---|---|---|
+| Queue scope | whole thread queue, not only the top-level editor HWND | child controls, popups, and helper HWNDs carry real input and paint traffic |
+| Mouse pass | drain `WM_MOUSEFIRST .. WM_MOUSELAST` first | pointer capture, hover, and resize feedback do not sit behind redraw backlogs |
+| Keyboard pass | drain `WM_KEYFIRST .. WM_KEYLAST` second | text entry and shortcuts stay responsive |
+| General drain | bounded to `4 ms` per host turn | JUCE's Linux event loop regains control even if the plugin floods `WM_PAINT` / `WM_TIMER` |
+| Completion edge | observe `WM_X11DRV_NSPA_EMBED_DONE` on the same queue | embed completion is tied to the same message source as normal editor traffic |
+
+### 6.2 `WineHWNDEmbedComponent` responsibilities
 
 | Responsibility | Current behavior |
 |---|---|
@@ -406,10 +422,10 @@ The same component also keeps screen-position tracking split correctly:
 | X11 child lookup | resolves the backing `wine_x11_window` for that HWND |
 | Embed handoff | sends `WM_X11DRV_NSPA_EMBED_WINDOW` to hand the child to Wine's embed path |
 | Completion fence | handles `WM_X11DRV_NSPA_EMBED_DONE` if the host wants a deterministic "embed settled" point |
-| Win32 pump | runs a `PeekMessageW()` / `TranslateMessage()` / `DispatchMessageW()` loop on a timer |
+| Win32 pump | drains the whole thread queue with input-first mouse/keyboard passes, then a 4 ms general-drain budget |
 | Geometry sync | uses `SetWindowPos()` for Wine rects and `XMoveResizeWindow()` for host-relative X11 placement |
 
-### 6.2 CLAP GUI calls stay on the JUCE message thread
+### 6.3 CLAP GUI calls stay on the JUCE message thread
 
 The CLAP editor path uses the same embed substrate, but it adds one important
 threading rule: the `clap.gui` lifecycle calls are performed directly on the
@@ -472,7 +488,7 @@ thread, while `WineHWNDEmbedComponent` handles the deferred X11-side cleanup.
   <text x="396" y="132" text-anchor="middle" class="cg-small">creates Wine HWND</text>
   <text x="396" y="148" text-anchor="middle" class="cg-small">resolves `wine_x11_window`</text>
   <text x="396" y="164" text-anchor="middle" class="cg-small">sends `EMBED_WINDOW`</text>
-  <text x="396" y="180" text-anchor="middle" class="cg-small">pumps Win32 messages</text>
+  <text x="396" y="180" text-anchor="middle" class="cg-small">input-first + 4 ms bounded drain</text>
   <text x="396" y="196" text-anchor="middle" class="cg-small">tracks `EMBED_DONE`</text>
   <text x="396" y="212" text-anchor="middle" class="cg-small">timer also drives resize sync</text>
 

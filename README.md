@@ -44,7 +44,7 @@ surfaces, and RT-oriented memory and I/O work.
 | Document | Description |
 |----------|-------------|
 | [Element-NSPA](https://nine7nine.github.io/Wine-NSPA/element-plugin-host.gen.html) | Element port for Windows VST2, VST3, and CLAP hosting on Wine-NSPA. |
-| [JUCE-NSPA](https://nine7nine.github.io/Wine-NSPA/juce-nspa.gen.html) | JUCE fork for Linux winelib hosting of Windows VST2, VST3, and CLAP plugins. |
+| [JUCE-NSPA](https://nine7nine.github.io/Wine-NSPA/juce-nspa.gen.html) | Framework fork for Linux winelib hosting of Windows VST2, VST3, and CLAP plugins. |
 | [Yabridge-NSPA](https://nine7nine.github.io/Wine-NSPA/yabridge-nspa.gen.html) | Linux VST bridge fork aligned to Wine-NSPA RT and PI rules. |
 
 ### Test Results & Validation
@@ -53,7 +53,7 @@ surfaces, and RT-oriented memory and I/O work.
 |----------|-------------|
 | [RT Test Harness](https://nine7nine.github.io/Wine-NSPA/nspa-rt-test.gen.html) | Native ntsync tests, PE matrix, and targeted follow-on validators. |
 | [State of The Art](https://nine7nine.github.io/Wine-NSPA/current-state.gen.html) | Current defaults, validation totals, and measured results. |
-| [Test Suite Comparison](https://nine7nine.github.io/Wine-NSPA/nspa-test-comparison.gen.html) | Validation baselines, methodology breaks, and archive lineage. |
+| [Test Suite Comparison](https://nine7nine.github.io/Wine-NSPA/nspa-test-comparison.gen.html) | Archived suite snapshots, per-test deltas, and targeted A/Bs. |
 
 ### Historical / Superseded
 

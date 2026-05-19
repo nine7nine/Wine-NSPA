@@ -79,7 +79,7 @@ The current application layer is also retuned for the same host model:
   <text x="490" y="128" text-anchor="middle" class="ov-small">winegcc / wineg++ build, PE module loading</text>
   <text x="490" y="144" text-anchor="middle" class="ov-small">VST2, VST3, and CLAP host formats</text>
   <text x="490" y="160" text-anchor="middle" class="ov-small">Win32 ABI fixes, `LoadLibraryW()`, `CreateThread` async load</text>
-  <text x="490" y="176" text-anchor="middle" class="ov-small">`WineHWNDEmbedComponent` + Win32 pump</text>
+  <text x="490" y="176" text-anchor="middle" class="ov-small">`WineHWNDEmbedComponent` + input-first bounded Win32 pump</text>
   <text x="490" y="202" text-anchor="middle" class="ov-text">framework layer reused by the app</text>
 
   <rect x="684" y="94" width="250" height="158" class="ov-plugin"/>
@@ -383,6 +383,14 @@ stream; the extra dispatcher call is additive, not a replacement.
 The editor path follows JUCE-NSPA's embedded Win32 GUI model, so plugin editor
 windows are still real Wine HWND-backed windows inside a Linux UI tree.
 
+Element does not add a second embed protocol on top of that layer. Editor
+windows inherit JUCE-NSPA's `WineHWNDEmbedComponent`, which means:
+
+- the whole editor thread queue is pumped, not just the top-level HWND
+- mouse and keyboard ranges drain before the general queue
+- the remaining queue uses the same 4 ms budget as JUCE-NSPA
+- `SetWindowPos()` and `XMoveResizeWindow()` stay split across Win32 and X11
+
 Element adds application policy on top:
 
 - the `PluginWindow` toolbar path is disabled so the embedded editor fills the
@@ -400,7 +408,20 @@ The internal chooser policy matters under winelib:
 - embedding the chooser on the main window keeps dialog ownership inside the
   same Linux shell as the rest of the application
 
-### 6.1 Graph shell and visual system
+### 6.1 Inherited embed boundary
+
+The application port reuses the JUCE-NSPA embed substrate directly. The split
+between framework ownership and application ownership is:
+
+| Surface | Owner | Current behavior |
+|---|---|---|
+| Wine HWND creation and X11 child lookup | JUCE-NSPA | `WineHWNDEmbedComponent` creates the HWND and resolves `wine_x11_window` |
+| Embed message and completion edge | JUCE-NSPA + Wine-NSPA | `WM_X11DRV_NSPA_EMBED_WINDOW` plus `WM_X11DRV_NSPA_EMBED_DONE` |
+| Queue pump discipline | JUCE-NSPA | whole-thread queue, input-first passes, 4 ms general drain |
+| X11/Win32 geometry split | JUCE-NSPA + Wine-NSPA | `SetWindowPos()` keeps Wine rects coherent; host keeps X11 parent-relative sizing coherent |
+| Plugin-window chrome and chooser policy | Element-NSPA | toolbar-free editor shell and in-app file choosers parented on the main content component |
+
+### 6.2 Graph shell and visual system
 
 Element's UI layer is not just a reskin. The recent changes move the host
 toward a clearer separation between application shell, graph topology, and
@@ -496,8 +517,8 @@ Element-NSPA sits on top of both framework and runtime layers.
 
 | Layer | Use in Element-NSPA |
 |---|---|
-| JUCE-NSPA | winelib build support, VST2/VST3/CLAP Windows-plugin loading, async `CreateThread` load path, Win32 dispatch, and editor embedding substrate |
-| Wine-NSPA X11 embed protocol | embeds plugin editor HWNDs under Linux host windows without a second wrapper protocol |
+| JUCE-NSPA | winelib build support, VST2/VST3/CLAP Windows-plugin loading, async `CreateThread` load path, and the bounded input-first `WineHWNDEmbedComponent` editor layer |
+| Wine-NSPA X11 embed protocol | embeds plugin editor HWNDs under Linux host windows while leaving X11 sizing and the consumer pump discipline on the host side |
 | Wine-NSPA Win32 runtime | supplies the window/message model, Win32 process priority mapping, and Wine-side plugin module load path |
 | Element-specific JACK layer | exposes JACK-native audio and MIDI routing inside the graph on top of the same host process |
 

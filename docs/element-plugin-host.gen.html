@@ -196,7 +196,7 @@ formats and JACK-native nodes are legible inside the same graph</li>
   <text x="490" y="128" text-anchor="middle" class="ov-small">winegcc / wineg++ build, PE module loading</text>
   <text x="490" y="144" text-anchor="middle" class="ov-small">VST2, VST3, and CLAP host formats</text>
   <text x="490" y="160" text-anchor="middle" class="ov-small">Win32 ABI fixes, `LoadLibraryW()`, `CreateThread` async load</text>
-  <text x="490" y="176" text-anchor="middle" class="ov-small">`WineHWNDEmbedComponent` + Win32 pump</text>
+  <text x="490" y="176" text-anchor="middle" class="ov-small">`WineHWNDEmbedComponent` + input-first bounded Win32 pump</text>
   <text x="490" y="202" text-anchor="middle" class="ov-text">framework layer reused by the app</text>
 
   <rect x="684" y="94" width="250" height="158" class="ov-plugin" rx="6"/>
@@ -622,6 +622,17 @@ stream; the extra dispatcher call is additive, not a replacement.</p>
 <p>The editor path follows JUCE-NSPA&rsquo;s embedded Win32 GUI model, so plugin editor
 windows are still real Wine HWND-backed windows inside a Linux UI tree.</p>
 
+<p>Element does not add a second embed protocol on top of that layer. Editor
+windows inherit JUCE-NSPA&rsquo;s <code>WineHWNDEmbedComponent</code>, which means:</p>
+
+<ul>
+<li>the whole editor thread queue is pumped, not just the top-level HWND</li>
+<li>mouse and keyboard ranges drain before the general queue</li>
+<li>the remaining queue uses the same 4 ms budget as JUCE-NSPA</li>
+<li><code>SetWindowPos()</code> and <code>XMoveResizeWindow()</code> stay split across Win32 and X11</li>
+</ul>
+
+
 <p>Element adds application policy on top:</p>
 
 <ul>
@@ -645,7 +656,50 @@ same Linux shell as the rest of the application</li>
 </ul>
 
 
-<h3 id="61-graph-shell-and-visual-system">6.1 Graph shell and visual system</h3>
+<h3 id="61-inherited-embed-boundary">6.1 Inherited embed boundary</h3>
+
+<p>The application port reuses the JUCE-NSPA embed substrate directly. The split
+between framework ownership and application ownership is:</p>
+
+<table>
+<thead>
+<tr>
+<th> Surface </th>
+<th> Owner </th>
+<th> Current behavior </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> Wine HWND creation and X11 child lookup </td>
+<td> JUCE-NSPA </td>
+<td> <code>WineHWNDEmbedComponent</code> creates the HWND and resolves <code>wine_x11_window</code> </td>
+</tr>
+<tr>
+<td> Embed message and completion edge </td>
+<td> JUCE-NSPA + Wine-NSPA </td>
+<td> <code>WM_X11DRV_NSPA_EMBED_WINDOW</code> plus <code>WM_X11DRV_NSPA_EMBED_DONE</code> </td>
+</tr>
+<tr>
+<td> Queue pump discipline </td>
+<td> JUCE-NSPA </td>
+<td> whole-thread queue, input-first passes, 4 ms general drain </td>
+</tr>
+<tr>
+<td> X11/Win32 geometry split </td>
+<td> JUCE-NSPA + Wine-NSPA </td>
+<td> <code>SetWindowPos()</code> keeps Wine rects coherent; host keeps X11 parent-relative sizing coherent </td>
+</tr>
+<tr>
+<td> Plugin-window chrome and chooser policy </td>
+<td> Element-NSPA </td>
+<td> toolbar-free editor shell and in-app file choosers parented on the main content component </td>
+</tr>
+</tbody>
+</table>
+
+
+<h3 id="62-graph-shell-and-visual-system">6.2 Graph shell and visual system</h3>
 
 <p>Element&rsquo;s UI layer is not just a reskin. The recent changes move the host
 toward a clearer separation between application shell, graph topology, and
@@ -780,11 +834,11 @@ synchronization</li>
 <tbody>
 <tr>
 <td> JUCE-NSPA </td>
-<td> winelib build support, VST2/VST3/CLAP Windows-plugin loading, async <code>CreateThread</code> load path, Win32 dispatch, and editor embedding substrate </td>
+<td> winelib build support, VST2/VST3/CLAP Windows-plugin loading, async <code>CreateThread</code> load path, and the bounded input-first <code>WineHWNDEmbedComponent</code> editor layer </td>
 </tr>
 <tr>
 <td> Wine-NSPA X11 embed protocol </td>
-<td> embeds plugin editor HWNDs under Linux host windows without a second wrapper protocol </td>
+<td> embeds plugin editor HWNDs under Linux host windows while leaving X11 sizing and the consumer pump discipline on the host side </td>
 </tr>
 <tr>
 <td> Wine-NSPA Win32 runtime </td>

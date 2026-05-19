@@ -35,7 +35,8 @@ The load-bearing changes are:
 - Fixed-layout metadata travels through the shared L2 region directly instead
   of being fully serialized every block.
 - Editor embedding uses Wine-NSPA's atomic X11 embed primitive while keeping a
-  wrapper window as the immediate host-owned X11 surface.
+  wrapper window as the immediate host-owned X11 surface, plus an input-first
+  capped Win32 pump for the editor thread queue.
 - Startup, teardown, and crash handling are tightened around DAW exit,
   wineserver cold start, and stale shared-memory artifacts.
 
@@ -245,13 +246,87 @@ embedded-window side effects in userspace just to host a plugin editor.
 |---|---|
 | Wrapper window | still present as the immediate foreign parent for focus, size, and host-window ownership |
 | Wine child handoff | done through `WM_X11DRV_NSPA_EMBED_WINDOW` instead of a userspace reparent-and-fixup sequence |
+| Win32 pump | input-first mouse/keyboard pass, then capped general drain in `HostBridge::handle_events()` |
 | Host-drag propagation | Wine updates embedded WND rect state from host motion |
 | Old `SubstructureRedirect` path | removed from the normal embed flow |
 
-The wrapper window still exists because yabridge still needs a host-local X11
-surface it owns directly. What changed is the boundary beneath that wrapper:
-the Wine window embed now goes through one Wine-side primitive instead of a
-host-local recreation of Wine's embedded-mode side effects.
+The wrapper window remains because yabridge still wants one host-owned X11
+surface for focus and size policy. The Wine-side child beneath that wrapper is
+where the behavior changed.
+
+### 4.2 Embedded HWND pump discipline
+
+`HostBridge::handle_events()` is the consumer-side message pump for the editor
+thread queue. Its current shape is:
+
+- drain `WM_MOUSEFIRST .. WM_MOUSELAST` first
+- drain `WM_KEYFIRST .. WM_KEYLAST` second
+- then drain the remaining queue with a 20-message cap
+- extend that cap to 8192 if `WM_USER + 123` appears, which is the JUCE flood
+  heuristic yabridge already carried
+
+That keeps two constraints aligned:
+
+- input does not sit behind redraw-heavy `WM_PAINT` / `WM_TIMER` traffic
+- the native host loop still regains control after each pump turn
+
+| Pump surface | Current rule | Why |
+|---|---|---|
+| Queue scope | whole editor thread queue | helper HWNDs below the editor parent still receive real traffic |
+| Mouse pass | drain `WM_MOUSEFIRST .. WM_MOUSELAST` first | drag, hover, and resize feedback stay ahead of redraw backlogs |
+| Keyboard pass | drain `WM_KEYFIRST .. WM_KEYLAST` second | text and shortcut latency stays low |
+| General drain | `20` messages by default | bounded return to the native host loop |
+| JUCE flood escape | extend the cap to `8192` on `WM_USER + 123` | JUCE-heavy pages can settle without artificial partial redraw |
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 960 360" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .hp-bg { fill: #1a1b26; }
+    .hp-host { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
+    .hp-input { fill: #2a2418; stroke: #e0af68; stroke-width: 1.8; rx: 8; }
+    .hp-gen { fill: #1a2235; stroke: #7aa2f7; stroke-width: 1.8; rx: 8; }
+    .hp-note { fill: #2a2137; stroke: #bb9af7; stroke-width: 1.6; rx: 8; }
+    .hp-title { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
+    .hp-head-g { fill: #9ece6a; font: bold 11px 'JetBrains Mono', monospace; }
+    .hp-head-y { fill: #e0af68; font: bold 11px 'JetBrains Mono', monospace; }
+    .hp-head-b { fill: #7aa2f7; font: bold 11px 'JetBrains Mono', monospace; }
+    .hp-head-p { fill: #bb9af7; font: bold 11px 'JetBrains Mono', monospace; }
+    .hp-small { fill: #a9b1d6; font: 9px 'JetBrains Mono', monospace; }
+    .hp-line-g { stroke: #9ece6a; stroke-width: 1.3; fill: none; }
+    .hp-line-y { stroke: #e0af68; stroke-width: 1.3; fill: none; }
+    .hp-line-b { stroke: #7aa2f7; stroke-width: 1.3; fill: none; }
+  </style>
+
+  <rect x="0" y="0" width="960" height="360" class="hp-bg"/>
+  <text x="480" y="28" text-anchor="middle" class="hp-title">Yabridge editor-thread pump</text>
+
+  <rect x="48" y="94" width="200" height="102" class="hp-host"/>
+  <text x="148" y="120" text-anchor="middle" class="hp-head-g">native host turn</text>
+  <text x="148" y="142" text-anchor="middle" class="hp-small">wrapper stays host-owned</text>
+  <text x="148" y="158" text-anchor="middle" class="hp-small">`handle_events()` drains Win32 queue</text>
+  <text x="148" y="174" text-anchor="middle" class="hp-small">then returns to the main loop</text>
+
+  <rect x="300" y="94" width="200" height="102" class="hp-input"/>
+  <text x="400" y="120" text-anchor="middle" class="hp-head-y">input-first</text>
+  <text x="400" y="142" text-anchor="middle" class="hp-small">mouse range first</text>
+  <text x="400" y="158" text-anchor="middle" class="hp-small">keyboard range second</text>
+  <text x="400" y="174" text-anchor="middle" class="hp-small">keeps overlays and menus responsive</text>
+
+  <rect x="552" y="94" width="200" height="102" class="hp-gen"/>
+  <text x="652" y="120" text-anchor="middle" class="hp-head-b">general queue cap</text>
+  <text x="652" y="142" text-anchor="middle" class="hp-small">20 messages by default</text>
+  <text x="652" y="158" text-anchor="middle" class="hp-small">8192 after `WM_USER + 123`</text>
+  <text x="652" y="174" text-anchor="middle" class="hp-small">JUCE-heavy redraw pages still settle</text>
+
+  <line x1="248" y1="146" x2="300" y2="146" class="hp-line-g"/>
+  <line x1="500" y1="146" x2="552" y2="146" class="hp-line-y"/>
+
+  <rect x="182" y="240" width="596" height="74" class="hp-note"/>
+  <text x="480" y="272" text-anchor="middle" class="hp-head-p">Why the split matters</text>
+  <text x="480" y="290" text-anchor="middle" class="hp-small">input avoids redraw backlogs, but the bridge still guarantees</text>
+  <text x="480" y="306" text-anchor="middle" class="hp-small">a bounded return to the native host loop</text>
+</svg>
+</div>
 
 ---
 

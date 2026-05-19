@@ -118,9 +118,10 @@ to place a Wine HWND-backed X11 child under a foreign Linux parent window.</p>
 <li><a href="#2-public-contract">Public contract</a></li>
 <li><a href="#3-embed-lifecycle">Embed lifecycle</a></li>
 <li><a href="#4-geometry-and-resize-ownership">Geometry and resize ownership</a></li>
-<li><a href="#5-input-and-drag-correctness">Input and drag correctness</a></li>
-<li><a href="#6-current-consumers">Current consumers</a></li>
-<li><a href="#7-references">References</a></li>
+<li><a href="#5-consumer-pump-discipline">Consumer pump discipline</a></li>
+<li><a href="#6-input-and-drag-correctness">Input and drag correctness</a></li>
+<li><a href="#7-current-consumers">Current consumers</a></li>
+<li><a href="#8-references">References</a></li>
 </ol>
 
 
@@ -225,6 +226,7 @@ observed when the host&rsquo;s Win32 message pump runs.</p>
 <li>the host owns X11 sizing with <code>XMoveResizeWindow()</code> or equivalent</li>
 <li>the host still uses <code>SetWindowPos()</code> so Wine&rsquo;s Win32-side rects track the
 correct absolute screen location</li>
+<li>the host pumps the embedded HWND&rsquo;s thread queue with a bounded general drain</li>
 </ul>
 
 
@@ -241,13 +243,30 @@ SendMessageW(embedHwnd, WM_X11DRV_NSPA_EMBED_WINDOW,
              MAKELPARAM(peerX, peerY));
 
 for (;;) {
-    while (PeekMessageW(&amp;msg, embedHwnd, 0, 0, PM_REMOVE)) {
-        if (msg.message == WM_X11DRV_NSPA_EMBED_DONE)
-            return;
+    while (PeekMessageW(&amp;msg, nullptr, WM_MOUSEFIRST, WM_MOUSELAST, PM_REMOVE)) {
         TranslateMessage(&amp;msg);
         DispatchMessageW(&amp;msg);
     }
+    while (PeekMessageW(&amp;msg, nullptr, WM_KEYFIRST, WM_KEYLAST, PM_REMOVE)) {
+        TranslateMessage(&amp;msg);
+        DispatchMessageW(&amp;msg);
+    }
+
+    const auto deadlineMs = now_ms() + 4;
+    while (PeekMessageW(&amp;msg, nullptr, 0, 0, PM_REMOVE)) {
+        if (msg.message == WM_X11DRV_NSPA_EMBED_DONE)
+            goto embed_done;
+        TranslateMessage(&amp;msg);
+        DispatchMessageW(&amp;msg);
+        if (now_ms() &gt;= deadlineMs)
+            break;
+    }
+
+    poll_linux_host_events();
 }
+
+embed_done:
+    ;
 </code></pre>
 
 
@@ -453,12 +472,125 @@ embedded X11 child when the parent-relative X11 geometry changes</li>
 
 <hr />
 
-<h2 id="5-input-and-drag-correctness">5. Input and drag correctness</h2>
+<h2 id="5-consumer-pump-discipline">5. Consumer pump discipline</h2>
+
+<p><code>WM_X11DRV_NSPA_EMBED_DONE</code> is only one part of the consumer contract. The
+host-side message pump also matters.</p>
+
+<p>The incorrect shape is an unbounded <code>while (PeekMessage)</code> drain on the same
+thread that must return to X11 polling. A redraw-heavy plugin can keep the
+queue non-empty with <code>WM_TIMER</code> and <code>WM_PAINT</code>, which means:</p>
+
+<ul>
+<li>the Win32 pump never returns</li>
+<li>the Linux host stops polling X11</li>
+<li>queued X11 mouse and keyboard input never reaches the plugin editor</li>
+</ul>
+
+
+<p>The required shape is:</p>
+
+<table>
+<thead>
+<tr>
+<th> Rule </th>
+<th> Why </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> pump the whole thread queue, not just the top-level HWND </td>
+<td> child editor windows carry paint, mouse, and keyboard traffic </td>
+</tr>
+<tr>
+<td> dispatch mouse and keyboard ranges ahead of the general drain </td>
+<td> redraw-heavy backlogs should not bury interactive input </td>
+</tr>
+<tr>
+<td> bound the general drain by time or message count </td>
+<td> the host thread must return to X11 polling predictably </td>
+</tr>
+</tbody>
+</table>
+
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 960 430" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
+  <style>
+    .pd-bg { fill: #1a1b26; }
+    .pd-host { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
+    .pd-input { fill: #2a2418; stroke: #e0af68; stroke-width: 1.8; rx: 8; }
+    .pd-gen { fill: #1a2235; stroke: #7aa2f7; stroke-width: 1.8; rx: 8; }
+    .pd-x11 { fill: #2a2137; stroke: #bb9af7; stroke-width: 1.8; rx: 8; }
+    .pd-warn { fill: #2a1a1a; stroke: #f7768e; stroke-width: 1.6; rx: 8; }
+    .pd-note { fill: #1f2435; stroke: #6b7398; stroke-width: 1.2; rx: 8; }
+    .pd-title { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
+    .pd-head-g { fill: #9ece6a; font: bold 11px 'JetBrains Mono', monospace; }
+    .pd-head-y { fill: #e0af68; font: bold 11px 'JetBrains Mono', monospace; }
+    .pd-head-b { fill: #7aa2f7; font: bold 11px 'JetBrains Mono', monospace; }
+    .pd-head-p { fill: #bb9af7; font: bold 11px 'JetBrains Mono', monospace; }
+    .pd-head-r { fill: #f7768e; font: bold 11px 'JetBrains Mono', monospace; }
+    .pd-small { fill: #a9b1d6; font: 9px 'JetBrains Mono', monospace; }
+    .pd-text { fill: #c0caf5; font: 10px 'JetBrains Mono', monospace; }
+    .pd-line-g { stroke: #9ece6a; stroke-width: 1.3; fill: none; }
+    .pd-line-y { stroke: #e0af68; stroke-width: 1.3; fill: none; }
+    .pd-line-b { stroke: #7aa2f7; stroke-width: 1.3; fill: none; }
+    .pd-line-p { stroke: #bb9af7; stroke-width: 1.3; fill: none; }
+  </style>
+
+  <rect x="0" y="0" width="960" height="430" class="pd-bg" rx="6"/>
+  <text x="480" y="28" text-anchor="middle" class="pd-title">Bounded consumer pump for embedded Wine HWNDs</text>
+
+  <rect x="44" y="94" width="184" height="110" class="pd-host" rx="6"/>
+  <text x="136" y="120" text-anchor="middle" class="pd-head-g">host tick</text>
+  <text x="136" y="142" text-anchor="middle" class="pd-small">JUCE timer callback</text>
+  <text x="136" y="158" text-anchor="middle" class="pd-small">or host event-loop turn</text>
+  <text x="136" y="174" text-anchor="middle" class="pd-small">same thread also polls X11</text>
+
+  <rect x="274" y="94" width="184" height="110" class="pd-input" rx="6"/>
+  <text x="366" y="120" text-anchor="middle" class="pd-head-y">input-first pass</text>
+  <text x="366" y="142" text-anchor="middle" class="pd-small">drain `WM_MOUSEFIRST..LAST`</text>
+  <text x="366" y="158" text-anchor="middle" class="pd-small">then `WM_KEYFIRST..LAST`</text>
+  <text x="366" y="174" text-anchor="middle" class="pd-small">whole thread queue, `hwnd = nullptr`</text>
+
+  <rect x="504" y="94" width="184" height="110" class="pd-gen" rx="6"/>
+  <text x="596" y="120" text-anchor="middle" class="pd-head-b">general drain</text>
+  <text x="596" y="142" text-anchor="middle" class="pd-small">all remaining Win32 messages</text>
+  <text x="596" y="158" text-anchor="middle" class="pd-small">bounded by time or count</text>
+  <text x="596" y="174" text-anchor="middle" class="pd-small">stop after `EMBED_DONE` or the budget</text>
+
+  <rect x="734" y="94" width="184" height="110" class="pd-x11" rx="6"/>
+  <text x="826" y="120" text-anchor="middle" class="pd-head-p">return to host poll</text>
+  <text x="826" y="142" text-anchor="middle" class="pd-small">service X11 button, motion, key</text>
+  <text x="826" y="158" text-anchor="middle" class="pd-small">keep editor interaction live</text>
+  <text x="826" y="174" text-anchor="middle" class="pd-small">host retains wall-clock fairness</text>
+
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="228" y1="150" x2="274" y2="150" class="pd-line-g"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="458" y1="150" x2="504" y2="150" class="pd-line-y"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="688" y1="150" x2="734" y2="150" class="pd-line-b"/>
+
+  <rect x="126" y="258" width="708" height="72" class="pd-note" rx="6"/>
+  <text x="480" y="286" text-anchor="middle" class="pd-head-b">Current consumer shapes</text>
+  <text x="480" y="306" text-anchor="middle" class="pd-small">JUCE-NSPA: input-first mouse/keyboard passes + 4 ms general-drain budget</text>
+  <text x="480" y="322" text-anchor="middle" class="pd-small">Element-NSPA: inherits JUCE-NSPA exactly</text>
+  <text x="480" y="338" text-anchor="middle" class="pd-small">Yabridge-NSPA: input-first passes + 20-message cap, extended to 8192 for JUCE floods</text>
+
+  <rect x="166" y="350" width="628" height="56" class="pd-warn" rx="6"/>
+  <text x="480" y="382" text-anchor="middle" class="pd-head-r">Failure mode avoided</text>
+  <text x="480" y="398" text-anchor="middle" class="pd-small">an unbounded general drain can loop forever on `WM_TIMER` + `WM_PAINT`</text>
+  <text x="480" y="414" text-anchor="middle" class="pd-small">and starve the host's X11 poll</text>
+</svg>
+</div>
+
+
+<hr />
+
+<h2 id="6-input-and-drag-correctness">6. Input and drag correctness</h2>
 
 <p>Two follow-on pieces keep embedded editors usable under host motion and plugin
 cursor save/restore behavior.</p>
 
-<h3 id="51-host-drag-rect-propagation">5.1 Host-drag rect propagation</h3>
+<h3 id="61-host-drag-rect-propagation">6.1 Host-drag rect propagation</h3>
 
 <p>When the host moves the embedded child at the X11 layer, Wine also updates the
 Win32-side rect state for the embedded HWND. That keeps:</p>
@@ -472,7 +604,7 @@ Win32-side rect state for the embedded HWND. That keeps:</p>
 
 <p>in sync with the host&rsquo;s actual X11 layout.</p>
 
-<h3 id="52-button-state-freeze-and-cursor-jump-suppression">5.2 Button-state freeze and cursor-jump suppression</h3>
+<h3 id="62-button-state-freeze-and-cursor-jump-suppression">6.2 Button-state freeze and cursor-jump suppression</h3>
 
 <p>During click-drag-release sequences, plugins may save screen coordinates on
 mouse-down and call <code>SetCursorPos()</code> on release. Mid-drag rect churn can make
@@ -493,7 +625,7 @@ embedded Win32 editors living inside foreign X11 hosts.</p>
 
 <hr />
 
-<h2 id="6-current-consumers">6. Current consumers</h2>
+<h2 id="7-current-consumers">7. Current consumers</h2>
 
 <p>The protocol is currently used by Wine-NSPA winelib hosts that embed Win32
 plugin editors into native Linux UI trees.</p>
@@ -508,15 +640,15 @@ plugin editors into native Linux UI trees.</p>
 <tbody>
 <tr>
 <td> JUCE-NSPA </td>
-<td> <code>WineHWNDEmbedComponent</code> creates a real Wine HWND and embeds it under a JUCE peer&rsquo;s X11 window for VST2, VST3, and CLAP editors </td>
+<td> <code>WineHWNDEmbedComponent</code> creates a real Wine HWND, pumps the full thread queue with input-first mouse/keyboard passes, and bounds the general drain to 4 ms per timer tick </td>
 </tr>
 <tr>
 <td> Element-NSPA </td>
-<td> inherits the JUCE-NSPA embed path for VST2, VST3, and CLAP editors </td>
+<td> inherits JUCE-NSPA&rsquo;s embed component, X11 sizing split, and bounded input-first pump for VST2, VST3, and CLAP editors </td>
 </tr>
 <tr>
 <td> Yabridge-NSPA </td>
-<td> keeps a wrapper window as the immediate host-owned parent, but hands the Wine child off through the atomic embed message beneath that wrapper </td>
+<td> keeps a wrapper window as the immediate host-owned parent, hands the Wine child off through the atomic embed message, and uses input-first passes plus a capped general drain in <code>HostBridge::handle_events()</code> </td>
 </tr>
 </tbody>
 </table>
@@ -527,7 +659,7 @@ that already manage a foreign X11 parent, not a full host toolkit.</p>
 
 <hr />
 
-<h2 id="7-references">7. References</h2>
+<h2 id="8-references">8. References</h2>
 
 <ul>
 <li><code>include/wine/nspa_x11_embed.h</code></li>
