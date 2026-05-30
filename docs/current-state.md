@@ -510,8 +510,8 @@ System-wide samples: `38,588 -> 19,415` per 30s.
 | 2026-05-16 | `--enable-nspa-arch=LEVEL` | x86_64 builds can opt into an explicit microarch target while bundling `-ffp-contract=off` so FP semantics stay stable |
 | 2026-05-30 | Wayland host/plugin embed path | `winewayland.drv` can adopt a winelib host `wl_display`, embed plugin HWND surfaces as `wl_subsurface` children, and ignore input enters on foreign host surfaces |
 | 2026-05-30 | `winewayland.drv` RT locking | Wayland driver mutexes in the host/plugin path use Wine-NSPA PI mutexes, and lazy init avoids non-PI pthread locking on RT-sensitive paths |
-| 2026-05-30 | JUCE-NSPA Wayland peer support | the JUCE fork carries a Wayland windowing backend for winelib hosts, including peer surface lookup and EGL/OpenGL context integration |
-| 2026-05-30 | Lulada Wayland integration | Lulada enables JUCE Wayland peers for Wayland sessions and uses the Wine-NSPA Wayland embed protocol for Windows plugin editors, with X11 fallback when Wayland is absent |
+| 2026-05-30 | JUCE-NSPA Wayland peer support | the JUCE-NSPA fork carries a Wayland windowing backend for winelib hosts, including peer surface lookup and EGL/OpenGL context integration |
+| 2026-05-30 | Lulada Wayland integration | Lulada enables JUCE-NSPA Wayland peers for Wayland sessions and uses the Wine-NSPA Wayland embed protocol for Windows plugin editors, with X11 fallback when Wayland is absent |
 
 ---
 
@@ -588,7 +588,7 @@ State boards and architecture deep-dives produced by the project:
 | `nt-local-stubs.gen.html` | NT-local stub pattern, including local sections, local events, and sched-hosted timer dispatch |
 | `shmem-ipc.gen.html` | NSPA shmem IPC primitives (γ + redraw + paint-cache) |
 | `juce-nspa.gen.html` | JUCE-NSPA framework substrate for Linux winelib Windows-plugin hosts |
-| `element-plugin-host.gen.html` | Lulada application port with JACK-first MIDI routing |
+| `element-plugin-host.gen.html` | Lulada DAW with recording, sequencing, JACK routing, and Windows-plugin embedding |
 | `yabridge-nspa.gen.html` | Yabridge-NSPA bridge alignment for native Linux DAWs hosting Windows plugins |
 | `nspa-rt-test.gen.html` | nspa_rt_test PE harness reference |
 | `architecture.gen.html` | Whole-system architecture overview |

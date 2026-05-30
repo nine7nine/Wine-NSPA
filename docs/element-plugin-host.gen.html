@@ -108,22 +108,23 @@
 <div class="page-nav"><a href="index.html">Docs Home</a></div>
 <h1 id="wine-nspa--lulada">Wine-NSPA &ndash; Lulada</h1>
 
-<p>This page documents Lulada, the Element-derived winelib application port for
-Windows VST2, VST3, and CLAP hosting on JUCE-NSPA and Wine-NSPA with JACK as
-the native audio and MIDI transport.</p>
+<p>This page documents Lulada, a modular Linux winelib DAW derived from Element
+and built around Wine-NSPA, JUCE-NSPA, in-process Win32 plugin hosting, and
+JACK-native audio/MIDI.</p>
 
 <h2 id="table-of-contents">Table of Contents</h2>
 
 <ol>
 <li><a href="#1-overview">Overview</a></li>
-<li><a href="#2-why-a-separate-port-exists">Why a separate port exists</a></li>
-<li><a href="#3-host-bootstrap">Host bootstrap</a></li>
-<li><a href="#4-plugin-surface-and-scan-policy">Plugin surface and scan policy</a></li>
-<li><a href="#5-jack-first-audio-and-midi-graph-path">JACK-first audio and MIDI graph path</a></li>
-<li><a href="#6-editor-dialogs-and-ui-layer">Editor, dialogs, and UI layer</a></li>
-<li><a href="#7-relationship-to-juce-nspa-and-wine-nspa">Relationship to JUCE-NSPA and Wine-NSPA</a></li>
-<li><a href="#8-current-scope">Current scope</a></li>
-<li><a href="#9-references">References</a></li>
+<li><a href="#2-daw-architecture">DAW architecture</a></li>
+<li><a href="#3-daw-feature-surface">DAW feature surface</a></li>
+<li><a href="#4-runtime-bootstrap">Runtime bootstrap</a></li>
+<li><a href="#5-plugin-surface-and-scan-policy">Plugin surface and scan policy</a></li>
+<li><a href="#6-jack-first-audio-and-midi-graph-path">JACK-first audio and MIDI graph path</a></li>
+<li><a href="#7-editor-dialogs-and-ui-layer">Editor, dialogs, and UI layer</a></li>
+<li><a href="#8-relationship-to-juce-nspa-and-wine-nspa">Relationship to JUCE-NSPA and Wine-NSPA</a></li>
+<li><a href="#9-application-boundary">Application boundary</a></li>
+<li><a href="#10-references">References</a></li>
 </ol>
 
 
@@ -131,28 +132,32 @@ the native audio and MIDI transport.</p>
 
 <h2 id="1-overview">1. Overview</h2>
 
-<p>Lulada is a Linux winelib application that hosts Windows plugins in-process
-through Wine. The port changes the runtime contract at five surfaces:</p>
+<p>Lulada is a modular Linux DAW with in-process Win32 plugin support. The
+application shell, Session View, Arrangement/Timeline, tracker, piano-roll,
+sampler, automation engine, JACK engine, plugin manager, embedded editors, and
+Wine-backed runtime all live in one Linux process with explicit ownership
+boundaries between the native and Win32 parts.</p>
+
+<p>The load-bearing subsystems are:</p>
 
 <ul>
-<li>Windows plugin format selection and scan policy</li>
-<li>asynchronous plugin instantiation under winelib</li>
-<li>embedded Win32 editor and dialog behavior inside a native X11 or Wayland UI
-tree</li>
-<li>JACK-first audio and MIDI routing inside the graph itself</li>
-<li>Wayland-aware host/window embedding through JUCE-NSPA when the session is
-Wayland-native</li>
-</ul>
-
-
-<p>The current application layer is also retuned for the same host model:</p>
-
-<ul>
-<li>the main window runs under one GL-backed shell, using Wayland when available
-and X11 otherwise</li>
-<li>internal file choosers replace native OS dialog assumptions under winelib</li>
-<li>the graph and mixer surfaces use per-node-type accents so Windows plugin
-formats and JACK-native nodes are legible inside the same graph</li>
+<li>a native Linux DAW shell with graph editing, session UI, Session View-style
+launching, multi-track recording, tracker sequencing, MIDI/piano-roll
+sequencing, internal dialogs, and GL-backed rendering</li>
+<li>a fully modular graph where audio, MIDI, JACK ports, sequencers, internal
+processors, and Windows plugins are routable production nodes</li>
+<li>Arrangement/Timeline audio and MIDI lanes with region authoring,
+disk-streamed record/playback, looped regions, gain, and fades</li>
+<li>tracker and piano-roll as equal MIDI authoring surfaces, with MIDI clips
+usable from both Session View and Arrangement</li>
+<li>sampler and automation systems that are part of the DAW engine, not external
+plugin requirements</li>
+<li>JACK-first audio and MIDI routing exposed as graph topology, including
+explicit per-port MIDI nodes</li>
+<li>Windows VST2, VST3, and CLAP plugin loading through JUCE-NSPA and Wine-NSPA</li>
+<li>embedded Win32 plugin editors inside native X11 or Wayland host windows</li>
+<li>runtime bootstrap that prepares wineserver, COM, process priority, and Wine
+thread state before plugin code runs</li>
 </ul>
 
 
@@ -181,26 +186,26 @@ formats and JACK-native nodes are legible inside the same graph</li>
   </style>
 
   <rect x="0" y="0" width="980" height="560" class="ov-bg" rx="6"/>
-  <text x="490" y="26" text-anchor="middle" class="ov-title">Lulada: application policy on top of JUCE-NSPA, Wine-NSPA, and JACK</text>
+  <text x="490" y="26" text-anchor="middle" class="ov-title">Lulada: DAW shell, JACK engine, and Windows plugin runtime in one process</text>
 
   <rect x="24" y="52" width="932" height="468" class="ov-lane" rx="6"/>
-  <text x="42" y="72" class="ov-small">single Linux process, mixed native + Wine-backed responsibilities</text>
+  <text x="42" y="72" class="ov-small">single Linux process, native DAW surfaces plus Wine-backed plugin surfaces</text>
 
   <rect x="46" y="94" width="250" height="158" class="ov-native" rx="6"/>
   <text x="171" y="118" text-anchor="middle" class="ov-head-g">Lulada application layer</text>
-  <text x="171" y="140" text-anchor="middle" class="ov-small">plugin manager, graph editor, session shell</text>
-  <text x="171" y="156" text-anchor="middle" class="ov-small">GL-backed main window + dark UI baseline</text>
-  <text x="171" y="172" text-anchor="middle" class="ov-small">internal file choosers embedded on the main window</text>
-  <text x="171" y="188" text-anchor="middle" class="ov-small">node-type accents for Audio I/O, JACK MIDI, VST2, VST3, CLAP</text>
-  <text x="171" y="214" text-anchor="middle" class="ov-text">application policy lives here</text>
+  <text x="171" y="140" text-anchor="middle" class="ov-small">Session View + Arrangement/Timeline</text>
+  <text x="171" y="156" text-anchor="middle" class="ov-small">tracker + piano-roll MIDI authoring</text>
+  <text x="171" y="172" text-anchor="middle" class="ov-small">sampler, automation, plugin manager</text>
+  <text x="171" y="188" text-anchor="middle" class="ov-small">GL-backed shell + embedded internal dialogs</text>
+  <text x="171" y="214" text-anchor="middle" class="ov-text">music-production UI and session model live here</text>
 
   <rect x="364" y="82" width="252" height="182" class="ov-host" rx="6"/>
   <text x="490" y="106" text-anchor="middle" class="ov-head-b">JUCE-NSPA / winelib host substrate</text>
   <text x="490" y="128" text-anchor="middle" class="ov-small">winegcc / wineg++ build, PE module loading</text>
-  <text x="490" y="144" text-anchor="middle" class="ov-small">VST2, VST3, and CLAP host formats</text>
+  <text x="490" y="144" text-anchor="middle" class="ov-small">in-process Win32 VST2, VST3, and CLAP</text>
   <text x="490" y="160" text-anchor="middle" class="ov-small">Win32 ABI fixes, `LoadLibraryW()`, `CreateThread` async load</text>
   <text x="490" y="176" text-anchor="middle" class="ov-small">X11 or Wayland `WineHWNDEmbedComponent` + bounded Win32 pump</text>
-  <text x="490" y="202" text-anchor="middle" class="ov-text">framework layer reused by the app</text>
+  <text x="490" y="202" text-anchor="middle" class="ov-text">framework layer provides the Win32 plugin substrate</text>
 
   <rect x="684" y="94" width="250" height="158" class="ov-plugin" rx="6"/>
   <text x="809" y="118" text-anchor="middle" class="ov-head-p">Windows plugins</text>
@@ -213,14 +218,14 @@ formats and JACK-native nodes are legible inside the same graph</li>
   <text x="490" y="334" text-anchor="middle" class="ov-head-y">JACK-first audio and MIDI engine</text>
   <text x="490" y="356" text-anchor="middle" class="ov-small">JACK is the sole Linux audio + MIDI transport in this build</text>
   <text x="490" y="372" text-anchor="middle" class="ov-small">sample-accurate MIDI ingress lands in combined and per-port buffers</text>
-  <text x="490" y="388" text-anchor="middle" class="ov-small">`JackMidiInputNode` / `JackMidiOutputNode` and `(...All)` nodes expose that routing</text>
-  <text x="490" y="404" text-anchor="middle" class="ov-small">outbound MIDI writes go directly to the current JACK period's port buffers</text>
+  <text x="490" y="388" text-anchor="middle" class="ov-small">native JACK MIDI nodes expose per-port routing in the graph</text>
+  <text x="490" y="404" text-anchor="middle" class="ov-small">disk-streamed audio lanes and MIDI lanes run from the same timeline model</text>
   <text x="490" y="430" text-anchor="middle" class="ov-text">audio and native MIDI live on the same timing surface</text>
 
   <rect x="110" y="454" width="760" height="46" class="ov-note" rx="6"/>
   <text x="490" y="482" text-anchor="middle" class="ov-head-r">Result</text>
-  <text x="490" y="498" text-anchor="middle" class="ov-small">Windows plugin hosting, native JACK routing, and the Linux application shell</text>
-  <text x="490" y="512" text-anchor="middle" class="ov-small">share one process, but each layer keeps a distinct ownership boundary</text>
+  <text x="490" y="498" text-anchor="middle" class="ov-small">the DAW shell, JACK graph, and Windows plugin runtime share one process,</text>
+  <text x="490" y="512" text-anchor="middle" class="ov-small">but each layer keeps a distinct ownership boundary</text>
 
   <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="296" y1="174" x2="364" y2="174" class="ov-line-g"/>
   <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="616" y1="174" x2="684" y2="174" class="ov-line-b"/>
@@ -233,39 +238,44 @@ formats and JACK-native nodes are legible inside the same graph</li>
 
 <hr />
 
-<h2 id="2-why-a-separate-port-exists">2. Why a separate port exists</h2>
+<h2 id="2-daw-architecture">2. DAW architecture</h2>
 
-<p>Upstream Element is not designed around a Linux winelib host for Windows
-plugins. The application layer still has to make decisions that are more
-specific than the JUCE framework layer:</p>
+<p>Lulada keeps Element&rsquo;s graph-oriented lineage, but the application target is a
+Wine-NSPA music-production environment. Plugin hosting is one subsystem inside
+the DAW rather than the whole product shape.</p>
+
+<p>The application-level decisions are:</p>
 
 <ul>
-<li>which plugin formats belong in this process</li>
-<li>how scan paths should be derived from <code>WINEPREFIX</code></li>
-<li>how early the host has to bootstrap wineserver, COM, and Win32 process-class
-state</li>
-<li>how plugin editor windows and file choosers should behave once the app is a
-Linux shell wrapped around Wine-hosted plugin state</li>
-<li>how JACK MIDI should be treated in the graph when the primary target is a
-low-latency JACK workflow</li>
+<li>the DAW shell stays native Linux, with Wayland used when available and X11 as
+the fallback host window system</li>
+<li>JACK is the audio/MIDI transport and timing authority</li>
+<li>JACK MIDI is exposed as real graph topology rather than hidden device state</li>
+<li>Windows plugins are first-class graph nodes loaded in-process through Wine</li>
+<li>plugin editor windows are native-host children even though the editor HWNDs
+and plugin callbacks follow Win32 rules</li>
+<li>file choosers and plugin-window chrome stay inside the application shell
+instead of depending on native OS dialog behavior from inside winelib</li>
 </ul>
 
-
-<p>That is why this is an application port, not just &ldquo;JUCE-NSPA plus a build
-file.&rdquo;</p>
 
 <table>
 <thead>
 <tr>
 <th> Concern </th>
-<th> Upstream Element assumption </th>
-<th> Lulada shape </th>
+<th> Generic Element lineage </th>
+<th> Lulada architecture </th>
 </tr>
 </thead>
 <tbody>
 <tr>
+<td> Application role </td>
+<td> graph-oriented audio host </td>
+<td> DAW shell with graph editing, JACK routing, and Windows plugin production workflow </td>
+</tr>
+<tr>
 <td> Plugin target </td>
-<td> native Linux formats plus platform-native host formats </td>
+<td> platform-native plugin formats </td>
 <td> Windows VST2, VST3, and CLAP through winelib + Wine </td>
 </tr>
 <tr>
@@ -289,8 +299,8 @@ file.&rdquo;</p>
 <td> JUCE-internal choosers embedded on the main window </td>
 </tr>
 <tr>
-<td> MIDI shape on JACK builds </td>
-<td> generic Linux MIDI backends </td>
+<td> MIDI shape </td>
+<td> generic Linux MIDI backend choices </td>
 <td> JACK-first native MIDI ports and graph nodes; ALSA is disabled </td>
 </tr>
 </tbody>
@@ -299,7 +309,95 @@ file.&rdquo;</p>
 
 <hr />
 
-<h2 id="3-host-bootstrap">3. Host bootstrap</h2>
+<h2 id="3-daw-feature-surface">3. DAW feature surface</h2>
+
+<p>Lulada&rsquo;s current public DAW surface is centered on graph/session workflow plus
+clip and sequence authoring. A load-bearing distinction is that Windows VST2,
+VST3, and CLAP plugins run in-process inside the Linux DAW instead of through a
+separate bridge process. The application presents audio I/O, JACK MIDI I/O,
+sequencers, internal processors, and Windows plugin nodes as routable
+production surfaces, with the JACK callback acting as the period boundary for
+audio and MIDI.</p>
+
+<table>
+<thead>
+<tr>
+<th> Surface </th>
+<th> Current behavior </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> Session shell </td>
+<td> single GL-backed main window with graph, mixer-facing UI, Session View-style launcher, plugin manager, and internal dialogs under one native Linux shell </td>
+</tr>
+<tr>
+<td> Modular graph </td>
+<td> audio I/O, JACK MIDI I/O, Windows plugins, sequencers, and internal processing surfaces are routable graph nodes </td>
+</tr>
+<tr>
+<td> Arrangement / Timeline </td>
+<td> audio and MIDI lanes, disk-streamed record/playback, move/resize/split/snap region authoring, looped regions, clip gain, and Bezier fades </td>
+</tr>
+<tr>
+<td> Multi-track recording </td>
+<td> audio and MIDI recording are organized as DAW tracks rather than one-off plugin-host capture </td>
+</tr>
+<tr>
+<td> Clip launching </td>
+<td> Session View-style workflow for launching and arranging musical material in a live-production shape </td>
+</tr>
+<tr>
+<td> Tracker sequencing </td>
+<td> tracker-style pattern sequencing is part of the composition surface </td>
+</tr>
+<tr>
+<td> MIDI / piano-roll sequencing </td>
+<td> piano-roll MIDI editing complements the tracker path for note and automation authoring </td>
+</tr>
+<tr>
+<td> Sampler </td>
+<td> FT2-style sampler engine with multi-instrument bank/slot workflow, envelopes, voice-level FX, session-global sample pool, and SIMD mix path </td>
+</tr>
+<tr>
+<td> Automation </td>
+<td> copy-on-write automation data model, sample-accurate MIDI CC, touch-record path, and session save/load round-trip </td>
+</tr>
+<tr>
+<td> Audio transport </td>
+<td> JACK is the Linux audio backend and timing authority </td>
+</tr>
+<tr>
+<td> MIDI transport </td>
+<td> JACK MIDI is enabled as graph topology, with combined input plus explicit per-port input and output nodes </td>
+</tr>
+<tr>
+<td> In-process Win32 plugins </td>
+<td> Windows VST2, VST3, and CLAP run inside the DAW process through the Wine-backed runtime </td>
+</tr>
+<tr>
+<td> Plugin editors </td>
+<td> Win32 plugin editor HWNDs embed inside the DAW window tree through X11 or Wayland host surfaces </td>
+</tr>
+<tr>
+<td> Dialogs </td>
+<td> session and graph file operations use JUCE internal choosers parented on the main window </td>
+</tr>
+<tr>
+<td> Visual identity </td>
+<td> graph blocks, wires, and mixer/channel surfaces use type colors for Audio I/O, JACK MIDI, VST2, VST3, CLAP, and internal nodes </td>
+</tr>
+</tbody>
+</table>
+
+
+<p>The result is a Linux DAW shell whose recording, clip, sequence, and realtime
+graph surfaces are JACK-native while in-process Windows plugin nodes keep
+Win32 loader, message, editor, and callback semantics intact.</p>
+
+<hr />
+
+<h2 id="4-runtime-bootstrap">4. Runtime bootstrap</h2>
 
 <p>Lulada performs winelib host initialization before plugin code gets a chance
 to run static constructors.</p>
@@ -331,10 +429,10 @@ uninitialized wineserver.</p>
 
 <hr />
 
-<h2 id="4-plugin-surface-and-scan-policy">4. Plugin surface and scan policy</h2>
+<h2 id="5-plugin-surface-and-scan-policy">5. Plugin surface and scan policy</h2>
 
 <p>Lulada narrows its plugin surface to the Windows formats that make
-sense inside this winelib host.</p>
+sense inside this Wine-NSPA DAW process.</p>
 
 <table>
 <thead>
@@ -357,6 +455,10 @@ sense inside this winelib host.</p>
 <td> enabled under <code>__WINE__</code> through JUCE-NSPA <code>CLAPPluginFormat</code> </td>
 </tr>
 <tr>
+<td> Built-in nodes </td>
+<td> sampler, tracker, MIDI tools, audio FX, and other internal graph processors stay native inside the DAW </td>
+</tr>
+<tr>
 <td> LV2 </td>
 <td> not registered under <code>__WINE__</code> </td>
 </tr>
@@ -369,11 +471,12 @@ sense inside this winelib host.</p>
 
 
 <p>The LV2 and LADSPA exclusions are deliberate. They are Linux-native plugin
-formats, and loading them inside the same winelib process would pull unrelated
-native plugin trees and their copies of framework globals into the same address
-space. For this host, that is the wrong process boundary.</p>
+formats, and loading them inside the same winelib DAW process would pull
+unrelated native plugin trees and their copies of framework globals into the
+same address space. For this application boundary, that is the wrong process
+shape.</p>
 
-<h3 id="41-wine-prefix-path-discovery">4.1 Wine-prefix path discovery</h3>
+<h3 id="51-wine-prefix-path-discovery">5.1 Wine-prefix path discovery</h3>
 
 <p>Lulada augments default scan paths with Windows-plugin directories inside
 <code>WINEPREFIX</code>.</p>
@@ -394,7 +497,7 @@ space. For this host, that is the wrong process boundary.</p>
 is x86_64 winelib, so 32-bit plugin DLLs are not loadable here and would only
 pollute scan results with permanently broken entries.</p>
 
-<h3 id="42-clap-registration-under-winelib">4.2 CLAP registration under winelib</h3>
+<h3 id="52-clap-registration-under-winelib">5.2 CLAP registration under winelib</h3>
 
 <p>Under <code>__WINE__</code>, Lulada uses JUCE-NSPA&rsquo;s CLAP host format instead of
 upstream Element&rsquo;s native Linux CLAP provider.</p>
@@ -413,7 +516,7 @@ native <code>CLAPProvider</code></li>
 IPC used for other formats is not yet reliable enough for the Winegcc CLAP
 path, so CLAP file enumeration and factory probing stay in the main process.</p>
 
-<h3 id="43-asynchronous-instantiation">4.3 Asynchronous instantiation</h3>
+<h3 id="53-asynchronous-instantiation">5.3 Asynchronous instantiation</h3>
 
 <p>Interactive plugin add is no longer a message-thread synchronous load.</p>
 
@@ -438,13 +541,12 @@ being materialized.</p>
 
 <hr />
 
-<h2 id="5-jack-first-audio-and-midi-graph-path">5. JACK-first audio and MIDI graph path</h2>
+<h2 id="6-jack-first-audio-and-midi-graph-path">6. JACK-first audio and MIDI graph path</h2>
 
-<p>The current Lulada JACK MIDI implementation is a live part of the host model.
-This Linux build disables ALSA and uses JACK as the native audio and MIDI
-transport.</p>
+<p>The JACK path is part of the DAW architecture, not just a device backend. This
+Linux build disables ALSA and uses JACK as the native audio and MIDI transport.</p>
 
-<h3 id="51-timing-and-data-path">5.1 Timing and data path</h3>
+<h3 id="61-timing-and-data-path">6.1 Timing and data path</h3>
 
 <p><code>JackAudioIODevice::process()</code> is the timing authority. JACK ingress, Lulada&rsquo;s
 audio callback, graph MIDI consumption, and outbound MIDI emission all happen on
@@ -496,9 +598,9 @@ that period, which drives the UI Tx indicator</li>
 </ul>
 
 
-<h3 id="52-graph-exposure-and-routing">5.2 Graph exposure and routing</h3>
+<h3 id="62-graph-exposure-and-routing">6.2 Graph exposure and routing</h3>
 
-<p>The host exposes JACK MIDI as actual graph topology instead of a hidden device
+<p>Lulada exposes JACK MIDI as actual graph topology instead of a hidden device
 side effect.</p>
 
 <table>
@@ -620,10 +722,11 @@ stream; the extra dispatcher call is additive, not a replacement.</p>
 
 <hr />
 
-<h2 id="6-editor-dialogs-and-ui-layer">6. Editor, dialogs, and UI layer</h2>
+<h2 id="7-editor-dialogs-and-ui-layer">7. Editor, dialogs, and UI layer</h2>
 
 <p>The editor path follows JUCE-NSPA&rsquo;s embedded Win32 GUI model, so plugin editor
-windows are still real Wine HWND-backed windows inside a Linux UI tree.</p>
+windows are real Wine HWND-backed windows inside the DAW&rsquo;s native Linux UI
+tree.</p>
 
 <p>Lulada does not add another embed protocol on top of that layer. Editor
 windows inherit JUCE-NSPA&rsquo;s <code>WineHWNDEmbedComponent</code>, which means:</p>
@@ -638,7 +741,7 @@ parentage on the adopted host <code>wl_display</code></li>
 </ul>
 
 
-<p>Lulada adds application policy on top:</p>
+<p>The DAW layer adds application policy on top:</p>
 
 <ul>
 <li>the <code>PluginWindow</code> toolbar path is disabled so the embedded editor fills the
@@ -661,9 +764,9 @@ same Linux shell as the rest of the application</li>
 </ul>
 
 
-<h3 id="61-inherited-embed-boundary">6.1 Inherited embed boundary</h3>
+<h3 id="71-inherited-embed-boundary">7.1 Inherited embed boundary</h3>
 
-<p>The application port reuses the JUCE-NSPA embed substrate directly. The split
+<p>The DAW reuses the JUCE-NSPA embed substrate directly. The split
 between framework ownership and application ownership is:</p>
 
 <table>
@@ -704,23 +807,22 @@ between framework ownership and application ownership is:</p>
 </table>
 
 
-<h3 id="62-wayland-host-mode">6.2 Wayland host mode</h3>
+<h3 id="72-wayland-host-mode">7.2 Wayland host mode</h3>
 
-<p>Lulada enables JUCE&rsquo;s Wayland peer backend for winelib builds. On a Wayland
-session the JUCE layer owns the native <code>wl_display</code> and peer surfaces, then
-publishes that display to <code>winewayland.drv</code> before Wine creates plugin editor
-surfaces. Wine validates that the host parent and Wine child are on the same
-display, creates a fresh <code>wl_surface</code> for the HWND, and installs it as a
-<code>wl_subsurface</code> of the JUCE peer.</p>
+<p>Lulada enables the JUCE-NSPA Wayland peer backend for winelib builds. On a
+Wayland session the JUCE-NSPA layer owns the native <code>wl_display</code> and peer
+surfaces, then publishes that display to <code>winewayland.drv</code> before Wine creates
+plugin editor surfaces. Wine validates that the host parent and Wine child are
+on the same display, creates a fresh <code>wl_surface</code> for the HWND, and installs it
+as a <code>wl_subsurface</code> of the JUCE-NSPA peer.</p>
 
 <p>The Wayland path is runtime-selected. If <code>WAYLAND_DISPLAY</code> is absent, the host
 continues through the X11 embed path.</p>
 
-<h3 id="63-graph-shell-and-visual-system">6.3 Graph shell and visual system</h3>
+<h3 id="73-graph-shell-and-visual-system">7.3 Graph shell and visual system</h3>
 
-<p>Lulada&rsquo;s UI layer is not just a reskin. The recent changes move the host
-toward a clearer separation between application shell, graph topology, and
-plugin format identity.</p>
+<p>The UI layer separates application shell, graph topology, plugin format
+identity, and JACK routing state.</p>
 
 <p>Current UI-side decisions:</p>
 
@@ -837,9 +939,11 @@ synchronization</li>
 
 <hr />
 
-<h2 id="7-relationship-to-juce-nspa-and-wine-nspa">7. Relationship to JUCE-NSPA and Wine-NSPA</h2>
+<h2 id="8-relationship-to-juce-nspa-and-wine-nspa">8. Relationship to JUCE-NSPA and Wine-NSPA</h2>
 
-<p>Lulada sits on top of both framework and runtime layers.</p>
+<p>Lulada uses JUCE-NSPA for the Win32 plugin framework layer and Wine-NSPA for
+the runtime surfaces that make that framework viable in an RT-oriented Linux
+DAW.</p>
 
 <table>
 <thead>
@@ -851,7 +955,7 @@ synchronization</li>
 <tbody>
 <tr>
 <td> JUCE-NSPA </td>
-<td> winelib build support, VST2/VST3/CLAP Windows-plugin loading, Wayland peer support, async <code>CreateThread</code> load path, and the bounded input-first <code>WineHWNDEmbedComponent</code> editor layer </td>
+<td> winelib build support, VST2/VST3/CLAP Windows-plugin loading, JUCE-NSPA Wayland peer support, async <code>CreateThread</code> load path, and the bounded input-first <code>WineHWNDEmbedComponent</code> editor layer </td>
 </tr>
 <tr>
 <td> Wine-NSPA X11 embed protocol </td>
@@ -859,7 +963,7 @@ synchronization</li>
 </tr>
 <tr>
 <td> Wine-NSPA Wayland embed protocol </td>
-<td> embeds plugin editor HWNDs as Wayland subsurfaces under JUCE Wayland peers using the shared host <code>wl_display</code> </td>
+<td> embeds plugin editor HWNDs as Wayland subsurfaces under JUCE-NSPA Wayland peers using the shared host <code>wl_display</code> </td>
 </tr>
 <tr>
 <td> Wine-NSPA Win32 runtime </td>
@@ -873,13 +977,13 @@ synchronization</li>
 </table>
 
 
-<p>Lulada therefore is not a thin build wrapper. It is an application port
-that binds one specific app shell to the JUCE-NSPA framework layer and to the
-Wine-NSPA runtime rules underneath it.</p>
+<p>The important boundary is that JUCE-NSPA and Wine-NSPA provide the plugin and
+runtime substrate. Lulada owns the DAW shell, graph/session model, JACK routing
+policy, plugin scan policy, editor presentation, and user-facing workflow.</p>
 
 <hr />
 
-<h2 id="8-current-scope">8. Current scope</h2>
+<h2 id="9-application-boundary">9. Application boundary</h2>
 
 <table>
 <thead>
@@ -890,8 +994,8 @@ Wine-NSPA runtime rules underneath it.</p>
 </thead>
 <tbody>
 <tr>
-<td> Host architecture </td>
-<td> Linux-only x86_64 winelib host </td>
+<td> Application architecture </td>
+<td> Linux-only x86_64 winelib DAW </td>
 </tr>
 <tr>
 <td> Host window system </td>
@@ -925,13 +1029,13 @@ Wine-NSPA runtime rules underneath it.</p>
 </table>
 
 
-<p>This page therefore describes a specific application-port shape, not a claim
-that every upstream Element feature or every native-Linux plugin surface should live in
-the same process as the winelib Windows-plugin host.</p>
+<p>This page describes the current Lulada application boundary: a native Linux DAW
+shell with a Wine-backed Windows plugin runtime, not a general claim that every
+native-Linux plugin surface should live in the same process.</p>
 
 <hr />
 
-<h2 id="9-references">9. References</h2>
+<h2 id="10-references">10. References</h2>
 
 <ul>
 <li><code>src/main.cc</code></li>

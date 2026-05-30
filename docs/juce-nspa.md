@@ -374,7 +374,7 @@ with the next instance just because both live inside the same process.
 
 Editor hosting uses the same `WineHWNDEmbedComponent` abstraction on both
 Linux windowing backends. The component creates a real Wine HWND, then hands
-that HWND to the Wine-NSPA driver path that matches the current JUCE peer.
+that HWND to the Wine-NSPA driver path that matches the current JUCE-NSPA peer.
 
 | Host peer | Embed path | Native object owned by the host |
 |---|---|---|
@@ -403,7 +403,7 @@ Geometry ownership stays split by layer:
 
 - `SetWindowPos()` updates Wine's Win32-side window rects
 - the native peer backend keeps the X11 child or Wayland subsurface at the
-  correct parent-relative location under the JUCE peer
+  correct parent-relative location under the JUCE-NSPA peer
 
 ### 6.1 Current pump contract
 
@@ -422,7 +422,7 @@ The queue pump is a host-side contract, not a best-effort hint.
 | Responsibility | Current behavior |
 |---|---|
 | Win32 surface creation | creates a real top-level Wine HWND with `CreateWindowExW()` |
-| Native peer lookup | resolves the backing X11 child or Wayland host parent for the JUCE peer |
+| Native peer lookup | resolves the backing X11 child or Wayland host parent for the JUCE-NSPA peer |
 | Embed handoff | sends the X11 or Wayland Wine-NSPA embed request for the HWND |
 | Completion fence | handles the backend `*_EMBED_DONE` message if the host wants a deterministic "embed settled" point |
 | Win32 pump | drains the whole thread queue with input-first mouse/keyboard passes, then a 4 ms general-drain budget |
@@ -541,8 +541,8 @@ JUCE-NSPA depends on specific Wine-NSPA surfaces.
 
 | Surface | Use in JUCE-NSPA |
 |---|---|
-| `WM_X11DRV_NSPA_EMBED_WINDOW` / `WM_X11DRV_NSPA_EMBED_DONE` | embeds Wine editor windows under a Linux JUCE peer without reimplementing Wine's embedded-window bookkeeping |
-| `WM_WAYLANDDRV_NSPA_EMBED_WINDOW` / `WM_WAYLANDDRV_NSPA_EMBED_DONE` | embeds Wine editor windows under a Wayland JUCE peer through a shared host `wl_display` and `wl_subsurface` parentage |
+| `WM_X11DRV_NSPA_EMBED_WINDOW` / `WM_X11DRV_NSPA_EMBED_DONE` | embeds Wine editor windows under a Linux JUCE-NSPA peer without reimplementing Wine's embedded-window bookkeeping |
+| `WM_WAYLANDDRV_NSPA_EMBED_WINDOW` / `WM_WAYLANDDRV_NSPA_EMBED_DONE` | embeds Wine editor windows under a Wayland JUCE-NSPA peer through a shared host `wl_display` and `wl_subsurface` parentage |
 | Wine `LoadLibraryW()` path | loads Windows VST2, VST3, and CLAP modules in-process |
 | Wine `CreateThread` path | gives async plugin creation a Win32-registered worker thread with valid TEB/SEH/loader state |
 | vendored `rtpi.h` wrappers | provides `PiMutex` / `PiCond` wrappers for the host-side dispatcher layer, including a process-shared-compatible shape |
@@ -560,7 +560,7 @@ fork written around Wine-NSPA's specific load, thread, sync, and embed rules.
 | Host architecture | Linux-only x86_64 winelib host |
 | Plugin formats | Windows VST2, VST3, and CLAP |
 | Async instantiation | one-shot Wine `CreateThread` worker, callback returned to the JUCE message thread |
-| GUI embedding | Wine HWND-backed editor windows inside X11 or Wayland Linux JUCE peers |
+| GUI embedding | Wine HWND-backed editor windows inside X11 or Wayland Linux JUCE-NSPA peers |
 | Current application consumer | Lulada |
 
 JUCE-NSPA is a framework fork, not an end-user host by itself. Its value is

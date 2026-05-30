@@ -60,7 +60,7 @@ surfaces as children of host surfaces.
 
   <rect x="54" y="104" width="220" height="132" class="wy-host"/>
   <text x="164" y="130" text-anchor="middle" class="wy-head-g">winelib host</text>
-  <text x="164" y="152" text-anchor="middle" class="wy-small">JUCE Wayland peer</text>
+  <text x="164" y="152" text-anchor="middle" class="wy-small">JUCE-NSPA Wayland peer</text>
   <text x="164" y="168" text-anchor="middle" class="wy-small">owns the parent `wl_surface`</text>
   <text x="164" y="184" text-anchor="middle" class="wy-small">drives the event loop</text>
   <text x="164" y="208" text-anchor="middle" class="wy-text">calls `wine_nspa_wayland_set_display()`</text>
@@ -273,7 +273,7 @@ starve the native host loop.
 | Consumer | Use |
 |---|---|
 | JUCE-NSPA | provides the Wayland peer surface and exposes the host `wl_display` used by Wine-NSPA's Wayland driver |
-| Lulada | enables `JUCE_WAYLAND=1`, uses the JUCE Wayland backend for the application shell, and embeds Windows plugin editors through the Wayland path on Wayland sessions |
+| Lulada | enables the JUCE-NSPA Wayland backend for the application shell and embeds Windows plugin editors through the Wine-NSPA Wayland path on Wayland sessions |
 
 Yabridge-NSPA still uses the X11 embed path because its editor bridge keeps a
 wrapper X11 window as the immediate foreign parent.

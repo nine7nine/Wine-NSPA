@@ -540,7 +540,7 @@ Master overview (this doc) plus dedicated subsystem pages.
 | `nspa-x11-embed-protocol.gen.html` | Wine-NSPA atomic X11 embed contract for winelib hosts |
 | `nspa-wayland-embed-protocol.gen.html` | Wine-NSPA native Wayland embed contract for winelib hosts |
 | `juce-nspa.gen.html` | JUCE-NSPA framework substrate for Linux winelib Windows-plugin hosts |
-| `element-plugin-host.gen.html` | Lulada application port with JACK-first MIDI routing and X11/Wayland plugin embedding |
+| `element-plugin-host.gen.html` | Lulada DAW with recording, sequencing, JACK routing, and X11/Wayland plugin embedding |
 | `yabridge-nspa.gen.html` | Yabridge-NSPA bridge alignment for native Linux DAWs hosting Windows plugins |
 | `nspa-rt-test.gen.html` | nspa_rt_test PE harness reference |
 | `decoration-loop-investigation.gen.html` | X11 decoration-loop bug 57955 case study |
