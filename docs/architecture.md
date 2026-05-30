@@ -316,7 +316,7 @@ cache keeps a per-thread snapshot of the last empty filter tuple plus
 changes, Wine returns `STATUS_PENDING` locally instead of paying another
 wineserver round-trip. The message path also reads its hot per-thread caches
 through `TEB->Win32ClientInfo` instead of repeated
-`pthread_getspecific()` calls. On the current 2026-05-16 layout, the forward
+`pthread_getspecific()` calls. On the current layout, the forward
 msg ring and the co-located timer/redraw rings also keep hot producer and
 consumer indices on separate cachelines so the writer's `head` updates and the
 reader's `tail` advances do not false-share the same line.
@@ -414,7 +414,7 @@ Each bypass moves a specific class of NT-API state or I/O work out of wineserver
 
 The current topology covers the active bypass surfaces plus the
 residual wineserver floor (process/thread lifecycle, cross-process
-naming, path resolution, handle inheritance). As of 2026-05-16, the
+naming, path resolution, handle inheritance). As of 2026-05-30, the
 default-on set includes sync primitives, hook caching,
 thread/process shared-state readers, zero-time process and thread wait polling,
 NT-local file and section handling, local events, sched-hosted timer dispatch,
@@ -423,7 +423,8 @@ aggregate-wait + `TRY_RECV2` dispatcher path, async `CreateFile`,
 socket `RECVMSG` / `SENDMSG`, msg-ring v1 same-process send/reply,
 the `redraw_window` push ring, the paint cache fast path, the
 `get_message` empty-poll cache, and the RT-keyed memory follow-ons
-(`mlockall()`, automatic hugetlb promotion, heap-arena hugetlb backing).
+(`mlockall()`, automatic hugetlb promotion, heap-arena hugetlb backing),
+plus the X11 and Wayland host/plugin embed protocols for winelib hosts.
 The main remaining server-managed surfaces are the harder cross-process,
 named-object, device-IRP, and message classes that do not fit those local
 envelopes.
@@ -537,8 +538,9 @@ Master overview (this doc) plus dedicated subsystem pages.
 | `io_uring-architecture.gen.html` | `io_uring` file I/O, async `CreateFile`, and socket SQEs |
 | `audio-stack.gen.html` | winejack.drv + nspaASIO low-latency audio path |
 | `nspa-x11-embed-protocol.gen.html` | Wine-NSPA atomic X11 embed contract for winelib hosts |
+| `nspa-wayland-embed-protocol.gen.html` | Wine-NSPA native Wayland embed contract for winelib hosts |
 | `juce-nspa.gen.html` | JUCE-NSPA framework substrate for Linux winelib Windows-plugin hosts |
-| `element-plugin-host.gen.html` | Element-NSPA application port with JACK-first MIDI routing |
+| `element-plugin-host.gen.html` | Lulada application port with JACK-first MIDI routing and X11/Wayland plugin embedding |
 | `yabridge-nspa.gen.html` | Yabridge-NSPA bridge alignment for native Linux DAWs hosting Windows plugins |
 | `nspa-rt-test.gen.html` | nspa_rt_test PE harness reference |
 | `decoration-loop-investigation.gen.html` | X11 decoration-loop bug 57955 case study |
@@ -551,4 +553,4 @@ here.
 
 ---
 
-*Master overview updated 2026-05-17. Per-subsystem detail is in the dedicated pages linked above; live state is in `current-state.gen.html`.*
+*Master overview updated 2026-05-30. Per-subsystem detail is in the dedicated pages linked above; live state is in `current-state.gen.html`.*

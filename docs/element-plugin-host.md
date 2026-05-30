@@ -1,8 +1,8 @@
-# Wine-NSPA -- Element-NSPA
+# Wine-NSPA -- Lulada
 
-This page documents the Element application port that hosts Windows VST2, VST3,
-and CLAP plugins through JUCE-NSPA and Wine-NSPA while using JACK as the native
-audio and MIDI transport.
+This page documents Lulada, the Element-derived winelib application port for
+Windows VST2, VST3, and CLAP hosting on JUCE-NSPA and Wine-NSPA with JACK as
+the native audio and MIDI transport.
 
 ## Table of Contents
 
@@ -20,18 +20,21 @@ audio and MIDI transport.
 
 ## 1. Overview
 
-Element-NSPA is a Linux winelib build of Element that hosts Windows plugins
-in-process through Wine. It is not just "Element built with a different
-compiler." The port changes the runtime contract at four surfaces:
+Lulada is a Linux winelib application that hosts Windows plugins in-process
+through Wine. The port changes the runtime contract at five surfaces:
 
 - Windows plugin format selection and scan policy
 - asynchronous plugin instantiation under winelib
-- embedded Win32 editor and dialog behavior inside a native Linux UI tree
+- embedded Win32 editor and dialog behavior inside a native X11 or Wayland UI
+  tree
 - JACK-first audio and MIDI routing inside the graph itself
+- Wayland-aware host/window embedding through JUCE-NSPA when the session is
+  Wayland-native
 
 The current application layer is also retuned for the same host model:
 
-- the main window runs under one GL-backed shell
+- the main window runs under one GL-backed shell, using Wayland when available
+  and X11 otherwise
 - internal file choosers replace native OS dialog assumptions under winelib
 - the graph and mixer surfaces use per-node-type accents so Windows plugin
   formats and JACK-native nodes are legible inside the same graph
@@ -61,13 +64,13 @@ The current application layer is also retuned for the same host model:
   </style>
 
   <rect x="0" y="0" width="980" height="560" class="ov-bg"/>
-  <text x="490" y="26" text-anchor="middle" class="ov-title">Element-NSPA: application policy on top of JUCE-NSPA, Wine-NSPA, and JACK</text>
+  <text x="490" y="26" text-anchor="middle" class="ov-title">Lulada: application policy on top of JUCE-NSPA, Wine-NSPA, and JACK</text>
 
   <rect x="24" y="52" width="932" height="468" class="ov-lane"/>
   <text x="42" y="72" class="ov-small">single Linux process, mixed native + Wine-backed responsibilities</text>
 
   <rect x="46" y="94" width="250" height="158" class="ov-native"/>
-  <text x="171" y="118" text-anchor="middle" class="ov-head-g">Element application layer</text>
+  <text x="171" y="118" text-anchor="middle" class="ov-head-g">Lulada application layer</text>
   <text x="171" y="140" text-anchor="middle" class="ov-small">plugin manager, graph editor, session shell</text>
   <text x="171" y="156" text-anchor="middle" class="ov-small">GL-backed main window + dark UI baseline</text>
   <text x="171" y="172" text-anchor="middle" class="ov-small">internal file choosers embedded on the main window</text>
@@ -79,13 +82,13 @@ The current application layer is also retuned for the same host model:
   <text x="490" y="128" text-anchor="middle" class="ov-small">winegcc / wineg++ build, PE module loading</text>
   <text x="490" y="144" text-anchor="middle" class="ov-small">VST2, VST3, and CLAP host formats</text>
   <text x="490" y="160" text-anchor="middle" class="ov-small">Win32 ABI fixes, `LoadLibraryW()`, `CreateThread` async load</text>
-  <text x="490" y="176" text-anchor="middle" class="ov-small">`WineHWNDEmbedComponent` + input-first bounded Win32 pump</text>
+  <text x="490" y="176" text-anchor="middle" class="ov-small">X11 or Wayland `WineHWNDEmbedComponent` + bounded Win32 pump</text>
   <text x="490" y="202" text-anchor="middle" class="ov-text">framework layer reused by the app</text>
 
   <rect x="684" y="94" width="250" height="158" class="ov-plugin"/>
   <text x="809" y="118" text-anchor="middle" class="ov-head-p">Windows plugins</text>
   <text x="809" y="140" text-anchor="middle" class="ov-small">VST2 `.dll`, VST3 PE module, CLAP `.clap` PE DLL</text>
-  <text x="809" y="156" text-anchor="middle" class="ov-small">editor HWNDs embedded under Linux peers</text>
+  <text x="809" y="156" text-anchor="middle" class="ov-small">editor HWNDs embedded under X11 or Wayland peers</text>
   <text x="809" y="172" text-anchor="middle" class="ov-small">Win32 message flow and plugin callbacks stay intact</text>
   <text x="809" y="198" text-anchor="middle" class="ov-text">loaded in-process through Wine</text>
 
@@ -130,12 +133,12 @@ specific than the JUCE framework layer:
 That is why this is an application port, not just "JUCE-NSPA plus a build
 file."
 
-| Concern | Generic Element assumption | Element-NSPA shape |
+| Concern | Upstream Element assumption | Lulada shape |
 |---|---|---|
 | Plugin target | native Linux formats plus platform-native host formats | Windows VST2, VST3, and CLAP through winelib + Wine |
 | Scan defaults | native host defaults | Wine-prefix VST/VST3/CLAP directories are part of the default scan surface |
 | Runtime bootstrap | native app bootstrap | wineserver pre-warm plus Win32 process-class and OLE init before plugin load |
-| Editor hosting | native plugin editor assumptions | embedded Wine HWND-backed editor windows in the Linux UI |
+| Editor hosting | native plugin editor assumptions | embedded Wine HWND-backed editor windows in the X11 or Wayland Linux UI |
 | Dialog model | native or OS-host file choosers | JUCE-internal choosers embedded on the main window |
 | MIDI shape on JACK builds | generic Linux MIDI backends | JACK-first native MIDI ports and graph nodes; ALSA is disabled |
 
@@ -143,7 +146,7 @@ file."
 
 ## 3. Host bootstrap
 
-Element performs winelib host initialization before plugin code gets a chance
+Lulada performs winelib host initialization before plugin code gets a chance
 to run static constructors.
 
 The current bootstrap does three things:
@@ -162,14 +165,14 @@ The order matters.
   priority mapping before its own initialization tree starts
 
 The wineserver pre-warm is a host-side defensive step. It avoids a cold-start
-window where the first Wine client in Element's process tree can race an
+window where the first Wine client in Lulada's process tree can race an
 uninitialized wineserver.
 
 ---
 
 ## 4. Plugin surface and scan policy
 
-The Element port narrows its plugin surface to the Windows formats that make
+Lulada narrows its plugin surface to the Windows formats that make
 sense inside this winelib host.
 
 | Area | Current behavior |
@@ -187,7 +190,7 @@ space. For this host, that is the wrong process boundary.
 
 ### 4.1 Wine-prefix path discovery
 
-Element augments default scan paths with Windows-plugin directories inside
+Lulada augments default scan paths with Windows-plugin directories inside
 `WINEPREFIX`.
 
 Current additions are:
@@ -205,13 +208,13 @@ pollute scan results with permanently broken entries.
 
 ### 4.2 CLAP registration under winelib
 
-Under `__WINE__`, Element uses JUCE-NSPA's CLAP host format instead of
-Element's native Linux CLAP provider.
+Under `__WINE__`, Lulada uses JUCE-NSPA's CLAP host format instead of
+upstream Element's native Linux CLAP provider.
 
 That split exists to avoid double registration:
 
 - native Linux CLAP remains the right path for a native Linux Element build
-- winelib Element wants Windows `.clap` PE DLLs through Wine `LoadLibraryW()`
+- Lulada wants Windows `.clap` PE DLLs through Wine `LoadLibraryW()`
 - the winelib build therefore registers `CLAPPluginFormat` and gates off the
   native `CLAPProvider`
 
@@ -225,10 +228,10 @@ Interactive plugin add is no longer a message-thread synchronous load.
 
 Current shape:
 
-1. Element requests `createGraphNodeAsync`
+1. Lulada requests `createGraphNodeAsync`
 2. JUCE-NSPA uses its winelib `CreateThread` worker to perform plugin creation
 3. completion returns to the message thread
-4. Element finalizes the new node in two pieces:
+4. Lulada finalizes the new node in two pieces:
    - message-thread metadata and `resetPorts()`
    - worker-thread block-hiding/property shaping before attachment
 
@@ -239,20 +242,20 @@ being materialized.
 
 ## 5. JACK-first audio and MIDI graph path
 
-The current Element JACK MIDI implementation is a live part of the host model.
+The current Lulada JACK MIDI implementation is a live part of the host model.
 This Linux build disables ALSA and uses JACK as the native audio and MIDI
 transport.
 
 ### 5.1 Timing and data path
 
-`JackAudioIODevice::process()` is the timing authority. JACK ingress, Element's
+`JackAudioIODevice::process()` is the timing authority. JACK ingress, Lulada's
 audio callback, graph MIDI consumption, and outbound MIDI emission all happen on
 that same callback thread.
 
 Current inbound shape:
 
 1. `jack_midi_event_get()` reads events from each enabled `midi_in_N` port
-2. Element writes those events into:
+2. Lulada writes those events into:
    - `currentPeriodMidiInput` for the graph-wide JACK MIDI ingress
    - `currentPeriodMidiInputPerPort[N]` for explicit per-port routing
 3. each event keeps `jack_midi_event_t::time` as its sample offset within the
@@ -327,7 +330,7 @@ stream; the extra dispatcher call is additive, not a replacement.
   </style>
 
   <rect x="0" y="0" width="980" height="620" class="jm-bg"/>
-  <text x="490" y="26" text-anchor="middle" class="jm-title">Element JACK MIDI: same-period ingress and direct same-period egress</text>
+  <text x="490" y="26" text-anchor="middle" class="jm-title">Lulada JACK MIDI: same-period ingress and direct same-period egress</text>
 
   <rect x="28" y="50" width="924" height="534" class="jm-lane"/>
 
@@ -337,7 +340,7 @@ stream; the extra dispatcher call is additive, not a replacement.
   <text x="173" y="152" text-anchor="middle" class="jm-small">reads `jack_midi_event_get()` from enabled `midi_in_N`</text>
   <text x="173" y="168" text-anchor="middle" class="jm-small">preserves `ev.time` as sample offset within this period</text>
   <text x="173" y="184" text-anchor="middle" class="jm-small">clears + caches enabled `midi_out_N` port buffers before graph render</text>
-  <text x="173" y="210" text-anchor="middle" class="jm-text">same thread also runs Element's audio callback</text>
+  <text x="173" y="210" text-anchor="middle" class="jm-text">same thread also runs Lulada's audio callback</text>
 
   <rect x="364" y="76" width="252" height="190" class="jm-buf"/>
   <text x="490" y="100" text-anchor="middle" class="jm-head-b">Per-period MIDI state inside `JackAudioIODevice`</text>
@@ -349,7 +352,7 @@ stream; the extra dispatcher call is additive, not a replacement.
   <text x="490" y="220" text-anchor="middle" class="jm-small">all valid for the lifetime of this callback only</text>
 
   <rect x="682" y="88" width="230" height="166" class="jm-node"/>
-  <text x="797" y="112" text-anchor="middle" class="jm-head-p">Element graph layer</text>
+  <text x="797" y="112" text-anchor="middle" class="jm-head-p">Lulada graph layer</text>
   <text x="797" y="136" text-anchor="middle" class="jm-small">AudioEngine consumes combined JACK MIDI input</text>
   <text x="797" y="152" text-anchor="middle" class="jm-small">`JackMidiInputNode(port=N)` consumes one per-port buffer</text>
   <text x="797" y="168" text-anchor="middle" class="jm-small">`JackMidiOutputNode(port=N)` writes direct to libjack</text>
@@ -383,15 +386,17 @@ stream; the extra dispatcher call is additive, not a replacement.
 The editor path follows JUCE-NSPA's embedded Win32 GUI model, so plugin editor
 windows are still real Wine HWND-backed windows inside a Linux UI tree.
 
-Element does not add a second embed protocol on top of that layer. Editor
+Lulada does not add another embed protocol on top of that layer. Editor
 windows inherit JUCE-NSPA's `WineHWNDEmbedComponent`, which means:
 
 - the whole editor thread queue is pumped, not just the top-level HWND
 - mouse and keyboard ranges drain before the general queue
 - the remaining queue uses the same 4 ms budget as JUCE-NSPA
-- `SetWindowPos()` and `XMoveResizeWindow()` stay split across Win32 and X11
+- X11 sessions use the X11 embed protocol and host-owned X11 sizing
+- Wayland sessions use the Wayland embed protocol and host-owned subsurface
+  parentage on the adopted host `wl_display`
 
-Element adds application policy on top:
+Lulada adds application policy on top:
 
 - the `PluginWindow` toolbar path is disabled so the embedded editor fills the
   content area instead of reserving host chrome
@@ -415,15 +420,27 @@ between framework ownership and application ownership is:
 
 | Surface | Owner | Current behavior |
 |---|---|---|
-| Wine HWND creation and X11 child lookup | JUCE-NSPA | `WineHWNDEmbedComponent` creates the HWND and resolves `wine_x11_window` |
-| Embed message and completion edge | JUCE-NSPA + Wine-NSPA | `WM_X11DRV_NSPA_EMBED_WINDOW` plus `WM_X11DRV_NSPA_EMBED_DONE` |
+| Wine HWND creation and native peer lookup | JUCE-NSPA | `WineHWNDEmbedComponent` creates the HWND and resolves the X11 child or Wayland host parent |
+| Embed message and completion edge | JUCE-NSPA + Wine-NSPA | X11 uses `WM_X11DRV_NSPA_EMBED_WINDOW`; Wayland uses `WM_WAYLANDDRV_NSPA_EMBED_WINDOW` |
 | Queue pump discipline | JUCE-NSPA | whole-thread queue, input-first passes, 4 ms general drain |
-| X11/Win32 geometry split | JUCE-NSPA + Wine-NSPA | `SetWindowPos()` keeps Wine rects coherent; host keeps X11 parent-relative sizing coherent |
-| Plugin-window chrome and chooser policy | Element-NSPA | toolbar-free editor shell and in-app file choosers parented on the main content component |
+| Native/Win32 geometry split | JUCE-NSPA + Wine-NSPA | `SetWindowPos()` keeps Wine rects coherent; the host peer keeps native parent-relative sizing coherent |
+| Plugin-window chrome and chooser policy | Lulada | toolbar-free editor shell and in-app file choosers parented on the main content component |
 
-### 6.2 Graph shell and visual system
+### 6.2 Wayland host mode
 
-Element's UI layer is not just a reskin. The recent changes move the host
+Lulada enables JUCE's Wayland peer backend for winelib builds. On a Wayland
+session the JUCE layer owns the native `wl_display` and peer surfaces, then
+publishes that display to `winewayland.drv` before Wine creates plugin editor
+surfaces. Wine validates that the host parent and Wine child are on the same
+display, creates a fresh `wl_surface` for the HWND, and installs it as a
+`wl_subsurface` of the JUCE peer.
+
+The Wayland path is runtime-selected. If `WAYLAND_DISPLAY` is absent, the host
+continues through the X11 embed path.
+
+### 6.3 Graph shell and visual system
+
+Lulada's UI layer is not just a reskin. The recent changes move the host
 toward a clearer separation between application shell, graph topology, and
 plugin format identity.
 
@@ -447,7 +464,7 @@ The current accent map is code, not theme metadata:
 | VST2 | indigo |
 | VST3 | purple |
 | CLAP | cyan |
-| Element-internal nodes | pink |
+| Internal nodes | pink |
 
 <div class="diagram-container">
 <svg width="100%" viewBox="0 0 980 430" xmlns="http://www.w3.org/2000/svg">
@@ -471,7 +488,7 @@ The current accent map is code, not theme metadata:
   </style>
 
   <rect x="0" y="0" width="980" height="430" class="ui-bg"/>
-  <text x="490" y="26" text-anchor="middle" class="ui-title">Element-NSPA UI policy: shell, dialogs, and graph identity</text>
+  <text x="490" y="26" text-anchor="middle" class="ui-title">Lulada UI policy: shell, dialogs, and graph identity</text>
 
   <rect x="54" y="82" width="250" height="132" class="ui-app"/>
   <text x="179" y="108" text-anchor="middle" class="ui-head-g">Main application shell</text>
@@ -513,16 +530,17 @@ The current accent map is code, not theme metadata:
 
 ## 7. Relationship to JUCE-NSPA and Wine-NSPA
 
-Element-NSPA sits on top of both framework and runtime layers.
+Lulada sits on top of both framework and runtime layers.
 
-| Layer | Use in Element-NSPA |
+| Layer | Use in Lulada |
 |---|---|
-| JUCE-NSPA | winelib build support, VST2/VST3/CLAP Windows-plugin loading, async `CreateThread` load path, and the bounded input-first `WineHWNDEmbedComponent` editor layer |
-| Wine-NSPA X11 embed protocol | embeds plugin editor HWNDs under Linux host windows while leaving X11 sizing and the consumer pump discipline on the host side |
+| JUCE-NSPA | winelib build support, VST2/VST3/CLAP Windows-plugin loading, Wayland peer support, async `CreateThread` load path, and the bounded input-first `WineHWNDEmbedComponent` editor layer |
+| Wine-NSPA X11 embed protocol | embeds plugin editor HWNDs under X11 host windows while leaving X11 sizing and the consumer pump discipline on the host side |
+| Wine-NSPA Wayland embed protocol | embeds plugin editor HWNDs as Wayland subsurfaces under JUCE Wayland peers using the shared host `wl_display` |
 | Wine-NSPA Win32 runtime | supplies the window/message model, Win32 process priority mapping, and Wine-side plugin module load path |
-| Element-specific JACK layer | exposes JACK-native audio and MIDI routing inside the graph on top of the same host process |
+| Lulada JACK layer | exposes JACK-native audio and MIDI routing inside the graph on top of the same host process |
 
-Element-NSPA therefore is not a thin build wrapper. It is an application port
+Lulada therefore is not a thin build wrapper. It is an application port
 that binds one specific app shell to the JUCE-NSPA framework layer and to the
 Wine-NSPA runtime rules underneath it.
 
@@ -533,6 +551,7 @@ Wine-NSPA runtime rules underneath it.
 | Boundary | Current behavior |
 |---|---|
 | Host architecture | Linux-only x86_64 winelib host |
+| Host window system | Wayland when available, X11 fallback |
 | Supported Windows plugin formats | VST2, VST3, and CLAP |
 | Linux-native plugin formats in this process | excluded under `__WINE__` |
 | Audio and MIDI transport on Linux build | JACK |
@@ -541,7 +560,7 @@ Wine-NSPA runtime rules underneath it.
 | Scan path policy | 64-bit Windows-plugin directories only |
 
 This page therefore describes a specific application-port shape, not a claim
-that every Element feature or every native-Linux plugin surface should live in
+that every upstream Element feature or every native-Linux plugin surface should live in
 the same process as the winelib Windows-plugin host.
 
 ---
@@ -563,5 +582,7 @@ the same process as the winelib Windows-plugin host.
 - `src/ui/mainwindow.cpp`
 - `src/ui/nodechannelstrip.hpp`
 - `src/ui/style_v1.cpp`
+- `CMakeLists.txt`
 - [JUCE-NSPA](juce-nspa.gen.html)
 - [NSPA X11 Embed Protocol](nspa-x11-embed-protocol.gen.html)
+- [NSPA Wayland Embed Protocol](nspa-wayland-embed-protocol.gen.html)

@@ -10,10 +10,11 @@ Windows VST2, VST3, and CLAP plugins on top of Wine-NSPA.
 3. [Build and runtime pivot](#3-build-and-runtime-pivot)
 4. [Plugin loading and discovery](#4-plugin-loading-and-discovery)
 5. [Dispatch, synchronization, and async load](#5-dispatch-synchronization-and-async-load)
-6. [Editor embedding and CLAP GUI ownership](#6-editor-embedding-and-clap-gui-ownership)
-7. [Relationship to Wine-NSPA](#7-relationship-to-wine-nspa)
-8. [Current scope](#8-current-scope)
-9. [References](#9-references)
+6. [Host windowing and editor embedding](#6-host-windowing-and-editor-embedding)
+7. [CLAP GUI ownership](#7-clap-gui-ownership)
+8. [Relationship to Wine-NSPA](#8-relationship-to-wine-nspa)
+9. [Current scope](#9-current-scope)
+10. [References](#10-references)
 
 ---
 
@@ -32,8 +33,8 @@ The load-bearing changes are:
 - per-instance Win32 dispatch lanes after the instance is live
 - `PiMutex` / `PiCond` wrappers where the host-facing sync layer needs
   Wine-NSPA-compatible PI behavior
-- `WineHWNDEmbedComponent` for VST2, VST3, and CLAP editors under a native
-  Linux X11 peer
+- `WineHWNDEmbedComponent` for VST2, VST3, and CLAP editors under native
+  Linux X11 or Wayland peers
 
 <div class="diagram-container">
 <svg width="100%" viewBox="0 0 980 560" xmlns="http://www.w3.org/2000/svg">
@@ -67,7 +68,7 @@ The load-bearing changes are:
 
   <rect x="44" y="94" width="250" height="160" class="jn-app"/>
   <text x="169" y="118" text-anchor="middle" class="jn-head-g">Linux host side</text>
-  <text x="169" y="140" text-anchor="middle" class="jn-small">JUCE event loop, peer tree, X11 parent ownership</text>
+  <text x="169" y="140" text-anchor="middle" class="jn-small">JUCE event loop, peer tree, native parent ownership</text>
   <text x="169" y="156" text-anchor="middle" class="jn-small">host windows stay native Linux objects</text>
   <text x="169" y="172" text-anchor="middle" class="jn-small">editor parents and bounds originate here</text>
   <text x="169" y="198" text-anchor="middle" class="jn-text">native shell stays native</text>
@@ -90,11 +91,11 @@ The load-bearing changes are:
 
   <rect x="126" y="318" width="728" height="126" class="jn-sync"/>
   <text x="490" y="342" text-anchor="middle" class="jn-head-y">Editor embed and thread ownership</text>
-  <text x="490" y="366" text-anchor="middle" class="jn-small">`WineHWNDEmbedComponent` creates a real Wine HWND, resolves `wine_x11_window`,</text>
-  <text x="490" y="382" text-anchor="middle" class="jn-small">sends `WM_X11DRV_NSPA_EMBED_WINDOW`, then runs an input-first bounded Win32 pump</text>
+  <text x="490" y="366" text-anchor="middle" class="jn-small">`WineHWNDEmbedComponent` creates a real Wine HWND and selects X11 or Wayland embed</text>
+  <text x="490" y="382" text-anchor="middle" class="jn-small">X11 reparents the Wine child; Wayland installs a `wl_subsurface`</text>
   <text x="490" y="398" text-anchor="middle" class="jn-small">CLAP editor setup runs directly on the JUCE message thread to avoid deadlock</text>
   <text x="490" y="414" text-anchor="middle" class="jn-small">with the same Win32 pump that must service `set_parent()` and `show()`</text>
-  <text x="490" y="430" text-anchor="middle" class="jn-text">framework owns the Linux/X11 <-> Win32/HWND seam</text>
+  <text x="490" y="430" text-anchor="middle" class="jn-text">framework owns the Linux host <-> Win32/HWND seam</text>
 
   <rect x="166" y="468" width="648" height="36" class="jn-note"/>
   <text x="490" y="491" text-anchor="middle" class="jn-head-r">Scope</text>
@@ -130,13 +131,13 @@ That is why this work lives as a fork instead of an application-side patch set.
 | Binary model | native Linux host or native Windows host | Linux winelib host that still drives Win32 plugin code |
 | Plugin module loading | native Linux `.so` or Windows-native host side | Windows PE modules through Wine `LoadLibraryW()` |
 | Format surface | VST2/VST3 plus native-Linux assumptions | Windows VST2, VST3, and CLAP only |
-| GUI embedding | toolkit-native child windows or native Windows HWNDs | Wine HWND-backed editor embedded under a Linux X11 peer |
+| GUI embedding | toolkit-native child windows or native Windows HWNDs | Wine HWND-backed editor embedded under a Linux X11 or Wayland peer |
 | Threading model | generic async worker or message-thread deferred sync load | Win32-registered worker for plugin creation, then per-instance dispatch |
 | Host-side sync | generic host mutex / condvar choices | PI-aware wrappers where the winelib dispatcher layer needs Wine-NSPA-compatible behavior |
 
 The fork therefore provides a framework substrate for Linux applications that
 want to host Windows plugins through Wine-NSPA without solving the same ABI,
-thread-registration, and X11-embed issues independently.
+thread-registration, and native embed issues independently.
 
 ---
 
@@ -369,18 +370,20 @@ with the next instance just because both live inside the same process.
 
 ---
 
-## 6. Editor embedding and CLAP GUI ownership
+## 6. Host windowing and editor embedding
 
-Editor hosting has two parts:
+Editor hosting uses the same `WineHWNDEmbedComponent` abstraction on both
+Linux windowing backends. The component creates a real Wine HWND, then hands
+that HWND to the Wine-NSPA driver path that matches the current JUCE peer.
 
-1. `WineHWNDEmbedComponent` creates a real Wine HWND and acquires its backing
-   X11 child window
-2. the component embeds that child under the JUCE peer's X11 window through
-   `WM_X11DRV_NSPA_EMBED_WINDOW`
+| Host peer | Embed path | Native object owned by the host |
+|---|---|---|
+| X11 | `WM_X11DRV_NSPA_EMBED_WINDOW` / `WM_X11DRV_NSPA_EMBED_DONE` | foreign X11 parent `Window` |
+| Wayland | `WM_WAYLANDDRV_NSPA_EMBED_WINDOW` / `WM_WAYLANDDRV_NSPA_EMBED_DONE` | foreign parent `wl_surface` on the adopted host `wl_display` |
 
-The completion edge is explicit: Wine posts
-`WM_X11DRV_NSPA_EMBED_DONE` back to the same HWND after the embed handshake has
-reparented, mapped, and settled its WM state.
+The completion edge is explicit on both backends. Wine posts the matching
+`*_EMBED_DONE` message back to the same HWND after the native driver has
+settled the embed handoff.
 
 The component also owns the Win32 message pump for the embedded thread queue.
 It does not drain only the top-level editor HWND, because the child windows
@@ -392,15 +395,15 @@ The current pump shape is:
 - unbounded keyboard-range peeks for `WM_KEYFIRST .. WM_KEYLAST`
 - a 4 ms budget for the remaining general queue
 
-That split keeps the JUCE message thread returning to its X11 poll instead of
-spinning forever on plugin-generated `WM_TIMER` / `WM_PAINT` backlogs, while
-still preserving responsive input under heavy redraw load.
+That split keeps the JUCE message thread returning to its native host event
+poll instead of spinning forever on plugin-generated `WM_TIMER` / `WM_PAINT`
+backlogs, while still preserving responsive input under heavy redraw load.
 
-Geometry ownership stays split the same way:
+Geometry ownership stays split by layer:
 
 - `SetWindowPos()` updates Wine's Win32-side window rects
-- `XMoveResizeWindow()` keeps the X11 child at the correct parent-relative
-  location under the JUCE peer
+- the native peer backend keeps the X11 child or Wayland subsurface at the
+  correct parent-relative location under the JUCE peer
 
 ### 6.1 Current pump contract
 
@@ -412,20 +415,33 @@ The queue pump is a host-side contract, not a best-effort hint.
 | Mouse pass | drain `WM_MOUSEFIRST .. WM_MOUSELAST` first | pointer capture, hover, and resize feedback do not sit behind redraw backlogs |
 | Keyboard pass | drain `WM_KEYFIRST .. WM_KEYLAST` second | text entry and shortcuts stay responsive |
 | General drain | bounded to `4 ms` per host turn | JUCE's Linux event loop regains control even if the plugin floods `WM_PAINT` / `WM_TIMER` |
-| Completion edge | observe `WM_X11DRV_NSPA_EMBED_DONE` on the same queue | embed completion is tied to the same message source as normal editor traffic |
+| Completion edge | observe the backend `*_EMBED_DONE` message on the same queue | embed completion is tied to the same message source as normal editor traffic |
 
 ### 6.2 `WineHWNDEmbedComponent` responsibilities
 
 | Responsibility | Current behavior |
 |---|---|
 | Win32 surface creation | creates a real top-level Wine HWND with `CreateWindowExW()` |
-| X11 child lookup | resolves the backing `wine_x11_window` for that HWND |
-| Embed handoff | sends `WM_X11DRV_NSPA_EMBED_WINDOW` to hand the child to Wine's embed path |
-| Completion fence | handles `WM_X11DRV_NSPA_EMBED_DONE` if the host wants a deterministic "embed settled" point |
+| Native peer lookup | resolves the backing X11 child or Wayland host parent for the JUCE peer |
+| Embed handoff | sends the X11 or Wayland Wine-NSPA embed request for the HWND |
+| Completion fence | handles the backend `*_EMBED_DONE` message if the host wants a deterministic "embed settled" point |
 | Win32 pump | drains the whole thread queue with input-first mouse/keyboard passes, then a 4 ms general-drain budget |
-| Geometry sync | uses `SetWindowPos()` for Wine rects and `XMoveResizeWindow()` for host-relative X11 placement |
+| Geometry sync | uses `SetWindowPos()` for Wine rects and the native peer backend for host-relative placement |
 
-### 6.3 CLAP GUI calls stay on the JUCE message thread
+### 6.3 Wayland display adoption
+
+The Wayland path has one extra invariant: host and Wine surfaces must belong to
+the same `wl_display`. JUCE-NSPA's Wayland peer layer exposes the process
+display, and the winelib host publishes it before Wine creates plugin editor
+surfaces. `winewayland.drv` then validates the display match before it turns
+the Wine HWND surface into a subsurface of the host parent.
+
+This keeps the Wayland path native. It does not force an X11 wrapper window
+when the host shell is already running on Wayland.
+
+---
+
+## 7. CLAP GUI ownership
 
 The CLAP editor path uses the same embed substrate, but it adds one important
 threading rule: the `clap.gui` lifecycle calls are performed directly on the
@@ -447,7 +463,7 @@ Current CLAP editor setup:
 8. drive plugin-requested resize/close through a 30 Hz timer
 
 Teardown is symmetrical: `hide()` then `destroy()` on the same JUCE message
-thread, while `WineHWNDEmbedComponent` handles the deferred X11-side cleanup.
+thread, while `WineHWNDEmbedComponent` handles the deferred native-side cleanup.
 
 <div class="diagram-container">
 <svg width="100%" viewBox="0 0 980 470" xmlns="http://www.w3.org/2000/svg">
@@ -486,16 +502,16 @@ thread, while `WineHWNDEmbedComponent` handles the deferred X11-side cleanup.
   <rect x="304" y="82" width="184" height="250" class="cg-msg"/>
   <text x="396" y="106" text-anchor="middle" class="cg-head-y">Embed component</text>
   <text x="396" y="132" text-anchor="middle" class="cg-small">creates Wine HWND</text>
-  <text x="396" y="148" text-anchor="middle" class="cg-small">resolves `wine_x11_window`</text>
-  <text x="396" y="164" text-anchor="middle" class="cg-small">sends `EMBED_WINDOW`</text>
+  <text x="396" y="148" text-anchor="middle" class="cg-small">resolves native host parent</text>
+  <text x="396" y="164" text-anchor="middle" class="cg-small">sends backend `EMBED_WINDOW`</text>
   <text x="396" y="180" text-anchor="middle" class="cg-small">input-first + 4 ms bounded drain</text>
   <text x="396" y="196" text-anchor="middle" class="cg-small">tracks `EMBED_DONE`</text>
   <text x="396" y="212" text-anchor="middle" class="cg-small">timer also drives resize sync</text>
 
   <rect x="522" y="82" width="184" height="250" class="cg-wine"/>
   <text x="614" y="106" text-anchor="middle" class="cg-head-b">Wine embed path</text>
-  <text x="614" y="132" text-anchor="middle" class="cg-small">reparents X11 child</text>
-  <text x="614" y="148" text-anchor="middle" class="cg-small">settles embedded WM state</text>
+  <text x="614" y="132" text-anchor="middle" class="cg-small">reparents X11 child or installs `wl_subsurface`</text>
+  <text x="614" y="148" text-anchor="middle" class="cg-small">settles embedded native state</text>
   <text x="614" y="164" text-anchor="middle" class="cg-small">keeps Win32 rects authoritative</text>
   <text x="614" y="180" text-anchor="middle" class="cg-small">posts `EMBED_DONE`</text>
 
@@ -519,13 +535,14 @@ thread, while `WineHWNDEmbedComponent` handles the deferred X11-side cleanup.
 
 ---
 
-## 7. Relationship to Wine-NSPA
+## 8. Relationship to Wine-NSPA
 
 JUCE-NSPA depends on specific Wine-NSPA surfaces.
 
 | Surface | Use in JUCE-NSPA |
 |---|---|
 | `WM_X11DRV_NSPA_EMBED_WINDOW` / `WM_X11DRV_NSPA_EMBED_DONE` | embeds Wine editor windows under a Linux JUCE peer without reimplementing Wine's embedded-window bookkeeping |
+| `WM_WAYLANDDRV_NSPA_EMBED_WINDOW` / `WM_WAYLANDDRV_NSPA_EMBED_DONE` | embeds Wine editor windows under a Wayland JUCE peer through a shared host `wl_display` and `wl_subsurface` parentage |
 | Wine `LoadLibraryW()` path | loads Windows VST2, VST3, and CLAP modules in-process |
 | Wine `CreateThread` path | gives async plugin creation a Win32-registered worker thread with valid TEB/SEH/loader state |
 | vendored `rtpi.h` wrappers | provides `PiMutex` / `PiCond` wrappers for the host-side dispatcher layer, including a process-shared-compatible shape |
@@ -536,15 +553,15 @@ fork written around Wine-NSPA's specific load, thread, sync, and embed rules.
 
 ---
 
-## 8. Current scope
+## 9. Current scope
 
 | Area | Current behavior |
 |---|---|
 | Host architecture | Linux-only x86_64 winelib host |
 | Plugin formats | Windows VST2, VST3, and CLAP |
 | Async instantiation | one-shot Wine `CreateThread` worker, callback returned to the JUCE message thread |
-| GUI embedding | Wine HWND-backed editor windows inside Linux JUCE peers |
-| Current application consumer | Element-NSPA |
+| GUI embedding | Wine HWND-backed editor windows inside X11 or Wayland Linux JUCE peers |
+| Current application consumer | Lulada |
 
 JUCE-NSPA is a framework fork, not an end-user host by itself. Its value is
 that application ports can build on one winelib + Wine-NSPA substrate instead
@@ -553,7 +570,7 @@ separately.
 
 ---
 
-## 9. References
+## 10. References
 
 - `modules/juce_audio_processors_headless/format/juce_AudioPluginFormat.cpp`
 - `modules/juce_audio_processors_headless/format_types/juce_CLAPPluginFormatHeadless.h`
@@ -565,5 +582,10 @@ separately.
 - `modules/juce_audio_processors_headless/format_types/juce_winelib_pi_sync.h`
 - `modules/juce_gui_extra/embedding/juce_WineHWNDEmbedComponent.h`
 - `modules/juce_gui_extra/native/juce_WineHWNDEmbedComponent_linux.cpp`
+- `modules/juce_gui_basics/native/juce_WaylandWindowSystem.h`
+- `modules/juce_gui_basics/native/juce_WaylandWindowSystem.cpp`
+- `modules/juce_gui_basics/native/juce_Windowing_wayland.cpp`
+- `modules/juce_opengl/native/juce_OpenGL_wayland.h`
 - [NSPA X11 Embed Protocol](nspa-x11-embed-protocol.gen.html)
-- [Element-NSPA](element-plugin-host.gen.html)
+- [NSPA Wayland Embed Protocol](nspa-wayland-embed-protocol.gen.html)
+- [Lulada](element-plugin-host.gen.html)

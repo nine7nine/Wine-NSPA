@@ -36,6 +36,7 @@ surfaces, and RT-oriented memory and I/O work.
 | [NTSync Userspace Sync](https://nine7nine.github.io/Wine-NSPA/ntsync-userspace.gen.html) | Wine-side ntsync cache, wait/signal path, and zero-time waits. |
 | [Thread and Process Shared-State Bypass](https://nine7nine.github.io/Wine-NSPA/thread-and-process-shared-state.gen.html) | Published thread/process snapshots and zero-time waits. |
 | [NSPA X11 Embed Protocol](https://nine7nine.github.io/Wine-NSPA/nspa-x11-embed-protocol.gen.html) | Atomic X11 embedding for Winelib hosts with Wine HWND children. |
+| [NSPA Wayland Embed Protocol](https://nine7nine.github.io/Wine-NSPA/nspa-wayland-embed-protocol.gen.html) | Native Wayland embedding for Winelib hosts with Wine HWND children. |
 | [Win32 Condvar PI (Requeue-PI)](https://nine7nine.github.io/Wine-NSPA/condvar-pi-requeue.gen.html) | Priority inheritance for Win32 condition variables. |
 | [Wineserver Decomposition](https://nine7nine.github.io/Wine-NSPA/wineserver-decomposition.gen.html) | Residual wineserver scope and decomposition path. |
 
@@ -43,8 +44,8 @@ surfaces, and RT-oriented memory and I/O work.
 
 | Document | Description |
 |----------|-------------|
-| [Element-NSPA](https://nine7nine.github.io/Wine-NSPA/element-plugin-host.gen.html) | Element port for Windows VST2, VST3, and CLAP hosting on Wine-NSPA. |
-| [JUCE-NSPA](https://nine7nine.github.io/Wine-NSPA/juce-nspa.gen.html) | Framework fork for Linux winelib hosting of Windows VST2, VST3, and CLAP plugins. |
+| [Lulada](https://nine7nine.github.io/Wine-NSPA/element-plugin-host.gen.html) | Winelib plugin host with JACK routing and X11/Wayland editor embedding. |
+| [JUCE-NSPA](https://nine7nine.github.io/Wine-NSPA/juce-nspa.gen.html) | Framework fork for Linux winelib hosting and native plugin embedding. |
 | [Yabridge-NSPA](https://nine7nine.github.io/Wine-NSPA/yabridge-nspa.gen.html) | Linux VST bridge fork aligned to Wine-NSPA RT and PI rules. |
 
 ### Test Results & Validation
@@ -85,6 +86,8 @@ Current highlights:
   overhead
 - RT memory follow-ons include `mlockall()`, automatic hugetlb promotion,
   heap hugepage backing, and the safety/fallback fixes around them
+- winelib hosts can embed Wine HWND-backed plugin editors through X11 or
+  Wayland-specific Wine-NSPA protocols
 
 ---
 

@@ -13,7 +13,7 @@ architecture boundary.
 3. [Active subsystems](#3-active-subsystems)
 4. [Validation and performance](#4-validation-and-performance)
 5. [Open work, in priority order](#5-open-work-in-priority-order)
-6. [Recent landed arc](#6-recent-landed-arc-2026-04-30-to-2026-05-16)
+6. [Recent landed arc](#6-recent-landed-arc-2026-04-30-to-2026-05-30)
 7. [Configuration reference](#7-configuration-reference)
 8. [Doc index](#8-doc-index)
 
@@ -21,9 +21,8 @@ architecture boundary.
 
 ## 1. Overview
 
-The public 2026-05-16 state is no longer just "aggregate-wait plus a faster
-dispatcher". The current stack layers several larger client-side and
-shared-state follow-ons on top of that base:
+The public 2026-05-30 state layers several larger client-side, shared-state,
+memory, and host-embedding systems on top of the gamma dispatcher base:
 
 - the **spawn-main + `ntdll_sched` substrate**, the per-process client
   scheduler host for close-queue and RT timer consumers
@@ -50,6 +49,9 @@ shared-state follow-ons on top of that base:
   msg/timer/redraw ring headers, cacheline-isolated `inproc_sync` entries,
   smaller wait-path helper cost, and AVX2 ASCII-burst string / Unicode loops
   on x86_64
+- the **host/plugin embedding layer**, with separate X11 and Wayland contracts
+  for winelib hosts that embed Wine HWND-backed plugin editors inside native
+  Linux UI trees
 
 The important architectural distinction is that these are not isolated feature
 flags. They continue the same direction as gamma, local-file, msg-ring, and
@@ -93,7 +95,7 @@ remains available.
 | Hot-path optimization layer | x86_64 unix-side `NtCurrentTeb()` is inline, `get_thread_data()` reads through a TEB backpointer, msg/timer/redraw ring producer and consumer indices are cacheline-isolated, `inproc_sync` entries are cacheline-isolated, dormant `io_uring` helper calls are inlined away, and ASCII-dominant string / Unicode loops use AVX2 fast windows on x86_64 |
 | Memory surface | local sections, large pages, current-process `QueryWorkingSetEx`, working-set quota bookkeeping, RT-keyed `mlockall()`, automatic hugetlb promotion, and heap arena hugetlb backing |
 | Local sync path | anonymous events client-range by default; timers piggyback on that base |
-| X11 embed path | atomic embed via `WM_X11DRV_NSPA_EMBED_WINDOW`, explicit `XMapWindow()`, async `WM_X11DRV_NSPA_EMBED_DONE`, host-owned X11 size authority for `nspa_embedded` windows, and bounded input-first consumer pumps in current hosts |
+| Host embed paths | X11 atomic embed via `WM_X11DRV_NSPA_EMBED_WINDOW`; Wayland host-mode embed via adopted `wl_display`, `WM_WAYLANDDRV_NSPA_EMBED_WINDOW`, and subsurface parentage; bounded input-first consumer pumps in current hosts |
 | X11 flush policy | `NSPA_FLUSH_THROTTLE_MS=8`, default ON |
 
 ### 2.3 Patch stack on top of upstream ntsync
@@ -289,7 +291,7 @@ own correctness proof and gate.
   </style>
 
   <rect x="0" y="0" width="940" height="500" class="cs-bg"/>
-  <text x="470" y="28" text-anchor="middle" class="cs-title">2026-05-16 deployment board: active state, diagnostics, and remaining work</text>
+  <text x="470" y="28" text-anchor="middle" class="cs-title">2026-05-30 deployment board: active state, diagnostics, and remaining work</text>
 
   <rect x="50" y="70" width="250" height="150" class="cs-green"/>
   <text x="175" y="96" text-anchor="middle" class="cs-tag-green">Kernel / sync substrate</text>
@@ -321,7 +323,7 @@ own correctness proof and gate.
   <text x="175" y="382" text-anchor="middle" class="cs-small">kept for validation and regression isolation, not as the default path</text>
 
   <rect x="345" y="270" width="250" height="140" class="cs-green"/>
-  <text x="470" y="296" text-anchor="middle" class="cs-tag-green">2026-05-06 to 2026-05-16 follow-ons</text>
+  <text x="470" y="296" text-anchor="middle" class="cs-tag-green">2026-05-06 to 2026-05-30 follow-ons</text>
   <text x="470" y="322" text-anchor="middle" class="cs-label">thread/process shared-state bypass</text>
   <text x="470" y="340" text-anchor="middle" class="cs-small">query RTTs and zero-time process/thread waits hit shared snapshots first</text>
   <text x="470" y="364" text-anchor="middle" class="cs-label">message-pump + hot-path + hugetlb safety</text>
@@ -424,7 +426,7 @@ System-wide samples: `38,588 -> 19,415` per 30s.
 | total `winex11.so` AVX2 | 6.76% | 2.43% | −4.33pp |
 | total kernel after AVX2 | 10.22% | 8.58% | −1.64pp |
 
-#### 2026-05-02 through 2026-05-16 feature-specific wins
+#### 2026-05-02 through 2026-05-30 feature-specific wins
 
 | Feature | Result |
 |---|---|
@@ -475,7 +477,7 @@ System-wide samples: `38,588 -> 19,415` per 30s.
 
 ---
 
-## 6. Recent landed arc (2026-04-30 to 2026-05-16)
+## 6. Recent landed arc (2026-04-30 to 2026-05-30)
 
 | Date | Work | Public result |
 |---|---|---|
@@ -506,6 +508,10 @@ System-wide samples: `38,588 -> 19,415` per 30s.
 | 2026-05-16 | embed completion and X11 ownership follow-ons | `WM_X11DRV_NSPA_EMBED_DONE`, explicit `XMapWindow()`, X11 size-emission suppression, and bounded input-first consumer pumps keep host-owned embedding deterministic and interactive |
 | 2026-05-16 | msg/timer/redraw ring cacheline isolation | the hot producer and consumer indices stop false-sharing on the same-process UI rings |
 | 2026-05-16 | `--enable-nspa-arch=LEVEL` | x86_64 builds can opt into an explicit microarch target while bundling `-ffp-contract=off` so FP semantics stay stable |
+| 2026-05-30 | Wayland host/plugin embed path | `winewayland.drv` can adopt a winelib host `wl_display`, embed plugin HWND surfaces as `wl_subsurface` children, and ignore input enters on foreign host surfaces |
+| 2026-05-30 | `winewayland.drv` RT locking | Wayland driver mutexes in the host/plugin path use Wine-NSPA PI mutexes, and lazy init avoids non-PI pthread locking on RT-sensitive paths |
+| 2026-05-30 | JUCE-NSPA Wayland peer support | the JUCE fork carries a Wayland windowing backend for winelib hosts, including peer surface lookup and EGL/OpenGL context integration |
+| 2026-05-30 | Lulada Wayland integration | Lulada enables JUCE Wayland peers for Wayland sessions and uses the Wine-NSPA Wayland embed protocol for Windows plugin editors, with X11 fallback when Wayland is absent |
 
 ---
 
@@ -562,13 +568,14 @@ State boards and architecture deep-dives produced by the project:
 
 | Doc | Subject |
 |---|---|
-| `current-state.md` | This document — state of the art on 2026-05-16 |
+| `current-state.md` | This document — state of the art on 2026-05-30 |
 | `client-scheduler-architecture.gen.html` | spawn-main + `ntdll_sched`, default-class and RT-class scheduler hosts, and the consumers routed through them |
 | `cs-pi.gen.html` | Critical Section Priority Inheritance (CS-PI v2.3) — twelve-section deep dive |
 | `condvar-pi-requeue.gen.html` | `RtlSleepConditionVariableCS` `FUTEX_WAIT_REQUEUE_PI` slow path |
 | `aggregate-wait-and-async-completion.gen.html` | Aggregate-wait plus same-thread async completion architecture |
 | `gamma-channel-dispatcher.gen.html` | Gamma request/reply transport plus post-1010 aggregate-wait dispatcher loop |
 | `nspa-x11-embed-protocol.gen.html` | Wine-NSPA atomic X11 embed contract for winelib hosts |
+| `nspa-wayland-embed-protocol.gen.html` | Wine-NSPA native Wayland embed contract for winelib hosts |
 | `thread-and-process-shared-state.gen.html` | server-published thread/process snapshots, query bypass coverage, and zero-time process/thread waits |
 | `ntsync-pi-driver.gen.html` | NTSync PI kernel overlay: PI baseline, channel transport, aggregate-wait, and later kernel hardening |
 | `ntsync-userspace.gen.html` | Wine in-process sync path: handle-to-fd cache, client-created sync objects, direct wait/signal helpers, and dispatcher-facing wrappers |
@@ -581,20 +588,20 @@ State boards and architecture deep-dives produced by the project:
 | `nt-local-stubs.gen.html` | NT-local stub pattern, including local sections, local events, and sched-hosted timer dispatch |
 | `shmem-ipc.gen.html` | NSPA shmem IPC primitives (γ + redraw + paint-cache) |
 | `juce-nspa.gen.html` | JUCE-NSPA framework substrate for Linux winelib Windows-plugin hosts |
-| `element-plugin-host.gen.html` | Element-NSPA application port with JACK-first MIDI routing |
+| `element-plugin-host.gen.html` | Lulada application port with JACK-first MIDI routing |
 | `yabridge-nspa.gen.html` | Yabridge-NSPA bridge alignment for native Linux DAWs hosting Windows plugins |
 | `nspa-rt-test.gen.html` | nspa_rt_test PE harness reference |
 | `architecture.gen.html` | Whole-system architecture overview |
 | `decoration-loop-investigation.gen.html` | X11 windowing decoration-loop bug 57955 case study |
 | `sync-primitives-research.gen.html` | Background research on sync primitive selection |
 
-The architecture-heavy pieces added through 2026-05-16 are covered
+The architecture-heavy pieces added through 2026-05-30 are covered
 in the public docs set, including the client scheduler, local events,
 socket `io_uring`, gamma, aggregate-wait, hook cache, thread/process
 shared-state readers, local-file, local sections, hot-path optimizations,
-memory follow-ons, msg-ring, the X11 embed contract, and the current
+memory follow-ons, msg-ring, the X11 and Wayland embed contracts, and the current
 winelib-host application pages.
 
 ---
 
-*Generated 2026-05-17. State board reflects the 2026-05-16 set on kernel `6.19.11-rt1-1-nspa`.*
+*Generated 2026-05-30. State board reflects the 2026-05-30 set on kernel `6.19.11-rt1-1-nspa`.*

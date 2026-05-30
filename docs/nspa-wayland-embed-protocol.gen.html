@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Wine-NSPA -- NSPA Wayland Embed Protocol</title>
+<style>
+  :root {
+    --bg: #1a1b26; --fg: #c0caf5; --accent: #7aa2f7;
+    --green: #9ece6a; --red: #f7768e; --yellow: #e0af68;
+    --surface: #24283b; --border: #3b4261; --muted: #8c92b3;
+    --purple: #bb9af7; --orange: #ff9e64; --cyan: #7dcfff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+    background: var(--bg); color: var(--fg);
+    max-width: 1100px; margin: 0 auto; padding: 2rem 1.5rem;
+    line-height: 1.7;
+  }
+  .page-nav {
+    display: flex;
+    justify-content: flex-end;
+    margin-bottom: 0.5rem;
+  }
+  .page-nav a {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.35rem 0.7rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: rgba(36, 40, 59, 0.9);
+    color: var(--accent);
+    font-size: 0.78rem;
+    line-height: 1;
+  }
+  .page-nav a:hover {
+    background: var(--surface);
+    color: var(--cyan);
+    text-decoration: none;
+  }
+  h1 { color: var(--accent); font-size: 1.5rem; margin: 1.5rem 0 0.5rem; }
+  h2 { color: var(--accent); font-size: 1.2rem; margin: 2rem 0 0.75rem;
+       border-bottom: 1px solid var(--border); padding-bottom: 0.3rem; }
+  h3 { color: var(--yellow); font-size: 1rem; margin: 1.25rem 0 0.5rem; }
+  h4 { color: var(--cyan); font-size: 0.95rem; margin: 1rem 0 0.4rem; }
+  p, li { font-size: 0.85rem; margin-bottom: 0.5rem; }
+  ul, ol { padding-left: 1.5rem; margin-bottom: 0.75rem; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  table {
+    width: 100%; border-collapse: collapse;
+    margin: 0.75rem 0 1rem; font-size: 0.8rem;
+  }
+  th, td {
+    padding: 0.4rem 0.75rem; text-align: left;
+    border: 1px solid var(--border);
+  }
+  th { background: var(--surface); color: var(--accent); font-weight: 600; }
+  td { background: var(--bg); }
+  code {
+    background: var(--surface); padding: 0.15rem 0.4rem;
+    border-radius: 3px; font-size: 0.82rem; color: var(--cyan);
+  }
+  pre {
+    background: var(--surface); padding: 1rem 1.1rem; border-radius: 8px;
+    overflow-x: auto; margin: 0.75rem 0 1rem;
+    border: 1px solid var(--border);
+  }
+  pre code {
+    display: block; background: transparent; padding: 0;
+    font-size: 0.8rem; color: inherit;
+  }
+  pre code.hljs,
+  code.hljs {
+    background: transparent;
+    padding: 0;
+  }
+  blockquote {
+    background: var(--surface); border-left: 3px solid var(--accent);
+    padding: 0.75rem 1rem; margin: 1rem 0; border-radius: 0 4px 4px 0;
+    font-size: 0.82rem;
+  }
+  blockquote strong { color: var(--yellow); }
+  hr { border: none; border-top: 1px solid var(--border); margin: 2rem 0; }
+  strong { color: var(--fg); }
+  em { color: var(--muted); font-style: italic; }
+  .diagram-container {
+    display: flex; justify-content: center;
+    margin: 1.25rem auto 1.5rem; padding: 0.75rem;
+    background: rgba(36, 40, 59, 0.55);
+    border: 1px solid var(--border); border-radius: 10px;
+    overflow-x: auto;
+  }
+  .diagram-container svg {
+    display: block;
+    width: 100% !important;
+    max-width: 100%;
+    height: auto !important;
+    margin: 0 auto;
+    flex: 0 0 auto;
+  }
+</style>
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/tokyo-night-dark.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
+</head><body>
+<div class="page-nav"><a href="index.html">Docs Home</a></div>
+<h1 id="wine-nspa--nspa-wayland-embed-protocol">Wine-NSPA &ndash; NSPA Wayland Embed Protocol</h1>
+
+<p>This page documents the Wayland host/plugin embedding path for winelib hosts
+that need Wine plugin surfaces to live inside a native Wayland application.</p>
+
+<h2 id="table-of-contents">Table of Contents</h2>
+
+<ol>
+<li><a href="#1-overview">Overview</a></li>
+<li><a href="#2-public-contract">Public contract</a></li>
+<li><a href="#3-display-adoption">Display adoption</a></li>
+<li><a href="#4-per-window-embed-lifecycle">Per-window embed lifecycle</a></li>
+<li><a href="#5-input-and-rt-locking">Input and RT locking</a></li>
+<li><a href="#6-relationship-to-x11-embedding">Relationship to X11 embedding</a></li>
+<li><a href="#7-current-consumers">Current consumers</a></li>
+<li><a href="#8-references">References</a></li>
+</ol>
+
+
+<hr />
+
+<h2 id="1-overview">1. Overview</h2>
+
+<p>The Wayland embed path lets a winelib host render Wine plugin windows as
+<code>wl_subsurface</code> children of a host-owned <code>wl_surface</code>. It is the Wayland
+counterpart to the X11 embed protocol, but the ownership model is stricter:
+Wayland only allows subsurface parentage when both surfaces live on the same
+<code>wl_display</code> connection.</p>
+
+<p>Wine-NSPA solves that by letting the host publish its <code>wl_display</code> before
+<code>winewayland.drv</code> initializes. In host mode, the driver adopts that display,
+binds its own Wayland globals on the same connection, and creates plugin
+surfaces as children of host surfaces.</p>
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 980 520" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
+  <style>
+    .wy-bg { fill: #1a1b26; }
+    .wy-lane { fill: #1f2535; stroke: #6b7398; stroke-width: 0.9; rx: 10; }
+    .wy-host { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
+    .wy-env { fill: #2a2418; stroke: #e0af68; stroke-width: 1.8; rx: 8; }
+    .wy-wine { fill: #1a2235; stroke: #7aa2f7; stroke-width: 1.8; rx: 8; }
+    .wy-plugin { fill: #2a2137; stroke: #bb9af7; stroke-width: 1.8; rx: 8; }
+    .wy-note { fill: #2a1a1a; stroke: #f7768e; stroke-width: 1.6; rx: 8; }
+    .wy-title { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
+    .wy-head-g { fill: #9ece6a; font: bold 11px 'JetBrains Mono', monospace; }
+    .wy-head-y { fill: #e0af68; font: bold 11px 'JetBrains Mono', monospace; }
+    .wy-head-b { fill: #7aa2f7; font: bold 11px 'JetBrains Mono', monospace; }
+    .wy-head-p { fill: #bb9af7; font: bold 11px 'JetBrains Mono', monospace; }
+    .wy-head-r { fill: #f7768e; font: bold 11px 'JetBrains Mono', monospace; }
+    .wy-small { fill: #a9b1d6; font: 9px 'JetBrains Mono', monospace; }
+    .wy-text { fill: #c0caf5; font: 10px 'JetBrains Mono', monospace; }
+    .wy-line-g { stroke: #9ece6a; stroke-width: 1.15; fill: none; }
+    .wy-line-y { stroke: #e0af68; stroke-width: 1.15; fill: none; }
+    .wy-line-b { stroke: #7aa2f7; stroke-width: 1.15; fill: none; }
+    .wy-line-p { stroke: #bb9af7; stroke-width: 1.15; fill: none; }
+  </style>
+
+  <rect x="0" y="0" width="980" height="520" class="wy-bg" rx="6"/>
+  <text x="490" y="28" text-anchor="middle" class="wy-title">Wayland host/plugin embedding: one process, one wl_display, two ownership domains</text>
+
+  <rect x="28" y="58" width="924" height="402" class="wy-lane" rx="6"/>
+
+  <rect x="54" y="104" width="220" height="132" class="wy-host" rx="6"/>
+  <text x="164" y="130" text-anchor="middle" class="wy-head-g">winelib host</text>
+  <text x="164" y="152" text-anchor="middle" class="wy-small">JUCE Wayland peer</text>
+  <text x="164" y="168" text-anchor="middle" class="wy-small">owns the parent `wl_surface`</text>
+  <text x="164" y="184" text-anchor="middle" class="wy-small">drives the event loop</text>
+  <text x="164" y="208" text-anchor="middle" class="wy-text">calls `wine_nspa_wayland_set_display()`</text>
+
+  <rect x="328" y="104" width="210" height="132" class="wy-env" rx="6"/>
+  <text x="433" y="130" text-anchor="middle" class="wy-head-y">process-local handoff</text>
+  <text x="433" y="152" text-anchor="middle" class="wy-small">`WINE_NSPA_WAYLAND_HOST`</text>
+  <text x="433" y="168" text-anchor="middle" class="wy-small">`WINE_NSPA_WAYLAND_DISPLAY`</text>
+  <text x="433" y="184" text-anchor="middle" class="wy-small">value is PID-stamped</text>
+  <text x="433" y="208" text-anchor="middle" class="wy-text">pre-driver initialization contract</text>
+
+  <rect x="592" y="104" width="220" height="132" class="wy-wine" rx="6"/>
+  <text x="702" y="130" text-anchor="middle" class="wy-head-b">`winewayland.drv`</text>
+  <text x="702" y="152" text-anchor="middle" class="wy-small">adopts host `wl_display`</text>
+  <text x="702" y="168" text-anchor="middle" class="wy-small">binds compositor / subcompositor / seat</text>
+  <text x="702" y="184" text-anchor="middle" class="wy-small">does not open a second connection</text>
+  <text x="702" y="208" text-anchor="middle" class="wy-text">Wine-side window state remains authoritative</text>
+
+  <rect x="204" y="306" width="250" height="94" class="wy-plugin" rx="6"/>
+  <text x="329" y="332" text-anchor="middle" class="wy-head-p">plugin HWND surface</text>
+  <text x="329" y="354" text-anchor="middle" class="wy-small">fresh Wine `wl_surface`</text>
+  <text x="329" y="370" text-anchor="middle" class="wy-small">role changes to foreign subsurface</text>
+  <text x="329" y="386" text-anchor="middle" class="wy-small">position set parent-relative</text>
+
+  <rect x="526" y="306" width="250" height="94" class="wy-note" rx="6"/>
+  <text x="651" y="332" text-anchor="middle" class="wy-head-r">host-owned parent</text>
+  <text x="651" y="354" text-anchor="middle" class="wy-small">same display identity is verified</text>
+  <text x="651" y="370" text-anchor="middle" class="wy-small">foreign-surface input enters are ignored</text>
+  <text x="651" y="386" text-anchor="middle" class="wy-small">host keeps parent lifecycle authority</text>
+
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="274" y1="170" x2="328" y2="170" class="wy-line-g"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="538" y1="170" x2="592" y2="170" class="wy-line-y"/>
+  <path stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="M702 236 L702 276 L329 276 L329 306" class="wy-line-b"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="454" y1="354" x2="526" y2="354" class="wy-line-p"/>
+</svg>
+</div>
+
+
+<hr />
+
+<h2 id="2-public-contract">2. Public contract</h2>
+
+<p>The supported interface lives in <code>include/wine/nspa_wayland_embed.h</code>.</p>
+
+<table>
+<thead>
+<tr>
+<th> Symbol </th>
+<th> Meaning </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> <code>WINE_NSPA_WAYLAND_HOST</code> </td>
+<td> host-mode marker; tells <code>winewayland.drv</code> to wait for display adoption instead of opening its own connection </td>
+</tr>
+<tr>
+<td> <code>WINE_NSPA_WAYLAND_DISPLAY</code> </td>
+<td> PID-stamped pointer handoff for the host <code>wl_display</code> </td>
+</tr>
+<tr>
+<td> <code>wine_nspa_wayland_set_display()</code> </td>
+<td> host helper that publishes the current process id and <code>wl_display</code> pointer </td>
+</tr>
+<tr>
+<td> <code>WM_WAYLANDDRV_NSPA_EMBED_WINDOW</code> </td>
+<td> request that a Wine HWND become a <code>wl_subsurface</code> of a host <code>wl_surface</code> </td>
+</tr>
+<tr>
+<td> <code>WM_WAYLANDDRV_NSPA_EMBED_DONE</code> </td>
+<td> async completion message posted after the subsurface install path runs </td>
+</tr>
+</tbody>
+</table>
+
+
+<p>The display handoff is process-local. Child Wine helper processes that inherit
+the environment do not reuse the parent&rsquo;s pointer because the value is checked
+against <code>getpid()</code>.</p>
+
+<hr />
+
+<h2 id="3-display-adoption">3. Display adoption</h2>
+
+<p>Wayland embedding has to avoid a load-order race. A driver export would be too
+late because <code>winewayland.drv</code> initializes as soon as it is loaded. The host
+therefore publishes the display pointer before the first Wine GUI call.</p>
+
+<p>The host-side sequence is:</p>
+
+<pre><code class="language-cpp code-block">
+setenv ("WINE_NSPA_WAYLAND_HOST", "1", 1);
+wine_nspa_wayland_set_display (juceWaylandDisplay);
+</code></pre>
+
+
+<p>Then <code>winewayland.drv</code> initializes against the host connection:</p>
+
+<ol>
+<li>read <code>WINE_NSPA_WAYLAND_HOST</code></li>
+<li>parse <code>WINE_NSPA_WAYLAND_DISPLAY</code></li>
+<li>accept it only if the PID matches the current process</li>
+<li>bind <code>wl_compositor</code>, <code>wl_subcompositor</code>, <code>wl_shm</code>, <code>xdg_wm_base</code>,
+<code>wp_viewporter</code>, and <code>wl_seat</code> on that display</li>
+<li>skip the normal <code>wl_display_connect()</code> path for this process</li>
+</ol>
+
+
+<p>When the environment is absent or invalid, the Wayland driver follows the
+normal standalone Wine path.</p>
+
+<hr />
+
+<h2 id="4-per-window-embed-lifecycle">4. Per-window embed lifecycle</h2>
+
+<p>Once the plugin has an HWND, the host sends
+<code>WM_WAYLANDDRV_NSPA_EMBED_WINDOW</code> to that window.</p>
+
+<table>
+<thead>
+<tr>
+<th> Message field </th>
+<th> Meaning </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> <code>wParam</code> </td>
+<td> host parent <code>wl_surface*</code> </td>
+</tr>
+<tr>
+<td> <code>lParam</code> </td>
+<td> packed parent-relative <code>peerX</code>, <code>peerY</code> coordinates </td>
+</tr>
+</tbody>
+</table>
+
+
+<p>The driver path:</p>
+
+<ol>
+<li>resolves <code>wayland_win_data</code> for the HWND</li>
+<li>verifies that the foreign parent belongs to the adopted <code>wl_display</code></li>
+<li>destroys any existing Wine surface for that HWND</li>
+<li>creates a fresh role-less <code>wl_surface</code></li>
+<li>assigns it as a <code>wl_subsurface</code> of the host parent</li>
+<li>records embedded state and parent-relative coordinates</li>
+<li>posts <code>WM_WAYLANDDRV_NSPA_EMBED_DONE</code></li>
+</ol>
+
+
+<p>The fresh-surface step is important. Wayland surface roles are not mutable once
+a buffer has committed in a role such as <code>xdg_toplevel</code>, so the embed message
+must run before plugin editor attach paths cause a first commit.</p>
+
+<div class="diagram-container">
+<svg width="100%" viewBox="0 0 960 390" xmlns="http://www.w3.org/2000/svg" class="diagram-svg" preserveAspectRatio="xMidYMid meet">
+  <style>
+    .wl-bg { fill: #1a1b26; }
+    .wl-host { fill: #1a2a1a; stroke: #9ece6a; stroke-width: 1.8; rx: 8; }
+    .wl-msg { fill: #2a2418; stroke: #e0af68; stroke-width: 1.8; rx: 8; }
+    .wl-wine { fill: #1a2235; stroke: #7aa2f7; stroke-width: 1.8; rx: 8; }
+    .wl-plug { fill: #2a2137; stroke: #bb9af7; stroke-width: 1.8; rx: 8; }
+    .wl-note { fill: #24283b; stroke: #6b7398; stroke-width: 1.2; rx: 8; }
+    .wl-title { fill: #7aa2f7; font: bold 14px 'JetBrains Mono', monospace; }
+    .wl-head-g { fill: #9ece6a; font: bold 11px 'JetBrains Mono', monospace; }
+    .wl-head-y { fill: #e0af68; font: bold 11px 'JetBrains Mono', monospace; }
+    .wl-head-b { fill: #7aa2f7; font: bold 11px 'JetBrains Mono', monospace; }
+    .wl-head-p { fill: #bb9af7; font: bold 11px 'JetBrains Mono', monospace; }
+    .wl-small { fill: #a9b1d6; font: 9px 'JetBrains Mono', monospace; }
+    .wl-line-g { stroke: #9ece6a; stroke-width: 1.3; fill: none; }
+    .wl-line-y { stroke: #e0af68; stroke-width: 1.3; fill: none; }
+    .wl-line-b { stroke: #7aa2f7; stroke-width: 1.3; fill: none; }
+    .wl-line-p { stroke: #bb9af7; stroke-width: 1.3; fill: none; }
+  </style>
+
+  <rect x="0" y="0" width="960" height="390" class="wl-bg" rx="6"/>
+  <text x="480" y="28" text-anchor="middle" class="wl-title">Per-window Wayland embed lifecycle</text>
+
+  <rect x="42" y="88" width="190" height="102" class="wl-host" rx="6"/>
+  <text x="137" y="114" text-anchor="middle" class="wl-head-g">host peer</text>
+  <text x="137" y="136" text-anchor="middle" class="wl-small">owns parent `wl_surface`</text>
+  <text x="137" y="152" text-anchor="middle" class="wl-small">has adopted display live</text>
+  <text x="137" y="168" text-anchor="middle" class="wl-small">sends embed message</text>
+
+  <rect x="280" y="88" width="190" height="102" class="wl-msg" rx="6"/>
+  <text x="375" y="114" text-anchor="middle" class="wl-head-y">driver message</text>
+  <text x="375" y="136" text-anchor="middle" class="wl-small">`WM_WAYLANDDRV_NSPA_EMBED_WINDOW`</text>
+  <text x="375" y="152" text-anchor="middle" class="wl-small">parent surface + peer coords</text>
+  <text x="375" y="168" text-anchor="middle" class="wl-small">before plugin attach commits</text>
+
+  <rect x="518" y="88" width="190" height="102" class="wl-wine" rx="6"/>
+  <text x="613" y="114" text-anchor="middle" class="wl-head-b">winewayland.drv</text>
+  <text x="613" y="136" text-anchor="middle" class="wl-small">verify same display</text>
+  <text x="613" y="152" text-anchor="middle" class="wl-small">create fresh surface</text>
+  <text x="613" y="168" text-anchor="middle" class="wl-small">assign foreign subsurface role</text>
+
+  <rect x="756" y="88" width="162" height="102" class="wl-plug" rx="6"/>
+  <text x="837" y="114" text-anchor="middle" class="wl-head-p">plugin editor</text>
+  <text x="837" y="136" text-anchor="middle" class="wl-small">renders into Wine surface</text>
+  <text x="837" y="152" text-anchor="middle" class="wl-small">host surface is parent</text>
+  <text x="837" y="168" text-anchor="middle" class="wl-small">completion message follows</text>
+
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="232" y1="139" x2="280" y2="139" class="wl-line-g"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="470" y1="139" x2="518" y2="139" class="wl-line-y"/>
+  <line stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" x1="708" y1="139" x2="756" y2="139" class="wl-line-b"/>
+
+  <rect x="170" y="260" width="620" height="70" class="wl-note" rx="6"/>
+  <text x="480" y="286" text-anchor="middle" class="wl-head-b">Role timing rule</text>
+  <text x="480" y="306" text-anchor="middle" class="wl-small">the host sends the embed request before VST/CLAP editor attach calls</text>
+  <text x="480" y="322" text-anchor="middle" class="wl-small">so the Wine surface can become a subsurface before the plugin commits a buffer</text>
+</svg>
+</div>
+
+
+<hr />
+
+<h2 id="5-input-and-rt-locking">5. Input and RT locking</h2>
+
+<p>Two follow-on changes make the host-mode path usable for plugin editors in an
+RT-oriented process.</p>
+
+<table>
+<thead>
+<tr>
+<th> Area </th>
+<th> Current behavior </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> Foreign-surface enter events </td>
+<td> pointer and keyboard enter events on host-owned foreign surfaces are ignored by <code>winewayland.drv</code>; the host remains owner of its own surface focus </td>
+</tr>
+<tr>
+<td> Driver mutexes </td>
+<td> <code>winewayland.drv</code> internal pthread mutexes are converted to Wine-NSPA <code>pi_mutex_t</code> so Wayland driver locks follow the same priority-inheritance policy as the rest of the RT stack </td>
+</tr>
+<tr>
+<td> Initialization guard </td>
+<td> the lazy Wayland initialization path avoids a non-PI pthread mutex on the RT thread </td>
+</tr>
+</tbody>
+</table>
+
+
+<p>This matters because host-mode embedding puts native host surfaces and Wine
+plugin surfaces in one process and one Wayland connection. The Wine driver must
+not claim input focus for the host shell, and it must not introduce ordinary
+pthread-mutex inversion into the RT process.</p>
+
+<hr />
+
+<h2 id="6-relationship-to-x11-embedding">6. Relationship to X11 embedding</h2>
+
+<p>The X11 and Wayland protocols solve the same application problem with different
+window-system primitives.</p>
+
+<table>
+<thead>
+<tr>
+<th> Area </th>
+<th> X11 path </th>
+<th> Wayland path </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> Parent type </td>
+<td> X11 <code>Window</code> id </td>
+<td> <code>wl_surface*</code> </td>
+</tr>
+<tr>
+<td> Wine child type </td>
+<td> Wine X11 child window </td>
+<td> Wine <code>wl_surface</code> </td>
+</tr>
+<tr>
+<td> Attach primitive </td>
+<td> <code>XReparentWindow()</code> + embedded-state bookkeeping </td>
+<td> <code>wl_subsurface</code> under a foreign host surface </td>
+</tr>
+<tr>
+<td> Connection rule </td>
+<td> host and Wine can use independent X11 clients </td>
+<td> host and Wine must share one <code>wl_display</code> </td>
+</tr>
+<tr>
+<td> Display handoff </td>
+<td> not needed </td>
+<td> host publishes <code>wl_display</code> before driver init </td>
+</tr>
+<tr>
+<td> Completion message </td>
+<td> <code>WM_X11DRV_NSPA_EMBED_DONE</code> </td>
+<td> <code>WM_WAYLANDDRV_NSPA_EMBED_DONE</code> </td>
+</tr>
+</tbody>
+</table>
+
+
+<p>The consumer pump discipline is shared: embedded editors need input-first queue
+passes and a bounded general drain so plugin redraw or timer traffic cannot
+starve the native host loop.</p>
+
+<hr />
+
+<h2 id="7-current-consumers">7. Current consumers</h2>
+
+<table>
+<thead>
+<tr>
+<th> Consumer </th>
+<th> Use </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> JUCE-NSPA </td>
+<td> provides the Wayland peer surface and exposes the host <code>wl_display</code> used by Wine-NSPA&rsquo;s Wayland driver </td>
+</tr>
+<tr>
+<td> Lulada </td>
+<td> enables <code>JUCE_WAYLAND=1</code>, uses the JUCE Wayland backend for the application shell, and embeds Windows plugin editors through the Wayland path on Wayland sessions </td>
+</tr>
+</tbody>
+</table>
+
+
+<p>Yabridge-NSPA still uses the X11 embed path because its editor bridge keeps a
+wrapper X11 window as the immediate foreign parent.</p>
+
+<hr />
+
+<h2 id="8-references">8. References</h2>
+
+<ul>
+<li><code>include/wine/nspa_wayland_embed.h</code></li>
+<li><code>dlls/winewayland.drv/window.c</code></li>
+<li><code>dlls/winewayland.drv/wayland.c</code></li>
+<li><code>dlls/winewayland.drv/wayland_pointer.c</code></li>
+<li><code>dlls/winewayland.drv/wayland_keyboard.c</code></li>
+<li><a href="nspa-x11-embed-protocol.gen.html">NSPA X11 Embed Protocol</a></li>
+<li><a href="juce-nspa.gen.html">JUCE-NSPA</a></li>
+<li><a href="element-plugin-host.gen.html">Lulada</a></li>
+</ul>
+
+
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+  document.querySelectorAll("pre code").forEach(function (block) {
+    hljs.highlightElement(block);
+  });
+});
+</script>
+</body></html>

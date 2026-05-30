@@ -22,6 +22,10 @@ The embed protocol gives a winelib host one supported way to reparent a Wine
 window into a foreign X11 parent without reimplementing Wine's embedded-window
 bookkeeping itself.
 
+This page is X11-specific. Wayland embedding uses a separate Wine-NSPA
+contract because host and Wine surfaces must share one `wl_display` and the
+native parent relation is a `wl_subsurface`, not an X11 reparent.
+
 The problem it solves is not just `XReparentWindow()`. A working host also
 needs Wine to:
 
@@ -370,7 +374,7 @@ The required shape is:
   <rect x="126" y="258" width="708" height="72" class="pd-note"/>
   <text x="480" y="286" text-anchor="middle" class="pd-head-b">Current consumer shapes</text>
   <text x="480" y="306" text-anchor="middle" class="pd-small">JUCE-NSPA: input-first mouse/keyboard passes + 4 ms general-drain budget</text>
-  <text x="480" y="322" text-anchor="middle" class="pd-small">Element-NSPA: inherits JUCE-NSPA exactly</text>
+  <text x="480" y="322" text-anchor="middle" class="pd-small">Lulada: inherits JUCE-NSPA exactly</text>
   <text x="480" y="338" text-anchor="middle" class="pd-small">Yabridge-NSPA: input-first passes + 20-message cap, extended to 8192 for JUCE floods</text>
 
   <rect x="166" y="350" width="628" height="56" class="pd-warn"/>
@@ -423,8 +427,8 @@ plugin editors into native Linux UI trees.
 
 | Consumer | Use |
 |---|---|
-| JUCE-NSPA | `WineHWNDEmbedComponent` creates a real Wine HWND, pumps the full thread queue with input-first mouse/keyboard passes, and bounds the general drain to 4 ms per timer tick |
-| Element-NSPA | inherits JUCE-NSPA's embed component, X11 sizing split, and bounded input-first pump for VST2, VST3, and CLAP editors |
+| JUCE-NSPA | on X11 peers, `WineHWNDEmbedComponent` creates a real Wine HWND, pumps the full thread queue with input-first mouse/keyboard passes, and bounds the general drain to 4 ms per timer tick |
+| Lulada | uses this path on X11 sessions for VST2, VST3, and CLAP editors; Wayland sessions use the Wayland embed protocol |
 | Yabridge-NSPA | keeps a wrapper window as the immediate host-owned parent, hands the Wine child off through the atomic embed message, and uses input-first passes plus a capped general drain in `HostBridge::handle_events()` |
 
 The protocol stays intentionally small. It is a Wine-side primitive for hosts
@@ -438,6 +442,7 @@ that already manage a foreign X11 parent, not a full host toolkit.
 - `dlls/win32u/message.c`
 - `dlls/winex11.drv/window.c`
 - `dlls/winex11.drv/mouse.c`
+- [NSPA Wayland Embed Protocol](nspa-wayland-embed-protocol.gen.html)
 - [JUCE-NSPA](juce-nspa.gen.html)
-- [Element-NSPA](element-plugin-host.gen.html)
+- [Lulada](element-plugin-host.gen.html)
 - [Yabridge-NSPA](yabridge-nspa.gen.html)
