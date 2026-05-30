@@ -44,7 +44,7 @@ surfaces, and RT-oriented memory and I/O work.
 
 | Document | Description |
 |----------|-------------|
-| [Lulada](https://nine7nine.github.io/Wine-NSPA/element-plugin-host.gen.html) | Modular Linux DAW with in-process Win32 plugins, recording, sequencing, and JACK routing. |
+| [Lulada](https://nine7nine.github.io/Wine-NSPA/element-plugin-host.gen.html) | Linux Digital Audio Workstation with recording, sequencing, JACK routing, and in-process Windows plugins. |
 | [JUCE-NSPA](https://nine7nine.github.io/Wine-NSPA/juce-nspa.gen.html) | Framework fork for Linux winelib hosting and native plugin embedding. |
 | [Yabridge-NSPA](https://nine7nine.github.io/Wine-NSPA/yabridge-nspa.gen.html) | Linux VST bridge fork aligned to Wine-NSPA RT and PI rules. |
 
